@@ -23,5 +23,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   presets when no URL is configured.
 - The headless `norte-code run` command, with streamed text and `--jsonl`
   output.
+- The models.dev catalog client: tolerant schema, capability and reasoning
+  mapping, ETag/TTL cache with stale and bundled fallbacks, and a live refresh
+  request.
+- Every provider the catalog describes, not just the native four: `npm` picks
+  the wire, `api` supplies the endpoint (including `${VAR}` templates), and
+  `env` names the API key; native OpenAI, Anthropic and Google still use Norte's
+  presets when no URL is configured.
+- `norte-code models`, with provider, tool and reasoning filters plus `--json`,
+  and `model_list` over the protocol for the TUI picker.
+- Mid-session model switching at a turn boundary, reusing the session and its
+  store while rebuilding the engine for the new model.
+- Reasoning resolution per model, with effort clamping to Norte's four efforts
+  and config overrides that win over catalog data.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

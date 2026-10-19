@@ -9,11 +9,18 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-chrono = { workspace = true }
 norte = { workspace = true }
+norte-code-config = { path = "../norte-code-config" }
+
+chrono = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true

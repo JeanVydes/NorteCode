@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-config = { path = "../norte-code-config" }
+norte-code-catalog = { path = "../norte-code-catalog" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }

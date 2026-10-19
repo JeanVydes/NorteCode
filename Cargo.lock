@@ -919,6 +919,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "norte",
+ "norte-code-catalog",
  "norte-code-config",
  "norte-code-protocol",
  "norte-testing",
@@ -936,9 +937,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "norte",
+ "norte-code-config",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -948,6 +953,7 @@ dependencies = [
  "clap",
  "futures-util",
  "norte-code-agent",
+ "norte-code-catalog",
  "norte-code-config",
  "norte-code-protocol",
  "serde_json",

@@ -1,26 +1,35 @@
-//! The in-process service: it owns one Norte engine, maps the client protocol
+//! The in-process service: it owns the Norte engines, maps the client protocol
 //! onto turns, and streams the engine's events back as [`ServerEvent`]s.
+//!
+//! An engine is cheap and shares the store and blob store, so each turn builds
+//! one for the model the session selected. That is what makes a mid-session
+//! model switch a change of model rather than a change of session.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
     BlobStore, Engine, EngineBuilder, EngineConfig, EngineEvent, FinishReason, InMemoryBlobStore,
-    InMemoryStore, Message, Model, SessionId, Store, StreamDelta, ToolRegistry, Usage,
+    InMemoryStore, Message, Model, ReasoningEffort, SessionId, Store, StreamDelta, ToolKind,
+    ToolRegistry, Usage,
 };
 use tokio::sync::{Notify, mpsc};
 
+use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::Config;
 use norte_code_protocol::{
-    Delta, ErrorCode, ServerEvent, ServerEventKind, SessionInfo, SessionKey,
+    Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent, ServerEventKind, SessionInfo,
+    SessionKey,
 };
 
 use crate::ServiceError;
-use crate::provider::{ModelFactory, ModelSpec, capabilities};
+use crate::provider::{ModelFactory, ModelSpec, Wire};
 
 /// A stream of events answering one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
@@ -30,7 +39,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 struct SessionRecord {
     id: SessionId,
     title: Option<String>,
-    model: String,
+    spec: ModelSpec,
     created_at: DateTime<Utc>,
     phase: norte_code_protocol::Phase,
     /// Messages of this session already reported for usage.
@@ -53,82 +62,120 @@ struct Stats {
     unpriced: u64,
 }
 
+/// Where the catalogue is refreshed from.
+#[derive(Clone, Debug)]
+struct CatalogSettings {
+    url: String,
+    ttl: Duration,
+    offline: bool,
+    cache_dir: PathBuf,
+}
+
 /// The Norte Code service.
 pub struct Service {
-    engine: Engine,
     config: Config,
-    model: String,
+    catalog: RwLock<Arc<Catalog>>,
+    catalog_settings: CatalogSettings,
+    default_spec: ModelSpec,
+    store: Arc<dyn Store>,
+    blobs: Arc<dyn BlobStore>,
+    factory: Arc<dyn ModelFactory>,
     system_prompt: String,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
 }
 
 impl Service {
-    /// Builds a service over an already-built model.
+    /// Builds a service.
+    ///
+    /// The default spec is used for new sessions; every turn builds an engine
+    /// for the session's current spec over the shared store and blob store.
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError`] when the engine cannot be built.
+    /// Returns [`ServiceError`] when the default model cannot be built.
     pub fn new(
         config: Config,
-        model: Arc<dyn Model>,
+        catalog: Arc<Catalog>,
+        default_spec: ModelSpec,
+        factory: Arc<dyn ModelFactory>,
         store: Arc<dyn Store>,
         blobs: Arc<dyn BlobStore>,
         system_prompt: impl Into<String>,
     ) -> Result<Self, ServiceError> {
-        let reference = model.reference();
-        let model_label = format!(
-            "{}/{}",
-            reference.provider.as_str(),
-            reference.model.as_str()
-        );
-        let engine = EngineBuilder::new()
-            .store(store)
-            .blobs(blobs)
-            .model(model)
-            .tools(ToolRegistry::new())
-            .config(EngineConfig {
-                max_iterations: config.max_iterations,
-                ..EngineConfig::default()
-            })
-            .build()?;
-        Ok(Self {
-            engine,
+        let settings = CatalogSettings {
+            url: config.catalog.url.clone(),
+            ttl: Duration::from_secs(config.catalog.ttl_hours.saturating_mul(3600)),
+            offline: config.catalog.offline,
+            cache_dir: norte_code_catalog::cache_dir()
+                .unwrap_or_else(|| PathBuf::from(".norte-code").join("cache")),
+        };
+        let service = Self {
             config,
-            model: model_label,
+            catalog: RwLock::new(catalog),
+            catalog_settings: settings,
+            default_spec,
+            store,
+            blobs,
+            factory,
             system_prompt: system_prompt.into(),
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
-        })
+        };
+        // Fail at construction, not at the first message, when the model's
+        // provider cannot be built.
+        let _ = service.engine(&service.default_spec)?;
+        Ok(service)
     }
 
-    /// Builds a service over an in-memory store and a vendor model.
+    /// Builds a service over an in-memory store.
     ///
     /// # Errors
     ///
     /// Returns [`ServiceError`] when the model cannot be built.
     pub fn in_memory(
         config: Config,
+        catalog: Arc<Catalog>,
         spec: &ModelSpec,
-        factory: &dyn ModelFactory,
+        factory: Arc<dyn ModelFactory>,
         system_prompt: impl Into<String>,
     ) -> Result<Self, ServiceError> {
-        let key = format!("{}/{}", spec.provider, spec.model);
-        let caps = capabilities(config.model_overrides.get(&key));
-        let model = factory.build(spec, &caps)?;
         Self::new(
             config,
-            model,
+            catalog,
+            spec.clone(),
+            factory,
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
             system_prompt,
         )
     }
 
+    /// Builds an engine for one spec over the shared stores.
+    fn engine(&self, spec: &ModelSpec) -> Result<Engine, ServiceError> {
+        let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
+        Ok(EngineBuilder::new()
+            .store(Arc::clone(&self.store))
+            .blobs(Arc::clone(&self.blobs))
+            .model(model)
+            .tools(ToolRegistry::new())
+            .config(EngineConfig {
+                max_iterations: self.config.max_iterations,
+                ..EngineConfig::default()
+            })
+            .build()?)
+    }
+
     /// The configuration the service was built with.
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The catalogue in use.
+    #[must_use]
+    pub fn catalog(&self) -> Arc<Catalog> {
+        Arc::clone(&self.lock_catalog())
     }
 
     /// Answers one client request.
@@ -161,7 +208,7 @@ impl Service {
                 },
             )),
             Kind::SwitchSession { session } => {
-                self.require(&session)?;
+                self.require_record(&session)?;
                 Ok(single(
                     request_id,
                     Some(session),
@@ -203,12 +250,12 @@ impl Service {
                 Ok(Box::pin(futures_util::stream::empty()))
             }
             Kind::CostReport { session } => Ok(self.cost_report(request_id, session.as_ref())),
-            Kind::ListModels | Kind::RefreshCatalog => Err(ServiceError::Unsupported(
-                "the model catalogue arrives in milestone 2",
+            Kind::ListModels => Ok(self.list_models_event(request_id)),
+            Kind::RefreshCatalog => self.refresh_catalog(request_id).await,
+            Kind::SetModel { session, model } => self.set_model_event(request_id, session, model),
+            Kind::SetReasoning { .. } | Kind::SetBudget { .. } => Err(ServiceError::Unsupported(
+                "session settings arrive in a later milestone",
             )),
-            Kind::SetModel { .. } | Kind::SetReasoning { .. } | Kind::SetBudget { .. } => Err(
-                ServiceError::Unsupported("session settings arrive in a later milestone"),
-            ),
             Kind::Approve { .. } | Kind::Deny { .. } | Kind::Revoke { .. } => {
                 Err(ServiceError::Unsupported("approvals arrive in milestone 3"))
             }
@@ -219,9 +266,53 @@ impl Service {
         }
     }
 
+    fn list_models_event(&self, request_id: u64) -> EventStream {
+        single(
+            request_id,
+            None,
+            ServerEventKind::ModelList {
+                models: self.list_models(),
+            },
+        )
+    }
+
+    async fn refresh_catalog(&self, request_id: u64) -> Result<EventStream, ServiceError> {
+        let loaded = load_catalog(&LoadOptions {
+            url: &self.catalog_settings.url,
+            ttl: self.catalog_settings.ttl,
+            offline: self.catalog_settings.offline,
+            cache_dir: &self.catalog_settings.cache_dir,
+        })
+        .await?;
+        let models = loaded.catalog.model_count();
+        *self.lock_catalog_write() = Arc::new(loaded.catalog);
+        Ok(single(
+            request_id,
+            None,
+            ServerEventKind::CatalogUpdated { models },
+        ))
+    }
+
+    fn set_model_event(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+        model: String,
+    ) -> Result<EventStream, ServiceError> {
+        let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), &model, None)?;
+        self.set_model(&session, spec)?;
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::ModelChanged { model },
+        ))
+    }
+
     async fn create_session(&self, title: Option<String>) -> Result<SessionKey, ServiceError> {
-        let session = self.engine.create().await?;
-        self.engine
+        let spec = self.default_spec.clone();
+        let engine = self.engine(&spec)?;
+        let session = engine.create().await?;
+        engine
             .append_history(
                 session.id,
                 vec![Message::system(self.system_prompt.clone())],
@@ -231,7 +322,7 @@ impl Service {
         let record = SessionRecord {
             id: session.id,
             title,
-            model: self.model.clone(),
+            spec,
             created_at: Utc::now(),
             phase: norte_code_protocol::Phase::Idle,
             billed: 0,
@@ -248,14 +339,15 @@ impl Service {
         from: &SessionKey,
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
-        let source = self.require(from)?;
-        let conversation = self.engine.export(source).await?;
-        let imported = self.engine.import(conversation).await?;
+        let (source, spec, _) = self.require_record(from)?;
+        let engine = self.engine(&spec)?;
+        let conversation = engine.export(source).await?;
+        let imported = engine.import(conversation).await?;
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
         let record = SessionRecord {
             id: imported.id,
             title,
-            model: self.model.clone(),
+            spec,
             created_at: Utc::now(),
             phase: norte_code_protocol::Phase::Idle,
             billed: 0,
@@ -274,14 +366,16 @@ impl Service {
         session: Option<SessionKey>,
         input: Option<String>,
     ) -> Result<EventStream, ServiceError> {
-        let (key, nid) = if let Some(key) = session {
-            (key.clone(), self.require(&key)?)
+        let (key, nid, spec) = if let Some(key) = session {
+            let (nid, spec, _) = self.require_record(&key)?;
+            (key, nid, spec)
         } else {
             let key = self.create_session(None).await?;
-            let nid = self.require(&key)?;
-            (key, nid)
+            let (nid, spec, _) = self.require_record(&key)?;
+            (key, nid, spec)
         };
-        let state = self.engine.session(nid).await?;
+        let engine = self.engine(&spec)?;
+        let state = engine.session(nid).await?;
         let turn = state.turn + 1;
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
         let notify = Arc::new(Notify::new());
@@ -291,7 +385,9 @@ impl Service {
         let task_key = key.clone();
         tokio::spawn(async move {
             let result = this
-                .run_turn(request_id, &task_key, nid, turn, input, &tx, &notify)
+                .run_turn(
+                    &engine, request_id, &task_key, nid, turn, input, &tx, &notify,
+                )
                 .await;
             if let Err(error) = result {
                 let _ = tx
@@ -315,6 +411,7 @@ impl Service {
     #[allow(clippy::too_many_arguments)]
     async fn run_turn(
         &self,
+        engine: &Engine,
         request_id: u64,
         key: &SessionKey,
         nid: SessionId,
@@ -324,8 +421,8 @@ impl Service {
         notify: &Notify,
     ) -> Result<(), ServiceError> {
         let mut stream = input.map_or_else(
-            || self.engine.resume(nid),
-            |text| self.engine.turn(nid).input(Message::user(text)).start(),
+            || engine.resume(nid),
+            |text| engine.turn(nid).input(Message::user(text)).start(),
         );
         let mut stats = self.stats(key, turn);
         if !emit(
@@ -352,7 +449,7 @@ impl Service {
                 next = stream.next() => {
                     match next {
                         Some(Ok(event)) => {
-                            if !self.handle(request_id, key, nid, &event, &mut stats, tx).await {
+                            if !self.handle(engine, request_id, key, nid, &event, &mut stats, tx).await {
                                 return Ok(());
                             }
                         }
@@ -372,7 +469,9 @@ impl Service {
 
         let outcome = stream.finish().await;
         // The last request has no successor to settle it.
-        let _ = self.settle(request_id, key, nid, &mut stats, tx).await;
+        let _ = self
+            .settle(engine, request_id, key, nid, &mut stats, tx)
+            .await;
         self.store_stats(key, &stats);
 
         match outcome {
@@ -395,8 +494,7 @@ impl Service {
             }
             Err(error) => {
                 let message = failure.unwrap_or_else(|| error.to_string());
-                let phase = self
-                    .engine
+                let phase = engine
                     .session(nid)
                     .await
                     .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
@@ -426,8 +524,10 @@ impl Service {
 
     /// Maps one engine event and answers whether to keep going (the client is
     /// still reading).
+    #[allow(clippy::too_many_arguments)]
     async fn handle(
         &self,
+        engine: &Engine,
         request_id: u64,
         key: &SessionKey,
         nid: SessionId,
@@ -488,7 +588,7 @@ impl Service {
                 message: message.clone(),
             }),
             EngineEvent::RequestReconstructed { .. } => {
-                return self.settle(request_id, key, nid, stats, tx).await;
+                return self.settle(engine, request_id, key, nid, stats, tx).await;
             }
             _ => None,
         };
@@ -501,13 +601,14 @@ impl Service {
     /// Reports every model request committed since the last look.
     async fn settle(
         &self,
+        engine: &Engine,
         request_id: u64,
         key: &SessionKey,
         nid: SessionId,
         stats: &mut Stats,
         tx: &mpsc::Sender<ServerEvent>,
     ) -> bool {
-        let Ok(history) = self.engine.history(nid).await else {
+        let Ok(history) = engine.history(nid).await else {
             return true;
         };
         for message in history.iter().skip(stats.billed) {
@@ -582,11 +683,16 @@ impl Service {
             .map(|(key, record)| SessionInfo {
                 session: key.clone(),
                 title: record.title.clone(),
-                model: (!record.model.is_empty()).then(|| record.model.clone()),
+                model: Some(record.spec.label()),
                 created_at: Some(record.created_at.to_rfc3339()),
                 phase: record.phase,
             })
             .collect()
+    }
+
+    /// Flattens the catalogue for a picker, applying the config overrides.
+    fn list_models(&self) -> Vec<ModelInfo> {
+        model_list(&self.config, &self.catalog())
     }
 
     fn stats(&self, key: &SessionKey, turn: u64) -> Stats {
@@ -623,6 +729,20 @@ impl Service {
         }
     }
 
+    fn set_model(&self, key: &SessionKey, spec: ModelSpec) -> Result<(), ServiceError> {
+        let mut lock = self.lock_sessions();
+        let record = lock
+            .get_mut(key)
+            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        if record.phase != norte_code_protocol::Phase::Idle {
+            return Err(ServiceError::Unsupported(
+                "switch the model at a turn boundary",
+            ));
+        }
+        record.spec = spec;
+        Ok(())
+    }
+
     fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
         let mut lock = self.lock_sessions();
         let record = lock
@@ -639,10 +759,13 @@ impl Service {
         Ok(())
     }
 
-    fn require(&self, key: &SessionKey) -> Result<SessionId, ServiceError> {
+    fn require_record(
+        &self,
+        key: &SessionKey,
+    ) -> Result<(SessionId, ModelSpec, norte_code_protocol::Phase), ServiceError> {
         self.lock_sessions()
             .get(key)
-            .map(|record| record.id)
+            .map(|record| (record.id, record.spec.clone(), record.phase))
             .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))
     }
 
@@ -652,6 +775,64 @@ impl Service {
 
     fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<Notify>>> {
         self.cancels.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_catalog(&self) -> RwLockReadGuard<'_, Arc<Catalog>> {
+        self.catalog.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_catalog_write(&self) -> RwLockWriteGuard<'_, Arc<Catalog>> {
+        self.catalog.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Flattens a catalogue for a picker, applying the config overrides.
+#[must_use]
+pub fn model_list(config: &Config, catalog: &Catalog) -> Vec<ModelInfo> {
+    let mut models = Vec::new();
+    for entry in catalog.models() {
+        let wire = Wire::from_npm(entry.provider.npm.as_deref().unwrap_or_default());
+        let overrides = config
+            .model_overrides
+            .get(&format!("{}/{}", entry.provider.id, entry.model.id));
+        let capabilities = norte_code_catalog::capabilities(entry.model, wire, overrides);
+        let mut efforts: Vec<String> = capabilities
+            .reasoning
+            .efforts
+            .iter()
+            .map(|effort| effort_name(*effort).to_owned())
+            .collect();
+        efforts.sort();
+        models.push(ModelInfo {
+            provider: entry.provider.id.clone(),
+            model: entry.model.id.clone(),
+            name: entry.model.name.clone(),
+            description: entry.model.description.clone(),
+            max_context: capabilities.max_context,
+            max_output: capabilities.max_output,
+            tools: capabilities.tool_kinds.contains(&ToolKind::Function),
+            input: entry.model.modalities.input.clone(),
+            output: entry.model.modalities.output.clone(),
+            reasoning: ReasoningInfo {
+                supported: capabilities.reasoning.supported,
+                can_disable: capabilities.reasoning.can_disable,
+                efforts,
+                supports_budget: capabilities.reasoning.supports_budget,
+                max_budget: capabilities.reasoning.max_budget,
+            },
+            deprecated: entry.model.status.as_deref() == Some("deprecated"),
+        });
+    }
+    models
+}
+
+fn effort_name(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        // `High` and any future top end map to Norte's highest effort.
+        _ => "high",
     }
 }
 
@@ -731,23 +912,96 @@ fn to_delta(delta: &StreamDelta) -> Option<Delta> {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
-    use norte::{InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ProviderId};
+    use norte::{Capabilities, InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ProviderId};
+    use norte_code_config::ApiKey;
     use norte_code_protocol::{ClientRequest, ClientRequestKind};
     use norte_testing::ScriptedModel;
 
-    fn scripted() -> Arc<ScriptedModel> {
+    struct ScriptedFactory {
+        model: Arc<ScriptedModel>,
+    }
+
+    impl ModelFactory for ScriptedFactory {
+        fn build(
+            &self,
+            _spec: &ModelSpec,
+            _capabilities: &Capabilities,
+        ) -> Result<Arc<dyn Model>, ServiceError> {
+            Ok(Arc::clone(&self.model) as Arc<dyn Model>)
+        }
+    }
+
+    fn catalog() -> Arc<Catalog> {
+        Arc::new(
+            Catalog::parse(
+                br#"{
+                    "providers": {
+                        "test": {
+                            "id": "test",
+                            "env": ["TEST_API_KEY"],
+                            "npm": "@ai-sdk/openai-compatible",
+                            "api": "https://example.invalid/v1",
+                            "models": {
+                                "scripted": {
+                                    "id": "scripted",
+                                    "name": "Scripted",
+                                    "tool_call": true,
+                                    "modalities": {"input": ["text"], "output": ["text"]},
+                                    "limit": {"context": 1000, "output": 100}
+                                },
+                                "other": {
+                                    "id": "other",
+                                    "name": "Other",
+                                    "tool_call": true,
+                                    "modalities": {"input": ["text"], "output": ["text"]},
+                                    "limit": {"context": 2000, "output": 200}
+                                }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .expect("catalog"),
+        )
+    }
+
+    fn spec(model: &str) -> ModelSpec {
+        let catalog = catalog();
+        let entry = catalog.find("test", model).expect("model");
+        ModelSpec {
+            provider: "test".to_owned(),
+            model: model.to_owned(),
+            wire: Wire::Chat,
+            endpoint: Some("https://example.invalid/v1".to_owned()),
+            api_key: ApiKey::new("test"),
+            capabilities: norte_code_catalog::capabilities(entry, Wire::Chat, None),
+        }
+    }
+
+    fn config() -> Config {
+        let key_file =
+            std::env::temp_dir().join(format!("norte-code-service-{}-key", std::process::id()));
+        std::fs::write(&key_file, "sk-test\n").expect("key file");
+        Config::from_json(&format!(
+            r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
+            key_file.display()
+        ))
+        .expect("config")
+        .config
+    }
+
+    fn service() -> Arc<Service> {
         let reference = ModelRef::new(
             ProviderId::new("test").expect("provider"),
             ModelId::new("scripted").expect("model"),
         );
-        Arc::new(ScriptedModel::new(reference).turn_deltas(["Hel", "lo"]))
-    }
-
-    fn service(model: Arc<ScriptedModel>) -> Arc<Service> {
+        let model = Arc::new(ScriptedModel::new(reference).turn_deltas(["Hel", "lo"]));
         Arc::new(
             Service::new(
-                Config::default(),
-                model,
+                config(),
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
                 Arc::new(InMemoryStore::new()),
                 Arc::new(InMemoryBlobStore::new()),
                 "system",
@@ -773,7 +1027,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_streams_text_and_commits() {
-        let service = service(scripted());
+        let service = service();
         let events = drain(
             &service,
             ClientRequestKind::SendMessage {
@@ -814,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_are_created_listed_and_renamed() {
-        let service = service(scripted());
+        let service = service();
         let created = drain(
             &service,
             ClientRequestKind::CreateSession {
@@ -850,8 +1104,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn models_are_listed_with_their_catalogue_limits() {
+        let service = service();
+        let events = drain(&service, ClientRequestKind::ListModels).await;
+        let ServerEventKind::ModelList { models } = &events[0].kind else {
+            panic!("expected a model list");
+        };
+        assert_eq!(models.len(), 2);
+        let scripted = models
+            .iter()
+            .find(|model| model.model == "scripted")
+            .expect("scripted");
+        assert_eq!(scripted.max_context, Some(1000));
+        assert_eq!(scripted.max_output, Some(100));
+        assert!(scripted.tools);
+    }
+
+    #[tokio::test]
+    async fn a_session_can_switch_models_at_a_boundary() {
+        let service = service();
+        let created = drain(
+            &service,
+            ClientRequestKind::CreateSession {
+                title: Some("switch".to_owned()),
+            },
+        )
+        .await;
+        let key = created[0].session.clone().expect("session");
+        let changed = drain(
+            &service,
+            ClientRequestKind::SetModel {
+                session: key.clone(),
+                model: "test/other".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            changed[0].kind,
+            ServerEventKind::ModelChanged { .. }
+        ));
+        let listed = drain(&service, ClientRequestKind::ListSessions).await;
+        let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
+            panic!("expected a list");
+        };
+        assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
+    }
+
+    #[tokio::test]
     async fn an_unknown_session_is_an_error() {
-        let service = service(scripted());
+        let service = service();
         let error = service
             .submit(ClientRequest {
                 request_id: 1,

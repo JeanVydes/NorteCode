@@ -228,8 +228,24 @@ pub struct ModelOverride {
     pub max_context: Option<u64>,
     /// Output limit in tokens.
     pub max_output: Option<u64>,
-    /// A reasoning descriptor, as the catalogue would write it.
-    pub reasoning: Option<Value>,
+    /// A reasoning override.
+    pub reasoning: Option<ReasoningOverride>,
+}
+
+/// A per-model override of the catalogue's reasoning declaration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReasoningOverride {
+    /// Whether the model reasons at all.
+    pub supported: Option<bool>,
+    /// Whether reasoning may be turned off.
+    pub can_disable: Option<bool>,
+    /// The effort names to expose.
+    pub efforts: Option<Vec<String>>,
+    /// Whether a token budget is accepted.
+    pub supports_budget: Option<bool>,
+    /// The largest accepted budget.
+    pub max_budget: Option<u32>,
 }
 
 /// A resolved API key. Its `Debug` output is redacted.

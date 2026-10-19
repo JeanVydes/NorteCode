@@ -6,8 +6,9 @@
 //! URL, and every `OpenAI`-compatible provider takes the same path as
 //! `OpenRouter`.
 //!
-//! The pre-catalogue fallback, [`Wire::for_provider`], exists only until the
-//! catalogue (milestone 2) supplies the wire directly.
+//! Native `OpenAI`, Anthropic and Google use Norte's presets when the catalogue
+//! carries no URL; every other provider uses its catalogue `api` URL through a
+//! [`VendorProfile`].
 
 use std::sync::Arc;
 
@@ -20,74 +21,11 @@ use norte::{
     WireFamily,
 };
 
+pub use norte_code_catalog::Wire;
+use norte_code_catalog::{Catalog, Model as CatalogModel, Provider as CatalogProvider};
 use norte_code_config::{ApiKey, Config, ModelOverride};
 
 use crate::ServiceError;
-
-/// The wire protocol a provider speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wire {
-    /// `OpenAI` Responses (`@ai-sdk/openai`).
-    Responses,
-    /// `OpenAI` chat completions, the `OpenAI`-compatible wire.
-    Chat,
-    /// Anthropic Messages (`@ai-sdk/anthropic`).
-    Messages,
-    /// Google `generateContent` (`@ai-sdk/google`).
-    GenerateContent,
-}
-
-impl Wire {
-    /// Maps a models.dev `npm` package to a wire.
-    ///
-    /// The catalogue spells the package, not the wire: `openai-compatible`
-    /// means the chat wire, `anthropic` the Messages wire, `google` the
-    /// `generateContent` wire and `@ai-sdk/openai` the Responses wire.
-    /// Everything else is assumed OpenAI-compatible, which is what most of the
-    /// catalogue's 193 `openai-compatible` entries are.
-    #[must_use]
-    pub fn from_npm(npm: &str) -> Self {
-        if npm.contains("openai-compatible") {
-            Self::Chat
-        } else if npm.contains("anthropic") {
-            Self::Messages
-        } else if npm.contains("google") {
-            Self::GenerateContent
-        } else if npm == "@ai-sdk/openai" {
-            Self::Responses
-        } else {
-            Self::Chat
-        }
-    }
-
-    /// The pre-catalogue fallback, for the four providers the spec names.
-    ///
-    /// The catalogue replaces this as soon as it lands.
-    #[must_use]
-    pub fn for_provider(provider: &str) -> Self {
-        match provider {
-            "openai" => Self::Responses,
-            "anthropic" => Self::Messages,
-            "google" | "gemini" => Self::GenerateContent,
-            _ => Self::Chat,
-        }
-    }
-
-    /// The Norte wire family string.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServiceError`] when Norte rejects the value.
-    pub fn family(self) -> Result<WireFamily, ServiceError> {
-        let name = match self {
-            Self::Responses => norte::openai::WIRE_RESPONSES,
-            Self::Chat => norte::openai::WIRE_CHAT,
-            Self::Messages => norte::anthropic::WIRE_MESSAGES,
-            Self::GenerateContent => norte::gemini::WIRE_GENERATE,
-        };
-        Ok(WireFamily::new(name)?)
-    }
-}
 
 /// Everything needed to build one model.
 #[derive(Clone, Debug)]
@@ -103,55 +41,130 @@ pub struct ModelSpec {
     pub endpoint: Option<String>,
     /// The API key. Its `Debug` output is redacted.
     pub api_key: ApiKey,
+    /// The capability declaration the catalogue entry and config produce.
+    pub capabilities: Capabilities,
 }
 
 impl ModelSpec {
-    /// Builds a spec from a models.dev provider entry: `npm` selects the wire,
-    /// `api` is the endpoint and `env` names the key variables. This is the
-    /// path the catalogue uses; no vendor is special-cased.
+    /// Builds a spec from a catalogue provider and model entry.
+    ///
+    /// The provider entry supplies the wire (`npm`), the endpoint (`api`) and
+    /// the key variables (`env`); the model entry supplies the limits,
+    /// modalities and reasoning options. Config wins for the key, the endpoint
+    /// and the model overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when no key can be resolved.
+    pub fn from_entry(
+        config: &Config,
+        provider: &CatalogProvider,
+        model: &CatalogModel,
+        endpoint_override: Option<String>,
+    ) -> Result<Self, ServiceError> {
+        let api_key = config.resolve_api_key(&provider.id, &provider.env)?;
+        let configured = config
+            .providers
+            .get(&provider.id)
+            .and_then(|entry| entry.endpoint.clone());
+        let wire = Wire::from_npm(provider.npm.as_deref().unwrap_or_default());
+        let endpoint = endpoint_override
+            .or(configured)
+            .or(expand_endpoint(provider)?);
+        let overrides = config
+            .model_overrides
+            .get(&format!("{}/{}", provider.id, model.id));
+        let capabilities = norte_code_catalog::capabilities(model, wire, overrides);
+        Ok(Self {
+            provider: provider.id.clone(),
+            model: model.id.clone(),
+            wire,
+            endpoint,
+            api_key,
+            capabilities,
+        })
+    }
+
+    /// Looks a `provider/model` reference up in the catalogue and builds its
+    /// spec.
     ///
     /// # Errors
     ///
     /// Returns [`ServiceError`] when the reference is not `provider/model`,
-    /// when no key can be resolved, or when the endpoint is not a valid URL.
+    /// the provider or model is not in the catalogue, or no key is available.
     pub fn from_catalog(
         config: &Config,
+        catalog: &Catalog,
         reference: &str,
-        npm: &str,
-        api: Option<&str>,
-        env: &[String],
         endpoint_override: Option<String>,
     ) -> Result<Self, ServiceError> {
-        let (provider, model) = reference
+        let (provider_id, model_id) = reference
             .split_once('/')
             .ok_or_else(|| ServiceError::ModelReference(reference.to_owned()))?;
-        let api_key = config.resolve_api_key(provider, env)?;
+        let provider = catalog
+            .provider(provider_id)
+            .ok_or_else(|| ServiceError::UnknownProvider(provider_id.to_owned()))?;
+        let model = provider
+            .models
+            .get(model_id)
+            .ok_or_else(|| ServiceError::UnknownModel {
+                provider: provider_id.to_owned(),
+                model: model_id.to_owned(),
+            })?;
+        Self::from_entry(config, provider, model, endpoint_override)
+    }
+
+    /// Builds a spec for a model the catalogue does not list but whose provider
+    /// it does, such as a fresh release. The provider still supplies the wire,
+    /// the endpoint and the key variables; the capabilities are conservative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when the reference is not `provider/model`,
+    /// the provider is not in the catalogue, or no key can be resolved.
+    pub fn from_provider(
+        config: &Config,
+        catalog: &Catalog,
+        reference: &str,
+        endpoint_override: Option<String>,
+    ) -> Result<Self, ServiceError> {
+        let (provider_id, model_id) = reference
+            .split_once('/')
+            .ok_or_else(|| ServiceError::ModelReference(reference.to_owned()))?;
+        let provider = catalog
+            .provider(provider_id)
+            .ok_or_else(|| ServiceError::UnknownProvider(provider_id.to_owned()))?;
+        let api_key = config.resolve_api_key(&provider.id, &provider.env)?;
         let configured = config
             .providers
-            .get(provider)
+            .get(&provider.id)
             .and_then(|entry| entry.endpoint.clone());
+        let wire = Wire::from_npm(provider.npm.as_deref().unwrap_or_default());
+        let endpoint = endpoint_override
+            .or(configured)
+            .or(expand_endpoint(provider)?);
+        let overrides = config.model_overrides.get(reference);
         Ok(Self {
-            provider: provider.to_owned(),
-            model: model.to_owned(),
-            wire: Wire::from_npm(npm),
-            endpoint: endpoint_override
-                .or(configured)
-                .or_else(|| api.map(str::to_owned)),
+            provider: provider.id.clone(),
+            model: model_id.to_owned(),
+            wire,
+            endpoint,
             api_key,
+            capabilities: fallback_capabilities(overrides),
         })
     }
 
     /// Splits a `provider/model` reference, resolves its key and endpoint, and
-    /// picks a wire.
+    /// picks a wire without the catalogue.
     ///
-    /// `endpoint` is a command-line override and wins over the provider's
-    /// configured endpoint. `default_env` is the catalogue's `env` list; the
-    /// config's own `api_key_env` and `api_key_file` win over it.
+    /// This is the fallback for a provider the catalogue does not list. Without
+    /// a catalogue `api` URL, only the three native providers (or a configured
+    /// endpoint) can be built.
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError`] when the reference is not `provider/model`,
-    /// when no key can be resolved, or when the endpoint is not a valid URL.
+    /// Returns [`ServiceError`] when the reference is not `provider/model` or
+    /// when no key can be resolved.
     pub fn resolve(
         config: &Config,
         reference: &str,
@@ -166,12 +179,15 @@ impl ModelSpec {
             .providers
             .get(provider)
             .and_then(|entry| entry.endpoint.clone());
+        let wire = Wire::for_provider(provider);
+        let overrides = config.model_overrides.get(reference);
         Ok(Self {
             provider: provider.to_owned(),
             model: model.to_owned(),
-            wire: Wire::for_provider(provider),
+            wire,
             endpoint: endpoint.or(configured),
             api_key,
+            capabilities: fallback_capabilities(overrides),
         })
     }
 
@@ -251,7 +267,7 @@ fn profile(
     endpoint: &str,
     key: String,
 ) -> Result<VendorProfile, ServiceError> {
-    let profile = VendorProfile::new(provider, wire.family()?, endpoint)?;
+    let profile = VendorProfile::new(provider, WireFamily::new(wire.family())?, endpoint)?;
     Ok(match wire {
         Wire::Responses | Wire::Chat => profile.with_auth(AuthScheme::bearer(key)),
         Wire::Messages => profile
@@ -276,11 +292,38 @@ fn build_with_profile(
     })
 }
 
-/// The conservative capability declaration Norte Code starts from: text in,
-/// text out, streamed deltas and function tools. The catalogue (milestone 2)
-/// and `model_overrides` refine it.
-#[must_use]
-pub fn capabilities(overrides: Option<&ModelOverride>) -> Capabilities {
+/// Expands the `${VAR}` placeholders some catalogue endpoints use, such as
+/// Snowflake's account host and Cloudflare's account id.
+fn expand_endpoint(provider: &CatalogProvider) -> Result<Option<String>, ServiceError> {
+    let Some(template) = &provider.api else {
+        return Ok(None);
+    };
+    let mut endpoint = String::with_capacity(template.len());
+    let mut rest = template.as_str();
+    while let Some(start) = rest.find("${") {
+        endpoint.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            return Err(ServiceError::EndpointTemplate {
+                provider: provider.id.clone(),
+                template: template.clone(),
+            });
+        };
+        let name = &after[..end];
+        let value = std::env::var(name).map_err(|_| ServiceError::MissingEndpointVariable {
+            provider: provider.id.clone(),
+            variable: name.to_owned(),
+        })?;
+        endpoint.push_str(&value);
+        rest = &after[end + 1..];
+    }
+    endpoint.push_str(rest);
+    Ok(Some(endpoint))
+}
+
+/// The conservative capability declaration for a model the catalogue does not
+/// list: text in, text out, streamed deltas and function tools.
+fn fallback_capabilities(overrides: Option<&ModelOverride>) -> Capabilities {
     let mut builder = Capabilities::builder()
         .input(Modality::Text)
         .output(Modality::Text)
@@ -308,21 +351,13 @@ mod tests {
             wire,
             endpoint: endpoint.map(str::to_owned),
             api_key: ApiKey::new("test-key"),
+            capabilities: fallback_capabilities(None),
         }
     }
 
     #[test]
-    fn npm_selects_the_wire() {
-        assert_eq!(Wire::from_npm("@ai-sdk/openai-compatible"), Wire::Chat);
-        assert_eq!(Wire::from_npm("@ai-sdk/anthropic"), Wire::Messages);
-        assert_eq!(Wire::from_npm("@ai-sdk/google"), Wire::GenerateContent);
-        assert_eq!(Wire::from_npm("@ai-sdk/openai"), Wire::Responses);
-        assert_eq!(Wire::from_npm("@ai-sdk/groq"), Wire::Chat);
-    }
-
-    #[test]
     fn every_wire_builds_from_an_endpoint() {
-        let capabilities = capabilities(None);
+        let capabilities = fallback_capabilities(None);
         for (provider, wire, endpoint) in [
             ("lilac", Wire::Chat, "https://api.getlilac.com/v1"),
             ("openai", Wire::Responses, "https://api.openai.com/v1"),
@@ -340,11 +375,58 @@ mod tests {
 
     #[test]
     fn a_compatible_provider_without_an_endpoint_is_refused() {
-        let capabilities = capabilities(None);
+        let capabilities = fallback_capabilities(None);
         let error = VendorModels
             .build(&spec("lilac", Wire::Chat, None), &capabilities)
             .err()
             .expect("an error");
         assert!(matches!(error, ServiceError::MissingEndpoint { .. }));
+    }
+
+    #[test]
+    fn a_catalogue_entry_supplies_wire_endpoint_key_and_limits() {
+        let catalog = Catalog::parse(
+            br#"{
+                "providers": {
+                    "lilac": {
+                        "id": "lilac",
+                        "env": ["LILAC_API_KEY"],
+                        "npm": "@ai-sdk/openai-compatible",
+                        "api": "https://api.getlilac.com/v1",
+                        "models": {
+                            "m": {
+                                "id": "m",
+                                "name": "M",
+                                "tool_call": true,
+                                "modalities": {"input": ["text", "image"], "output": ["text"]},
+                                "limit": {"context": 128000, "output": 8192}
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("catalog");
+        let key_file =
+            std::env::temp_dir().join(format!("norte-code-provider-{}-key", std::process::id()));
+        std::fs::write(&key_file, "sk-test\n").expect("key file");
+        let config = Config::from_json(&format!(
+            r#"{{"providers":{{"lilac":{{"api_key_file":"{}"}}}}}}"#,
+            key_file.display()
+        ))
+        .expect("config")
+        .config;
+        let provider = catalog.provider("lilac").expect("provider");
+        let model = catalog.find("lilac", "m").expect("model");
+        let spec = ModelSpec::from_entry(&config, provider, model, None).expect("spec");
+        assert_eq!(spec.wire, Wire::Chat);
+        assert_eq!(
+            spec.endpoint.as_deref(),
+            Some("https://api.getlilac.com/v1")
+        );
+        assert_eq!(spec.api_key.expose(), "sk-test");
+        assert_eq!(spec.capabilities.max_context, Some(128_000));
+        assert_eq!(spec.capabilities.max_output, Some(8192));
+        assert!(spec.capabilities.tool_kinds.contains(&ToolKind::Function));
     }
 }

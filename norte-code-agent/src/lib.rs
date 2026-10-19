@@ -12,8 +12,8 @@ pub mod provider;
 pub mod service;
 
 pub use error::ServiceError;
-pub use provider::{ModelFactory, ModelSpec, VendorModels, capabilities};
-pub use service::{EventStream, Service};
+pub use provider::{ModelFactory, ModelSpec, VendorModels, Wire};
+pub use service::{EventStream, Service, model_list};
 
 /// The system prompt a session starts with until project instructions
 /// (milestone 8) replace it.

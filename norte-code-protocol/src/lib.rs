@@ -362,6 +362,11 @@ pub enum ServerEventKind {
         /// How many models it carries.
         models: usize,
     },
+    /// The models the catalogue knows.
+    ModelList {
+        /// One entry per model.
+        models: Vec<ModelInfo>,
+    },
     /// The turn ended.
     TurnFinished {
         /// The turn.
@@ -394,6 +399,50 @@ pub struct SessionInfo {
     pub created_at: Option<String>,
     /// Where it currently is.
     pub phase: Phase,
+}
+
+/// One model the catalogue knows, flattened for a picker.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInfo {
+    /// The provider id.
+    pub provider: String,
+    /// The model id the provider expects.
+    pub model: String,
+    /// The display name.
+    pub name: String,
+    /// A one-line description.
+    pub description: Option<String>,
+    /// The context window, when known and plausible.
+    pub max_context: Option<u64>,
+    /// The output limit, when known and plausible.
+    pub max_output: Option<u64>,
+    /// Whether the model calls host functions.
+    pub tools: bool,
+    /// Accepted input modalities.
+    pub input: Vec<String>,
+    /// Produced output modalities.
+    pub output: Vec<String>,
+    /// The reasoning controls the host may offer.
+    pub reasoning: ReasoningInfo,
+    /// Whether the catalogue marks the model deprecated.
+    pub deprecated: bool,
+}
+
+/// The reasoning controls a model declares.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningInfo {
+    /// Whether the model reasons at all.
+    pub supported: bool,
+    /// Whether reasoning may be turned off.
+    pub can_disable: bool,
+    /// The effort names the host may offer, in Norte's spelling.
+    pub efforts: Vec<String>,
+    /// Whether a token budget is accepted.
+    pub supports_budget: bool,
+    /// The largest accepted budget.
+    pub max_budget: Option<u32>,
 }
 
 /// Where a session currently is.
