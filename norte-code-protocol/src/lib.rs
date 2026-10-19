@@ -4,8 +4,660 @@
 //! between these types and the engine, so a client does not compile the engine
 //! and the wire can move on its own schedule.
 //!
-//! The two halves of the wire are the client request and the server event.
-//! They are landed milestone by milestone; the crate is empty until the
-//! service exists to serve it.
+//! The two halves of the wire are [`ClientRequest`] and [`ServerEvent`]. Every
+//! server event carries the request it answers and, when it is about one, the
+//! session it belongs to.
 
 #![forbid(unsafe_code)]
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// The protocol revision. It is bumped when a type changes shape in a way an
+/// older client cannot read.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// A stable identifier of a logical Norte Code session.
+///
+/// It is Norte Code's own id, not the engine's: a compaction replaces the
+/// underlying Norte session while the logical id stays the same.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionKey(String);
+
+impl SessionKey {
+    /// Wraps `id`.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// The id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A client request: a numbered command for the service.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientRequest {
+    /// Chosen by the client and echoed on every event that answers it.
+    pub request_id: u64,
+    /// What to do.
+    pub kind: ClientRequestKind,
+}
+
+/// The command itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClientRequestKind {
+    /// Create a session and answer with [`ServerEventKind::SessionCreated`].
+    CreateSession {
+        /// A human label for the session.
+        title: Option<String>,
+    },
+    /// List the known sessions.
+    ListSessions,
+    /// Make a session the caller's current one.
+    SwitchSession {
+        /// The session.
+        session: SessionKey,
+    },
+    /// Copy a session's history into a new session.
+    ForkSession {
+        /// The session to copy.
+        session: SessionKey,
+        /// A label for the copy.
+        title: Option<String>,
+    },
+    /// Rename a session.
+    RenameSession {
+        /// The session.
+        session: SessionKey,
+        /// The new label.
+        title: String,
+    },
+    /// Delete a session.
+    DeleteSession {
+        /// The session.
+        session: SessionKey,
+    },
+    /// Start a turn. With no session, one is created first.
+    SendMessage {
+        /// The session, or `None` to create one.
+        session: Option<SessionKey>,
+        /// The user message.
+        text: String,
+        /// A budget for this message only.
+        budget: Option<Budget>,
+        /// A reasoning override for this message only.
+        reasoning: Option<Reasoning>,
+    },
+    /// Queue a message to apply at the next turn boundary.
+    Steer {
+        /// The session.
+        session: SessionKey,
+        /// The message.
+        text: String,
+    },
+    /// Ask the running turn to stop.
+    CancelTurn {
+        /// The session.
+        session: SessionKey,
+    },
+    /// Continue a session that is parked or interrupted.
+    Resume {
+        /// The session.
+        session: SessionKey,
+    },
+    /// Approve a parked tool call.
+    Approve {
+        /// The session.
+        session: SessionKey,
+        /// The approval record.
+        approval: String,
+        /// Replacement arguments, when the human edited the call.
+        arguments: Option<Value>,
+        /// How long the grant lasts.
+        scope: Option<GrantScope>,
+        /// Whether to remember the decision for the session.
+        remember: Option<bool>,
+    },
+    /// Deny a parked tool call.
+    Deny {
+        /// The session.
+        session: SessionKey,
+        /// The approval record.
+        approval: String,
+        /// Why.
+        reason: Option<String>,
+    },
+    /// Revoke a live grant.
+    Revoke {
+        /// The session.
+        session: SessionKey,
+        /// The approval record.
+        approval: String,
+        /// The grant to revoke.
+        grant: String,
+    },
+    /// Switch the session's model at a turn boundary.
+    SetModel {
+        /// The session.
+        session: SessionKey,
+        /// A `provider/model` reference.
+        model: String,
+    },
+    /// Set the reasoning setting for a scope.
+    SetReasoning {
+        /// The session.
+        session: SessionKey,
+        /// Whether the setting applies to the session or one message.
+        scope: ReasoningScope,
+        /// The setting.
+        reasoning: Reasoning,
+    },
+    /// Set a session budget.
+    SetBudget {
+        /// The session.
+        session: SessionKey,
+        /// The budget.
+        budget: Budget,
+    },
+    /// Compact the session now.
+    Compact {
+        /// The session.
+        session: SessionKey,
+    },
+    /// List the models the catalogue knows.
+    ListModels,
+    /// Refresh the catalogue from the network.
+    RefreshCatalog,
+    /// Report the ledger's totals.
+    CostReport {
+        /// One session, or every session.
+        session: Option<SessionKey>,
+    },
+}
+
+/// A service event: a numbered answer to a [`ClientRequest`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerEvent {
+    /// The request this event answers.
+    pub request_id: u64,
+    /// The session it is about, when it is about one.
+    pub session: Option<SessionKey>,
+    /// What happened.
+    pub kind: ServerEventKind,
+}
+
+/// The event itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ServerEventKind {
+    /// A session now exists.
+    SessionCreated {
+        /// Its label.
+        title: Option<String>,
+    },
+    /// The known sessions.
+    SessionList {
+        /// One entry per session.
+        sessions: Vec<SessionInfo>,
+    },
+    /// A session was deleted.
+    SessionDeleted,
+    /// A session was renamed.
+    SessionRenamed {
+        /// The new label.
+        title: String,
+    },
+    /// A session was copied.
+    SessionForked {
+        /// The session the copy was made from.
+        from: SessionKey,
+    },
+    /// The caller's current session changed.
+    SessionSwitched,
+    /// A turn started.
+    TurnStarted {
+        /// The turn number.
+        turn: u64,
+    },
+    /// A stream delta.
+    Delta {
+        /// The turn.
+        turn: u64,
+        /// The delta.
+        delta: Delta,
+    },
+    /// A tool call started.
+    ToolStarted {
+        /// The turn.
+        turn: u64,
+        /// The call.
+        call_id: String,
+        /// The tool.
+        tool: String,
+    },
+    /// A tool call finished.
+    ToolFinished {
+        /// The turn.
+        turn: u64,
+        /// The call.
+        call_id: String,
+        /// The tool.
+        tool: String,
+        /// Whether the tool reported an error.
+        is_error: bool,
+        /// How long it ran, in milliseconds.
+        duration_ms: u64,
+    },
+    /// A tool call is parked for a human decision.
+    ApprovalRequested {
+        /// The turn.
+        turn: u64,
+        /// The approval record.
+        approval: String,
+        /// The call awaiting a decision.
+        call_id: String,
+        /// The tool.
+        tool: String,
+    },
+    /// A parked call was approved or denied.
+    ApprovalResolved {
+        /// The approval record.
+        approval: String,
+        /// Whether it was approved.
+        approved: bool,
+    },
+    /// A model request was reconstructed: its usage and reported cost.
+    RequestReconstructed {
+        /// The turn.
+        turn: u64,
+        /// The request's index within the turn.
+        index: u64,
+        /// The tokens the provider reported.
+        usage: Usage,
+        /// The cost the provider reported, in USD.
+        cost_usd: Option<f64>,
+        /// Whether the answer's text was truncated by the output budget.
+        truncated: bool,
+    },
+    /// A commit landed.
+    Committed {
+        /// The turn.
+        turn: u64,
+        /// The session version the commit reached.
+        version: u64,
+    },
+    /// Compaction started.
+    CompactionStarted,
+    /// Compaction finished, possibly with a new Norte session behind the same
+    /// logical one.
+    CompactionFinished {
+        /// Whether compaction happened.
+        compacted: bool,
+    },
+    /// A budget crossed its warning threshold.
+    BudgetWarning {
+        /// What was measured.
+        scope: BudgetScope,
+        /// What was spent.
+        spent: f64,
+        /// The limit.
+        limit: f64,
+    },
+    /// A budget was exhausted.
+    BudgetExceeded {
+        /// What was measured.
+        scope: BudgetScope,
+        /// What was spent.
+        spent: f64,
+        /// The limit.
+        limit: f64,
+        /// What the service did about it.
+        action: BudgetAction,
+    },
+    /// The running cost total changed.
+    CostUpdated {
+        /// The total the provider reported, in USD.
+        total_usd: f64,
+        /// How many requests are in the total.
+        requests: u64,
+    },
+    /// A response carried no cost.
+    CostNotReported {
+        /// How many requests so far carried no cost.
+        requests: u64,
+    },
+    /// The session's model changed.
+    ModelChanged {
+        /// The new `provider/model`.
+        model: String,
+    },
+    /// The session's reasoning setting was lowered to fit the new model.
+    ReasoningDowngraded {
+        /// What was asked for.
+        from: String,
+        /// What was applied.
+        to: String,
+        /// Why.
+        reason: String,
+    },
+    /// The catalogue changed on disk.
+    CatalogUpdated {
+        /// How many models it carries.
+        models: usize,
+    },
+    /// The turn ended.
+    TurnFinished {
+        /// The turn.
+        turn: u64,
+        /// The session phase it ended in.
+        phase: Phase,
+        /// Whether the turn committed an assistant message.
+        committed: bool,
+    },
+    /// A request failed.
+    Error {
+        /// A machine-readable category.
+        code: ErrorCode,
+        /// A message written for the person reading it.
+        message: String,
+    },
+}
+
+/// A session as the client sees it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionInfo {
+    /// The logical id.
+    pub session: SessionKey,
+    /// The label.
+    pub title: Option<String>,
+    /// The model in use, as `provider/model`.
+    pub model: Option<String>,
+    /// When it was created, as RFC 3339.
+    pub created_at: Option<String>,
+    /// Where it currently is.
+    pub phase: Phase,
+}
+
+/// Where a session currently is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Nothing in flight.
+    Idle,
+    /// A turn is being produced.
+    Streaming,
+    /// A tool call is authorised and about to run.
+    AwaitingTool,
+    /// A tool call is parked for a human.
+    AwaitingApproval,
+}
+
+/// A stream delta.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "delta", rename_all = "snake_case")]
+pub enum Delta {
+    /// Answer text.
+    Text {
+        /// The part index.
+        index: u32,
+        /// The text.
+        text: String,
+    },
+    /// Reasoning text.
+    Reasoning {
+        /// The part index.
+        index: u32,
+        /// The text.
+        text: String,
+    },
+    /// Refusal text.
+    Refusal {
+        /// The part index.
+        index: u32,
+        /// The text.
+        text: String,
+    },
+    /// A fragment of a tool call's arguments.
+    ToolArguments {
+        /// The part index.
+        index: u32,
+        /// The call.
+        call_id: String,
+        /// The fragment.
+        arguments: String,
+    },
+    /// Generated media, as a byte count.
+    Media {
+        /// The part index.
+        index: u32,
+        /// How many bytes.
+        bytes: u64,
+        /// Whether the part ends here.
+        last: bool,
+    },
+}
+
+/// Provider-reported token counters and cost.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Usage {
+    /// Input tokens.
+    pub input_tokens: Option<u64>,
+    /// Output tokens.
+    pub output_tokens: Option<u64>,
+    /// Reasoning tokens, counted inside the output.
+    pub reasoning_tokens: Option<u64>,
+    /// Tokens read from the provider's cache.
+    pub cache_read_tokens: Option<u64>,
+    /// Tokens written to the provider's cache.
+    pub cache_write_tokens: Option<u64>,
+    /// The cost the provider reported, in USD, when it reported one.
+    pub cost_usd: Option<f64>,
+    /// Provider-specific counters, kept verbatim.
+    pub vendor: BTreeMap<String, Value>,
+}
+
+/// What a budget limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetUnit {
+    /// US dollars, provider-reported.
+    Usd,
+    /// Tokens, provider-reported.
+    Tokens,
+    /// Model requests.
+    Requests,
+}
+
+/// What to do when a budget is exhausted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetAction {
+    /// Report it and keep going.
+    Warn,
+    /// Park for approval.
+    Ask,
+    /// Stop the turn.
+    Stop,
+}
+
+/// A spending limit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budget {
+    /// What it measures.
+    pub unit: BudgetUnit,
+    /// The limit.
+    pub limit: f64,
+    /// What to do at the limit.
+    pub action: BudgetAction,
+}
+
+/// What a budget applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetScope {
+    /// One message.
+    Message,
+    /// One session.
+    Session,
+    /// The day, across sessions.
+    GlobalDaily,
+}
+
+/// How long an approval grant lasts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantScope {
+    /// This call only.
+    Once,
+    /// This session.
+    Session,
+    /// Every session.
+    Always,
+}
+
+/// A reasoning setting.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reasoning", rename_all = "snake_case")]
+pub enum Reasoning {
+    /// Let the model decide.
+    Automatic,
+    /// Turn reasoning off, when the model allows it.
+    Disabled,
+    /// A named effort.
+    Effort {
+        /// The effort name.
+        effort: String,
+    },
+    /// A token budget for reasoning.
+    Budget {
+        /// The budget.
+        tokens: u32,
+    },
+}
+
+/// Whether a reasoning setting applies to a session or one message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningScope {
+    /// The session default.
+    Session,
+    /// The next message only.
+    Message,
+}
+
+/// A machine-readable error category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// The request was malformed.
+    InvalidRequest,
+    /// The named session, model or approval does not exist.
+    NotFound,
+    /// The session moved and the action could not be applied.
+    Conflict,
+    /// The model cannot do what was asked.
+    Capability,
+    /// A budget stopped the action.
+    Budget,
+    /// The provider failed.
+    Provider,
+    /// The service failed internally.
+    Internal,
+    /// The feature is not implemented yet.
+    Unsupported,
+}
+
+impl ServerEvent {
+    /// Builds an event answering `request_id`, about `session`.
+    #[must_use]
+    pub fn new(request_id: u64, session: Option<SessionKey>, kind: ServerEventKind) -> Self {
+        Self {
+            request_id,
+            session,
+            kind,
+        }
+    }
+
+    /// A failure event.
+    #[must_use]
+    pub fn error(
+        request_id: u64,
+        session: Option<SessionKey>,
+        code: ErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            request_id,
+            session,
+            ServerEventKind::Error {
+                code,
+                message: message.into(),
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_round_trips() {
+        let request = ClientRequest {
+            request_id: 3,
+            kind: ClientRequestKind::SendMessage {
+                session: Some(SessionKey::new("abc")),
+                text: "hi".to_owned(),
+                budget: Some(Budget {
+                    unit: BudgetUnit::Usd,
+                    limit: 1.0,
+                    action: BudgetAction::Stop,
+                }),
+                reasoning: Some(Reasoning::Effort {
+                    effort: "high".to_owned(),
+                }),
+            },
+        };
+        let json = serde_json::to_string(&request).expect("serialize");
+        let back: ClientRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.request_id, 3);
+    }
+
+    #[test]
+    fn an_event_round_trips() {
+        let event = ServerEvent::new(
+            1,
+            Some(SessionKey::new("s")),
+            ServerEventKind::Delta {
+                turn: 1,
+                delta: Delta::Text {
+                    index: 0,
+                    text: "hi".to_owned(),
+                },
+            },
+        );
+        let json = serde_json::to_string(&event).expect("serialize");
+        let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.session.expect("session").as_str(), "s");
+    }
+}

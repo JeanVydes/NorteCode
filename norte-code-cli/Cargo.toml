@@ -17,6 +17,9 @@ norte-code-agent = { path = "../norte-code-agent" }
 norte-code-config = { path = "../norte-code-config" }
 norte-code-protocol = { path = "../norte-code-protocol" }
 
+clap = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [lints]
