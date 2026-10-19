@@ -184,6 +184,10 @@ pub enum ClientRequestKind {
     ListModels,
     /// Refresh the catalogue from the network.
     RefreshCatalog,
+    /// List the installed Agent Skills.
+    ListSkills,
+    /// Re-scan the skills roots.
+    RefreshSkills,
     /// Report the ledger's totals.
     CostReport {
         /// One session, or every session.
@@ -262,6 +266,9 @@ pub enum ServerEventKind {
         tool: String,
         /// Whether the tool reported an error.
         is_error: bool,
+        /// The error text the model saw, when the tool failed.
+        #[serde(default)]
+        error: Option<String>,
         /// How long it ran, in milliseconds.
         duration_ms: u64,
     },
@@ -367,6 +374,25 @@ pub enum ServerEventKind {
         /// One entry per model.
         models: Vec<ModelInfo>,
     },
+    /// The installed Agent Skills.
+    SkillList {
+        /// One entry per valid skill.
+        skills: Vec<SkillInfo>,
+        /// Skills that were skipped, with the reason.
+        warnings: Vec<String>,
+    },
+    /// The skills roots were re-scanned.
+    SkillsUpdated {
+        /// How many valid skills were found.
+        skills: usize,
+    },
+    /// An approval grant was revoked.
+    GrantRevoked {
+        /// The approval record.
+        approval: String,
+        /// The grant.
+        grant: String,
+    },
     /// The turn ended.
     TurnFinished {
         /// The turn.
@@ -427,6 +453,20 @@ pub struct ModelInfo {
     pub reasoning: ReasoningInfo,
     /// Whether the catalogue marks the model deprecated.
     pub deprecated: bool,
+}
+
+/// One installed Agent Skill, as a client sees it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillInfo {
+    /// The validated name, equal to its directory name.
+    pub name: String,
+    /// What the skill does and when to use it.
+    pub description: String,
+    /// The skill directory.
+    pub root: String,
+    /// Tools the skill declares as pre-approved, when the host honors them.
+    pub allowed_tools: Vec<String>,
 }
 
 /// The reasoning controls a model declares.

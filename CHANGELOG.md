@@ -36,5 +36,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   store while rebuilding the engine for the new model.
 - Reasoning resolution per model, with effort clamping to Norte's four efforts
   and config overrides that win over catalog data.
+- Agent Skills: discovery from user, configured and project roots; YAML
+  frontmatter validation against the Agent Skills specification; progressive
+  disclosure through the `skill`, `skill_resource` and opt-in `skill_script`
+  tools; `norte-code skills list|check`; and `ListSkills`/`RefreshSkills` over the
+  protocol.
+- A configured tool registry per engine: Norte's `read`, `write`, `edit` and
+  `command` (with `PATH` and every resolved API key redacted), plus `glob`,
+  `list_dir`, `grep`, `todo` and opt-in `web_fetch`.
+- Approval modes (`ask`, `auto-edit`, `yolo`) as a Norte policy, with
+  `Approve`/`Deny`/`Revoke` resuming a parked session and `allowed-tools`
+  pre-approval behind `skills.honor_allowed_tools`.
+- Failed tool calls carry the error text the model saw, shown by
+  `norte-code run --verbose`.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

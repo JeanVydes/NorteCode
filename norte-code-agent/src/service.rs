@@ -6,7 +6,7 @@
 //! model switch a change of model rather than a change of session.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
@@ -15,14 +15,20 @@ use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
-    BlobStore, Engine, EngineBuilder, EngineConfig, EngineEvent, FinishReason, InMemoryBlobStore,
-    InMemoryStore, Message, Model, ReasoningEffort, SessionId, Store, StreamDelta, ToolKind,
-    ToolRegistry, Usage,
+    ApprovalId, BlobStore, Decision, Engine, EngineBuilder, EngineConfig, EngineEvent,
+    FinishReason, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore, Message, Model, Policy,
+    PolicySet, PolicyView, ReasoningEffort, SessionId, Store, StreamDelta, ToolKind, ToolRegistry,
+    Usage,
 };
+use norte_code_skills::{
+    SkillRegistry, SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
+};
+use norte_code_tools::{GlobTool, GrepTool, ListDirTool, TodoState, TodoTool, WebFetchTool};
+use norte_tools::{CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::{Notify, mpsc};
 
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
-use norte_code_config::Config;
+use norte_code_config::{ApprovalMode, Config};
 use norte_code_protocol::{
     Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent, ServerEventKind, SessionInfo,
     SessionKey,
@@ -81,6 +87,10 @@ pub struct Service {
     blobs: Arc<dyn BlobStore>,
     factory: Arc<dyn ModelFactory>,
     system_prompt: String,
+    workspace_root: PathBuf,
+    skills: RwLock<Arc<SkillRegistry>>,
+    todo: Arc<TodoState>,
+    secrets: Vec<String>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
 }
@@ -110,6 +120,9 @@ impl Service {
             cache_dir: norte_code_catalog::cache_dir()
                 .unwrap_or_else(|| PathBuf::from(".norte-code").join("cache")),
         };
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let secrets = collect_secrets(&config, &catalog);
+        let skills = Arc::new(discover_skills(&config, &workspace_root));
         let service = Self {
             config,
             catalog: RwLock::new(catalog),
@@ -119,6 +132,10 @@ impl Service {
             blobs,
             factory,
             system_prompt: system_prompt.into(),
+            workspace_root,
+            skills: RwLock::new(skills),
+            todo: Arc::new(TodoState::default()),
+            secrets,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
         };
@@ -158,12 +175,76 @@ impl Service {
             .store(Arc::clone(&self.store))
             .blobs(Arc::clone(&self.blobs))
             .model(model)
-            .tools(ToolRegistry::new())
+            .tools(self.tools()?)
+            .policies(self.policies())
             .config(EngineConfig {
                 max_iterations: self.config.max_iterations,
                 ..EngineConfig::default()
             })
             .build()?)
+    }
+
+    /// The tool registry every engine shares, rebuilt cheaply per turn because
+    /// Norte's registry is immutable and not cloneable.
+    fn tools(&self) -> Result<ToolRegistry, ServiceError> {
+        let mut tools = ToolRegistry::new();
+        tools.register_tool_declaration(ReadTool::new().into_declaration())?;
+        tools.register_tool_declaration(WriteTool::new().into_declaration())?;
+        tools.register_tool_declaration(EditTool::new().into_declaration())?;
+
+        let mut env = BTreeMap::new();
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".to_owned(), path);
+        }
+        let command = CommandTool::new()
+            .with_env(env)
+            .with_secrets(self.secrets.clone())
+            .with_blobs(Arc::clone(&self.blobs))
+            .into_declaration();
+        tools.register_tool_declaration(command)?;
+        tools.register_tool_declaration(GlobTool::new(&self.workspace_root).into_declaration())?;
+        tools
+            .register_tool_declaration(ListDirTool::new(&self.workspace_root).into_declaration())?;
+        tools.register_tool_declaration(GrepTool::new(&self.workspace_root).into_declaration())?;
+        tools
+            .register_tool_declaration(TodoTool::new(Arc::clone(&self.todo)).into_declaration())?;
+        if self.config.tools.web_fetch {
+            tools.register_tool_declaration(WebFetchTool::new().into_declaration())?;
+        }
+
+        if self.config.skills.enabled {
+            let skills = self.skills();
+            tools.register_tool_declaration(
+                SkillTool::new(Arc::clone(&skills)).into_declaration(),
+            )?;
+            tools.register_tool_declaration(
+                SkillResourceTool::new(Arc::clone(&skills)).into_declaration(),
+            )?;
+            if self.config.skills.allow_scripts {
+                tools.register_tool_declaration(
+                    SkillScriptTool::new(
+                        Arc::clone(&skills),
+                        SkillScriptConfig::in_workspace(&self.workspace_root),
+                    )
+                    .into_declaration(),
+                )?;
+            }
+        }
+        Ok(tools)
+    }
+
+    fn policies(&self) -> PolicySet {
+        PolicySet::new(vec![Arc::new(ApprovalModePolicy {
+            mode: self.config.approval_mode,
+            skills: self.skills(),
+            honor_allowed_tools: self.config.skills.honor_allowed_tools,
+        })])
+    }
+
+    /// The skills registry in use.
+    #[must_use]
+    pub fn skills(&self) -> Arc<SkillRegistry> {
+        Arc::clone(&self.lock_skills())
     }
 
     /// The configuration the service was built with.
@@ -251,14 +332,33 @@ impl Service {
             }
             Kind::CostReport { session } => Ok(self.cost_report(request_id, session.as_ref())),
             Kind::ListModels => Ok(self.list_models_event(request_id)),
+            Kind::ListSkills => Ok(self.skill_list_event(request_id)),
+            Kind::RefreshSkills => Ok(self.refresh_skills_event(request_id)),
             Kind::RefreshCatalog => self.refresh_catalog(request_id).await,
             Kind::SetModel { session, model } => self.set_model_event(request_id, session, model),
             Kind::SetReasoning { .. } | Kind::SetBudget { .. } => Err(ServiceError::Unsupported(
                 "session settings arrive in a later milestone",
             )),
-            Kind::Approve { .. } | Kind::Deny { .. } | Kind::Revoke { .. } => {
-                Err(ServiceError::Unsupported("approvals arrive in milestone 3"))
+            Kind::Approve {
+                session,
+                approval,
+                arguments,
+                scope,
+                remember,
+            } => {
+                self.approve(request_id, session, approval, arguments, scope, remember)
+                    .await
             }
+            Kind::Deny {
+                session,
+                approval,
+                reason,
+            } => self.deny(request_id, session, approval, reason).await,
+            Kind::Revoke {
+                session,
+                approval,
+                grant,
+            } => self.revoke(request_id, session, approval, grant).await,
             Kind::Steer { .. } => Err(ServiceError::Unsupported("steering arrives with the TUI")),
             Kind::Compact { .. } => Err(ServiceError::Unsupported(
                 "compaction arrives in milestone 6",
@@ -273,6 +373,49 @@ impl Service {
             ServerEventKind::ModelList {
                 models: self.list_models(),
             },
+        )
+    }
+
+    fn skill_list_event(&self, request_id: u64) -> EventStream {
+        let skills = self.skills();
+        let mut warnings = Vec::new();
+        let mut infos = Vec::new();
+        for skill in skills.skills() {
+            infos.push(norte_code_protocol::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                root: skill.root.display().to_string(),
+                allowed_tools: skill.allowed_tools.clone(),
+            });
+        }
+        for warning in skills.warnings() {
+            warnings.push(format!("{}: {}", warning.path.display(), warning.message));
+        }
+        single(
+            request_id,
+            None,
+            ServerEventKind::SkillList {
+                skills: infos,
+                warnings,
+            },
+        )
+    }
+
+    fn refresh_skills_event(&self, request_id: u64) -> EventStream {
+        let registry = Arc::new(discover_skills(&self.config, &self.workspace_root));
+        let count = registry.len();
+        for warning in registry.warnings() {
+            tracing::warn!(
+                path = %warning.path.display(),
+                "skipping skill: {}",
+                warning.message
+            );
+        }
+        *self.lock_skills_write() = registry;
+        single(
+            request_id,
+            None,
+            ServerEventKind::SkillsUpdated { skills: count },
         )
     }
 
@@ -305,6 +448,99 @@ impl Service {
             request_id,
             Some(session),
             ServerEventKind::ModelChanged { model },
+        ))
+    }
+
+    async fn approve(
+        self: &Arc<Self>,
+        request_id: u64,
+        session: SessionKey,
+        approval: String,
+        arguments: Option<serde_json::Value>,
+        scope: Option<norte_code_protocol::GrantScope>,
+        remember: Option<bool>,
+    ) -> Result<EventStream, ServiceError> {
+        if arguments.is_some() {
+            return Err(ServiceError::Unsupported(
+                "editing approval arguments is not implemented for this client",
+            ));
+        }
+        let (nid, spec, _) = self.require_record(&session)?;
+        let engine = self.engine(&spec)?;
+        let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
+        let record = engine
+            .pending_approvals(nid)
+            .await?
+            .into_iter()
+            .find(|record| record.id == id)
+            .ok_or(ServiceError::Norte(norte::Error::ApprovalNotFound(id)))?;
+        let grant = match (scope, remember) {
+            (Some(norte_code_protocol::GrantScope::Always), _) => GrantScope::Global,
+            (Some(norte_code_protocol::GrantScope::Session), _) | (_, Some(true)) => {
+                GrantScope::Session(nid)
+            }
+            _ => GrantScope::Call(record.call_id),
+        };
+        engine.approve(id, grant, "user").await?;
+        let head = single(
+            request_id,
+            Some(session.clone()),
+            ServerEventKind::ApprovalResolved {
+                approval: approval.clone(),
+                approved: true,
+            },
+        );
+        let resumed = self.start_turn(request_id, Some(session), None).await?;
+        Ok(Box::pin(head.chain(resumed)))
+    }
+
+    async fn deny(
+        self: &Arc<Self>,
+        request_id: u64,
+        session: SessionKey,
+        approval: String,
+        reason: Option<String>,
+    ) -> Result<EventStream, ServiceError> {
+        let (_, spec, _) = self.require_record(&session)?;
+        let engine = self.engine(&spec)?;
+        let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
+        engine
+            .deny(
+                id,
+                "user",
+                reason.unwrap_or_else(|| "denied by the user".to_owned()),
+            )
+            .await?;
+        let head = single(
+            request_id,
+            Some(session.clone()),
+            ServerEventKind::ApprovalResolved {
+                approval: approval.clone(),
+                approved: false,
+            },
+        );
+        let resumed = self.start_turn(request_id, Some(session), None).await?;
+        Ok(Box::pin(head.chain(resumed)))
+    }
+
+    async fn revoke(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+        approval: String,
+        grant: String,
+    ) -> Result<EventStream, ServiceError> {
+        let (nid, spec, _) = self.require_record(&session)?;
+        let engine = self.engine(&spec)?;
+        let grant: GrantId = grant.parse().map_err(ServiceError::Norte)?;
+        engine.revoke(nid, grant, "user").await?;
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::GrantRevoked {
+                approval,
+                grant: grant.to_string(),
+            },
         ))
     }
 
@@ -555,13 +791,21 @@ impl Service {
                 is_error,
                 duration_ms,
                 ..
-            } => Some(ServerEventKind::ToolFinished {
-                turn: stats.turn,
-                call_id: call_id.to_string(),
-                tool: tool.to_string(),
-                is_error: *is_error,
-                duration_ms: *duration_ms,
-            }),
+            } => {
+                let error = if *is_error {
+                    tool_error(engine, nid, call_id).await
+                } else {
+                    None
+                };
+                Some(ServerEventKind::ToolFinished {
+                    turn: stats.turn,
+                    call_id: call_id.to_string(),
+                    tool: tool.to_string(),
+                    is_error: *is_error,
+                    error,
+                    duration_ms: *duration_ms,
+                })
+            }
             EngineEvent::ApprovalRequested {
                 approval,
                 call_id,
@@ -784,6 +1028,83 @@ impl Service {
     fn lock_catalog_write(&self) -> RwLockWriteGuard<'_, Arc<Catalog>> {
         self.catalog.write().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn lock_skills(&self) -> RwLockReadGuard<'_, Arc<SkillRegistry>> {
+        self.skills.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_skills_write(&self) -> RwLockWriteGuard<'_, Arc<SkillRegistry>> {
+        self.skills.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Parks the tools a human must approve, according to the session's mode.
+struct ApprovalModePolicy {
+    mode: ApprovalMode,
+    skills: Arc<SkillRegistry>,
+    honor_allowed_tools: bool,
+}
+
+impl Policy for ApprovalModePolicy {
+    fn name(&self) -> &'static str {
+        "approval-mode"
+    }
+
+    fn decide(&self, view: &PolicyView<'_>) -> Decision {
+        let tool = view.call.name.as_str();
+        if self.honor_allowed_tools
+            && self
+                .skills
+                .preapproves(view.session.id, tool, &view.call.arguments)
+        {
+            return Decision::Allow;
+        }
+        let needs_approval = match self.mode {
+            ApprovalMode::Yolo => false,
+            ApprovalMode::AutoEdit => matches!(tool, "command" | "skill_script"),
+            ApprovalMode::Ask => {
+                matches!(tool, "write" | "edit" | "command" | "skill_script")
+            }
+        };
+        if needs_approval {
+            Decision::RequireApproval(format!("allow `{tool}` to run with these arguments?"))
+        } else {
+            Decision::Allow
+        }
+    }
+}
+
+fn discover_skills(config: &Config, workspace: &Path) -> SkillRegistry {
+    if !config.skills.enabled {
+        return SkillRegistry::discover(&[], 1);
+    }
+    let roots =
+        norte_code_skills::discovery_roots(workspace, &config.skills.paths, config.skills.interop);
+    SkillRegistry::discover(&roots, config.skills.max_skills)
+}
+
+/// Every API key the config can resolve, for redaction in command output.
+///
+/// Missing keys are not an error here: only the selected provider needs one.
+fn collect_secrets(config: &Config, catalog: &Catalog) -> Vec<String> {
+    let mut secrets = Vec::new();
+    for (id, provider) in &catalog.providers {
+        if let Ok(key) = config.resolve_api_key(id, &provider.env) {
+            secrets.push(key.expose().to_owned());
+        }
+    }
+    for id in config.providers.keys() {
+        let env = catalog
+            .provider(id)
+            .map_or_else(Vec::new, |provider| provider.env.clone());
+        if let Ok(key) = config.resolve_api_key(id, &env) {
+            secrets.push(key.expose().to_owned());
+        }
+    }
+    secrets.retain(|secret| !secret.trim().is_empty());
+    secrets.sort();
+    secrets.dedup();
+    secrets
 }
 
 /// Flattens a catalogue for a picker, applying the config overrides.
@@ -853,6 +1174,31 @@ fn reported_cost(usage: &Usage) -> Option<f64> {
     usage.vendor.get("cost").and_then(serde_json::Value::as_f64)
 }
 
+/// The text of a failed tool result, read from the committed history.
+async fn tool_error(
+    engine: &Engine,
+    session: SessionId,
+    call_id: &norte::CallId,
+) -> Option<String> {
+    let history = engine.history(session).await.ok()?;
+    for message in history.iter().rev() {
+        for part in &message.parts {
+            if let norte::Part::ToolResult(result) = part {
+                if result.call_id == *call_id && result.is_error {
+                    let text = result
+                        .parts
+                        .iter()
+                        .filter_map(norte::Part::as_text)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn to_usage(usage: &Usage) -> norte_code_protocol::Usage {
     norte_code_protocol::Usage {
         input_tokens: usage.input_tokens,
@@ -912,7 +1258,9 @@ fn to_delta(delta: &StreamDelta) -> Option<Delta> {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
-    use norte::{Capabilities, InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ProviderId};
+    use norte::{
+        CallId, Capabilities, InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ProviderId,
+    };
     use norte_code_config::ApiKey;
     use norte_code_protocol::{ClientRequest, ClientRequestKind};
     use norte_testing::ScriptedModel;
@@ -1148,6 +1496,111 @@ mod tests {
             panic!("expected a list");
         };
         assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
+    }
+
+    #[tokio::test]
+    async fn a_write_parks_for_approval_and_resumes() {
+        let target =
+            std::env::temp_dir().join(format!("norte-code-write-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&target);
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "write",
+                    &serde_json::json!({
+                        "path": target.display().to_string(),
+                        "content": "written by a tool",
+                        "overwrite": true
+                    }),
+                )
+                .turn_text("done"),
+        );
+        let service = Arc::new(
+            Service::new(
+                config(),
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+
+        let first = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "write it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let session = first[0].session.clone().expect("session");
+        let approval = first
+            .iter()
+            .find_map(|event| match &event.kind {
+                ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+                _ => None,
+            })
+            .expect("approval request");
+        assert!(first.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                phase: norte_code_protocol::Phase::AwaitingApproval,
+                ..
+            }
+        )));
+        assert!(!target.exists());
+
+        let second = drain(
+            &service,
+            ClientRequestKind::Approve {
+                session,
+                approval,
+                arguments: None,
+                scope: None,
+                remember: None,
+            },
+        )
+        .await;
+        assert!(second.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ApprovalResolved { approved: true, .. }
+        )));
+        assert!(second.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: false,
+                ..
+            } if tool == "write"
+        )));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("written file"),
+            "written by a tool"
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[tokio::test]
+    async fn skills_and_tools_are_listed_over_the_protocol() {
+        let service = service();
+        let skills = drain(&service, ClientRequestKind::ListSkills).await;
+        assert!(matches!(skills[0].kind, ServerEventKind::SkillList { .. }));
+        let refreshed = drain(&service, ClientRequestKind::RefreshSkills).await;
+        assert!(matches!(
+            refreshed[0].kind,
+            ServerEventKind::SkillsUpdated { .. }
+        ));
     }
 
     #[tokio::test]

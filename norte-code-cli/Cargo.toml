@@ -17,6 +17,7 @@ norte-code-agent = { path = "../norte-code-agent" }
 norte-code-catalog = { path = "../norte-code-catalog" }
 norte-code-config = { path = "../norte-code-config" }
 norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-skills = { path = "../norte-code-skills" }
 
 clap = { workspace = true }
 futures-util = { workspace = true }

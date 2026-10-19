@@ -50,6 +50,8 @@ pub struct Config {
     pub budgets: BudgetsConfig,
     /// Tool switches.
     pub tools: ToolsConfig,
+    /// Agent Skills settings.
+    pub skills: SkillsConfig,
     /// Per-model overrides, keyed by `provider/model`.
     pub model_overrides: BTreeMap<String, ModelOverride>,
 }
@@ -68,6 +70,7 @@ impl Default for Config {
             cost: CostConfig::default(),
             budgets: BudgetsConfig::default(),
             tools: ToolsConfig::default(),
+            skills: SkillsConfig::default(),
             model_overrides: BTreeMap::new(),
         }
     }
@@ -218,6 +221,38 @@ impl Default for BudgetConfig {
 pub struct ToolsConfig {
     /// Whether the `web_fetch` tool is registered.
     pub web_fetch: bool,
+}
+
+/// Agent Skills settings.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Whether skills are discovered and their tools registered.
+    pub enabled: bool,
+    /// Extra discovery roots, in order, after the user root.
+    pub paths: Vec<PathBuf>,
+    /// Also read the `.agents/skills` interoperability roots.
+    pub interop: bool,
+    /// Whether `skill_script` is registered. Off by default.
+    pub allow_scripts: bool,
+    /// Whether a skill's `allowed-tools` may pre-approve calls. Off by default.
+    pub honor_allowed_tools: bool,
+    /// The largest number of valid skills kept.
+    pub max_skills: usize,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            paths: Vec::new(),
+            interop: true,
+            allow_scripts: false,
+            honor_allowed_tools: false,
+            max_skills: 128,
+        }
+    }
 }
 
 /// A per-model override of what the catalogue says.
@@ -394,6 +429,9 @@ impl Config {
                     format!("`{model}` is not a `provider/model` reference"),
                 ));
             }
+        }
+        if self.skills.max_skills == 0 {
+            return Err(invalid("skills.max_skills", "must be at least 1"));
         }
         if !(self.compaction.threshold > 0.0 && self.compaction.threshold <= 1.0) {
             return Err(invalid(

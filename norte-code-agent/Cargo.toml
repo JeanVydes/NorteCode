@@ -12,12 +12,15 @@ authors.workspace = true
 norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-config = { path = "../norte-code-config" }
 norte-code-catalog = { path = "../norte-code-catalog" }
+norte-code-skills = { path = "../norte-code-skills" }
+norte-code-tools = { path = "../norte-code-tools" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 norte = { workspace = true }
+norte-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

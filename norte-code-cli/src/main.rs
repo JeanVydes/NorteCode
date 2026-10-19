@@ -25,6 +25,7 @@ use norte_code_protocol::{
     ClientRequest, ClientRequestKind, Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent,
     ServerEventKind,
 };
+use norte_code_skills::{SkillRegistry, discovery_roots};
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +43,9 @@ struct Cli {
     /// Revalidate the catalogue with the network even when the cache is fresh.
     #[arg(long, global = true)]
     refresh: bool,
+    /// Show tool failures and other details.
+    #[arg(long, global = true)]
+    verbose: bool,
     /// What to do.
     #[command(subcommand)]
     command: Command,
@@ -53,6 +57,8 @@ enum Command {
     Run(RunArgs),
     /// List the models the catalogue knows.
     Models(ModelsArgs),
+    /// Inspect the installed Agent Skills.
+    Skills(SkillsArgs),
 }
 
 #[derive(Args)]
@@ -71,6 +77,25 @@ struct RunArgs {
     /// Do not print reasoning, tool activity or usage.
     #[arg(long)]
     quiet: bool,
+}
+
+#[derive(Args)]
+struct SkillsArgs {
+    /// What to do with the installed skills.
+    #[command(subcommand)]
+    command: SkillsCommand,
+}
+
+#[derive(Subcommand)]
+enum SkillsCommand {
+    /// List the valid skills.
+    List {
+        /// Write one JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate every skill and report what was skipped.
+    Check,
 }
 
 #[derive(Args)]
@@ -105,11 +130,65 @@ async fn run(cli: Cli) -> Result<u8, String> {
     let config_path = cli.config.clone();
     let offline = cli.offline;
     let refresh = cli.refresh;
+    let verbose = cli.verbose;
     let config = load_config(config_path)?;
-    let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
     match cli.command {
-        Command::Run(args) => run_prompt(config, catalog, source, args).await,
-        Command::Models(args) => list_models(&config, &catalog, source, &args),
+        Command::Skills(args) => skills_command(&config, &args),
+        command => {
+            let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
+            match command {
+                Command::Run(args) => run_prompt(config, catalog, source, args, verbose).await,
+                Command::Models(args) => list_models(&config, &catalog, source, &args),
+                Command::Skills(_) => unreachable!("skills were handled before the catalogue"),
+            }
+        }
+    }
+}
+
+fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, String> {
+    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let roots = discovery_roots(&workspace, &config.skills.paths, config.skills.interop);
+    let registry = SkillRegistry::discover(&roots, config.skills.max_skills);
+    match args.command {
+        SkillsCommand::List { json } => {
+            for skill in registry.skills() {
+                if json {
+                    let line = serde_json::json!({
+                        "name": skill.name,
+                        "description": skill.description,
+                        "root": skill.root.display().to_string(),
+                        "allowed_tools": skill.allowed_tools,
+                    });
+                    println!("{line}");
+                } else {
+                    println!(
+                        "{}\t{}\t{}",
+                        skill.name,
+                        skill.root.display(),
+                        skill.description
+                    );
+                }
+            }
+            Ok(0)
+        }
+        SkillsCommand::Check => {
+            for skill in registry.skills() {
+                println!(
+                    "ok\t{}\t{}\t{}",
+                    skill.name,
+                    skill.root.display(),
+                    skill.description
+                );
+            }
+            for warning in registry.warnings() {
+                eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+            }
+            if registry.warnings().is_empty() {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
+        }
     }
 }
 
@@ -154,6 +233,7 @@ async fn run_prompt(
     catalog: Catalog,
     source: Source,
     args: RunArgs,
+    verbose: bool,
 ) -> Result<u8, String> {
     let spec = resolve_spec(&config, &catalog, args.model, args.endpoint)?;
     if !args.quiet && !args.jsonl {
@@ -192,6 +272,7 @@ async fn run_prompt(
             Format::Text
         },
         quiet: args.quiet,
+        verbose,
         last_char: None,
         failed: false,
     };
@@ -307,6 +388,7 @@ enum Format {
 struct Renderer {
     format: Format,
     quiet: bool,
+    verbose: bool,
     last_char: Option<char>,
     failed: bool,
 }
@@ -328,12 +410,18 @@ impl Renderer {
             ServerEventKind::ToolFinished {
                 tool,
                 is_error,
+                error,
                 duration_ms,
                 ..
             } => {
                 if !self.quiet {
                     let outcome = if *is_error { "failed" } else { "ok" };
                     eprintln!("· {tool} {outcome} in {duration_ms} ms");
+                }
+                if *is_error && self.verbose {
+                    if let Some(error) = error {
+                        eprintln!("  error: {error}");
+                    }
                 }
             }
             ServerEventKind::RequestReconstructed {
