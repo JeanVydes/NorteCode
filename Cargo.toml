@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+    "norte-code-agent",
+    "norte-code-catalog",
+    "norte-code-cli",
+    "norte-code-config",
+    "norte-code-cost",
+    "norte-code-protocol",
+    "norte-code-store-sqlite",
+    "norte-code-tools",
+    "norte-code-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/JeanVydes/NorteCode"
+authors = ["Jean Vides <j@vyde.dev>"]
+
+# Norte Code is a host that sits on top of Norte; it never forks it. Norte is
+# pulled over git on the `dev` branch and the exact revision is pinned in
+# Cargo.lock, which this application commits.
+[workspace.dependencies]
+norte = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev", features = ["full"] }
+norte-testing = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
+
+async-trait = "0.1.89"
+chrono = { version = "0.4", features = ["serde"] }
+futures-core = "0.3.31"
+futures-util = "0.3.31"
+schemars = "1.1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.17"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

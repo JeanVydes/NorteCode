@@ -1,0 +1,26 @@
+[package]
+name = "norte-code-store-sqlite"
+description = "A Norte Store and BlobStore over SQLite, plus Norte Code's own tables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+norte = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+norte-testing = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,34 @@
+# Build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Local state, caches and databases (never committed)
+*.db
+*.db-shm
+*.db-wal
+.sqlx/
+.cache/
+/data/
+norte-code.local.*
+*.local.toml
+
+# Logs and scratch
+*.log
+/build
+/out
+/tmp
+
+# Secrets
+.env
+.env.*
+*.env
+*.pem
+*.key
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
