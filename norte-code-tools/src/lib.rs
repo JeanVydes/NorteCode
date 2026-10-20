@@ -524,6 +524,10 @@ pub struct QuestionEvent {
     pub session: Option<SessionId>,
     /// What the model wants to know.
     pub question: String,
+    /// Closed choices, when the model offered any.
+    pub options: Vec<String>,
+    /// Whether more than one option may be chosen.
+    pub multiple: bool,
 }
 
 /// A durable record of a question, for hosts that survive a restart.
@@ -537,6 +541,10 @@ pub struct DurableQuestion {
     pub call_id: String,
     /// What the model asked.
     pub question: String,
+    /// Closed choices, when the model offered any.
+    pub options: Vec<String>,
+    /// Whether more than one option may be chosen.
+    pub multiple: bool,
     /// The answer, once one was given.
     pub answer: Option<String>,
 }
@@ -657,6 +665,8 @@ impl QuestionBroker {
         &self,
         context: &ToolContext,
         mut question: String,
+        mut options: Vec<String>,
+        mut multiple: bool,
     ) -> std::result::Result<String, String> {
         let call_id = context.call_id.map(|call| call.to_string());
         let mut id = call_id.as_ref().map_or_else(
@@ -672,6 +682,8 @@ impl QuestionBroker {
                     return Ok(answer);
                 }
                 question.clone_from(&existing.question);
+                options.clone_from(&existing.options);
+                multiple = existing.multiple;
             } else {
                 store
                     .save(&DurableQuestion {
@@ -679,6 +691,8 @@ impl QuestionBroker {
                         session,
                         call_id: call.to_owned(),
                         question: question.clone(),
+                        options: options.clone(),
+                        multiple,
                         answer: None,
                     })
                     .await;
@@ -700,6 +714,8 @@ impl QuestionBroker {
             id: id.clone(),
             session: context.session,
             question,
+            options,
+            multiple,
         };
         if self.events.send(event).is_err() {
             self.pending
@@ -737,6 +753,14 @@ impl QuestionBroker {
 pub struct AskUserArgs {
     /// The one question to ask, with enough context to answer without guessing.
     pub question: String,
+    /// Closed choices, when the answer should be one of them instead of open
+    /// text. The client adds an "answer something else" choice that falls back
+    /// to the normal free-form answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+    /// Whether several choices may be selected. Only meaningful with `options`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
 }
 
 /// Ask the human a question and wait for the answer.
@@ -757,7 +781,7 @@ impl AskUserTool {
     pub fn into_declaration(self) -> ToolDeclaration<AskUserArgs> {
         ToolDeclaration::new(
             "ask_user",
-            "Ask the human one question and wait for their answer. Use it only when the task cannot proceed without a decision or missing fact, not for confirmation you can infer.",
+            "Ask the human one question and wait for their answer. Use it only when the task cannot proceed without a decision or missing fact, not for confirmation you can infer. Pass `options` to offer closed choices; set `multiple` to true when several may apply. The client always adds a free-form \"something else\" choice.",
             Arc::new(self),
         )
     }
@@ -776,7 +800,21 @@ impl FnExecutor<AskUserArgs, ToolOutput> for AskUserTool {
         context: &ToolContext,
         args: AskUserArgs,
     ) -> Result<ToolOutput> {
-        match self.broker.ask(context, args.question).await {
+        if args.options.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(ToolOutput::error("ask_user: options must not be empty"));
+        }
+        if args.multiple == Some(true) && args.options.is_none() {
+            return Ok(ToolOutput::error(
+                "ask_user: multiple needs a non-empty options list",
+            ));
+        }
+        let options = args.options.unwrap_or_default();
+        let multiple = args.multiple.unwrap_or(false);
+        match self
+            .broker
+            .ask(context, args.question, options, multiple)
+            .await
+        {
             Ok(answer) => Ok(ToolOutput::text(format!(
                 "The user answered: {}",
                 escape(&answer)
@@ -990,11 +1028,18 @@ mod tests {
         let asking = Arc::clone(&broker);
         let task = tokio::spawn(async move {
             asking
-                .ask(&ToolContext::new(), "Continue?".to_owned())
+                .ask(
+                    &ToolContext::new(),
+                    "Continue?".to_owned(),
+                    vec!["Yes".to_owned(), "No".to_owned()],
+                    false,
+                )
                 .await
         });
         let event = events.recv().await.expect("question event");
         assert_eq!(event.question, "Continue?");
+        assert_eq!(event.options, ["Yes", "No"]);
+        assert!(!event.multiple);
         assert!(broker.answer(None, &event.id, "yes".to_owned()).await);
         let answer = task.await.expect("task").expect("answer");
         assert_eq!(answer, "yes");
@@ -1050,7 +1095,16 @@ mod tests {
         let asking = Arc::clone(&first);
         let task = tokio::spawn({
             let context = context.clone();
-            async move { asking.ask(&context, "Continue?".to_owned()).await }
+            async move {
+                asking
+                    .ask(
+                        &context,
+                        "Continue?".to_owned(),
+                        vec!["Yes".to_owned(), "No".to_owned()],
+                        true,
+                    )
+                    .await
+            }
         });
         let asked = events.recv().await.expect("question event");
         task.abort();
@@ -1060,10 +1114,21 @@ mod tests {
         let asking = Arc::clone(&second);
         let task = tokio::spawn({
             let context = context.clone();
-            async move { asking.ask(&context, "Continue?".to_owned()).await }
+            async move {
+                asking
+                    .ask(
+                        &context,
+                        "Continue?".to_owned(),
+                        vec!["Yes".to_owned(), "No".to_owned()],
+                        true,
+                    )
+                    .await
+            }
         });
         let reasked = events.recv().await.expect("question event");
         assert_eq!(reasked.id, asked.id);
+        assert_eq!(reasked.options, ["Yes", "No"]);
+        assert!(reasked.multiple);
         assert!(
             second
                 .answer(context.session, &reasked.id, "yes".to_owned())
@@ -1074,7 +1139,7 @@ mod tests {
         let third = Arc::new(QuestionBroker::new().with_store(store as _));
         let answer = tokio::time::timeout(
             Duration::from_secs(1),
-            third.ask(&context, "Continue?".to_owned()),
+            third.ask(&context, "Continue?".to_owned(), Vec::new(), false),
         )
         .await
         .expect("a replayed answer returns immediately")

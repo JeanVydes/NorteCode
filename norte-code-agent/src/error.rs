@@ -67,6 +67,9 @@ pub enum ServiceError {
     /// A budget is malformed or cannot be measured.
     #[error("budget: {0}")]
     Budget(String),
+    /// An approval rule could not be read or written.
+    #[error("approval: {0}")]
+    Approval(String),
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),

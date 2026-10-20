@@ -42,6 +42,8 @@ pub struct Config {
     pub reasoning: ReasoningConfig,
     /// How tool calls are approved.
     pub approval_mode: ApprovalMode,
+    /// Tools always allowed or denied across sessions.
+    pub approvals: ApprovalsConfig,
     /// How many requests one turn may spend.
     pub max_iterations: usize,
     /// Display settings for cost.
@@ -66,6 +68,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             reasoning: ReasoningConfig::default(),
             approval_mode: ApprovalMode::default(),
+            approvals: ApprovalsConfig::default(),
             max_iterations: 32,
             cost: CostConfig::default(),
             budgets: BudgetsConfig::default(),
@@ -165,6 +168,21 @@ pub enum ApprovalMode {
     AutoEdit,
     /// Allow everything.
     Yolo,
+}
+
+/// Approval rules that outlive one session.
+///
+/// A tool named in `deny` is refused before the approval mode is consulted; a
+/// tool named in `allow` runs without asking. Denial wins when a tool is in
+/// both lists. These are deliberately tool-wide: use the session prompt for a
+/// narrower decision.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApprovalsConfig {
+    /// Tool names always allowed across sessions.
+    pub allow: Vec<String>,
+    /// Tool names always denied across sessions.
+    pub deny: Vec<String>,
 }
 
 /// Cost display settings.
@@ -334,6 +352,14 @@ pub enum ConfigError {
         path: PathBuf,
         /// The underlying error.
         source: serde_json::Error,
+    },
+    /// A file could not be written.
+    #[error("could not write {path}: {source}")]
+    Write {
+        /// The path.
+        path: PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
     },
     /// A value was present but wrong.
     #[error("config is invalid: {path}: {message}")]
@@ -581,6 +607,76 @@ pub fn project_config_path(root: &Path) -> PathBuf {
     root.join(".norte-code").join("config.json")
 }
 
+/// Adds one global approval rule to the user config, preserving the rest of
+/// the file.
+///
+/// A tool moves between `approvals.allow` and `approvals.deny`; the opposite
+/// list is cleared for that tool so the file never says both. Unknown keys and
+/// the existing formatting-independent JSON content are kept.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the file cannot be read or written, is not a
+/// JSON object, or has an `approvals` field of the wrong shape.
+pub fn update_user_approval(path: &Path, tool: &str, allow: bool) -> Result<(), ConfigError> {
+    let tool = tool.trim();
+    if tool.is_empty() {
+        return Err(invalid("approvals", "the tool name is empty"));
+    }
+    let mut root = if path.exists() {
+        read_value(path)?
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+    let root = root
+        .as_object_mut()
+        .ok_or_else(|| invalid("approvals", "the config root must be a JSON object"))?;
+    let approvals = root
+        .entry("approvals")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let approvals = approvals
+        .as_object_mut()
+        .ok_or_else(|| invalid("approvals", "must be a JSON object"))?;
+    let (keep, drop) = if allow {
+        ("allow", "deny")
+    } else {
+        ("deny", "allow")
+    };
+    let list = approvals
+        .entry(keep)
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let list = list.as_array_mut().ok_or_else(|| {
+        invalid(
+            format!("approvals.{keep}"),
+            "must be an array of tool names",
+        )
+    })?;
+    if !list.iter().any(|entry| entry.as_str() == Some(tool)) {
+        list.push(Value::String(tool.to_owned()));
+    }
+    if let Some(other) = approvals.get_mut(drop).and_then(Value::as_array_mut) {
+        other.retain(|entry| entry.as_str() != Some(tool));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut body = serde_json::to_string_pretty(&root).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    body.push('\n');
+    fs::write(path, body).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +730,22 @@ mod tests {
         )
         .expect_err("budget");
         assert!(error.to_string().contains("budgets.session.limit"));
+    }
+
+    #[test]
+    fn a_global_approval_rule_moves_between_lists_and_keeps_unknown_keys() {
+        let path = temp_file(r#"{"mystery":true}"#);
+        update_user_approval(&path, "command", true).expect("allow");
+        update_user_approval(&path, "command", true).expect("allow again");
+        let body = fs::read_to_string(&path).expect("read");
+        let root: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(root["approvals"]["allow"], serde_json::json!(["command"]));
+        assert_eq!(root["mystery"], true);
+
+        update_user_approval(&path, "command", false).expect("deny");
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert!(loaded.config.approvals.allow.is_empty());
+        assert_eq!(loaded.config.approvals.deny, ["command"]);
     }
 
     #[test]

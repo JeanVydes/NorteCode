@@ -60,6 +60,9 @@ pub struct StoredSession {
     /// Host counters (billed messages, reported cost), opaque to the store.
     #[serde(default)]
     pub stats: Value,
+    /// Tools this session refuses without asking again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_tools: Vec<String>,
 }
 
 /// A question a turn is parked on, durable across a restart.
@@ -73,6 +76,12 @@ pub struct StoredQuestion {
     pub call_id: String,
     /// What the model wants to know.
     pub question: String,
+    /// Closed choices, when the model offered any.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// Whether more than one option may be chosen.
+    #[serde(default)]
+    pub multiple: bool,
     /// The answer, once a human gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
@@ -306,6 +315,8 @@ impl SessionDirectory for InMemoryDirectory {
                 stored.id.clone_from(&question.id);
                 stored.session = question.session;
                 stored.question.clone_from(&question.question);
+                stored.options.clone_from(&question.options);
+                stored.multiple = question.multiple;
             })
             .or_insert_with(|| question.clone());
         Ok(())
@@ -418,6 +429,18 @@ impl SqliteStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.execute_batch(SCHEMA)?;
+        ensure_column(
+            &connection,
+            "questions",
+            "options",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(
+            &connection,
+            "questions",
+            "multiple",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -456,6 +479,26 @@ impl SqliteStore {
         })
         .await
     }
+}
+
+/// Adds a column to a table created by an older schema.
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|name| name == column) {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 const SCHEMA: &str = "
@@ -497,6 +540,8 @@ CREATE TABLE IF NOT EXISTS questions (
     id       TEXT NOT NULL,
     session  TEXT NOT NULL,
     question TEXT NOT NULL,
+    options  TEXT NOT NULL DEFAULT '[]',
+    multiple INTEGER NOT NULL DEFAULT 0,
     answer   TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -1012,11 +1057,12 @@ impl SessionDirectory for SqliteStore {
             String,
             String,
             String,
+            String,
         )> = self
             .run(|connection| {
                 let mut statement = connection
                     .prepare(
-                        "SELECT key, north, title, model, created_at, phase, stats
+                        "SELECT key, north, title, model, created_at, phase, stats, data
                          FROM logical_sessions ORDER BY created_at DESC",
                     )
                     .map_err(Fault::from)?;
@@ -1030,6 +1076,7 @@ impl SessionDirectory for SqliteStore {
                             row.get(4)?,
                             row.get(5)?,
                             row.get(6)?,
+                            row.get(7)?,
                         ))
                     })
                     .map_err(Fault::from)?;
@@ -1039,22 +1086,26 @@ impl SessionDirectory for SqliteStore {
             })
             .await?;
         rows.into_iter()
-            .map(|(key, north, title, model, created_at, phase, stats)| {
-                Ok(StoredSession {
-                    key,
-                    north: north.parse()?,
-                    title,
-                    model,
-                    created_at: created_at.parse().map_err(|error: chrono::ParseError| {
-                        Fault::Corrupt {
-                            what: "stored session".to_owned(),
-                            reason: error.to_string(),
-                        }
-                    })?,
-                    phase,
-                    stats: decode(&stats, "session stats")?,
-                })
-            })
+            .map(
+                |(key, north, title, model, created_at, phase, stats, data)| {
+                    let extra: StoredSession = decode(&data, "stored session")?;
+                    Ok(StoredSession {
+                        key,
+                        north: north.parse()?,
+                        title,
+                        model,
+                        created_at: created_at.parse().map_err(|error: chrono::ParseError| {
+                            Fault::Corrupt {
+                                what: "stored session".to_owned(),
+                                reason: error.to_string(),
+                            }
+                        })?,
+                        phase,
+                        stats: decode(&stats, "session stats")?,
+                        denied_tools: extra.denied_tools,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -1258,11 +1309,12 @@ impl SessionDirectory for SqliteStore {
 
     async fn question(&self, call_id: &str) -> Result<Option<StoredQuestion>> {
         let call_id = call_id.to_owned();
-        let row: Option<(String, String, String, String, Option<String>)> = self
+        let row: Option<(String, String, String, String, String, i64, Option<String>)> = self
             .run(move |connection| {
                 connection
                     .query_row(
-                        "SELECT id, session, call_id, question, answer FROM questions WHERE call_id = ?1",
+                        "SELECT id, session, call_id, question, options, multiple, answer
+                         FROM questions WHERE call_id = ?1",
                         params![call_id],
                         |row| {
                             Ok((
@@ -1271,6 +1323,8 @@ impl SessionDirectory for SqliteStore {
                                 row.get(2)?,
                                 row.get(3)?,
                                 row.get(4)?,
+                                row.get(5)?,
+                                row.get(6)?,
                             ))
                         },
                     )
@@ -1278,18 +1332,22 @@ impl SessionDirectory for SqliteStore {
                     .map_err(Fault::from)
             })
             .await?;
-        row.map(|(id, session, call_id, question, answer)| {
-            let session = session
-                .parse::<SessionId>()
-                .map_err(|error: Error| Error::Other(error.to_string()))?;
-            Ok::<_, Error>(StoredQuestion {
-                id,
-                session,
-                call_id,
-                question,
-                answer,
-            })
-        })
+        row.map(
+            |(id, session, call_id, question, options, multiple, answer)| {
+                let session = session
+                    .parse::<SessionId>()
+                    .map_err(|error: Error| Error::Other(error.to_string()))?;
+                Ok::<_, Error>(StoredQuestion {
+                    id,
+                    session,
+                    call_id,
+                    question,
+                    options: decode(&options, "question options")?,
+                    multiple: multiple != 0,
+                    answer,
+                })
+            },
+        )
         .transpose()
     }
 
@@ -1298,16 +1356,20 @@ impl SessionDirectory for SqliteStore {
         self.run(move |connection| {
             connection
                 .execute(
-                    "INSERT INTO questions (call_id, id, session, question, answer)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    "INSERT INTO questions
+                       (call_id, id, session, question, options, multiple, answer)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(call_id) DO UPDATE SET id = excluded.id,
                        session = excluded.session, question = excluded.question,
+                       options = excluded.options, multiple = excluded.multiple,
                        answer = COALESCE(questions.answer, excluded.answer)",
                     params![
                         question.call_id,
                         question.id,
                         question.session.to_string(),
                         question.question,
+                        encode(&question.options, "question options")?,
+                        i64::from(question.multiple),
                         question.answer,
                     ],
                 )
@@ -1459,6 +1521,7 @@ mod tests {
                 created_at: Utc::now(),
                 phase: "streaming".to_owned(),
                 stats: serde_json::json!({}),
+                denied_tools: Vec::new(),
             })
             .await
             .expect("save");
@@ -1575,6 +1638,7 @@ mod tests {
             created_at: Utc::now(),
             phase: "idle".to_owned(),
             stats: serde_json::json!({"cost": 0.5}),
+            denied_tools: vec!["command".to_owned()],
         };
         store.save_session(&session).await.expect("save");
         assert_eq!(store.sessions().await.expect("list"), vec![session.clone()]);
@@ -1584,6 +1648,8 @@ mod tests {
             session: session.north,
             call_id: "call-1".to_owned(),
             question: "Which file?".to_owned(),
+            options: vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
+            multiple: false,
             answer: None,
         };
         store.save_question(&question).await.expect("question");

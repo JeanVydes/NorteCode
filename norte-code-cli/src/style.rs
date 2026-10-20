@@ -82,16 +82,37 @@ impl Style {
         self.paint("33", text)
     }
 
-    /// Cyan, for prompts.
+    /// Cyan, for tools and prompts.
     #[must_use]
     pub fn cyan(self, text: impl Display) -> String {
         self.paint("36", text)
+    }
+
+    /// Blue, for usage and secondary labels.
+    #[must_use]
+    pub fn blue(self, text: impl Display) -> String {
+        self.paint("34", text)
     }
 
     /// Magenta, for the model identity.
     #[must_use]
     pub fn magenta(self, text: impl Display) -> String {
         self.paint("35", text)
+    }
+
+    /// Bright black, for rules and quiet chrome. Kept distinct from [`dim`] so
+    /// a theme that renders bold/dim as plain still shows structure.
+    ///
+    /// [`dim`]: Style::dim
+    #[must_use]
+    pub fn faint(self, text: impl Display) -> String {
+        self.paint("90", text)
+    }
+
+    /// Bold cyan, for a tool name.
+    #[must_use]
+    pub fn tool(self, text: impl Display) -> String {
+        self.paint("1;36", text)
     }
 }
 

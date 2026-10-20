@@ -55,18 +55,30 @@ calls are journaled: if a process dies after a write or command may have run,
 the next process refuses to run that same call again rather than repeat it.
 
 When a tool needs approval, `norte-code run` prints the call and its arguments
-and asks `[y]es / [n]o / [a]lways for this session` on stdin. Approving resumes
-the same turn; input is read from the terminal, never from the model. With no
-interactive terminal the session stays parked, which is what `--jsonl` scripts
-and other clients expect. Reasoning streams in dim italic and tool, usage and
-turn summaries are colourised only when the output is a terminal; `NO_COLOR`,
-`TERM=dumb` and pipes keep it plain.
+and offers six choices on stdin: allow once (`y`), allow this tool for the
+session (`s`), allow this tool always (`a`), deny once (`n`), deny this tool for
+the session (`ns`) or deny this tool always (`ng`). `n <message>` (and the
+session/global forms) sends human feedback to the model instead of a bare
+refusal. Session allows become Norte grants; session denials are stored with the
+session; “always” rules are written to `approvals.allow` / `approvals.deny` in
+the user config, so they survive a restart. A global deny wins over a global
+allow. Approving resumes the same turn; input is read from the terminal, never
+from the model. With no interactive terminal the session stays parked, which is
+what `--jsonl` scripts and other clients expect. Reasoning streams in dim italic
+and tool, usage and turn summaries are colourised only when the output is a
+terminal; `NO_COLOR`, `TERM=dumb` and pipes keep it plain.
+
+`ask_user` accepts an optional `options` list and `multiple` flag. When the model
+offers choices, the terminal shows them as a numbered list plus an automatic
+“Something else (type it)” entry; choosing that entry asks for free-form text
+through the same answer channel. A multi-select answer joins the selected option
+strings with `, `.
 
 While a turn is running, `Ctrl-C` cancels it: the running tool is asked to stop
 (Norte's `command` tool kills the whole child process group, so a hung command
 does not keep the terminal hostage) and the turn finishes uncommitted. A second
-`Ctrl-C` quits the process. The session stays resumable with `norte-code
-resume`.
+`Ctrl-C` within five seconds only repeats “still cancelling”; after five seconds
+it force-exits. The session stays resumable with `norte-code resume`.
 
 ## Cost and budgets
 

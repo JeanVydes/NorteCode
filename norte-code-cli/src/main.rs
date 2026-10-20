@@ -27,7 +27,7 @@ use norte_code_config::{ApprovalMode, Config, user_config_path};
 use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
-    ErrorCode, GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo, ServerEvent,
+    DenyScope, ErrorCode, GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo, ServerEvent,
     ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
@@ -85,9 +85,15 @@ struct RunArgs {
     /// A base URL override for the provider.
     #[arg(long, value_name = "URL")]
     endpoint: Option<String>,
-    /// A spend limit for the whole run, in USD.
-    #[arg(long, value_name = "USD")]
+    /// A limit for this message.
+    #[arg(long, value_name = "LIMIT")]
     budget: Option<f64>,
+    /// What `--budget` measures.
+    #[arg(long, value_name = "UNIT", value_parser = ["usd", "tokens", "requests"], default_value = "usd")]
+    budget_unit: String,
+    /// What to do when `--budget` is exhausted.
+    #[arg(long, value_name = "ACTION", value_parser = ["warn", "ask", "stop"], default_value = "stop")]
+    budget_action: String,
     /// A reasoning effort such as `low`, `medium` or `high`.
     #[arg(long, value_name = "EFFORT")]
     reasoning: Option<String>,
@@ -195,6 +201,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<u8, String> {
     let config_path = cli.config.clone();
+    let user_config = config_path.clone().or_else(user_config_path);
     let offline = cli.offline;
     let refresh = cli.refresh;
     let verbose = cli.verbose;
@@ -206,9 +213,11 @@ async fn run(cli: Cli) -> Result<u8, String> {
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
-                Command::Run(args) => run_prompt(config, catalog, source, args, verbose).await,
+                Command::Run(args) => {
+                    run_prompt(config, catalog, source, args, verbose, user_config).await
+                }
                 Command::Resume(args) => {
-                    resume_session(config, catalog, source, args, verbose).await
+                    resume_session(config, catalog, source, args, verbose, user_config).await
                 }
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
                 Command::Skills(_) | Command::Sessions(_) | Command::Cost(_) => {
@@ -402,6 +411,16 @@ fn cost_summary(summary: &CostSummary) -> String {
         format!("{} in", human_tokens(summary.input_tokens)),
         format!("{} out", human_tokens(summary.output_tokens)),
     ];
+    if summary.cache_read_tokens > 0 && summary.input_tokens > 0 {
+        parts.push(format!(
+            "cache {}",
+            percent_label(summary.cache_read_tokens, summary.input_tokens)
+        ));
+    }
+    parts.push(format!(
+        "in:out {}",
+        token_ratio(summary.input_tokens, summary.output_tokens)
+    ));
     if summary.not_reported == summary.requests {
         parts.push("cost not reported".to_owned());
     } else {
@@ -456,6 +475,7 @@ async fn run_prompt(
     source: Source,
     args: RunArgs,
     verbose: bool,
+    config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let spec = resolve_spec(&config, &catalog, args.model.clone(), args.endpoint.clone())?;
     let mut config = config;
@@ -472,6 +492,14 @@ async fn run_prompt(
             return Err(format!("--budget must be a positive number, got {limit}"));
         }
     }
+    let message_budget = match args.budget {
+        Some(limit) => Some(Budget {
+            unit: parse_budget_unit(&args.budget_unit)?,
+            limit,
+            action: parse_budget_action(&args.budget_action)?,
+        }),
+        None => None,
+    };
     let style = if args.jsonl {
         Style::plain()
     } else {
@@ -513,6 +541,7 @@ async fn run_prompt(
         .await
         .map_err(|e| e.to_string())?,
     );
+    service.set_config_path(config_path);
 
     let request = ClientRequest {
         request_id: 1,
@@ -522,11 +551,7 @@ async fn run_prompt(
                 .as_ref()
                 .map(|key| SessionKey::new(key.clone())),
             text: args.prompt,
-            budget: args.budget.map(|limit| Budget {
-                unit: BudgetUnit::Usd,
-                limit,
-                action: BudgetAction::Stop,
-            }),
+            budget: message_budget,
             reasoning: args.reasoning.map(|effort| Reasoning::Effort { effort }),
         },
     };
@@ -542,8 +567,14 @@ async fn run_prompt(
         verbose,
         show_cost,
         style,
+        block: Block::None,
+        reasoning_line_start: false,
         last_char: None,
         failed: false,
+        cancelled: false,
+        cache_read: 0,
+        cache_write: 0,
+        cache_reported: false,
         budget_stopped: false,
         requests: 0,
         input: 0,
@@ -569,6 +600,7 @@ async fn resume_session(
     source: Source,
     args: ResumeArgs,
     verbose: bool,
+    config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let spec = resolve_spec(&config, &catalog, None, None)?;
     let style = if args.jsonl {
@@ -608,6 +640,7 @@ async fn resume_session(
         .await
         .map_err(|e| e.to_string())?,
     );
+    service.set_config_path(config_path);
     let mut renderer = Renderer {
         format: if args.jsonl {
             Format::Jsonl
@@ -618,8 +651,14 @@ async fn resume_session(
         verbose,
         show_cost,
         style,
+        block: Block::None,
+        reasoning_line_start: false,
         last_char: None,
         failed: false,
+        cancelled: false,
+        cache_read: 0,
+        cache_write: 0,
+        cache_reported: false,
         budget_stopped: false,
         requests: 0,
         input: 0,
@@ -632,18 +671,8 @@ async fn resume_session(
         if !limit.is_finite() || limit <= 0.0 {
             return Err(format!("--budget must be a positive number, got {limit}"));
         }
-        let unit = match args.budget_unit.as_str() {
-            "usd" => BudgetUnit::Usd,
-            "tokens" => BudgetUnit::Tokens,
-            "requests" => BudgetUnit::Requests,
-            other => return Err(format!("unknown budget unit `{other}`")),
-        };
-        let action = match args.budget_action.as_str() {
-            "warn" => BudgetAction::Warn,
-            "ask" => BudgetAction::Ask,
-            "stop" => BudgetAction::Stop,
-            other => return Err(format!("unknown budget action `{other}`")),
-        };
+        let unit = parse_budget_unit(&args.budget_unit)?;
+        let action = parse_budget_action(&args.budget_action)?;
         let stream = service
             .submit(ClientRequest {
                 request_id: 1,
@@ -683,6 +712,7 @@ async fn resume_session(
 ///
 /// A turn may park for several approvals; each decision resumes on its own
 /// stream, which can park again, so the loop drains a queue of streams.
+#[allow(clippy::too_many_lines)]
 async fn drive_turns(
     service: &Arc<Service>,
     primary: EventStream,
@@ -702,34 +732,59 @@ async fn drive_turns(
         }
     });
     let mut current: Option<SessionKey> = None;
-    let mut interrupted = false;
+    let mut cancel_requested: Option<std::time::Instant> = None;
     while let Some(mut stream) = streams.pop_front() {
         loop {
             let event = tokio::select! {
                 biased;
                 Some(()) = interrupt_rx.recv() => {
                     let Some(session) = current.clone() else { continue };
-                    if interrupted {
-                        eprintln!("{}", style.red("interrupted"));
-                        signal.abort();
-                        return Err("interrupted".to_owned());
-                    }
-                    interrupted = true;
-                    eprintln!(
-                        "{}",
-                        style.yellow(
-                            "cancelling the running turn… (press Ctrl-C again to quit)"
-                        )
-                    );
-                    let request = ClientRequest {
-                        request_id: 0,
-                        kind: ClientRequestKind::CancelTurn { session },
-                    };
-                    if let Err(error) = service.submit(request).await {
-                        eprintln!(
-                            "{}",
-                            style.yellow(format!("warning: could not cancel the turn: {error}"))
-                        );
+                    match cancel_requested {
+                        None => {
+                            cancel_requested = Some(std::time::Instant::now());
+                            renderer.mark_cancelled();
+                            eprintln!(
+                                "{}",
+                                style.yellow("cancelling the running turn…")
+                            );
+                            eprintln!(
+                                "  {}",
+                                style.dim(
+                                    "the turn is saved and can be resumed; press Ctrl-C again \
+                                     after 5s to force quit"
+                                )
+                            );
+                            let request = ClientRequest {
+                                request_id: 0,
+                                kind: ClientRequestKind::CancelTurn { session },
+                            };
+                            if let Err(error) = service.submit(request).await {
+                                eprintln!(
+                                    "{}",
+                                    style.yellow(format!(
+                                        "warning: could not cancel the turn: {error}"
+                                    ))
+                                );
+                            }
+                        }
+                        Some(at) if at.elapsed() < Duration::from_secs(5) => {
+                            eprintln!(
+                                "{}",
+                                style.yellow("still cancelling…")
+                            );
+                            eprintln!(
+                                "  {}",
+                                style.dim(
+                                    "a blocking tool may take a moment to stop; Ctrl-C again \
+                                     after 5s will force quit"
+                                )
+                            );
+                        }
+                        Some(_) => {
+                            eprintln!("{}", style.red("interrupted; forcing exit"));
+                            signal.abort();
+                            return Err("interrupted".to_owned());
+                        }
                     }
                     continue;
                 }
@@ -766,14 +821,20 @@ async fn drive_turns(
 }
 
 /// What the human chose for a parked call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ApprovalChoice {
     /// Run this call once.
     Once,
     /// Run any call to this tool for the rest of the session.
-    Session,
-    /// Refuse the call.
-    Deny,
+    ToolSession,
+    /// Run this tool in every session, stored in the user config.
+    ToolGlobal,
+    /// Refuse this call, with the reason the human typed, if any.
+    DenyOnce(Option<String>),
+    /// Refuse this tool for the rest of the session.
+    DenySession(Option<String>),
+    /// Refuse this tool in every session, stored in the user config.
+    DenyGlobal(Option<String>),
 }
 
 /// Prints an approval request and asks for a decision when stdin is a terminal.
@@ -797,17 +858,33 @@ fn ask_approval(
     };
     let session = event.session.clone()?;
     eprintln!();
+    let rule = style.yellow("─".repeat(rule_width()));
+    eprintln!("{rule}");
     eprintln!(
-        "{} {} {}",
+        "{}  {}  {}",
         style.yellow("approval required"),
-        style.bold(tool),
+        style.tool(tool),
         style.dim(format!("#{}", short(call_id)))
     );
     if let Some(arguments) = arguments {
-        for line in argument_preview(arguments) {
-            eprintln!("  {}", style.dim(line));
+        for line in argument_preview(tool, arguments) {
+            match line {
+                PreviewLine::Field { key, value } => {
+                    eprintln!("  {} {}", style.dim(format!("{key:<10}")), value);
+                }
+                PreviewLine::Block { label, lines } => {
+                    eprintln!("  {}", style.dim(label));
+                    for line in lines {
+                        eprintln!("  {} {}", style.cyan("│"), line);
+                    }
+                }
+                PreviewLine::Note(note) => {
+                    eprintln!("  {}", style.dim(note));
+                }
+            }
         }
     }
+    eprintln!("{rule}");
     if !interactive {
         eprintln!(
             "  {}",
@@ -819,60 +896,357 @@ fn ask_approval(
         return None;
     }
     loop {
-        eprint!(
-            "{} ",
-            style.cyan("[y]es / [n]o / [a]lways for this session ›")
+        eprintln!(
+            "  {}  {}  {}",
+            style.green("[y] allow once"),
+            style.cyan("[s] allow this tool for this session"),
+            style.cyan("[a] allow this tool always")
         );
+        eprintln!(
+            "  {}  {}  {}",
+            style.red("[n] deny once"),
+            style.red("[ns] deny this tool for this session"),
+            style.red("[ng] deny this tool always")
+        );
+        eprint!("  {} ", style.dim("›"));
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         let read = std::io::stdin().read_line(&mut line);
         if read.is_err() || read.is_ok_and(|bytes| bytes == 0) {
-            return Some((session, approval.clone(), ApprovalChoice::Deny));
+            return Some((session, approval.clone(), ApprovalChoice::DenyOnce(None)));
         }
         if let Some(choice) = parse_approval_choice(&line) {
             return Some((session, approval.clone(), choice));
         }
-        eprintln!("{}", style.dim("answer y, n or a"));
+        eprintln!(
+            "  {}",
+            style.dim("answer y, s, a, n, ns or ng; add a message after n to tell the model why")
+        );
     }
 }
 
 /// Parses one line of the approval prompt. `None` means ask again.
+///
+/// `n <message>` is a denial that reaches the model, so "no, use the existing
+/// helper" is actionable feedback rather than a bare refusal. `ns` and `ng`
+/// make the denial last for the session or for every session; the same suffixes
+/// on `s` and `a` pick the matching allow scope.
 fn parse_approval_choice(line: &str) -> Option<ApprovalChoice> {
-    match line.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => Some(ApprovalChoice::Once),
-        "a" | "always" => Some(ApprovalChoice::Session),
-        "n" | "no" | "" => Some(ApprovalChoice::Deny),
+    let line = line.trim();
+    let (command, reason) = line
+        .split_once(char::is_whitespace)
+        .map_or((line, ""), |(command, reason)| (command, reason.trim()));
+    let reason = (!reason.is_empty()).then(|| reason.to_owned());
+    match command.to_ascii_lowercase().as_str() {
+        "y" | "yes" | "1" if reason.is_none() => Some(ApprovalChoice::Once),
+        "s" | "session" | "2" if reason.is_none() => Some(ApprovalChoice::ToolSession),
+        "a" | "always" | "g" | "3" if reason.is_none() => Some(ApprovalChoice::ToolGlobal),
+        "n" | "no" | "4" if reason.is_none() => Some(ApprovalChoice::DenyOnce(None)),
+        "n" | "no" => Some(ApprovalChoice::DenyOnce(reason)),
+        "ns" | "5" => Some(ApprovalChoice::DenySession(reason)),
+        "ng" | "6" => Some(ApprovalChoice::DenyGlobal(reason)),
+        "" => Some(ApprovalChoice::DenyOnce(None)),
         _ => None,
     }
 }
 
-/// A compact rendering of a tool call's arguments for the approval prompt.
-fn argument_preview(arguments: &serde_json::Value) -> Vec<String> {
-    const MAX_LINES: usize = 10;
-    const MAX_WIDTH: usize = 120;
-    let compact = serde_json::to_string(arguments).unwrap_or_default();
-    if compact.chars().count() <= MAX_WIDTH {
-        return vec![compact];
+/// One line in the approval panel, already split from the raw JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreviewLine {
+    /// A named scalar: `path`, `cwd`, `pattern`.
+    Field { key: String, value: String },
+    /// A multi-line value shown in a gutter.
+    Block { label: String, lines: Vec<String> },
+    /// A quiet note about a flag or a bound.
+    Note(String),
+}
+
+/// Renders a tool call as something a human can read at a glance.
+///
+/// The approval prompt must never be a JSON dump: for the common tools the
+/// useful parts are the path, the command and a short excerpt of the text that
+/// will be written.
+fn argument_preview(tool: &str, arguments: &serde_json::Value) -> Vec<PreviewLine> {
+    let Some(object) = arguments.as_object() else {
+        return vec![PreviewLine::Note(compact_json(arguments, 200))];
+    };
+    let lines = match tool {
+        "command" => command_preview(object),
+        "read" => read_preview(object),
+        "write" => write_preview(object),
+        "edit" => edit_preview(object),
+        "glob" | "grep" | "list_dir" => path_tool_preview(tool, object),
+        "ask_user" => ask_preview(object),
+        _ => generic_preview(object),
+    };
+    if lines.is_empty() {
+        vec![PreviewLine::Note(compact_json(arguments, 200))]
+    } else {
+        lines
     }
-    let pretty = serde_json::to_string_pretty(arguments).unwrap_or(compact);
-    let total = pretty.lines().count();
-    let mut lines: Vec<String> = pretty
-        .lines()
-        .take(MAX_LINES)
-        .map(|line| {
-            if line.chars().count() > MAX_WIDTH {
-                let mut shortened: String = line.chars().take(MAX_WIDTH).collect();
-                shortened.push('…');
-                shortened
-            } else {
-                line.to_owned()
+}
+
+fn command_preview(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    if let Some(command) = object.get("command").and_then(serde_json::Value::as_object) {
+        match command.get("kind").and_then(serde_json::Value::as_str) {
+            Some("shell") => {
+                if let Some(shell) = command.get("shell").and_then(serde_json::Value::as_str) {
+                    lines.push(field("shell", shell));
+                }
+                if let Some(script) = command.get("script").and_then(serde_json::Value::as_str) {
+                    lines.push(block("script", script, 14));
+                }
             }
-        })
-        .collect();
-    if total > MAX_LINES {
-        lines.push("…".to_owned());
+            Some("program") => {
+                if let Some(program) = command.get("program").and_then(serde_json::Value::as_str) {
+                    lines.push(field("program", program));
+                }
+                if let Some(args) = command.get("args").and_then(serde_json::Value::as_array) {
+                    let args: Vec<&str> =
+                        args.iter().filter_map(serde_json::Value::as_str).collect();
+                    if !args.is_empty() {
+                        let joined = args.join(" ");
+                        lines.push(field("args", &joined));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(cwd) = object.get("cwd").and_then(serde_json::Value::as_str) {
+        lines.push(field("cwd", cwd));
+    }
+    if let Some(env) = object.get("env").and_then(serde_json::Value::as_object) {
+        if !env.is_empty() {
+            lines.push(PreviewLine::Note(format!(
+                "{} environment variable(s)",
+                env.len()
+            )));
+        }
+    }
+    if let Some(stdin) = object.get("stdin").and_then(serde_json::Value::as_str) {
+        lines.push(block("stdin", stdin, 6));
+    }
+    if let Some(timeout) = object.get("timeout_ms").and_then(serde_json::Value::as_u64) {
+        lines.push(PreviewLine::Note(format!("timeout {timeout} ms")));
+    }
+    if object
+        .get("merge_stderr")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|merge| merge)
+    {
+        lines.push(PreviewLine::Note("stderr is merged into stdout".to_owned()));
     }
     lines
+}
+
+fn read_preview(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    if let Some(path) = object.get("path").and_then(serde_json::Value::as_str) {
+        lines.push(field("path", path));
+    }
+    if let Some(range) = object.get("lines").and_then(serde_json::Value::as_object) {
+        let start = range
+            .get("start")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1);
+        match range.get("end").and_then(serde_json::Value::as_u64) {
+            Some(end) => lines.push(PreviewLine::Note(format!("lines {start}–{end}"))),
+            None => lines.push(PreviewLine::Note(format!("lines {start} to the end"))),
+        }
+    }
+    if let Some(tail) = object.get("tail").and_then(serde_json::Value::as_u64) {
+        lines.push(PreviewLine::Note(format!("last {tail} line(s)")));
+    }
+    if let Some(pattern) = object.get("pattern").and_then(serde_json::Value::as_str) {
+        lines.push(field("pattern", pattern));
+    }
+    if let Some(context) = object.get("context").and_then(serde_json::Value::as_u64) {
+        lines.push(PreviewLine::Note(format!("{context} line(s) of context")));
+    }
+    for (key, label) in [
+        ("ignore_case", "ignore case"),
+        ("invert", "invert the match"),
+        ("count_only", "count only"),
+    ] {
+        if object
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            .is_some_and(|set| set)
+        {
+            lines.push(PreviewLine::Note(label.to_owned()));
+        }
+    }
+    lines
+}
+
+fn write_preview(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    if let Some(path) = object.get("path").and_then(serde_json::Value::as_str) {
+        lines.push(field("path", path));
+    }
+    if object
+        .get("overwrite")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|overwrite| overwrite)
+    {
+        lines.push(PreviewLine::Note(
+            "replaces the file if it exists".to_owned(),
+        ));
+    }
+    if let Some(content) = object.get("content").and_then(serde_json::Value::as_str) {
+        lines.push(block("content", content, 12));
+    }
+    lines
+}
+
+fn edit_preview(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    if let Some(path) = object.get("path").and_then(serde_json::Value::as_str) {
+        lines.push(field("path", path));
+    }
+    if let Some(edits) = object.get("edits").and_then(serde_json::Value::as_array) {
+        for (index, edit) in edits.iter().enumerate() {
+            let Some(edit) = edit.as_object() else {
+                continue;
+            };
+            let prefix = if edits.len() > 1 {
+                format!("edit {} · ", index + 1)
+            } else {
+                String::new()
+            };
+            if let Some(search) = edit.get("search").and_then(serde_json::Value::as_str) {
+                lines.push(block(&format!("{prefix}search"), search, 8));
+            }
+            if let Some(replace) = edit.get("replace").and_then(serde_json::Value::as_str) {
+                lines.push(block(&format!("{prefix}replace"), replace, 8));
+            }
+        }
+    }
+    lines
+}
+
+fn path_tool_preview(
+    tool: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    if let Some(path) = object.get("path").and_then(serde_json::Value::as_str) {
+        lines.push(field("path", path));
+    }
+    if let Some(pattern) = object.get("pattern").and_then(serde_json::Value::as_str) {
+        lines.push(field("pattern", pattern));
+    }
+    if let Some(include) = object.get("include").and_then(serde_json::Value::as_str) {
+        lines.push(field("include", include));
+    }
+    if object
+        .get("ignore_case")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|set| set)
+    {
+        lines.push(PreviewLine::Note("ignore case".to_owned()));
+    }
+    if tool == "list_dir" && lines.is_empty() {
+        lines.push(PreviewLine::Note("the workspace root".to_owned()));
+    }
+    lines
+}
+
+fn ask_preview(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    if let Some(question) = object.get("question").and_then(serde_json::Value::as_str) {
+        lines.push(block("question", question, 12));
+    }
+    if let Some(options) = object.get("options").and_then(serde_json::Value::as_array) {
+        let choices: Vec<&str> = options
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        if !choices.is_empty() {
+            let multiple = object
+                .get("multiple")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            lines.push(PreviewLine::Note(format!(
+                "{} choice(s), {}",
+                choices.len(),
+                if multiple { "several allowed" } else { "one" }
+            )));
+            for (index, choice) in choices.iter().enumerate() {
+                lines.push(field(&format!("{}.", index + 1), choice));
+            }
+        }
+    }
+    lines
+}
+
+fn generic_preview(object: &serde_json::Map<String, serde_json::Value>) -> Vec<PreviewLine> {
+    let mut lines = Vec::new();
+    for (key, value) in object.iter().take(10) {
+        match value {
+            serde_json::Value::String(text) if text.contains('\n') || text.len() > 120 => {
+                lines.push(block(key, text, 8));
+            }
+            serde_json::Value::String(text) => lines.push(field(key, text)),
+            serde_json::Value::Null => {}
+            other => lines.push(field(key, &compact_json(other, 120))),
+        }
+    }
+    if object.len() > 10 {
+        lines.push(PreviewLine::Note(format!(
+            "… {} more field(s)",
+            object.len() - 10
+        )));
+    }
+    lines
+}
+
+fn field(key: &str, value: &str) -> PreviewLine {
+    PreviewLine::Field {
+        key: key.to_owned(),
+        value: value.to_owned(),
+    }
+}
+
+fn block(label: &str, text: &str, max_lines: usize) -> PreviewLine {
+    let mut lines: Vec<String> = text
+        .lines()
+        .take(max_lines)
+        .map(|line| clip_line(line, 110))
+        .collect();
+    if text.lines().count() > max_lines {
+        lines.push(format!(
+            "… {} more line(s)",
+            text.lines().count() - max_lines
+        ));
+    }
+    PreviewLine::Block {
+        label: label.to_owned(),
+        lines,
+    }
+}
+
+fn compact_json(value: &serde_json::Value, max: usize) -> String {
+    let text = serde_json::to_string(value).unwrap_or_default();
+    clip_line(&text, max)
+}
+
+fn clip_line(line: &str, max: usize) -> String {
+    if line.chars().count() <= max {
+        return line.to_owned();
+    }
+    let mut shortened: String = line.chars().take(max).collect();
+    shortened.push('…');
+    shortened
+}
+
+fn rule_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|columns| columns.parse::<usize>().ok())
+        .map_or(72, |columns| columns.saturating_sub(2).clamp(40, 100))
 }
 
 /// The protocol request that resolves a parked approval.
@@ -889,17 +1263,37 @@ fn approval_request(
             scope: None,
             remember: None,
         },
-        ApprovalChoice::Session => ClientRequestKind::Approve {
+        ApprovalChoice::ToolSession => ClientRequestKind::Approve {
             session,
             approval,
             arguments: None,
-            scope: Some(GrantScope::Session),
+            scope: Some(GrantScope::Tool),
             remember: Some(true),
         },
-        ApprovalChoice::Deny => ClientRequestKind::Deny {
+        ApprovalChoice::ToolGlobal => ClientRequestKind::Approve {
             session,
             approval,
-            reason: Some("denied from the command line".to_owned()),
+            arguments: None,
+            scope: Some(GrantScope::Always),
+            remember: Some(true),
+        },
+        ApprovalChoice::DenyOnce(reason) => ClientRequestKind::Deny {
+            session,
+            approval,
+            reason,
+            scope: Some(DenyScope::Once),
+        },
+        ApprovalChoice::DenySession(reason) => ClientRequestKind::Deny {
+            session,
+            approval,
+            reason,
+            scope: Some(DenyScope::ToolSession),
+        },
+        ApprovalChoice::DenyGlobal(reason) => ClientRequestKind::Deny {
+            session,
+            approval,
+            reason,
+            scope: Some(DenyScope::ToolGlobal),
         },
     };
     ClientRequest {
@@ -910,9 +1304,19 @@ fn approval_request(
 
 /// Answers a `QuestionAsked` event, prompting on a terminal and leaving a note
 /// when the client is not interactive.
+///
+/// With closed `options`, the prompt is a numbered list plus an automatic
+/// "Something else" entry. Picking that entry (or `other`) asks for free-form
+/// text, which travels through the same [`ClientRequestKind::AnswerQuestion`]
+/// channel as a plain answer. A multi-select answer joins the chosen option
+/// strings with `, `.
 async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<(), String> {
     let ServerEventKind::QuestionAsked {
-        question, prompt, ..
+        question,
+        prompt,
+        options,
+        multiple,
+        ..
     } = &event.kind
     else {
         return Ok(());
@@ -924,13 +1328,48 @@ async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<
     let question = question.clone();
     let answer = if std::io::stdin().is_terminal() {
         eprintln!("? {prompt}");
-        eprint!("answer> ");
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        line.trim_end().to_owned()
+        if options.is_empty() {
+            read_answer_line("answer> ")?.unwrap_or_else(|| {
+                "(no interactive client is attached; continue with your best judgment)".to_owned()
+            })
+        } else {
+            for (index, option) in options.iter().enumerate() {
+                eprintln!("  {}. {option}", index + 1);
+            }
+            eprintln!("  {}. Something else (type it)", options.len() + 1);
+            eprintln!(
+                "  {}",
+                if *multiple {
+                    "choose one or more numbers, separated by commas"
+                } else {
+                    "choose a number, or type an option"
+                }
+            );
+            loop {
+                let Some(line) = read_answer_line("choice> ")? else {
+                    break "(no interactive client is attached; continue with your best judgment)"
+                        .to_owned();
+                };
+                let Some((selected, other)) = parse_selection(&line, options, *multiple) else {
+                    eprintln!("  choose a listed number");
+                    continue;
+                };
+                let extra = if other {
+                    let Some(text) = read_answer_line("something else> ")? else {
+                        break "(no interactive client is attached; continue with your best judgment)"
+                            .to_owned();
+                    };
+                    Some(text)
+                } else {
+                    None
+                };
+                if selected.is_empty() && extra.as_deref().is_none_or(str::is_empty) {
+                    eprintln!("  type an answer, or choose a listed number");
+                    continue;
+                }
+                break compose_selection(options, &selected, extra.as_deref());
+            }
+        }
     } else {
         eprintln!("? {prompt}");
         eprintln!("(no interactive client; answering with a note)");
@@ -947,6 +1386,93 @@ async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<
     let mut acknowledgement = service.submit(response).await.map_err(|e| e.to_string())?;
     while acknowledgement.next().await.is_some() {}
     Ok(())
+}
+
+/// Reads one line from the terminal; `None` means end of input.
+fn read_answer_line(prompt: &str) -> Result<Option<String>, String> {
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    if read == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(line.trim_end().to_owned()))
+    }
+}
+
+/// Parses a numbered selection. Returns the zero-based option indexes and
+/// whether the automatic "Something else" entry was chosen.
+fn parse_selection(line: &str, options: &[String], multiple: bool) -> Option<(Vec<usize>, bool)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    if !multiple {
+        if line.eq_ignore_ascii_case("other") || line.eq_ignore_ascii_case("o") {
+            return Some((Vec::new(), true));
+        }
+        if let Some(index) = options
+            .iter()
+            .position(|option| option.eq_ignore_ascii_case(line))
+        {
+            return Some((vec![index], false));
+        }
+    }
+    let tokens: Vec<&str> = line
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() || (!multiple && tokens.len() != 1) {
+        return None;
+    }
+    if tokens.len() == 1 && tokens[0].eq_ignore_ascii_case("all") {
+        return multiple.then(|| ((0..options.len()).collect(), false));
+    }
+    let mut selected = Vec::new();
+    let mut other = false;
+    for token in tokens {
+        if token.eq_ignore_ascii_case("other") || token.eq_ignore_ascii_case("o") {
+            if !multiple && other {
+                return None;
+            }
+            other = true;
+        } else if let Ok(number) = token.parse::<usize>() {
+            if number == 0 || number > options.len() + 1 {
+                return None;
+            }
+            if number == options.len() + 1 {
+                if !multiple && other {
+                    return None;
+                }
+                other = true;
+            } else if !selected.contains(&(number - 1)) {
+                selected.push(number - 1);
+            }
+        } else {
+            return None;
+        }
+    }
+    if selected.is_empty() && !other {
+        None
+    } else {
+        selected.sort_unstable();
+        Some((selected, other))
+    }
+}
+
+/// Renders a selection as the answer the model reads.
+fn compose_selection(options: &[String], selected: &[usize], other: Option<&str>) -> String {
+    let mut parts: Vec<String> = selected
+        .iter()
+        .filter_map(|index| options.get(*index).cloned())
+        .collect();
+    if let Some(text) = other.filter(|text| !text.is_empty()) {
+        parts.push(text.to_owned());
+    }
+    parts.join(", ")
 }
 
 fn list_models(
@@ -1046,6 +1572,18 @@ enum Format {
     Jsonl,
 }
 
+/// Which streamed block the renderer is in, so reasoning never runs inline
+/// with the answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Block {
+    /// Nothing is streaming.
+    None,
+    /// Model reasoning, shown in a dim gutter on stderr.
+    Reasoning,
+    /// The answer, printed plainly on stdout.
+    Answer,
+}
+
 /// Renders one server event to the terminal.
 #[allow(clippy::struct_excessive_bools)]
 struct Renderer {
@@ -1054,12 +1592,18 @@ struct Renderer {
     verbose: bool,
     show_cost: bool,
     style: Style,
+    block: Block,
+    reasoning_line_start: bool,
     last_char: Option<char>,
     failed: bool,
+    cancelled: bool,
     budget_stopped: bool,
     requests: u64,
     input: u64,
     output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cache_reported: bool,
     cost: f64,
     unpriced: u64,
 }
@@ -1085,16 +1629,114 @@ impl Renderer {
         Ok(())
     }
 
+    /// Notes that a cancellation was requested, so the turn's end reads as a
+    /// cancellation rather than a failure.
+    fn mark_cancelled(&mut self) {
+        self.cancelled = true;
+    }
+
+    /// Closes a reasoning gutter, if one is open.
+    fn end_reasoning(&mut self) {
+        if self.block != Block::Reasoning {
+            return;
+        }
+        if !self.reasoning_line_start {
+            eprintln!();
+        }
+        eprintln!("  {}", self.style.faint("╰"));
+        self.block = Block::None;
+        self.last_char = Some('\n');
+    }
+
+    /// Finishes any streamed block and leaves one blank line.
+    fn end_blocks(&mut self) {
+        self.end_reasoning();
+        if self.block == Block::Answer && self.last_char != Some('\n') {
+            println!();
+        }
+        if self.block != Block::None {
+            self.block = Block::None;
+            self.last_char = Some('\n');
+        }
+        if !self.quiet && self.last_char.is_some() {
+            eprintln!();
+        }
+    }
+
+    /// Prints a single blank separator line.
+    fn space(&mut self) {
+        if self.quiet {
+            return;
+        }
+        if self.last_char != Some('\n') {
+            println!();
+        }
+        eprintln!();
+        self.last_char = Some('\n');
+    }
+
+    /// Writes reasoning into its own dim gutter.
+    fn reasoning_delta(&mut self, text: &str) {
+        let mut rest = text;
+        while !rest.is_empty() {
+            if self.reasoning_line_start {
+                eprint!("  {} ", self.style.faint("│"));
+                self.reasoning_line_start = false;
+            }
+            if let Some(index) = rest.find('\n') {
+                let (line, tail) = rest.split_at(index);
+                eprint!("{}", self.style.thought(line));
+                eprintln!();
+                self.last_char = Some('\n');
+                self.reasoning_line_start = true;
+                rest = &tail[1..];
+            } else {
+                eprint!("{}", self.style.thought(rest));
+                self.last_char = rest.chars().last();
+                rest = "";
+            }
+        }
+        let _ = std::io::stderr().flush();
+    }
+
+    /// Writes answer text, closing reasoning and separating it first.
+    fn answer_delta(&mut self, text: &str) {
+        if self.quiet {
+            print!("{text}");
+            if let Some(last) = text.chars().last() {
+                self.last_char = Some(last);
+            }
+            let _ = std::io::stdout().flush();
+            return;
+        }
+        if self.block == Block::Reasoning {
+            self.end_reasoning();
+            self.space();
+        } else if self.block != Block::Answer && !text.is_empty() {
+            if self.last_char.is_some() {
+                self.space();
+            }
+            self.block = Block::Answer;
+        }
+        self.block = Block::Answer;
+        print!("{text}");
+        if let Some(last) = text.chars().last() {
+            self.last_char = Some(last);
+        }
+        let _ = std::io::stdout().flush();
+    }
+
     /// Renders tool activity: what started, and how it ended.
     fn tool_event(&mut self, kind: &ServerEventKind) {
         match kind {
             ServerEventKind::ToolStarted { tool, call_id, .. } => {
                 if !self.quiet {
+                    self.end_blocks();
                     eprintln!(
                         "{} {} {}",
-                        self.style.dim("→"),
-                        self.style.bold(tool),
-                        self.style.dim(format!("#{}", short(call_id)))
+                        self.style.cyan("→"),
+                        self.style.tool(tool),
+                        self.style.faint(format!("#{}", short(call_id)))
                     );
                 }
             }
@@ -1110,21 +1752,23 @@ impl Renderer {
                         eprintln!(
                             "{} {} {}",
                             self.style.red("✗"),
-                            self.style.red(tool),
+                            self.style.bold(tool),
                             self.style.dim(format!("failed in {duration_ms} ms"))
                         );
                     } else {
                         eprintln!(
                             "{} {} {}",
                             self.style.green("✓"),
-                            tool,
+                            self.style.bold(tool),
                             self.style.dim(format!("in {duration_ms} ms"))
                         );
                     }
                 }
                 if *is_error && self.verbose {
                     if let Some(error) = error {
-                        eprintln!("  {}", self.style.red(error));
+                        for line in error.lines() {
+                            eprintln!("  {}", self.style.red(line));
+                        }
                     }
                 }
             }
@@ -1144,6 +1788,13 @@ impl Renderer {
                 self.requests += 1;
                 self.input += usage.input_tokens.unwrap_or(0);
                 self.output += usage.output_tokens.unwrap_or(0);
+                if let Some(cache) = usage.cache_read_tokens {
+                    self.cache_read += cache;
+                    self.cache_reported = true;
+                }
+                if let Some(cache) = usage.cache_write_tokens {
+                    self.cache_write += cache;
+                }
                 if let Some(cost) = cost_usd {
                     self.cost += cost;
                 } else {
@@ -1152,23 +1803,39 @@ impl Renderer {
                 if self.quiet {
                     return;
                 }
+                if self.block != Block::None {
+                    self.end_blocks();
+                }
                 let mut parts = Vec::new();
                 if let Some(input) = usage.input_tokens {
-                    parts.push(format!("{} in", human_tokens(input)));
+                    parts.push(self.style.dim(format!("{} in", human_tokens(input))));
                 }
                 if let Some(output) = usage.output_tokens {
-                    parts.push(format!("{} out", human_tokens(output)));
+                    parts.push(self.style.dim(format!("{} out", human_tokens(output))));
+                }
+                if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
+                    parts.push(
+                        self.style
+                            .dim(format!("cache {}", percent_label(cache, input))),
+                    );
+                }
+                if let (Some(input), Some(output)) = (usage.input_tokens, usage.output_tokens) {
+                    parts.push(
+                        self.style
+                            .dim(format!("in:out {}", token_ratio(input, output))),
+                    );
                 }
                 if self.show_cost {
                     parts.push(match cost_usd {
-                        Some(cost) => format!("${cost:.6}"),
-                        None => "cost not reported".to_owned(),
+                        Some(cost) if *cost > 0.0 => self.style.green(format!("${cost:.6}")),
+                        Some(cost) => self.style.faint(format!("${cost:.6}")),
+                        None => self.style.yellow("cost not reported".to_owned()),
                     });
                 }
                 eprintln!(
                     "  {} {}",
-                    self.style.dim("↳"),
-                    self.style.dim(parts.join(" · "))
+                    self.style.blue("↳"),
+                    parts.join(&self.style.faint(" · "))
                 );
                 if *truncated {
                     eprintln!(
@@ -1191,19 +1858,27 @@ impl Renderer {
     }
 
     /// Renders errors, approval outcomes and the turn's final state.
+    #[allow(clippy::too_many_lines)]
     fn status_event(&mut self, kind: &ServerEventKind) {
         match kind {
+            ServerEventKind::TurnStarted { .. } => {
+                self.cancelled = false;
+            }
             ServerEventKind::Error { code, message } => {
+                self.end_blocks();
                 eprintln!(
                     "{} {} {}",
                     self.style.red("error:"),
                     self.style.bold(message),
                     self.style.dim(format!("({})", code_name(*code)))
                 );
-                self.failed = true;
+                if !self.cancelled {
+                    self.failed = true;
+                }
             }
             ServerEventKind::ApprovalResolved { approved, .. } => {
                 if !self.quiet {
+                    self.end_blocks();
                     if *approved {
                         eprintln!("{}", self.style.green("✓ approval granted"));
                     } else {
@@ -1214,7 +1889,16 @@ impl Renderer {
             ServerEventKind::TurnFinished {
                 committed, phase, ..
             } => {
-                if !*committed && self.budget_stopped {
+                self.end_blocks();
+                if !*committed && self.cancelled {
+                    if !self.quiet {
+                        eprintln!(
+                            "{}",
+                            self.style
+                                .yellow("turn cancelled · the session is saved and can be resumed")
+                        );
+                    }
+                } else if !*committed && self.budget_stopped {
                     if !self.quiet {
                         eprintln!(
                             "{}",
@@ -1285,20 +1969,24 @@ impl Renderer {
 
     fn delta(&mut self, delta: &Delta) {
         match delta {
-            Delta::Text { text, .. } => {
-                print!("{text}");
-                if let Some(last) = text.chars().last() {
-                    self.last_char = Some(last);
-                }
-                let _ = std::io::stdout().flush();
-            }
+            Delta::Text { text, .. } => self.answer_delta(text),
             Delta::Reasoning { text, .. } => {
                 if !self.quiet {
-                    eprint!("{}", self.style.thought(text));
-                    let _ = std::io::stderr().flush();
+                    if self.block != Block::Reasoning {
+                        if self.block == Block::Answer {
+                            self.end_blocks();
+                        } else if self.block == Block::None {
+                            self.space();
+                        }
+                        eprintln!("  {} {}", self.style.faint("┌"), self.style.dim("thinking"));
+                        self.block = Block::Reasoning;
+                        self.reasoning_line_start = true;
+                    }
+                    self.reasoning_delta(text);
                 }
             }
             Delta::Refusal { text, .. } => {
+                self.end_blocks();
                 eprintln!("{}", self.style.red(format!("refusal: {text}")));
                 self.failed = true;
             }
@@ -1312,24 +2000,39 @@ impl Renderer {
             return;
         }
         let mut parts = vec![
-            format!("{} request(s)", self.requests),
-            format!("{} in", human_tokens(self.input)),
-            format!("{} out", human_tokens(self.output)),
+            self.style.cyan(format!("{} request(s)", self.requests)),
+            self.style.dim(format!("{} in", human_tokens(self.input))),
+            self.style.dim(format!("{} out", human_tokens(self.output))),
         ];
+        if self.cache_reported && self.input > 0 {
+            parts.push(self.style.blue(format!(
+                "cache {}",
+                percent_label(self.cache_read, self.input)
+            )));
+        }
+        parts.push(
+            self.style
+                .dim(format!("in:out {}", token_ratio(self.input, self.output))),
+        );
         if self.show_cost {
             if self.unpriced == self.requests {
-                parts.push("cost not reported".to_owned());
+                parts.push(self.style.yellow("cost not reported"));
             } else {
-                parts.push(format!("${:.6}", self.cost));
+                parts.push(if self.cost > 0.0 {
+                    self.style.green(format!("${:.6}", self.cost))
+                } else {
+                    self.style.faint(format!("${:.6}", self.cost))
+                });
                 if self.unpriced > 0 {
-                    parts.push(format!("{} not reported", self.unpriced));
+                    parts.push(self.style.yellow(format!("{} not reported", self.unpriced)));
                 }
             }
         }
+        eprintln!();
         eprintln!(
-            "{} {}",
-            self.style.dim("──"),
-            self.style.dim(parts.join(" · "))
+            "  {} {}",
+            self.style.faint("──"),
+            parts.join(&self.style.faint(" · "))
         );
     }
 }
@@ -1385,6 +2088,38 @@ fn human_tokens(tokens: u64) -> String {
         format!("{}k", tokens / 1_000)
     } else {
         tokens.to_string()
+    }
+}
+
+/// A share of a total, rounded so `0.4%` does not become a bare `0%`.
+#[allow(clippy::cast_precision_loss)]
+fn percent_label(part: u64, total: u64) -> String {
+    if total == 0 {
+        return "0%".to_owned();
+    }
+    let percent = part as f64 / total as f64 * 100.0;
+    if percent >= 10.0 {
+        format!("{percent:.0}%")
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
+/// The input-to-output ratio, the number a cost conversation usually asks
+/// about. A turn with no output is unbounded rather than zero.
+#[allow(clippy::cast_precision_loss)]
+fn token_ratio(input: u64, output: u64) -> String {
+    if input == 0 && output == 0 {
+        return "–".to_owned();
+    }
+    if output == 0 {
+        return "∞".to_owned();
+    }
+    let ratio = input as f64 / output as f64;
+    if ratio >= 10.0 {
+        format!("{ratio:.0}:1")
+    } else {
+        format!("{ratio:.1}:1")
     }
 }
 
@@ -1454,6 +2189,24 @@ fn format_measure(unit: BudgetUnit, value: f64) -> String {
     }
 }
 
+fn parse_budget_unit(unit: &str) -> Result<BudgetUnit, String> {
+    match unit {
+        "usd" => Ok(BudgetUnit::Usd),
+        "tokens" => Ok(BudgetUnit::Tokens),
+        "requests" => Ok(BudgetUnit::Requests),
+        other => Err(format!("unknown budget unit `{other}`")),
+    }
+}
+
+fn parse_budget_action(action: &str) -> Result<BudgetAction, String> {
+    match action {
+        "warn" => Ok(BudgetAction::Warn),
+        "ask" => Ok(BudgetAction::Ask),
+        "stop" => Ok(BudgetAction::Stop),
+        other => Err(format!("unknown budget action `{other}`")),
+    }
+}
+
 fn budget_label(budget: &Budget) -> String {
     format!(
         "{} {} ({})",
@@ -1479,58 +2232,174 @@ fn code_name(code: ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalChoice, GrantScope, approval_request, argument_preview, budget_label, cost_summary,
-        parse_approval_choice,
+        ApprovalChoice, DenyScope, GrantScope, PreviewLine, approval_request, argument_preview,
+        budget_label, compose_selection, cost_summary, parse_approval_choice, parse_selection,
     };
     use norte_code_cost::CostSummary;
     use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
 
     #[test]
+    fn closed_question_selections_are_parsed() {
+        let options = ["Read".to_owned(), "Write".to_owned()];
+        assert_eq!(
+            parse_selection("1", &options, false),
+            Some((vec![0], false))
+        );
+        assert_eq!(
+            parse_selection("write", &options, false),
+            Some((vec![1], false))
+        );
+        assert_eq!(
+            parse_selection("3", &options, false),
+            Some((Vec::new(), true))
+        );
+        assert_eq!(
+            parse_selection("1, 2", &options, true),
+            Some((vec![0, 1], false))
+        );
+        assert_eq!(
+            parse_selection("1, 3", &options, true),
+            Some((vec![0], true))
+        );
+        assert_eq!(
+            parse_selection("all", &options, true),
+            Some((vec![0, 1], false))
+        );
+        assert_eq!(parse_selection("1, 2", &options, false), None);
+        assert_eq!(parse_selection("0", &options, false), None);
+        assert_eq!(
+            compose_selection(&options, &[0, 1], Some("something custom")),
+            "Read, Write, something custom"
+        );
+    }
+
+    #[test]
     fn approval_answers_are_parsed_leniently() {
         assert_eq!(parse_approval_choice("y"), Some(ApprovalChoice::Once));
         assert_eq!(parse_approval_choice(" YES "), Some(ApprovalChoice::Once));
-        assert_eq!(parse_approval_choice("A"), Some(ApprovalChoice::Session));
+        assert_eq!(
+            parse_approval_choice("s"),
+            Some(ApprovalChoice::ToolSession)
+        );
+        assert_eq!(parse_approval_choice("A"), Some(ApprovalChoice::ToolGlobal));
         assert_eq!(
             parse_approval_choice("always"),
-            Some(ApprovalChoice::Session)
+            Some(ApprovalChoice::ToolGlobal)
         );
-        assert_eq!(parse_approval_choice("n"), Some(ApprovalChoice::Deny));
-        assert_eq!(parse_approval_choice(""), Some(ApprovalChoice::Deny));
+        assert_eq!(
+            parse_approval_choice("n"),
+            Some(ApprovalChoice::DenyOnce(None))
+        );
+        assert_eq!(
+            parse_approval_choice(""),
+            Some(ApprovalChoice::DenyOnce(None))
+        );
+        assert_eq!(
+            parse_approval_choice("ns"),
+            Some(ApprovalChoice::DenySession(None))
+        );
+        assert_eq!(
+            parse_approval_choice("ng"),
+            Some(ApprovalChoice::DenyGlobal(None))
+        );
         assert_eq!(parse_approval_choice("maybe"), None);
     }
 
     #[test]
-    fn short_arguments_stay_on_one_line() {
+    fn a_denial_can_carry_feedback_for_the_model() {
+        assert_eq!(
+            parse_approval_choice("n use the existing helper"),
+            Some(ApprovalChoice::DenyOnce(Some(
+                "use the existing helper".to_owned()
+            )))
+        );
+        assert_eq!(
+            parse_approval_choice("no this touches production"),
+            Some(ApprovalChoice::DenyOnce(Some(
+                "this touches production".to_owned()
+            )))
+        );
+        assert_eq!(
+            parse_approval_choice("ns use the helper"),
+            Some(ApprovalChoice::DenySession(Some(
+                "use the helper".to_owned()
+            )))
+        );
+        assert_eq!(
+            parse_approval_choice("ng not in this repo"),
+            Some(ApprovalChoice::DenyGlobal(Some(
+                "not in this repo".to_owned()
+            )))
+        );
+        assert_eq!(parse_approval_choice("f"), None);
+    }
+
+    #[test]
+    fn a_read_preview_names_the_path_instead_of_dumping_json() {
         let arguments = serde_json::json!({"path": "src/main.rs"});
         assert_eq!(
-            argument_preview(&arguments),
-            vec![r#"{"path":"src/main.rs"}"#.to_owned()]
+            argument_preview("read", &arguments),
+            vec![PreviewLine::Field {
+                key: "path".to_owned(),
+                value: "src/main.rs".to_owned(),
+            }]
         );
     }
 
     #[test]
-    fn long_arguments_are_bounded() {
+    fn a_command_preview_shows_the_script_and_its_shell() {
         let arguments = serde_json::json!({
-            "path": "src/main.rs",
-            "content": "x".repeat(500),
+            "command": {"kind": "shell", "shell": "sh", "script": "cargo test\ncargo clippy"},
+            "cwd": "/tmp/project",
         });
-        let lines = argument_preview(&arguments);
-        assert!(lines.len() <= 11);
-        assert!(lines.iter().all(|line| line.chars().count() <= 121));
-        assert!(lines.iter().any(|line| line.ends_with('…')));
+        let lines = argument_preview("command", &arguments);
+        assert!(lines.contains(&PreviewLine::Field {
+            key: "shell".to_owned(),
+            value: "sh".to_owned(),
+        }));
+        assert!(lines.contains(&PreviewLine::Field {
+            key: "cwd".to_owned(),
+            value: "/tmp/project".to_owned(),
+        }));
+        assert!(lines.contains(&PreviewLine::Block {
+            label: "script".to_owned(),
+            lines: vec!["cargo test".to_owned(), "cargo clippy".to_owned()],
+        }));
     }
 
     #[test]
-    fn cost_totals_name_the_requests_without_a_reported_cost() {
+    fn write_content_is_bounded() {
+        let content = (0..20)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let arguments = serde_json::json!({"path": "src/main.rs", "content": content});
+        let lines = argument_preview("write", &arguments);
+        let block = lines
+            .iter()
+            .find_map(|line| match line {
+                PreviewLine::Block { label, lines } if label == "content" => Some(lines),
+                _ => None,
+            })
+            .expect("content block");
+        assert_eq!(block.len(), 13);
+        assert!(block.last().is_some_and(|line| line.contains("more line")));
+    }
+
+    #[test]
+    fn cost_totals_show_cache_and_the_input_output_ratio() {
         let mixed = CostSummary {
             requests: 2,
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cache_read_tokens: 900,
             reported_cost_usd: 0.5,
             not_reported: 1,
             ..CostSummary::default()
         };
         assert_eq!(
             cost_summary(&mixed),
-            "2 request(s) · 0 in · 0 out · $0.500000 · 1 not reported"
+            "2 request(s) · 1k in · 100 out · cache 90% · in:out 10:1 · $0.500000 · 1 not reported"
         );
         let unpriced = CostSummary {
             requests: 2,
@@ -1539,7 +2408,7 @@ mod tests {
         };
         assert_eq!(
             cost_summary(&unpriced),
-            "2 request(s) · 0 in · 0 out · cost not reported"
+            "2 request(s) · 0 in · 0 out · in:out – · cost not reported"
         );
     }
 
@@ -1556,25 +2425,43 @@ mod tests {
     }
 
     #[test]
-    fn always_grants_the_session_and_deny_carries_a_reason() {
+    fn approval_scopes_are_explicit_in_the_request() {
         let session = SessionKey::new("s");
-        let always = approval_request(
+        let session_allow = approval_request(
             session.clone(),
             "approval".to_owned(),
-            ApprovalChoice::Session,
+            ApprovalChoice::ToolSession,
         );
-        match always.kind {
+        match session_allow.kind {
             ClientRequestKind::Approve {
                 scope, remember, ..
             } => {
-                assert!(matches!(scope, Some(GrantScope::Session)));
+                assert!(matches!(scope, Some(GrantScope::Tool)));
                 assert_eq!(remember, Some(true));
             }
             other => panic!("expected an approval, got {other:?}"),
         }
-        let deny = approval_request(session, "approval".to_owned(), ApprovalChoice::Deny);
+        let global_allow = approval_request(
+            session.clone(),
+            "approval".to_owned(),
+            ApprovalChoice::ToolGlobal,
+        );
+        match global_allow.kind {
+            ClientRequestKind::Approve { scope, .. } => {
+                assert!(matches!(scope, Some(GrantScope::Always)));
+            }
+            other => panic!("expected an approval, got {other:?}"),
+        }
+        let deny = approval_request(
+            session,
+            "approval".to_owned(),
+            ApprovalChoice::DenySession(Some("use the helper".to_owned())),
+        );
         match deny.kind {
-            ClientRequestKind::Deny { reason, .. } => assert!(reason.is_some()),
+            ClientRequestKind::Deny { reason, scope, .. } => {
+                assert_eq!(reason.as_deref(), Some("use the helper"));
+                assert_eq!(scope, Some(DenyScope::ToolSession));
+            }
             other => panic!("expected a denial, got {other:?}"),
         }
     }

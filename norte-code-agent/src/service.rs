@@ -6,7 +6,7 @@
 //! model switch a change of model rather than a change of session.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
@@ -69,6 +69,8 @@ struct SessionRecord {
     output_tokens: u64,
     /// The session budget, when one was set.
     budget: Option<Budget>,
+    /// Tools this session refuses without asking again.
+    denied_tools: Vec<String>,
 }
 
 /// Live counters for the turn in flight.
@@ -112,6 +114,8 @@ pub struct Service {
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
+    approval_rules: Arc<ApprovalRules>,
+    config_path: Mutex<Option<PathBuf>>,
 }
 
 impl Service {
@@ -208,6 +212,7 @@ impl Service {
                 .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
         );
         let effects = Arc::new(EffectJournal::new(Arc::clone(&directory)));
+        let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
         let service = Self {
             config,
             catalog: RwLock::new(catalog),
@@ -227,6 +232,8 @@ impl Service {
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             budget_states: Mutex::new(BTreeMap::new()),
+            approval_rules,
+            config_path: Mutex::new(norte_code_config::user_config_path()),
         };
         // Fail at construction, not at the first message, when the model's
         // provider cannot be built.
@@ -324,6 +331,8 @@ impl Service {
                     }
                 }
             };
+            self.approval_rules
+                .load_session(entry.north, &entry.denied_tools);
             let stats = &entry.stats;
             let record = SessionRecord {
                 id: entry.north,
@@ -359,6 +368,7 @@ impl Service {
                 budget: stats
                     .get("budget")
                     .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                denied_tools: entry.denied_tools.clone(),
             };
             records.push((key.clone(), record));
             if needs_repair {
@@ -401,6 +411,7 @@ impl Service {
                 "output_tokens": record.output_tokens,
                 "budget": record.budget,
             }),
+            denied_tools: record.denied_tools.clone(),
         });
         if let Some(stored) = stored {
             self.directory.save_session(&stored).await?;
@@ -507,8 +518,43 @@ impl Service {
                 mode: self.config.approval_mode,
                 skills: self.skills(),
                 honor_allowed_tools: self.config.skills.honor_allowed_tools,
+                rules: Arc::clone(&self.approval_rules),
             }),
         ])
+    }
+
+    /// Selects the config file global approval rules are written to.
+    ///
+    /// The CLI calls this after loading `--config`, so "always" lands in the
+    /// file the user actually named. Without it, the platform user config path
+    /// is used.
+    pub fn set_config_path(&self, path: Option<PathBuf>) {
+        *self
+            .config_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = path;
+    }
+
+    /// Writes one tool-wide rule to the user config and applies it in memory.
+    fn remember_global_rule(&self, tool: &str, allow: bool) -> Result<(), ServiceError> {
+        let path = self
+            .config_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .or_else(norte_code_config::user_config_path)
+            .ok_or_else(|| {
+                ServiceError::Approval(
+                    "no user config path; set --config before choosing a global rule".to_owned(),
+                )
+            })?;
+        norte_code_config::update_user_approval(&path, tool, allow)?;
+        if allow {
+            self.approval_rules.allow_global(tool);
+        } else {
+            self.approval_rules.deny_global(tool);
+        }
+        Ok(())
     }
 
     /// The skills registry in use.
@@ -637,7 +683,11 @@ impl Service {
                 session,
                 approval,
                 reason,
-            } => self.deny(request_id, session, approval, reason).await,
+                scope,
+            } => {
+                self.deny(request_id, session, approval, reason, scope)
+                    .await
+            }
             Kind::Revoke {
                 session,
                 approval,
@@ -767,10 +817,15 @@ impl Service {
             .into_iter()
             .find(|record| record.id == id)
             .ok_or(ServiceError::Norte(norte::Error::ApprovalNotFound(id)))?;
+        let global = matches!(scope, Some(norte_code_protocol::GrantScope::Always));
+        if global {
+            self.remember_global_rule(record.tool.as_str(), true)?;
+        }
         let grant = match (scope, remember) {
             (Some(norte_code_protocol::GrantScope::Always), _) => GrantScope::Global,
-            (Some(norte_code_protocol::GrantScope::Session), _) | (_, Some(true)) => {
-                GrantScope::Session(nid)
+            (Some(norte_code_protocol::GrantScope::Session), _) => GrantScope::Session(nid),
+            (Some(norte_code_protocol::GrantScope::Tool), _) | (_, Some(true)) => {
+                GrantScope::Tool(record.tool.clone())
             }
             _ => GrantScope::Call(record.call_id),
         };
@@ -795,17 +850,34 @@ impl Service {
         session: SessionKey,
         approval: String,
         reason: Option<String>,
+        scope: Option<norte_code_protocol::DenyScope>,
     ) -> Result<EventStream, ServiceError> {
-        let (_, spec, _) = self.require_record(&session)?;
+        let (nid, spec, _) = self.require_record(&session)?;
         let engine = self.engine(&spec)?;
         let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
-        engine
-            .deny(
-                id,
-                "user",
-                reason.unwrap_or_else(|| "denied by the user".to_owned()),
-            )
-            .await?;
+        let record = engine
+            .pending_approvals(nid)
+            .await?
+            .into_iter()
+            .find(|record| record.id == id)
+            .ok_or(ServiceError::Norte(norte::Error::ApprovalNotFound(id)))?;
+        let tool = record.tool.as_str();
+        match scope {
+            Some(norte_code_protocol::DenyScope::ToolSession) => {
+                self.approval_rules.deny_session(nid, tool);
+                if let Some(record) = self.lock_sessions().get_mut(&session) {
+                    if !record.denied_tools.iter().any(|denied| denied == tool) {
+                        record.denied_tools.push(tool.to_owned());
+                    }
+                }
+                self.persist(&session).await?;
+            }
+            Some(norte_code_protocol::DenyScope::ToolGlobal) => {
+                self.remember_global_rule(tool, false)?;
+            }
+            Some(norte_code_protocol::DenyScope::Once) | None => {}
+        }
+        engine.deny(id, "user", reason.unwrap_or_default()).await?;
         let head = single(
             request_id,
             Some(session.clone()),
@@ -883,6 +955,7 @@ impl Service {
             input_tokens: 0,
             output_tokens: 0,
             budget: self.configured_session_budget(),
+            denied_tools: Vec::new(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -912,6 +985,7 @@ impl Service {
             input_tokens: 0,
             output_tokens: 0,
             budget: self.configured_session_budget(),
+            denied_tools: Vec::new(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -1065,6 +1139,8 @@ impl Service {
                                         turn,
                                         question: question.id,
                                         prompt: question.question,
+                                        options: question.options,
+                                        multiple: question.multiple,
                                     },
                                 ),
                             )
@@ -1718,6 +1794,8 @@ impl QuestionStore for DirectoryQuestions {
                 session: stored.session,
                 call_id: stored.call_id,
                 question: stored.question,
+                options: stored.options,
+                multiple: stored.multiple,
                 answer: stored.answer,
             }),
             Err(error) => {
@@ -1733,6 +1811,8 @@ impl QuestionStore for DirectoryQuestions {
             session: question.session,
             call_id: question.call_id.clone(),
             question: question.question.clone(),
+            options: question.options.clone(),
+            multiple: question.multiple,
             answer: question.answer.clone(),
         };
         if let Err(error) = self.directory.save_question(&stored).await {
@@ -1751,13 +1831,25 @@ impl QuestionStore for DirectoryQuestions {
     }
 }
 
-/// Re-roots tool paths into the workspace and refuses a lexical escape.
+/// Re-roots tool paths into the workspace and refuses an escape.
 ///
-/// This is a gate on arguments, not a sandbox: a command or a symlink can still
-/// reach outside the workspace. It stops the common mistake of a model reading
-/// `../../etc/passwd` or writing outside the project.
+/// This is a gate on arguments, not a sandbox: a `command` can still reach
+/// outside the workspace. It stops the common mistake of a model reading
+/// `../../etc/passwd`, resolves symbolic links before comparing them with the
+/// root, and refuses FIFOs, sockets and devices so a tool cannot block forever.
 struct WorkspacePolicy {
     root: PathBuf,
+}
+
+/// What a path argument is expected to name when it already exists.
+#[derive(Clone, Copy)]
+enum PathKind {
+    /// A regular file (or a path that does not exist yet, for a write).
+    File,
+    /// A directory (or, for a path that does not exist, a future one).
+    Directory,
+    /// Either a regular file or a directory, but never a FIFO, socket or device.
+    FileOrDirectory,
 }
 
 impl Policy for WorkspacePolicy {
@@ -1767,24 +1859,33 @@ impl Policy for WorkspacePolicy {
 
     fn decide(&self, view: &PolicyView<'_>) -> Decision {
         let tool = view.call.name.as_str();
-        let key = match tool {
-            "read" | "write" | "edit" => "path",
-            "glob" | "list_dir" | "grep" => {
-                return match transform_path(&view.call.arguments, "path", &self.root, true) {
-                    Ok(arguments) => Decision::Transform(arguments),
-                    Err(reason) => Decision::Deny(reason),
-                };
-            }
-            "command" => {
-                return match transform_path(&view.call.arguments, "cwd", &self.root, false) {
-                    Ok(arguments) => Decision::Transform(arguments),
-                    Err(reason) => Decision::Deny(reason),
-                };
-            }
-            _ => return Decision::Allow,
+        match tool {
+            "read" | "write" | "edit" => self.apply(view, "path", false, PathKind::File),
+            "glob" | "list_dir" => self.apply(view, "path", true, PathKind::Directory),
+            "grep" => self.apply(view, "path", true, PathKind::FileOrDirectory),
+            "command" => self.apply(view, "cwd", false, PathKind::Directory),
+            _ => Decision::Allow,
+        }
+    }
+}
+
+impl WorkspacePolicy {
+    /// Re-roots one path argument, then refuses a symlink escape or a special
+    /// file. The kind check is what keeps a FIFO from blocking `read` forever.
+    fn apply(
+        &self,
+        view: &PolicyView<'_>,
+        key: &str,
+        default_to_root: bool,
+        kind: PathKind,
+    ) -> Decision {
+        let arguments = match transform_path(&view.call.arguments, key, &self.root, default_to_root)
+        {
+            Ok(arguments) => arguments,
+            Err(reason) => return Decision::Deny(reason),
         };
-        match transform_path(&view.call.arguments, key, &self.root, false) {
-            Ok(arguments) => Decision::Transform(arguments),
+        match check_path_kind(&arguments, key, kind) {
+            Ok(()) => Decision::Transform(arguments),
             Err(reason) => Decision::Deny(reason),
         }
     }
@@ -1823,13 +1924,8 @@ fn transform_path(
     } else {
         root.join(path)
     };
-    let resolved = lexical_normalize(&joined);
-    if !resolved.starts_with(root) {
-        return Err(format!(
-            "`{raw}` is outside the workspace root `{}`; use a path inside it",
-            root.display()
-        ));
-    }
+    let resolved = resolve_inside(root, &joined)
+        .map_err(|reason| format!("`{raw}` cannot be used: {reason}"))?;
     object.insert(
         key.to_owned(),
         serde_json::Value::String(resolved.display().to_string()),
@@ -1837,21 +1933,102 @@ fn transform_path(
     Ok(serde_json::Value::Object(object))
 }
 
-/// Resolves `.` and `..` without touching the filesystem.
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
+/// Resolves symlinks in the part of `path` that exists, and checks the result
+/// against the canonical workspace root.
+///
+/// A lexical check is not enough: a repository can carry `link -> /etc`, and
+/// the OS follows it after the policy has approved the argument. Canonicalizing
+/// the deepest existing ancestor catches that, while leaving a not-yet-created
+/// file name for `write` to create.
+fn resolve_inside(root: &Path, path: &Path) -> std::result::Result<PathBuf, String> {
+    let canonical =
+        resolve_existing_prefix(path).map_err(|error| format!("`{}`: {error}", path.display()))?;
+    if !canonical.starts_with(root) {
+        return Err(format!(
+            "is outside the workspace root `{}`; use a path inside it",
+            root.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Canonicalizes the longest existing prefix of `path` and reattaches the
+/// missing tail. A dangling symlink is refused rather than followed, because
+/// its target could be outside the workspace and would be created there.
+fn resolve_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut cursor = path;
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
             }
-            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(cursor) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(std::io::Error::other(format!(
+                            "{} is a symbolic link whose target does not exist",
+                            cursor.display()
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                let Some(name) = cursor.file_name() else {
+                    return Err(error);
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = cursor.parent() else {
+                    return Err(error);
+                };
+                cursor = parent;
             }
+            Err(error) => return Err(error),
         }
     }
-    normalized
+}
+
+/// Refuses a path that exists and is not the kind the tool can handle.
+///
+/// The check follows symlinks (the policy has already established that the
+/// target is inside the workspace). Its main job is a FIFO: `read` opens it
+/// synchronously, and opening a FIFO with no writer blocks forever.
+fn check_path_kind(
+    arguments: &serde_json::Value,
+    key: &str,
+    kind: PathKind,
+) -> std::result::Result<(), String> {
+    let Some(raw) = arguments.get(key).and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let path = Path::new(raw);
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("`{raw}`: {error}")),
+    };
+    let file_type = metadata.file_type();
+    let accepted = match kind {
+        PathKind::File => file_type.is_file(),
+        PathKind::Directory => file_type.is_dir(),
+        PathKind::FileOrDirectory => file_type.is_file() || file_type.is_dir(),
+    };
+    if accepted {
+        return Ok(());
+    }
+    Err(format!(
+        "`{raw}` is not a {}; special files such as FIFOs, sockets and devices are refused \
+         because they can block a tool indefinitely",
+        match kind {
+            PathKind::File => "regular file",
+            PathKind::Directory => "directory",
+            PathKind::FileOrDirectory => "regular file or directory",
+        }
+    ))
 }
 
 /// The tools whose effects are not safely repeatable after a crash.
@@ -1945,11 +2122,97 @@ impl Policy for EffectJournalPolicy {
     }
 }
 
+/// Global and per-session approval rules.
+///
+/// Global rules live in the config file; session denials are mirrored into the
+/// logical session so a restart keeps them. Allows for one session use Norte's
+/// grants instead, so they travel with the session's durable state.
+#[derive(Debug, Default)]
+struct ApprovalRules {
+    global_allow: Mutex<BTreeSet<String>>,
+    global_deny: Mutex<BTreeSet<String>>,
+    session_deny: Mutex<BTreeMap<SessionId, BTreeSet<String>>>,
+}
+
+impl ApprovalRules {
+    fn new(config: &norte_code_config::ApprovalsConfig) -> Self {
+        Self {
+            global_allow: Mutex::new(config.allow.iter().cloned().collect()),
+            global_deny: Mutex::new(config.deny.iter().cloned().collect()),
+            session_deny: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn denies(&self, session: SessionId, tool: &str) -> bool {
+        if self
+            .global_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(tool)
+        {
+            return true;
+        }
+        self.session_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .is_some_and(|tools| tools.contains(tool))
+    }
+
+    fn allows(&self, session: SessionId, tool: &str) -> bool {
+        !self.denies(session, tool)
+            && self
+                .global_allow
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(tool)
+    }
+
+    fn allow_global(&self, tool: &str) {
+        self.global_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(tool);
+        self.global_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(tool.to_owned());
+    }
+
+    fn deny_global(&self, tool: &str) {
+        self.global_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(tool);
+        self.global_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(tool.to_owned());
+    }
+
+    fn deny_session(&self, session: SessionId, tool: &str) {
+        self.session_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session)
+            .or_default()
+            .insert(tool.to_owned());
+    }
+
+    fn load_session(&self, session: SessionId, tools: &[String]) {
+        self.session_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session, tools.iter().cloned().collect());
+    }
+}
+
 /// Parks the tools a human must approve, according to the session's mode.
 struct ApprovalModePolicy {
     mode: ApprovalMode,
     skills: Arc<SkillRegistry>,
     honor_allowed_tools: bool,
+    rules: Arc<ApprovalRules>,
 }
 
 impl Policy for ApprovalModePolicy {
@@ -1959,6 +2222,14 @@ impl Policy for ApprovalModePolicy {
 
     fn decide(&self, view: &PolicyView<'_>) -> Decision {
         let tool = view.call.name.as_str();
+        if self.rules.denies(view.session.id, tool) {
+            return Decision::Deny(format!(
+                "`{tool}` is denied by the approval rules; change the rule before calling it"
+            ));
+        }
+        if self.rules.allows(view.session.id, tool) {
+            return Decision::Allow;
+        }
         if self.honor_allowed_tools
             && self
                 .skills
@@ -2193,12 +2464,26 @@ impl Layer for BudgetLayer {
 }
 
 /// The arguments a pending call would run with, for showing a human what they
-/// are approving. Missing history is not an error: the fields are optional.
+/// are approving.
+///
+/// The approval record is authoritative: when a policy rewrote the arguments,
+/// it holds the rewritten object, while history still has what the model wrote.
+/// Older records predate that field, so history is the fallback. Missing
+/// history is not an error: the fields are optional.
 async fn call_arguments(
     engine: &Engine,
     session: SessionId,
     call_id: CallId,
 ) -> Option<serde_json::Value> {
+    if let Ok(records) = engine.pending_approvals(session).await {
+        if let Some(arguments) = records
+            .into_iter()
+            .find(|record| record.call_id == call_id)
+            .and_then(|record| record.arguments)
+        {
+            return Some(arguments);
+        }
+    }
     let history = engine.history(session).await.ok()?;
     history
         .iter()
@@ -2625,6 +2910,86 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_the_workspace_cannot_reach_outside_it() {
+        let base = std::env::temp_dir().join(format!("norte-policy-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("secret"), "do not read").expect("secret");
+        let root = std::fs::canonicalize(&root).expect("canonical root");
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("symlink");
+
+        let error = transform_path(
+            &serde_json::json!({"path": "link/secret"}),
+            "path",
+            &root,
+            false,
+        )
+        .expect_err("a symlink escape must be refused");
+        assert!(error.contains("outside the workspace root"), "{error}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_refused_instead_of_followed() {
+        let base = std::env::temp_dir().join(format!("norte-policy-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let root = std::fs::canonicalize(&root).expect("canonical root");
+        std::os::unix::fs::symlink(root.join("missing"), root.join("dangling")).expect("symlink");
+
+        let error = transform_path(
+            &serde_json::json!({"path": "dangling"}),
+            "path",
+            &root,
+            false,
+        )
+        .expect_err("a dangling symlink must be refused");
+        assert!(error.contains("target does not exist"), "{error}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_stays_inside_the_workspace_is_followed() {
+        let base = std::env::temp_dir().join(format!("norte-policy-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("target"), "inside").expect("target");
+        let root = std::fs::canonicalize(&root).expect("canonical root");
+        std::os::unix::fs::symlink(root.join("target"), root.join("link")).expect("symlink");
+
+        let arguments = transform_path(&serde_json::json!({"path": "link"}), "path", &root, false)
+            .expect("an inside symlink is allowed");
+        assert_eq!(
+            arguments.get("path").and_then(serde_json::Value::as_str),
+            Some(root.join("target").to_str().expect("utf-8"))
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_before_a_tool_can_block_on_it() {
+        let base = std::env::temp_dir().join(format!("norte-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("base");
+        let fifo = base.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success());
+        let arguments = serde_json::json!({"path": fifo});
+        let error = check_path_kind(&arguments, "path", PathKind::File)
+            .expect_err("a FIFO must be refused");
+        assert!(error.contains("not a regular file"), "{error}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Usage {
         let mut usage = Usage::default();
         usage.input_tokens = Some(input);
@@ -2951,6 +3316,161 @@ mod tests {
         let _ = std::fs::remove_file(&target);
     }
 
+    fn write_model(call: CallId, target: &std::path::Path) -> Arc<ScriptedModel> {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "write",
+                    &serde_json::json!({
+                        "path": target.display().to_string(),
+                        "content": "rules",
+                        "overwrite": true
+                    }),
+                )
+                .turn_text("done"),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_global_allow_skips_the_approval_prompt() {
+        let target = std::env::current_dir()
+            .expect("working directory")
+            .join("target")
+            .join(format!(
+                "norte-code-global-allow-{}.txt",
+                std::process::id()
+            ));
+        let _ = std::fs::remove_file(&target);
+        let mut config = config();
+        config.approvals.allow = vec!["write".to_owned()];
+        let service = Arc::new(
+            Service::new(
+                config,
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory {
+                    model: write_model(CallId::new(), &target),
+                }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "write it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, ServerEventKind::ApprovalRequested { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: false,
+                ..
+            } if tool == "write"
+        )));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("written file"),
+            "rules"
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[tokio::test]
+    async fn a_global_deny_refuses_without_asking() {
+        let target = std::env::current_dir()
+            .expect("working directory")
+            .join("target")
+            .join(format!("norte-code-global-deny-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&target);
+        let mut config = config();
+        config.approvals.deny = vec!["write".to_owned()];
+        let service = Arc::new(
+            Service::new(
+                config,
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory {
+                    model: write_model(CallId::new(), &target),
+                }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "write it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, ServerEventKind::ApprovalRequested { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: true,
+                ..
+            } if tool == "write"
+        )));
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn a_global_rule_is_persisted_and_applied() {
+        let path = std::env::temp_dir().join(format!(
+            "norte-code-approval-rules-{}-{}.json",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let service = service();
+        service.set_config_path(Some(path.clone()));
+        let session = SessionId::new();
+
+        service
+            .remember_global_rule("write", false)
+            .expect("deny rule");
+        assert!(service.approval_rules.denies(session, "write"));
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert_eq!(loaded.config.approvals.deny, ["write"]);
+
+        service
+            .remember_global_rule("write", true)
+            .expect("allow rule");
+        assert!(!service.approval_rules.denies(session, "write"));
+        assert!(service.approval_rules.allows(session, "write"));
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert_eq!(loaded.config.approvals.allow, ["write"]);
+        assert!(loaded.config.approvals.deny.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[tokio::test]
     async fn skills_and_tools_are_listed_over_the_protocol() {
         let service = service();
@@ -2975,7 +3495,11 @@ mod tests {
                 .turn_tool_call(
                     call,
                     "ask_user",
-                    &serde_json::json!({"question": "Which file should I edit?"}),
+                    &serde_json::json!({
+                        "question": "Which file should I edit?",
+                        "options": ["src/lib.rs", "src/main.rs"],
+                        "multiple": false
+                    }),
                 )
                 .turn_text("I will wait for the answer."),
         );
@@ -3010,11 +3534,17 @@ mod tests {
         {
             session = session.or(event.session.clone());
             if let ServerEventKind::QuestionAsked {
-                question, prompt, ..
+                question,
+                prompt,
+                options,
+                multiple,
+                ..
             } = &event.kind
             {
                 asked = Some(question.clone());
                 assert_eq!(prompt, "Which file should I edit?");
+                assert_eq!(options, &["src/lib.rs", "src/main.rs"]);
+                assert!(!multiple);
             }
             if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
                 finished = true;
@@ -3283,6 +3813,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn a_pending_question_survives_a_restart() {
         let directory = std::env::temp_dir().join(format!(
             "norte-code-question-restart-{}-{}",
@@ -3301,7 +3832,11 @@ mod tests {
                 .turn_tool_call(
                     call,
                     "ask_user",
-                    &serde_json::json!({"question": "Which file?"}),
+                    &serde_json::json!({
+                        "question": "Which file?",
+                        "options": ["src/lib.rs", "src/main.rs"],
+                        "multiple": true
+                    }),
                 )
                 .turn_text("done"),
         );
@@ -3351,7 +3886,15 @@ mod tests {
             .await
             .expect("the resume should re-ask")
         {
-            if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
+            if let ServerEventKind::QuestionAsked {
+                question,
+                options,
+                multiple,
+                ..
+            } = &event.kind
+            {
+                assert_eq!(options, &["src/lib.rs", "src/main.rs"]);
+                assert!(multiple);
                 reasked = Some(question.clone());
                 break;
             }
@@ -3409,5 +3952,84 @@ mod tests {
         .await
         .expect("service");
         (store, Arc::new(service))
+    }
+
+    /// A symlink inside the workspace must not become a way out of it, even
+    /// when the tool call goes through the whole engine.
+    ///
+    /// The unit tests above exercise the policy directly. This one drives a
+    /// real `read` call through the engine, so the denial is proven on the
+    /// path a model actually takes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
+        let base = std::env::temp_dir().join(format!(
+            "norte-escape-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(outside.join("secret"), "do not read").expect("secret");
+
+        // The service takes its workspace root from the current directory, so
+        // the symlink has to live in it.
+        let root = std::env::current_dir().expect("working directory");
+        let link = root.join(format!("norte-escape-link-{}.tmp", uuid::Uuid::new_v4()));
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "read",
+                    &serde_json::json!({ "path": link.join("secret").display().to_string() }),
+                )
+                .turn_text("done"),
+        );
+        let service = Arc::new(
+            Service::new(
+                config(),
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "read it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+
+        let finished = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ServerEventKind::ToolFinished { error, .. } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("the read should have been attempted and failed");
+        let message = finished.unwrap_or_default();
+        assert!(
+            message.contains("outside the workspace root"),
+            "the escape must be refused, not read: {message}"
+        );
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

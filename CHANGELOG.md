@@ -44,10 +44,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - A configured tool registry per engine: Norte's `read`, `write`, `edit` and
   `command` (with `PATH` and every resolved API key redacted), plus `glob`,
   `list_dir`, `grep`, `todo`, `ask_user` and opt-in `web_fetch`.
-- A workspace-root policy that re-roots tool paths and refuses a lexical escape,
-  so `read`/`write`/`edit`/`glob`/`grep` cannot name `../../etc/passwd`.
+- A workspace-root policy that re-roots tool paths, canonicalizes the existing
+  prefix so a symlink cannot escape the root, refuses dangling symlinks, and
+  rejects FIFOs, sockets and devices before a tool can block on them.
 - `ask_user` parks a running turn on a question and resumes it through the
   `QuestionAsked`/`AnswerQuestion` protocol, with a headless prompt on a terminal.
+  The model may pass `options` for a closed selection and `multiple: true` for a
+  multi-select; the terminal always appends an “answer something else” entry
+  that falls back to the existing free-form answer channel.
+- Global approval rules in the user config: `approvals.allow` and
+  `approvals.deny` are tool-wide, denial wins over allow, and “always” choices
+  written by the CLI preserve the rest of the config file.
 - Approval modes (`ask`, `auto-edit`, `yolo`) as a Norte policy, with
   `Approve`/`Deny`/`Revoke` resuming a parked session and `allowed-tools`
   pre-approval behind `skills.honor_allowed_tools`.
@@ -70,15 +77,21 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   was still at intent when the process started is refused on replay instead of
   being run a second time. Norte guarantees commit-at-most-once, not
   effect-at-most-once.
-- Interactive approvals on stdin: a parked call prints the tool and a bounded
-  preview of its arguments, then accepts `y`/`n`/`a` (yes, no, always for this
-  session). The resumed turn is folded back into the same render loop, so a
-  turn can park and resume several times. Piped stdin still leaves the session
-  parked rather than guessing.
+- Interactive approvals on stdin: a parked call prints the tool and a semantic
+  preview of its arguments, then accepts `y` (allow once), `s` (allow this tool
+  for the session), `a` (allow this tool always), `n` (deny once), `ns` (deny
+  this tool for the session) and `ng` (deny this tool always). A message after
+  any denial (`n <message>`, `ns <message>`, `ng <message>`) reaches the model
+  as human feedback. Session denials are durable with the session and global
+  rules live in the user config. The resumed turn is folded back into the same
+  render loop, so a turn can park and resume several times. Piped stdin still
+  leaves the session parked rather than guessing.
 - A styled text renderer: model and tool names, outcomes, usage and errors use
-  colour when the destination is a terminal, reasoning is dim italic, and the
-  run ends with a compact request/token/cost summary. `NO_COLOR`, `TERM=dumb`,
-  `CLICOLOR=0`, pipes and `--jsonl` all keep the output plain.
+  colour when the destination is a terminal, reasoning streams in its own dim
+  gutter instead of mixing with the answer, and the run ends with a compact
+  request/token/cost summary that includes the cache-read share and the
+  input:output ratio. `NO_COLOR`, `TERM=dumb`, `CLICOLOR=0`, pipes and `--jsonl`
+  all keep the output plain.
 - Interrupted sessions are repaired on startup: Norte's `streaming` phase
   describes a live process, so a session left there by a hard kill is committed
   back to `idle` instead of being listed as streaming forever.

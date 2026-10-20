@@ -142,6 +142,8 @@ pub enum ClientRequestKind {
         approval: String,
         /// Why.
         reason: Option<String>,
+        /// How long the denial lasts.
+        scope: Option<DenyScope>,
     },
     /// Revoke a live grant.
     Revoke {
@@ -422,6 +424,15 @@ pub enum ServerEventKind {
         question: String,
         /// What the model wants to know.
         prompt: String,
+        /// Closed choices, when the model offered any.
+        ///
+        /// A client should append its own “answer something else” entry and
+        /// send the free-form text through [`ClientRequestKind::AnswerQuestion`].
+        #[serde(default)]
+        options: Vec<String>,
+        /// Whether more than one option may be chosen.
+        #[serde(default)]
+        multiple: bool,
     },
     /// A question was answered and the turn resumed.
     QuestionAnswered {
@@ -653,10 +664,24 @@ pub enum BudgetScope {
 pub enum GrantScope {
     /// This call only.
     Once,
-    /// This session.
+    /// This tool for the rest of this session.
+    Tool,
+    /// Every tool in this session.
     Session,
     /// Every session.
     Always,
+}
+
+/// How long a denial lasts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DenyScope {
+    /// This call only.
+    Once,
+    /// This tool for the rest of this session.
+    ToolSession,
+    /// This tool in every session, stored in the user config.
+    ToolGlobal,
 }
 
 /// A reasoning setting.
