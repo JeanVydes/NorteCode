@@ -340,6 +340,13 @@ impl BudgetBook {
         self.stopped = statuses
             .into_iter()
             .find(|status| status.is_exceeded() && status.action != BudgetAction::Warn);
+        if let Some(status) = &self.stopped
+            && !self.exceeded.contains(&status.scope)
+        {
+            // The layer reports the exhaustion itself; the final check must
+            // not report the same scope again.
+            self.exceeded.push(status.scope);
+        }
         self.stopped.clone()
     }
 
@@ -357,8 +364,21 @@ impl BudgetBook {
             .collect()
     }
 
+    /// Newly crossed warnings, each reported once.
+    ///
+    /// Mid-turn checks use this: an exhaustion is reported by the layer that
+    /// stops the next request, or by the final [`Self::notices`] call when the
+    /// turn ends first.
+    pub fn warnings(&mut self) -> Vec<BudgetNotice> {
+        self.take_notices(false)
+    }
+
     /// Newly crossed warnings and exhaustions, each reported once.
     pub fn notices(&mut self) -> Vec<BudgetNotice> {
+        self.take_notices(true)
+    }
+
+    fn take_notices(&mut self, include_exceeded: bool) -> Vec<BudgetNotice> {
         let mut notices = Vec::new();
         for status in self.statuses() {
             let scope = status.scope;
@@ -366,7 +386,7 @@ impl BudgetBook {
                 self.warned.push(scope);
                 notices.push(BudgetNotice::Warning(status.clone()));
             }
-            if status.is_exceeded() && !self.exceeded.contains(&scope) {
+            if include_exceeded && status.is_exceeded() && !self.exceeded.contains(&scope) {
                 self.exceeded.push(scope);
                 notices.push(BudgetNotice::Exceeded(status));
             }
@@ -454,6 +474,49 @@ mod tests {
         let notices = book.notices();
         assert!(matches!(notices.as_slice(), [BudgetNotice::Exceeded(_)]));
         assert!(book.stop().is_some());
+    }
+
+    #[test]
+    fn a_mid_turn_exhaustion_is_reported_once_by_the_stopping_layer() {
+        let mut book = BudgetBook::new(
+            None,
+            Some(budget(BudgetUnit::Tokens, 100.0, BudgetAction::Stop)),
+            None,
+            CostSummary::default(),
+            CostSummary::default(),
+            CostSummary::default(),
+        );
+        book.record(&record(1, 40, 40, None));
+        assert!(matches!(
+            book.warnings().as_slice(),
+            [BudgetNotice::Warning(_)]
+        ));
+        book.record(&record(2, 10, 10, None));
+        assert!(book.warnings().is_empty());
+        assert!(book.stop().is_some());
+        assert!(book.notices().is_empty());
+    }
+
+    #[test]
+    fn the_final_check_reports_an_exhaustion_the_layer_never_saw() {
+        let mut book = BudgetBook::new(
+            None,
+            Some(budget(BudgetUnit::Tokens, 100.0, BudgetAction::Stop)),
+            None,
+            CostSummary::default(),
+            CostSummary::default(),
+            CostSummary::default(),
+        );
+        book.record(&record(1, 60, 60, None));
+        assert!(matches!(
+            book.warnings().as_slice(),
+            [BudgetNotice::Warning(_)]
+        ));
+        assert!(matches!(
+            book.notices().as_slice(),
+            [BudgetNotice::Exceeded(_)]
+        ));
+        assert!(book.notices().is_empty());
     }
 
     #[test]

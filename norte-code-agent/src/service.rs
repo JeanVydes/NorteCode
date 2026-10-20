@@ -1100,7 +1100,7 @@ impl Service {
         let outcome = stream.finish().await;
         // The last request has no successor to settle it.
         let _ = self
-            .settle(engine, request_id, key, nid, &mut stats, tx)
+            .settle(engine, request_id, key, nid, &mut stats, tx, true)
             .await;
         self.store_stats(key, &stats).await;
 
@@ -1247,7 +1247,9 @@ impl Service {
                 }
             }
             EngineEvent::RequestReconstructed { .. } => {
-                return self.settle(engine, request_id, key, nid, stats, tx).await;
+                return self
+                    .settle(engine, request_id, key, nid, stats, tx, false)
+                    .await;
             }
             _ => None,
         };
@@ -1258,6 +1260,7 @@ impl Service {
     }
 
     /// Reports every model request committed since the last look.
+    #[allow(clippy::too_many_arguments)]
     async fn settle(
         &self,
         engine: &Engine,
@@ -1266,6 +1269,7 @@ impl Service {
         nid: SessionId,
         stats: &mut Stats,
         tx: &mpsc::Sender<ServerEvent>,
+        final_check: bool,
     ) -> bool {
         let Ok(history) = engine.history(nid).await else {
             return true;
@@ -1306,7 +1310,11 @@ impl Service {
                     .map_or_else(Vec::new, |book| {
                         let mut book = book.lock().unwrap_or_else(PoisonError::into_inner);
                         book.record(&record);
-                        book.notices()
+                        if final_check {
+                            book.notices()
+                        } else {
+                            book.warnings()
+                        }
                     });
             let event = ServerEvent::new(
                 request_id,
