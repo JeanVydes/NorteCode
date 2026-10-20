@@ -82,5 +82,20 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Interrupted sessions are repaired on startup: Norte's `streaming` phase
   describes a live process, so a session left there by a hard kill is committed
   back to `idle` instead of being listed as streaming forever.
+- A provider-reported cost ledger in SQLite, one row per model request, with
+  per-message, per-session and per-UTC-day rollups. A request whose usage
+  payload has no cost is counted as "not reported", never priced; catalogue
+  prices are ignored. `norte-code cost` prints the same numbers as the run
+  summary, with `--json` and `--session` filters.
+- Budgets with `message`, `session` and `global_daily` scopes, `usd`, `tokens`
+  and `requests` units, and `warn`, `ask` and `stop` actions. A Norte layer
+  checks the ledger before each request, a post-request check reports warnings
+  and exhaustion, and a stopped turn stays resumable. USD budgets are refused
+  over unreported cost, and an incompatible model switch is blocked.
+- `norte-code resume <key>` continues a parked or stopped session, optionally
+  replacing its budget first (`--budget`, `--budget-unit`, `--budget-action`).
+- `Ctrl-C` cancels the running turn through the protocol, so a hanging tool is
+  stopped (including its process group) instead of leaving the terminal stuck;
+  a second `Ctrl-C` quits.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

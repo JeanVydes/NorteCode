@@ -40,7 +40,9 @@ exact revision and is committed.
 ```sh
 norte-code run "explain this repository"
 norte-code run --session <key> "continue with the tests"
+norte-code resume <key> --budget 20000 --budget-unit tokens
 norte-code sessions
+norte-code cost
 norte-code skills list
 ```
 
@@ -59,6 +61,36 @@ interactive terminal the session stays parked, which is what `--jsonl` scripts
 and other clients expect. Reasoning streams in dim italic and tool, usage and
 turn summaries are colourised only when the output is a terminal; `NO_COLOR`,
 `TERM=dumb` and pipes keep it plain.
+
+While a turn is running, `Ctrl-C` cancels it: the running tool is asked to stop
+(Norte's `command` tool kills the whole child process group, so a hung command
+does not keep the terminal hostage) and the turn finishes uncommitted. A second
+`Ctrl-C` quits the process. The session stays resumable with `norte-code
+resume`.
+
+## Cost and budgets
+
+Norte Code never computes a price. The only dollar figure is the one the
+provider reports in each response's usage payload, and a request without one is
+counted as "not reported" rather than priced from a list. The catalogue's
+`cost.*` fields are ignored. Token counters always come from the provider.
+
+The SQLite ledger stores one row per model request (session, turn, request
+index, model, token counters, reported cost or `NULL`). `norte-code cost` prints
+the total, per-session and per-UTC-day rollups; `--session <key>` adds the
+session's turns and `--json` emits the same data as one object. The run summary
+and JSONL events use the same ledger numbers. `cost.show: false` hides them;
+budget warnings still appear.
+
+Budgets are opt-in, in config and per message (`run --budget`, in USD) or per
+session (`resume --budget` with `--budget-unit usd|tokens|requests`). Scopes are
+`message`, `session` and `global_daily`; actions are `warn` (keep going), `ask`
+and `stop`. A Norte layer checks the measured spend before every request and the
+service checks again after each one, so the last request may overshoot by one.
+A stopped turn is not committed and stays resumable: raise the budget with
+`resume` and continue. A USD budget is refused when the provider has already
+returned requests without a reported cost, and a model switch that would make an
+existing USD budget unmeasurable is blocked.
 
 ## Network
 

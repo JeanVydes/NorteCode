@@ -334,6 +334,8 @@ pub enum ServerEventKind {
     BudgetWarning {
         /// What was measured.
         scope: BudgetScope,
+        /// The unit the figures are in.
+        unit: BudgetUnit,
         /// What was spent.
         spent: f64,
         /// The limit.
@@ -343,12 +345,19 @@ pub enum ServerEventKind {
     BudgetExceeded {
         /// What was measured.
         scope: BudgetScope,
+        /// The unit the figures are in.
+        unit: BudgetUnit,
         /// What was spent.
         spent: f64,
         /// The limit.
         limit: f64,
         /// What the service did about it.
         action: BudgetAction,
+    },
+    /// The session's budget changed.
+    BudgetChanged {
+        /// The budget now in force, or `None` when it was cleared.
+        budget: Option<Budget>,
     },
     /// The running cost total changed.
     CostUpdated {
@@ -591,7 +600,7 @@ pub struct Usage {
 }
 
 /// What a budget limits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetUnit {
     /// US dollars, provider-reported.
@@ -627,7 +636,7 @@ pub struct Budget {
 }
 
 /// What a budget applies to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetScope {
     /// One message.

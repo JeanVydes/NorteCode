@@ -12,6 +12,7 @@ authors.workspace = true
 norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-config = { path = "../norte-code-config" }
 norte-code-catalog = { path = "../norte-code-catalog" }
+norte-code-cost = { path = "../norte-code-cost" }
 norte-code-skills = { path = "../norte-code-skills" }
 norte-code-store-sqlite = { path = "../norte-code-store-sqlite" }
 norte-code-tools = { path = "../norte-code-tools" }

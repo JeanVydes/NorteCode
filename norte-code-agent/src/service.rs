@@ -16,11 +16,13 @@ use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
-    ApprovalId, BlobStore, CallId, Decision, Engine, EngineBuilder, EngineConfig, EngineEvent,
-    FinishReason, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore, Message, Model, Policy,
-    PolicySet, PolicyView, ReasoningEffort, SessionId, Store, StreamDelta, ToolKind, ToolRegistry,
-    Usage,
+    ApprovalId, BlobStore, CallId, Continuation, Decision, Engine, EngineBuilder, EngineConfig,
+    EngineEvent, FinishReason, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore, Layer,
+    LayerContext, LayerStack, Message, Model, ModelRequest, ModelStream, Policy, PolicySet,
+    PolicyView, ReasoningEffort, SessionId, ShortCircuitReason, Store, StreamDelta, ToolKind,
+    ToolRegistry, Usage,
 };
+use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord, CostSummary, summarize};
 use norte_code_skills::{
     SkillRegistry, SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
@@ -33,10 +35,10 @@ use norte_tools::{CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::{Notify, mpsc};
 
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
-use norte_code_config::{ApprovalMode, Config};
+use norte_code_config::{ApprovalMode, BudgetConfig, Config};
 use norte_code_protocol::{
-    Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent, ServerEventKind, SessionInfo,
-    SessionKey,
+    Budget, BudgetUnit, Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent, ServerEventKind,
+    SessionInfo, SessionKey,
 };
 
 use crate::ServiceError;
@@ -61,6 +63,12 @@ struct SessionRecord {
     cost: f64,
     /// Requests that carried no cost.
     unpriced: u64,
+    /// Input tokens, summed over reported requests.
+    input_tokens: u64,
+    /// Output tokens, summed over reported requests.
+    output_tokens: u64,
+    /// The session budget, when one was set.
+    budget: Option<Budget>,
 }
 
 /// Live counters for the turn in flight.
@@ -71,6 +79,8 @@ struct Stats {
     requests: u64,
     cost: f64,
     unpriced: u64,
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 /// Where the catalogue is refreshed from.
@@ -101,6 +111,7 @@ pub struct Service {
     effects: Arc<EffectJournal>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
+    budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
 }
 
 impl Service {
@@ -215,6 +226,7 @@ impl Service {
             effects,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
+            budget_states: Mutex::new(BTreeMap::new()),
         };
         // Fail at construction, not at the first message, when the model's
         // provider cannot be built.
@@ -246,6 +258,7 @@ impl Service {
     }
 
     /// Rebuilds the in-memory session map from the durable directory.
+    #[allow(clippy::too_many_lines)]
     async fn load_sessions(&self) -> Result<(), ServiceError> {
         let stored = self.directory.sessions().await?;
         let catalog = self.catalog();
@@ -335,6 +348,17 @@ impl Service {
                     .get("unpriced")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
+                input_tokens: stats
+                    .get("input_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                output_tokens: stats
+                    .get("output_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                budget: stats
+                    .get("budget")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
             };
             records.push((key.clone(), record));
             if needs_repair {
@@ -373,6 +397,9 @@ impl Service {
                 "requests": record.requests,
                 "cost": record.cost,
                 "unpriced": record.unpriced,
+                "input_tokens": record.input_tokens,
+                "output_tokens": record.output_tokens,
+                "budget": record.budget,
             }),
         });
         if let Some(stored) = stored {
@@ -383,8 +410,17 @@ impl Service {
 
     /// Builds an engine for one spec over the shared stores.
     fn engine(&self, spec: &ModelSpec) -> Result<Engine, ServiceError> {
+        self.engine_with_budget(spec, None)
+    }
+
+    /// Builds an engine whose requests pass through the budget layer.
+    fn engine_with_budget(
+        &self,
+        spec: &ModelSpec,
+        budget: Option<Arc<Mutex<BudgetBook>>>,
+    ) -> Result<Engine, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
-        Ok(EngineBuilder::new()
+        let mut builder = EngineBuilder::new()
             .store(Arc::clone(&self.store))
             .blobs(Arc::clone(&self.blobs))
             .model(model)
@@ -400,8 +436,11 @@ impl Service {
                     effects.intent(info.session, info.call_id, info.tool.as_str());
                     BTreeMap::new()
                 }
-            })
-            .build()?)
+            });
+        if let Some(book) = budget {
+            builder = builder.layers(LayerStack::new(vec![Arc::new(BudgetLayer { book })]));
+        }
+        Ok(builder.build()?)
     }
 
     /// The tool registry every engine shares, rebuilt cheaply per turn because
@@ -552,10 +591,18 @@ impl Service {
                     ServerEventKind::SessionDeleted,
                 ))
             }
-            Kind::SendMessage { session, text, .. } => {
-                self.start_turn(request_id, session, Some(text)).await
+            Kind::SendMessage {
+                session,
+                text,
+                budget,
+                ..
+            } => {
+                self.start_turn(request_id, session, Some(text), Some(budget))
+                    .await
             }
-            Kind::Resume { session } => self.start_turn(request_id, Some(session), None).await,
+            Kind::Resume { session } => {
+                self.start_turn(request_id, Some(session), None, None).await
+            }
             Kind::CancelTurn { session } => {
                 if let Some(notify) = self.lock_cancels().get(&session).cloned() {
                     notify.notify_one();
@@ -570,8 +617,11 @@ impl Service {
             Kind::SetModel { session, model } => {
                 self.set_model_event(request_id, session, model).await
             }
-            Kind::SetReasoning { .. } | Kind::SetBudget { .. } => Err(ServiceError::Unsupported(
-                "session settings arrive in a later milestone",
+            Kind::SetBudget { session, budget } => {
+                self.set_budget(request_id, session, budget).await
+            }
+            Kind::SetReasoning { .. } => Err(ServiceError::Unsupported(
+                "reasoning overrides arrive in a later milestone",
             )),
             Kind::Approve {
                 session,
@@ -685,6 +735,7 @@ impl Service {
         model: String,
     ) -> Result<EventStream, ServiceError> {
         let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), &model, None)?;
+        self.ensure_model_supports_budget(&session, &spec).await?;
         self.set_model(&session, spec).await?;
         Ok(single(
             request_id,
@@ -732,7 +783,9 @@ impl Service {
                 approved: true,
             },
         );
-        let resumed = self.start_turn(request_id, Some(session), None).await?;
+        let resumed = self
+            .start_turn(request_id, Some(session), None, None)
+            .await?;
         Ok(Box::pin(head.chain(resumed)))
     }
 
@@ -761,7 +814,9 @@ impl Service {
                 approved: false,
             },
         );
-        let resumed = self.start_turn(request_id, Some(session), None).await?;
+        let resumed = self
+            .start_turn(request_id, Some(session), None, None)
+            .await?;
         Ok(Box::pin(head.chain(resumed)))
     }
 
@@ -825,6 +880,9 @@ impl Service {
             requests: 0,
             cost: 0.0,
             unpriced: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            budget: self.configured_session_budget(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -851,6 +909,9 @@ impl Service {
             requests: 0,
             cost: 0.0,
             unpriced: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            budget: self.configured_session_budget(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -858,11 +919,16 @@ impl Service {
     }
 
     /// Starts a turn (or a resume) and returns the stream of its events.
+    ///
+    /// The outer option distinguishes a new message (which replaces the
+    /// message budget) from a resume (which keeps the one already in force).
+    #[allow(clippy::option_option)]
     async fn start_turn(
         self: &Arc<Self>,
         request_id: u64,
         session: Option<SessionKey>,
         input: Option<String>,
+        message_budget: Option<Option<Budget>>,
     ) -> Result<EventStream, ServiceError> {
         let (key, nid, spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
@@ -872,7 +938,26 @@ impl Service {
             let (nid, spec, _) = self.require_record(&key)?;
             (key, nid, spec)
         };
-        let engine = self.engine(&spec)?;
+        let configured_message = configured_budget(self.config.budgets.message.as_ref());
+        let message = message_budget.map(|budget| budget.or(configured_message.clone()));
+        if let Some(budget) = message.as_ref().and_then(Option::as_ref) {
+            self.validate_budget(&key, budget).await?;
+        }
+        let existing = self.lock_budget_states().get(&key).cloned();
+        let book = if let Some(message) = message {
+            let book = self.new_budget_book(&key, message).await?;
+            self.lock_budget_states()
+                .insert(key.clone(), Arc::clone(&book));
+            book
+        } else if let Some(book) = existing {
+            book
+        } else {
+            let book = self.new_budget_book(&key, configured_message).await?;
+            self.lock_budget_states()
+                .insert(key.clone(), Arc::clone(&book));
+            book
+        };
+        let engine = self.engine_with_budget(&spec, Some(book))?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
         // A resumable park: after a restart the engine will not re-emit the
@@ -1142,10 +1227,25 @@ impl Service {
                 turn: stats.turn,
                 version: *version,
             }),
-            EngineEvent::Error { message, .. } => Some(ServerEventKind::Error {
-                code: ErrorCode::Provider,
-                message: message.clone(),
-            }),
+            EngineEvent::LayerShortCircuited { layer, .. } if layer == "budget" => self
+                .budget_stopped(key)
+                .map(|status| ServerEventKind::BudgetExceeded {
+                    scope: status.scope,
+                    unit: status.unit,
+                    spent: status.spent,
+                    limit: status.limit,
+                    action: status.action,
+                }),
+            EngineEvent::Error { message, .. } => {
+                if self.budget_stopped(key).is_some() {
+                    None
+                } else {
+                    Some(ServerEventKind::Error {
+                        code: ErrorCode::Provider,
+                        message: message.clone(),
+                    })
+                }
+            }
             EngineEvent::RequestReconstructed { .. } => {
                 return self.settle(engine, request_id, key, nid, stats, tx).await;
             }
@@ -1181,6 +1281,33 @@ impl Service {
             } else {
                 stats.unpriced += 1;
             }
+            stats.input_tokens += origin.usage.input_tokens.unwrap_or(0);
+            stats.output_tokens += origin.usage.output_tokens.unwrap_or(0);
+            let record = CostRecord {
+                session: key.to_string(),
+                turn: stats.turn,
+                index: stats.requests,
+                model: self.model_label(key),
+                input_tokens: origin.usage.input_tokens,
+                output_tokens: origin.usage.output_tokens,
+                reasoning_tokens: origin.usage.reasoning_tokens,
+                cache_read_tokens: origin.usage.cache_read_tokens,
+                cache_write_tokens: origin.usage.cache_write_tokens,
+                cost_usd: cost,
+                recorded_at: Utc::now(),
+            };
+            if let Err(error) = self.directory.record_cost(&record).await {
+                tracing::warn!(session = %key, %error, "could not record request cost");
+            }
+            let notices =
+                self.lock_budget_states()
+                    .get(key)
+                    .cloned()
+                    .map_or_else(Vec::new, |book| {
+                        let mut book = book.lock().unwrap_or_else(PoisonError::into_inner);
+                        book.record(&record);
+                        book.notices()
+                    });
             let event = ServerEvent::new(
                 request_id,
                 Some(key.clone()),
@@ -1196,9 +1323,47 @@ impl Service {
                 stats.billed = history.len();
                 return false;
             }
+            for notice in notices {
+                let kind = match notice {
+                    BudgetNotice::Warning(warning) => ServerEventKind::BudgetWarning {
+                        scope: warning.scope,
+                        unit: warning.unit,
+                        spent: warning.spent,
+                        limit: warning.limit,
+                    },
+                    BudgetNotice::Exceeded(exceeded) => ServerEventKind::BudgetExceeded {
+                        scope: exceeded.scope,
+                        unit: exceeded.unit,
+                        spent: exceeded.spent,
+                        limit: exceeded.limit,
+                        action: exceeded.action,
+                    },
+                };
+                if !emit(tx, ServerEvent::new(request_id, Some(key.clone()), kind)).await {
+                    stats.billed = history.len();
+                    return false;
+                }
+            }
         }
         stats.billed = history.len();
         true
+    }
+
+    /// The `provider/model` a session currently uses.
+    fn model_label(&self, key: &SessionKey) -> String {
+        self.lock_sessions()
+            .get(key)
+            .map_or_else(String::new, |record| record.spec.label())
+    }
+
+    /// The budget decision that stopped the turn, if the layer made one.
+    fn budget_stopped(&self, key: &SessionKey) -> Option<norte_code_cost::BudgetStatus> {
+        self.lock_budget_states().get(key).and_then(|book| {
+            book.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .stopped()
+                .cloned()
+        })
     }
 
     fn cost_report(&self, request_id: u64, session: Option<&SessionKey>) -> EventStream {
@@ -1262,6 +1427,8 @@ impl Service {
                 requests: 0,
                 cost: 0.0,
                 unpriced: 0,
+                input_tokens: 0,
+                output_tokens: 0,
             },
             |record| Stats {
                 turn,
@@ -1269,6 +1436,8 @@ impl Service {
                 requests: record.requests,
                 cost: record.cost,
                 unpriced: record.unpriced,
+                input_tokens: record.input_tokens,
+                output_tokens: record.output_tokens,
             },
         )
     }
@@ -1279,6 +1448,8 @@ impl Service {
             record.requests = stats.requests;
             record.cost = stats.cost;
             record.unpriced = stats.unpriced;
+            record.input_tokens = stats.input_tokens;
+            record.output_tokens = stats.output_tokens;
         }
         if let Err(error) = self.persist(key).await {
             tracing::warn!(session = %key, %error, "could not persist session counters");
@@ -1292,6 +1463,111 @@ impl Service {
         if let Err(error) = self.persist(key).await {
             tracing::warn!(session = %key, %error, "could not persist session phase");
         }
+    }
+
+    /// Validates and sets the session's budget.
+    ///
+    /// A USD budget over a provider that never reported cost cannot be
+    /// measured, so it is refused instead of silently comparing against zero.
+    async fn set_budget(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+        budget: Budget,
+    ) -> Result<EventStream, ServiceError> {
+        self.validate_budget(&key, &budget).await?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.budget = Some(budget.clone());
+        }
+        self.persist(&key).await?;
+        if let Some(book) = self.lock_budget_states().get(&key).cloned() {
+            book.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .set_session_budget(Some(budget.clone()));
+        }
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::BudgetChanged {
+                budget: Some(budget),
+            },
+        ))
+    }
+
+    /// Refuses a budget that the session's history says cannot be measured.
+    async fn validate_budget(&self, key: &SessionKey, budget: &Budget) -> Result<(), ServiceError> {
+        if !budget.limit.is_finite() || budget.limit <= 0.0 {
+            return Err(ServiceError::Budget(
+                "the limit must be a positive, finite number".to_owned(),
+            ));
+        }
+        if budget.unit != BudgetUnit::Usd {
+            return Ok(());
+        }
+        let model = self.model_label(key);
+        let unpriced_in_session = {
+            let sessions = self.lock_sessions();
+            sessions
+                .get(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?
+                .unpriced
+        };
+        let unpriced_model = self
+            .directory
+            .costs(Some(key.as_str()))
+            .await?
+            .iter()
+            .filter(|record| record.model == model && record.cost_usd.is_none())
+            .count();
+        if unpriced_in_session > 0 || unpriced_model > 0 {
+            return Err(ServiceError::Budget(format!(
+                "`{model}` has requests with no reported cost; use a tokens or requests \
+                 budget, or a provider that reports cost"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Blocks a switch that would leave a USD budget unmeasurable.
+    async fn ensure_model_supports_budget(
+        &self,
+        key: &SessionKey,
+        spec: &ModelSpec,
+    ) -> Result<(), ServiceError> {
+        let (budget, unpriced) = {
+            let sessions = self.lock_sessions();
+            let record = sessions
+                .get(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            (record.budget.clone(), record.unpriced)
+        };
+        if budget
+            .as_ref()
+            .is_none_or(|budget| budget.unit != BudgetUnit::Usd)
+        {
+            return Ok(());
+        }
+        let model = spec.label();
+        let costs = self.directory.costs(Some(key.as_str())).await?;
+        let new_model_costs: Vec<_> = costs
+            .into_iter()
+            .filter(|record| record.model == model)
+            .collect();
+        let unpriced_new = new_model_costs
+            .iter()
+            .filter(|record| record.cost_usd.is_none())
+            .count();
+        if unpriced > 0 || unpriced_new > 0 {
+            return Err(ServiceError::Budget(format!(
+                "the session has a USD budget, but `{model}` has requests without a \
+                 reported cost; set a tokens or requests budget before switching"
+            )));
+        }
+        Ok(())
     }
 
     async fn set_model(&self, key: &SessionKey, spec: ModelSpec) -> Result<(), ServiceError> {
@@ -1341,6 +1617,56 @@ impl Service {
 
     fn lock_sessions(&self) -> MutexGuard<'_, BTreeMap<SessionKey, SessionRecord>> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_budget_states(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>> {
+        self.budget_states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Builds the budget state for a turn from the session and the day's ledger.
+    async fn new_budget_book(
+        &self,
+        key: &SessionKey,
+        message: Option<Budget>,
+    ) -> Result<Arc<Mutex<BudgetBook>>, ServiceError> {
+        let (session_budget, session_summary) = {
+            let sessions = self.lock_sessions();
+            let record = sessions
+                .get(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            (
+                record.budget.clone(),
+                CostSummary {
+                    requests: record.requests,
+                    input_tokens: record.input_tokens,
+                    output_tokens: record.output_tokens,
+                    reported_cost_usd: record.cost,
+                    not_reported: record.unpriced,
+                    ..CostSummary::default()
+                },
+            )
+        };
+        let today = Utc::now().date_naive();
+        let costs = self.directory.costs(None).await?;
+        let global_summary = summarize(
+            costs
+                .iter()
+                .filter(|record| record.recorded_at.date_naive() == today),
+        );
+        Ok(Arc::new(Mutex::new(BudgetBook::new(
+            message,
+            session_budget,
+            configured_budget(self.config.budgets.global_daily.as_ref()),
+            CostSummary::default(),
+            session_summary,
+            global_summary,
+        ))))
+    }
+
+    fn configured_session_budget(&self) -> Option<Budget> {
+        configured_budget(self.config.budgets.session.as_ref())
     }
 
     fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<Notify>>> {
@@ -1784,6 +2110,80 @@ fn to_usage(usage: &Usage) -> norte_code_protocol::Usage {
     }
 }
 
+/// Converts a validated config budget to the wire shape.
+///
+/// Config validation already rejects unknown units and actions; a programmatic
+/// `Config` can still carry one, so an unusable budget is dropped rather than
+/// guessed at.
+fn configured_budget(budget: Option<&BudgetConfig>) -> Option<Budget> {
+    let budget = budget?;
+    let unit = match budget.unit.as_str() {
+        "usd" => BudgetUnit::Usd,
+        "tokens" => BudgetUnit::Tokens,
+        "requests" => BudgetUnit::Requests,
+        _ => return None,
+    };
+    let action = match budget.action.as_str() {
+        "warn" => norte_code_protocol::BudgetAction::Warn,
+        "ask" => norte_code_protocol::BudgetAction::Ask,
+        "stop" => norte_code_protocol::BudgetAction::Stop,
+        _ => return None,
+    };
+    Some(Budget {
+        unit,
+        limit: budget.limit,
+        action,
+    })
+}
+
+/// Stops a model request before it is sent when a budget is exhausted.
+///
+/// Norte has no price feed, so this is a check against the ledger's measured
+/// spend, not a worst-case estimate. A request can still overshoot by one,
+/// because the provider only reports its cost after it answers.
+struct BudgetLayer {
+    book: Arc<Mutex<BudgetBook>>,
+}
+
+#[async_trait]
+impl Layer for BudgetLayer {
+    fn name(&self) -> &'static str {
+        "budget"
+    }
+
+    async fn wrap(
+        &self,
+        context: &LayerContext<'_>,
+        request: ModelRequest,
+        next: &dyn Continuation,
+    ) -> norte::Result<ModelStream> {
+        let stop = {
+            let mut book = self.book.lock().unwrap_or_else(PoisonError::into_inner);
+            book.stop()
+        };
+        if let Some(status) = stop {
+            let unit = match status.unit {
+                BudgetUnit::Usd => "USD",
+                BudgetUnit::Tokens => "tokens",
+                BudgetUnit::Requests => "requests",
+            };
+            let detail = format!(
+                "{:?} budget: spent {:.6} of {:.6} {unit}; raise the budget and resume",
+                status.scope, status.spent, status.limit
+            );
+            context.short_circuit(
+                "budget",
+                ShortCircuitReason::Custom {
+                    name: "budget_exceeded".to_owned(),
+                    detail: detail.clone(),
+                },
+            );
+            return Err(norte::Error::Other(format!("budget exceeded: {detail}")));
+        }
+        next.call(context, request).await
+    }
+}
+
 /// The arguments a pending call would run with, for showing a human what they
 /// are approving. Missing history is not an error: the fields are optional.
 async fn call_arguments(
@@ -2215,6 +2615,229 @@ mod tests {
             missing.get("path").and_then(serde_json::Value::as_str),
             Some("/tmp/norte-workspace")
         );
+    }
+
+    fn usage(input: u64, output: u64, cost: Option<f64>) -> Usage {
+        let mut usage = Usage::default();
+        usage.input_tokens = Some(input);
+        usage.output_tokens = Some(output);
+        usage.vendor = cost.map_or_else(BTreeMap::new, |cost| {
+            BTreeMap::from([("cost".to_owned(), serde_json::json!(cost))])
+        });
+        usage
+    }
+
+    async fn persistent_service(model: Arc<ScriptedModel>) -> (Arc<Service>, Arc<SqliteStore>) {
+        let store = Arc::new(SqliteStore::in_memory().expect("store"));
+        let service = Service::with_directory(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            "system",
+        )
+        .await
+        .expect("service");
+        (Arc::new(service), store)
+    }
+
+    #[tokio::test]
+    async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn(vec![
+                    norte::StreamEvent::Usage(usage(100, 20, Some(0.25))),
+                    norte::StreamEvent::TextDelta {
+                        index: 0,
+                        text: "first".to_owned(),
+                    },
+                    norte::StreamEvent::Finish(FinishReason::Stop),
+                ])
+                .turn(vec![
+                    norte::StreamEvent::Usage(usage(50, 10, None)),
+                    norte::StreamEvent::TextDelta {
+                        index: 0,
+                        text: "second".to_owned(),
+                    },
+                    norte::StreamEvent::Finish(FinishReason::Stop),
+                ]),
+        );
+        let (service, store) = persistent_service(model).await;
+        let first = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "one".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = first[0].session.clone().expect("session");
+        let second = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: Some(key.clone()),
+                text: "two".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        assert!(second.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::RequestReconstructed { cost_usd: None, .. }
+        )));
+        let costs = store.costs(Some(key.as_str())).await.expect("costs");
+        assert_eq!(costs.len(), 2);
+        assert_eq!(costs[0].index, 1);
+        assert_eq!(costs[0].input_tokens, Some(100));
+        assert_eq!(costs[0].cost_usd, Some(0.25));
+        assert!(costs[1].cost_usd.is_none());
+        assert_eq!(costs[1].index, 2);
+    }
+
+    #[tokio::test]
+    async fn a_session_budget_stops_the_next_request() {
+        let mut config = config();
+        config.budgets.session = Some(BudgetConfig {
+            unit: "requests".to_owned(),
+            limit: 1.0,
+            action: "stop".to_owned(),
+        });
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(call, "todo", &serde_json::json!({"todos": []}))
+                .turn_text("done"),
+        );
+        let store = Arc::new(SqliteStore::in_memory().expect("store"));
+        let service = Arc::new(
+            Service::with_directory(
+                config,
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
+                store.clone(),
+                store.clone(),
+                store.clone(),
+                "system",
+            )
+            .await
+            .expect("service"),
+        );
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::BudgetExceeded {
+                scope: norte_code_protocol::BudgetScope::Session,
+                action: norte_code_protocol::BudgetAction::Stop,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )));
+        let key = events[0].session.clone().expect("session");
+        let changed = drain(
+            &service,
+            ClientRequestKind::SetBudget {
+                session: key.clone(),
+                budget: Budget {
+                    unit: BudgetUnit::Requests,
+                    limit: 10.0,
+                    action: norte_code_protocol::BudgetAction::Stop,
+                },
+            },
+        )
+        .await;
+        assert!(changed.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::BudgetChanged { budget: Some(_) }
+        )));
+        let resumed = drain(
+            &service,
+            ClientRequestKind::Resume {
+                session: key.clone(),
+            },
+        )
+        .await;
+        assert!(resumed.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: true,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(ScriptedModel::new(reference).turn(vec![
+            norte::StreamEvent::Usage(usage(10, 5, None)),
+            norte::StreamEvent::TextDelta {
+                index: 0,
+                text: "again".to_owned(),
+            },
+            norte::StreamEvent::Finish(FinishReason::Stop),
+        ]));
+        let (service, _) = persistent_service(model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "one".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = events[0].session.clone().expect("session");
+        let result = service
+            .submit(ClientRequest {
+                request_id: 8,
+                kind: ClientRequestKind::SetBudget {
+                    session: key,
+                    budget: Budget {
+                        unit: BudgetUnit::Usd,
+                        limit: 1.0,
+                        action: norte_code_protocol::BudgetAction::Stop,
+                    },
+                },
+            })
+            .await;
+        let Err(error) = result else {
+            panic!("the unmeasurable budget should have been refused");
+        };
+        assert!(error.to_string().contains("no reported cost"));
     }
 
     #[tokio::test]

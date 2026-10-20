@@ -64,6 +64,9 @@ pub enum ServiceError {
         /// The template as the catalogue spells it.
         template: String,
     },
+    /// A budget is malformed or cannot be measured.
+    #[error("budget: {0}")]
+    Budget(String),
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),

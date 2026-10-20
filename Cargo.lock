@@ -1032,6 +1032,7 @@ dependencies = [
  "norte",
  "norte-code-catalog",
  "norte-code-config",
+ "norte-code-cost",
  "norte-code-protocol",
  "norte-code-skills",
  "norte-code-store-sqlite",
@@ -1071,6 +1072,7 @@ dependencies = [
  "norte-code-agent",
  "norte-code-catalog",
  "norte-code-config",
+ "norte-code-cost",
  "norte-code-protocol",
  "norte-code-skills",
  "norte-code-store-sqlite",
@@ -1093,6 +1095,7 @@ name = "norte-code-cost"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "norte-code-protocol",
  "serde",
  "serde_json",
  "thiserror",
@@ -1128,6 +1131,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "norte",
+ "norte-code-cost",
  "norte-testing",
  "rusqlite",
  "serde",

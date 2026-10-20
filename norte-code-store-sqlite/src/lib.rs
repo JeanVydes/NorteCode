@@ -21,6 +21,7 @@ use norte::{
     ApprovalId, ApprovalRecord, BlobId, BlobStore, CallId, Commit, Error, Grant, GrantId,
     GrantScope, Node, NodeId, Result, Session, SessionId, Store, ToolName,
 };
+use norte_code_cost::CostRecord;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -126,6 +127,21 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn repair_interrupted(&self) -> Result<usize>;
+    /// Records one model request in the cost ledger.
+    ///
+    /// The key is `(session, index)`, so recording the same request twice
+    /// replaces its row rather than duplicating the spend.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    async fn record_cost(&self, record: &CostRecord) -> Result<()>;
+    /// Every ledger row, optionally only one session's, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    async fn costs(&self, session: Option<&str>) -> Result<Vec<CostRecord>>;
     /// The durable question for a call, if one was recorded.
     ///
     /// # Errors
@@ -181,6 +197,7 @@ pub struct InMemoryDirectory {
     sessions: Mutex<BTreeMap<String, StoredSession>>,
     questions: Mutex<BTreeMap<String, StoredQuestion>>,
     effects: Mutex<BTreeMap<(SessionId, CallId), EffectEntry>>,
+    costs: Mutex<BTreeMap<(String, u64), CostRecord>>,
 }
 
 #[derive(Debug)]
@@ -239,6 +256,31 @@ impl SessionDirectory for InMemoryDirectory {
             }
         }
         Ok(repaired)
+    }
+
+    async fn record_cost(&self, record: &CostRecord) -> Result<()> {
+        self.costs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((record.session.clone(), record.index), record.clone());
+        Ok(())
+    }
+
+    async fn costs(&self, session: Option<&str>) -> Result<Vec<CostRecord>> {
+        let costs = self.costs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut records: Vec<CostRecord> = costs
+            .values()
+            .filter(|record| session.is_none_or(|key| record.session == key))
+            .cloned()
+            .collect();
+        records.sort_by(|left, right| {
+            (left.recorded_at, left.session.as_str(), left.index).cmp(&(
+                right.recorded_at,
+                right.session.as_str(),
+                right.index,
+            ))
+        });
+        Ok(records)
     }
 
     async fn question(&self, call_id: &str) -> Result<Option<StoredQuestion>> {
@@ -471,6 +513,22 @@ CREATE TABLE IF NOT EXISTS effects (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (session, call_id)
 );
+CREATE TABLE IF NOT EXISTS costs (
+    session             TEXT NOT NULL,
+    request_index       INTEGER NOT NULL,
+    turn                INTEGER NOT NULL,
+    model               TEXT NOT NULL,
+    input_tokens        INTEGER,
+    output_tokens       INTEGER,
+    reasoning_tokens    INTEGER,
+    cache_read_tokens   INTEGER,
+    cache_write_tokens  INTEGER,
+    cost_usd            REAL,
+    recorded_at         TEXT NOT NULL,
+    PRIMARY KEY (session, request_index)
+);
+CREATE INDEX IF NOT EXISTS costs_recorded_at ON costs(recorded_at);
+CREATE INDEX IF NOT EXISTS costs_session ON costs(session);
 ";
 
 /// The internal error a blocking section can raise.
@@ -496,6 +554,19 @@ enum Fault {
     InvalidInput(String),
     #[error("{what} is corrupt: {reason}")]
     Corrupt { what: String, reason: String },
+}
+
+fn sqlite_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn rust_u64(value: i64, what: &str) -> Result<u64> {
+    u64::try_from(value).map_err(|error| {
+        Error::from(Fault::Corrupt {
+            what: what.to_owned(),
+            reason: error.to_string(),
+        })
+    })
 }
 
 impl From<Fault> for Error {
@@ -930,6 +1001,7 @@ impl BlobStore for SqliteStore {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl SessionDirectory for SqliteStore {
     async fn sessions(&self) -> Result<Vec<StoredSession>> {
         let rows: Vec<(
@@ -1036,6 +1108,152 @@ impl SessionDirectory for SqliteStore {
                 .map_err(Fault::from)
         })
         .await
+    }
+
+    async fn record_cost(&self, record: &CostRecord) -> Result<()> {
+        let record = record.clone();
+        self.run(move |connection| {
+            connection
+                .execute(
+                    "INSERT INTO costs (
+                         session, request_index, turn, model, input_tokens, output_tokens,
+                         reasoning_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+                         recorded_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     ON CONFLICT(session, request_index) DO UPDATE SET
+                         turn = excluded.turn,
+                         model = excluded.model,
+                         input_tokens = excluded.input_tokens,
+                         output_tokens = excluded.output_tokens,
+                         reasoning_tokens = excluded.reasoning_tokens,
+                         cache_read_tokens = excluded.cache_read_tokens,
+                         cache_write_tokens = excluded.cache_write_tokens,
+                         cost_usd = excluded.cost_usd,
+                         recorded_at = excluded.recorded_at",
+                    params![
+                        record.session,
+                        sqlite_u64(record.index),
+                        sqlite_u64(record.turn),
+                        record.model,
+                        record.input_tokens.map(sqlite_u64),
+                        record.output_tokens.map(sqlite_u64),
+                        record.reasoning_tokens.map(sqlite_u64),
+                        record.cache_read_tokens.map(sqlite_u64),
+                        record.cache_write_tokens.map(sqlite_u64),
+                        record.cost_usd,
+                        record.recorded_at.to_rfc3339(),
+                    ],
+                )
+                .map_err(Fault::from)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn costs(&self, session: Option<&str>) -> Result<Vec<CostRecord>> {
+        let session = session.map(str::to_owned);
+        let rows: Vec<(
+            String,
+            i64,
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<f64>,
+            String,
+        )> = self
+            .run(move |connection| {
+                let sql = if session.is_some() {
+                    "SELECT session, request_index, turn, model, input_tokens, output_tokens,
+                            reasoning_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+                            recorded_at
+                     FROM costs WHERE session = ?1 ORDER BY recorded_at, request_index"
+                } else {
+                    "SELECT session, request_index, turn, model, input_tokens, output_tokens,
+                            reasoning_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+                            recorded_at
+                     FROM costs ORDER BY recorded_at, session, request_index"
+                };
+                let mut statement = connection.prepare(sql).map_err(Fault::from)?;
+                let map = |row: &rusqlite::Row<'_>| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                };
+                let mapped = if let Some(session) = session.as_deref() {
+                    statement
+                        .query_map(params![session], map)
+                        .map_err(Fault::from)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(Fault::from)?
+                } else {
+                    statement
+                        .query_map([], map)
+                        .map_err(Fault::from)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(Fault::from)?
+                };
+                Ok(mapped)
+            })
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let (
+                    session,
+                    index,
+                    turn,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    reasoning_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    cost_usd,
+                    recorded_at,
+                ) = row;
+                Ok(CostRecord {
+                    session,
+                    turn: rust_u64(turn, "cost turn")?,
+                    index: rust_u64(index, "cost request index")?,
+                    model,
+                    input_tokens: input_tokens
+                        .map(|value| rust_u64(value, "input tokens"))
+                        .transpose()?,
+                    output_tokens: output_tokens
+                        .map(|value| rust_u64(value, "output tokens"))
+                        .transpose()?,
+                    reasoning_tokens: reasoning_tokens
+                        .map(|value| rust_u64(value, "reasoning tokens"))
+                        .transpose()?,
+                    cache_read_tokens: cache_read_tokens
+                        .map(|value| rust_u64(value, "cache read tokens"))
+                        .transpose()?,
+                    cache_write_tokens: cache_write_tokens
+                        .map(|value| rust_u64(value, "cache write tokens"))
+                        .transpose()?,
+                    cost_usd,
+                    recorded_at: recorded_at.parse().map_err(|error: chrono::ParseError| {
+                        Fault::Corrupt {
+                            what: "cost record".to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?,
+                })
+            })
+            .collect()
     }
 
     async fn question(&self, call_id: &str) -> Result<Option<StoredQuestion>> {
@@ -1197,6 +1415,36 @@ mod tests {
     async fn passes_nortes_store_conformance() {
         let store = SqliteStore::in_memory().expect("open");
         norte_testing::store_conformance(&store).await;
+    }
+
+    #[tokio::test]
+    async fn costs_round_trip_and_replace_by_request_index() {
+        use norte_code_cost::CostRecord;
+
+        let store = SqliteStore::in_memory().expect("open");
+        let record = CostRecord {
+            session: "session".to_owned(),
+            turn: 2,
+            index: 7,
+            model: "provider/model".to_owned(),
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            reasoning_tokens: Some(5),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost_usd: Some(0.0125),
+            recorded_at: Utc::now(),
+        };
+        store.record_cost(&record).await.expect("record");
+        let mut replacement = record.clone();
+        replacement.cost_usd = None;
+        replacement.output_tokens = Some(25);
+        store.record_cost(&replacement).await.expect("replace");
+        let costs = store.costs(Some("session")).await.expect("costs");
+        assert_eq!(costs.len(), 1);
+        assert_eq!(costs[0].output_tokens, Some(25));
+        assert!(costs[0].cost_usd.is_none());
+        assert!(store.costs(Some("other")).await.expect("costs").is_empty());
     }
 
     #[tokio::test]

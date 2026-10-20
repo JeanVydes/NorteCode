@@ -28,6 +28,14 @@ impl Style {
         }
     }
 
+    /// Styling for `stdout`, where reports go.
+    #[must_use]
+    pub fn stdout() -> Self {
+        Self {
+            enabled: supported(std::io::stdout().is_terminal()),
+        }
+    }
+
     /// Wraps `text` in the given SGR codes.
     #[must_use]
     pub fn paint(self, codes: &str, text: impl Display) -> String {

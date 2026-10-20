@@ -24,10 +24,11 @@ use norte_code_agent::{
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
 use norte_code_config::{ApprovalMode, Config, user_config_path};
+use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
-    Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
-    GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo, ServerEvent, ServerEventKind,
-    SessionKey,
+    Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
+    ErrorCode, GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo, ServerEvent,
+    ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
 use norte_code_store_sqlite::{SessionDirectory, SqliteStore};
@@ -62,12 +63,16 @@ struct Cli {
 enum Command {
     /// Send one prompt and stream the answer.
     Run(RunArgs),
+    /// Continue a parked, stopped or interrupted session.
+    Resume(ResumeArgs),
     /// List the models the catalogue knows.
     Models(ModelsArgs),
     /// Inspect the installed Agent Skills.
     Skills(SkillsArgs),
     /// List the sessions stored on disk.
     Sessions(SessionsArgs),
+    /// Report the provider-reported cost ledger.
+    Cost(CostArgs),
 }
 
 #[derive(Args)]
@@ -101,8 +106,42 @@ struct RunArgs {
 }
 
 #[derive(Args)]
+struct ResumeArgs {
+    /// The session key to continue.
+    session: String,
+    /// Replace the session budget before resuming.
+    #[arg(long, value_name = "LIMIT")]
+    budget: Option<f64>,
+    /// What the budget measures.
+    #[arg(long, value_name = "UNIT", value_parser = ["usd", "tokens", "requests"], default_value = "usd")]
+    budget_unit: String,
+    /// What to do when the budget is exhausted.
+    #[arg(long, value_name = "ACTION", value_parser = ["warn", "ask", "stop"], default_value = "stop")]
+    budget_action: String,
+    /// Write one JSON event per line on stdout.
+    #[arg(long)]
+    jsonl: bool,
+    /// Do not print reasoning, tool activity or usage.
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Args)]
 struct SessionsArgs {
     /// Write one JSON object per line.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct CostArgs {
+    /// Only this session, with its turns.
+    #[arg(long, value_name = "KEY")]
+    session: Option<String>,
+    /// Group by UTC day only.
+    #[arg(long)]
+    daily: bool,
+    /// Write one JSON object.
     #[arg(long)]
     json: bool,
 }
@@ -163,14 +202,17 @@ async fn run(cli: Cli) -> Result<u8, String> {
     match cli.command {
         Command::Skills(args) => skills_command(&config, &args),
         Command::Sessions(args) => sessions_command(&args).await,
+        Command::Cost(args) => cost_command(&config, &args).await,
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
                 Command::Run(args) => run_prompt(config, catalog, source, args, verbose).await,
+                Command::Resume(args) => {
+                    resume_session(config, catalog, source, args, verbose).await
+                }
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
-                Command::Skills(_) => unreachable!("skills were handled before the catalogue"),
-                Command::Sessions(_) => {
-                    unreachable!("sessions were handled before the catalogue")
+                Command::Skills(_) | Command::Sessions(_) | Command::Cost(_) => {
+                    unreachable!("these commands do not need the catalogue")
                 }
             }
         }
@@ -279,6 +321,98 @@ async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> {
     Ok(0)
 }
 
+async fn cost_command(config: &Config, args: &CostArgs) -> Result<u8, String> {
+    if !config.cost.show {
+        eprintln!("cost display is off (cost.show = false)");
+        return Ok(0);
+    }
+    let path = database_path();
+    if !path.exists() {
+        println!("no cost records yet (the database is {})", path.display());
+        return Ok(0);
+    }
+    let store = SqliteStore::open(&path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let records = store
+        .costs(args.session.as_deref())
+        .await
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    if records.is_empty() {
+        println!("no cost records yet");
+        return Ok(0);
+    }
+    let total = summarize(&records);
+    let sessions = by_session(&records);
+    let days = by_day(&records);
+    let turns = by_turn(&records);
+    if args.json {
+        let sessions: Vec<_> = sessions
+            .iter()
+            .map(|(session, summary)| serde_json::json!({"session": session, "summary": summary}))
+            .collect();
+        let days: Vec<_> = days
+            .iter()
+            .map(|(day, summary)| serde_json::json!({"day": day, "summary": summary}))
+            .collect();
+        let turns: Vec<_> = turns
+            .iter()
+            .map(|((session, turn), summary)| {
+                serde_json::json!({"session": session, "turn": turn, "summary": summary})
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "total": total,
+                "sessions": sessions,
+                "days": days,
+                "turns": turns,
+            })
+        );
+        return Ok(0);
+    }
+    let style = Style::stdout();
+    println!("{}  {}", style.bold("total"), cost_summary(&total));
+    if args.session.is_some() {
+        for ((_, turn), summary) in &turns {
+            println!("turn {turn:<4}     {}", cost_summary(summary));
+        }
+    } else if !args.daily {
+        for (session, summary) in &sessions {
+            println!(
+                "{}  {}",
+                style.bold(format!("session {}", short(session))),
+                cost_summary(summary)
+            );
+        }
+    }
+    if !args.daily && args.session.is_none() {
+        println!();
+    }
+    for (day, summary) in &days {
+        println!("{}  {}", style.bold(day), cost_summary(summary));
+    }
+    Ok(0)
+}
+
+/// One line of token counts, reported cost and missing-cost count.
+fn cost_summary(summary: &CostSummary) -> String {
+    let mut parts = vec![
+        format!("{} request(s)", summary.requests),
+        format!("{} in", human_tokens(summary.input_tokens)),
+        format!("{} out", human_tokens(summary.output_tokens)),
+    ];
+    if summary.not_reported == summary.requests {
+        parts.push("cost not reported".to_owned());
+    } else {
+        parts.push(format!("${:.6}", summary.reported_cost_usd));
+        if summary.not_reported > 0 {
+            parts.push(format!("{} not reported", summary.not_reported));
+        }
+    }
+    parts.join(" · ")
+}
+
 fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
     let user = path.or_else(user_config_path);
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -315,6 +449,7 @@ async fn load_catalogue(
     Ok((loaded.catalog, loaded.source))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_prompt(
     config: Config,
     catalog: Catalog,
@@ -355,6 +490,7 @@ async fn run_prompt(
             ))
         );
     }
+    let show_cost = config.cost.show;
     let database = database_path();
     let store = Arc::new(
         SqliteStore::open(&database)
@@ -404,9 +540,11 @@ async fn run_prompt(
         },
         quiet: args.quiet,
         verbose,
+        show_cost,
         style,
         last_char: None,
         failed: false,
+        budget_stopped: false,
         requests: 0,
         input: 0,
         output: 0,
@@ -414,6 +552,123 @@ async fn run_prompt(
         unpriced: 0,
     };
 
+    drive_turns(&service, stream, &mut renderer, style).await?;
+    if matches!(renderer.format, Format::Text)
+        && renderer.last_char.is_some_and(|last| last != '\n')
+    {
+        println!();
+    }
+    renderer.summary();
+    Ok(u8::from(renderer.failed))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn resume_session(
+    config: Config,
+    catalog: Catalog,
+    source: Source,
+    args: ResumeArgs,
+    verbose: bool,
+) -> Result<u8, String> {
+    let spec = resolve_spec(&config, &catalog, None, None)?;
+    let style = if args.jsonl {
+        Style::plain()
+    } else {
+        Style::stderr()
+    };
+    if !args.quiet && !args.jsonl {
+        eprintln!(
+            "{} {} {} {}",
+            style.magenta("◆"),
+            style.bold(format!("resume {}", short(&args.session))),
+            style.dim("·"),
+            style.dim(format!("catalogue from {}", source_label(source)))
+        );
+    }
+    let show_cost = config.cost.show;
+    let database = database_path();
+    let store = Arc::new(
+        SqliteStore::open(&database)
+            .map_err(|error| format!("could not open {}: {error}", database.display()))?,
+    );
+    let session_store: Arc<dyn norte::Store> = store.clone();
+    let blobs: Arc<dyn norte::BlobStore> = store.clone();
+    let directory: Arc<dyn SessionDirectory> = store;
+    let service = Arc::new(
+        Service::with_directory(
+            config,
+            Arc::new(catalog),
+            spec,
+            Arc::new(VendorModels),
+            session_store,
+            blobs,
+            directory,
+            DEFAULT_SYSTEM_PROMPT,
+        )
+        .await
+        .map_err(|e| e.to_string())?,
+    );
+    let mut renderer = Renderer {
+        format: if args.jsonl {
+            Format::Jsonl
+        } else {
+            Format::Text
+        },
+        quiet: args.quiet,
+        verbose,
+        show_cost,
+        style,
+        last_char: None,
+        failed: false,
+        budget_stopped: false,
+        requests: 0,
+        input: 0,
+        output: 0,
+        cost: 0.0,
+        unpriced: 0,
+    };
+    let session = SessionKey::new(args.session);
+    if let Some(limit) = args.budget {
+        if !limit.is_finite() || limit <= 0.0 {
+            return Err(format!("--budget must be a positive number, got {limit}"));
+        }
+        let unit = match args.budget_unit.as_str() {
+            "usd" => BudgetUnit::Usd,
+            "tokens" => BudgetUnit::Tokens,
+            "requests" => BudgetUnit::Requests,
+            other => return Err(format!("unknown budget unit `{other}`")),
+        };
+        let action = match args.budget_action.as_str() {
+            "warn" => BudgetAction::Warn,
+            "ask" => BudgetAction::Ask,
+            "stop" => BudgetAction::Stop,
+            other => return Err(format!("unknown budget action `{other}`")),
+        };
+        let stream = service
+            .submit(ClientRequest {
+                request_id: 1,
+                kind: ClientRequestKind::SetBudget {
+                    session: session.clone(),
+                    budget: Budget {
+                        unit,
+                        limit,
+                        action,
+                    },
+                },
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        drive_turns(&service, stream, &mut renderer, style).await?;
+    }
+    let stream = service
+        .submit(ClientRequest {
+            request_id: 2,
+            kind: ClientRequestKind::Resume {
+                session: session.clone(),
+            },
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     drive_turns(&service, stream, &mut renderer, style).await?;
     if matches!(renderer.format, Format::Text)
         && renderer.last_char.is_some_and(|last| last != '\n')
@@ -438,8 +693,52 @@ async fn drive_turns(
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
     let mut pending: VecDeque<(SessionKey, String, ApprovalChoice)> = VecDeque::new();
+    let (interrupt_tx, mut interrupt_rx) = tokio::sync::mpsc::channel::<()>(4);
+    let signal = tokio::spawn(async move {
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() || interrupt_tx.send(()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut current: Option<SessionKey> = None;
+    let mut interrupted = false;
     while let Some(mut stream) = streams.pop_front() {
-        while let Some(event) = stream.next().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                Some(()) = interrupt_rx.recv() => {
+                    let Some(session) = current.clone() else { continue };
+                    if interrupted {
+                        eprintln!("{}", style.red("interrupted"));
+                        signal.abort();
+                        return Err("interrupted".to_owned());
+                    }
+                    interrupted = true;
+                    eprintln!(
+                        "{}",
+                        style.yellow(
+                            "cancelling the running turn… (press Ctrl-C again to quit)"
+                        )
+                    );
+                    let request = ClientRequest {
+                        request_id: 0,
+                        kind: ClientRequestKind::CancelTurn { session },
+                    };
+                    if let Err(error) = service.submit(request).await {
+                        eprintln!(
+                            "{}",
+                            style.yellow(format!("warning: could not cancel the turn: {error}"))
+                        );
+                    }
+                    continue;
+                }
+                event = stream.next() => event,
+            };
+            let Some(event) = event else { break };
+            if let Some(session) = &event.session {
+                current = Some(session.clone());
+            }
             if let Some(approval) = ask_approval(&event, style, interactive) {
                 pending.push_back(approval);
             }
@@ -462,6 +761,7 @@ async fn drive_turns(
             }
         }
     }
+    signal.abort();
     Ok(())
 }
 
@@ -747,13 +1047,16 @@ enum Format {
 }
 
 /// Renders one server event to the terminal.
+#[allow(clippy::struct_excessive_bools)]
 struct Renderer {
     format: Format,
     quiet: bool,
     verbose: bool,
+    show_cost: bool,
     style: Style,
     last_char: Option<char>,
     failed: bool,
+    budget_stopped: bool,
     requests: u64,
     input: u64,
     output: u64,
@@ -856,10 +1159,12 @@ impl Renderer {
                 if let Some(output) = usage.output_tokens {
                     parts.push(format!("{} out", human_tokens(output)));
                 }
-                parts.push(match cost_usd {
-                    Some(cost) => format!("${cost:.6}"),
-                    None => "cost not reported".to_owned(),
-                });
+                if self.show_cost {
+                    parts.push(match cost_usd {
+                        Some(cost) => format!("${cost:.6}"),
+                        None => "cost not reported".to_owned(),
+                    });
+                }
                 eprintln!(
                     "  {} {}",
                     self.style.dim("↳"),
@@ -873,7 +1178,7 @@ impl Renderer {
                     );
                 }
             }
-            ServerEventKind::CostNotReported { requests } if !self.quiet => {
+            ServerEventKind::CostNotReported { requests } if !self.quiet && self.show_cost => {
                 eprintln!(
                     "  {}",
                     self.style.yellow(format!(
@@ -909,13 +1214,71 @@ impl Renderer {
             ServerEventKind::TurnFinished {
                 committed, phase, ..
             } => {
-                if !*committed {
+                if !*committed && self.budget_stopped {
+                    if !self.quiet {
+                        eprintln!(
+                            "{}",
+                            self.style.yellow(
+                                "stopped by budget; raise it and resume the session to continue"
+                            )
+                        );
+                    }
+                } else if !*committed {
                     eprintln!("{}", self.style.red("the turn did not commit"));
                     self.failed = true;
                 } else if *phase == Phase::AwaitingApproval && !self.quiet {
                     eprintln!("{}", self.style.yellow("paused: waiting for approval"));
                 }
             }
+            ServerEventKind::BudgetWarning {
+                scope,
+                unit,
+                spent,
+                limit,
+            } => {
+                if !self.quiet {
+                    eprintln!(
+                        "{} {}",
+                        self.style.yellow("budget warning:"),
+                        self.style.dim(format!(
+                            "{} {} of {} {}",
+                            scope_name(*scope),
+                            format_measure(*unit, *spent),
+                            format_measure(*unit, *limit),
+                            unit_name(*unit)
+                        ))
+                    );
+                }
+            }
+            ServerEventKind::BudgetExceeded {
+                scope,
+                unit,
+                spent,
+                limit,
+                action,
+            } => {
+                self.budget_stopped = !matches!(action, BudgetAction::Warn);
+                eprintln!(
+                    "{} {}",
+                    self.style.red("budget exceeded:"),
+                    self.style.dim(format!(
+                        "{} {} of {} {} ({})",
+                        scope_name(*scope),
+                        format_measure(*unit, *spent),
+                        format_measure(*unit, *limit),
+                        unit_name(*unit),
+                        budget_action_name(*action)
+                    ))
+                );
+            }
+            ServerEventKind::BudgetChanged { budget } if !self.quiet => match budget {
+                Some(budget) => eprintln!(
+                    "{} {}",
+                    self.style.dim("budget set:"),
+                    self.style.dim(budget_label(budget))
+                ),
+                None => eprintln!("{}", self.style.dim("budget cleared")),
+            },
             _ => {}
         }
     }
@@ -953,12 +1316,14 @@ impl Renderer {
             format!("{} in", human_tokens(self.input)),
             format!("{} out", human_tokens(self.output)),
         ];
-        if self.unpriced == self.requests {
-            parts.push("cost not reported".to_owned());
-        } else {
-            parts.push(format!("${:.6}", self.cost));
-            if self.unpriced > 0 {
-                parts.push(format!("{} not reported", self.unpriced));
+        if self.show_cost {
+            if self.unpriced == self.requests {
+                parts.push("cost not reported".to_owned());
+            } else {
+                parts.push(format!("${:.6}", self.cost));
+                if self.unpriced > 0 {
+                    parts.push(format!("{} not reported", self.unpriced));
+                }
             }
         }
         eprintln!(
@@ -1058,6 +1423,46 @@ fn short(call_id: &str) -> &str {
     call_id.get(..8).unwrap_or(call_id)
 }
 
+fn scope_name(scope: BudgetScope) -> &'static str {
+    match scope {
+        BudgetScope::Message => "message",
+        BudgetScope::Session => "session",
+        BudgetScope::GlobalDaily => "today",
+    }
+}
+
+fn unit_name(unit: BudgetUnit) -> &'static str {
+    match unit {
+        BudgetUnit::Usd => "USD",
+        BudgetUnit::Tokens => "tokens",
+        BudgetUnit::Requests => "requests",
+    }
+}
+
+fn budget_action_name(action: BudgetAction) -> &'static str {
+    match action {
+        BudgetAction::Warn => "warn",
+        BudgetAction::Ask => "ask",
+        BudgetAction::Stop => "stop",
+    }
+}
+
+fn format_measure(unit: BudgetUnit, value: f64) -> String {
+    match unit {
+        BudgetUnit::Usd => format!("${value:.6}"),
+        BudgetUnit::Tokens | BudgetUnit::Requests => format!("{value:.0}"),
+    }
+}
+
+fn budget_label(budget: &Budget) -> String {
+    format!(
+        "{} {} ({})",
+        format_measure(budget.unit, budget.limit),
+        unit_name(budget.unit),
+        budget_action_name(budget.action)
+    )
+}
+
 fn code_name(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::InvalidRequest => "invalid request",
@@ -1074,9 +1479,11 @@ fn code_name(code: ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalChoice, GrantScope, approval_request, argument_preview, parse_approval_choice,
+        ApprovalChoice, GrantScope, approval_request, argument_preview, budget_label, cost_summary,
+        parse_approval_choice,
     };
-    use norte_code_protocol::{ClientRequestKind, SessionKey};
+    use norte_code_cost::CostSummary;
+    use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
 
     #[test]
     fn approval_answers_are_parsed_leniently() {
@@ -1111,6 +1518,41 @@ mod tests {
         assert!(lines.len() <= 11);
         assert!(lines.iter().all(|line| line.chars().count() <= 121));
         assert!(lines.iter().any(|line| line.ends_with('…')));
+    }
+
+    #[test]
+    fn cost_totals_name_the_requests_without_a_reported_cost() {
+        let mixed = CostSummary {
+            requests: 2,
+            reported_cost_usd: 0.5,
+            not_reported: 1,
+            ..CostSummary::default()
+        };
+        assert_eq!(
+            cost_summary(&mixed),
+            "2 request(s) · 0 in · 0 out · $0.500000 · 1 not reported"
+        );
+        let unpriced = CostSummary {
+            requests: 2,
+            not_reported: 2,
+            ..CostSummary::default()
+        };
+        assert_eq!(
+            cost_summary(&unpriced),
+            "2 request(s) · 0 in · 0 out · cost not reported"
+        );
+    }
+
+    #[test]
+    fn budget_labels_say_what_is_measured_and_what_happens() {
+        assert_eq!(
+            budget_label(&Budget {
+                unit: BudgetUnit::Requests,
+                limit: 12.0,
+                action: BudgetAction::Stop,
+            }),
+            "12 requests (stop)"
+        );
     }
 
     #[test]
