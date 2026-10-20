@@ -52,6 +52,14 @@ in that database, so a session can be resumed after a restart. Effectful tool
 calls are journaled: if a process dies after a write or command may have run,
 the next process refuses to run that same call again rather than repeat it.
 
+When a tool needs approval, `norte-code run` prints the call and its arguments
+and asks `[y]es / [n]o / [a]lways for this session` on stdin. Approving resumes
+the same turn; input is read from the terminal, never from the model. With no
+interactive terminal the session stays parked, which is what `--jsonl` scripts
+and other clients expect. Reasoning streams in dim italic and tool, usage and
+turn summaries are colourised only when the output is a terminal; `NO_COLOR`,
+`TERM=dumb` and pipes keep it plain.
+
 ## Network
 
 The only network destinations are the configured model endpoints and the model

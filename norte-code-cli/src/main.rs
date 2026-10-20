@@ -8,6 +8,9 @@
 //! `norte-code models` lists what the catalogue knows, filtered by provider,
 //! tool calling or reasoning.
 
+mod style;
+
+use std::collections::VecDeque;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,16 +20,19 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use norte_code_agent::{
-    DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, ServiceError, VendorModels, model_list,
+    DEFAULT_SYSTEM_PROMPT, EventStream, ModelSpec, Service, ServiceError, VendorModels, model_list,
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
 use norte_code_config::{ApprovalMode, Config, user_config_path};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
-    ModelInfo, Reasoning, ReasoningInfo, ServerEvent, ServerEventKind, SessionKey,
+    GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo, ServerEvent, ServerEventKind,
+    SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
 use norte_code_store_sqlite::{SessionDirectory, SqliteStore};
+
+use crate::style::Style;
 
 #[derive(Parser)]
 #[command(
@@ -243,6 +249,9 @@ async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> {
     }
     let store = SqliteStore::open(&path)
         .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    if let Err(error) = store.repair_interrupted().await {
+        eprintln!("warning: could not repair interrupted sessions: {error}");
+    }
     let sessions = store
         .sessions()
         .await
@@ -328,12 +337,22 @@ async fn run_prompt(
             return Err(format!("--budget must be a positive number, got {limit}"));
         }
     }
+    let style = if args.jsonl {
+        Style::plain()
+    } else {
+        Style::stderr()
+    };
     if !args.quiet && !args.jsonl {
         eprintln!(
-            "· {} · catalogue from {} · approval {}",
-            spec.label(),
-            source_label(source),
-            approval_label(config.approval_mode)
+            "{} {} {} {} {}",
+            style.magenta("◆"),
+            style.bold(spec.label()),
+            style.dim("·"),
+            style.dim(format!("catalogue from {}", source_label(source))),
+            style.dim(format!(
+                "· approval {}",
+                approval_label(config.approval_mode)
+            ))
         );
     }
     let database = database_path();
@@ -375,7 +394,7 @@ async fn run_prompt(
             reasoning: args.reasoning.map(|effort| Reasoning::Effort { effort }),
         },
     };
-    let mut stream = service.submit(request).await.map_err(|e| e.to_string())?;
+    let stream = service.submit(request).await.map_err(|e| e.to_string())?;
 
     let mut renderer = Renderer {
         format: if args.jsonl {
@@ -385,19 +404,208 @@ async fn run_prompt(
         },
         quiet: args.quiet,
         verbose,
+        style,
         last_char: None,
         failed: false,
+        requests: 0,
+        input: 0,
+        output: 0,
+        cost: 0.0,
+        unpriced: 0,
     };
-    while let Some(event) = stream.next().await {
-        answer_if_asked(&service, &event).await?;
-        renderer.event(&event)?;
-    }
+
+    drive_turns(&service, stream, &mut renderer, style).await?;
     if matches!(renderer.format, Format::Text)
         && renderer.last_char.is_some_and(|last| last != '\n')
     {
         println!();
     }
+    renderer.summary();
     Ok(u8::from(renderer.failed))
+}
+
+/// Streams the primary turn, then any turns resumed by an approval.
+///
+/// A turn may park for several approvals; each decision resumes on its own
+/// stream, which can park again, so the loop drains a queue of streams.
+async fn drive_turns(
+    service: &Arc<Service>,
+    primary: EventStream,
+    renderer: &mut Renderer,
+    style: Style,
+) -> Result<(), String> {
+    let interactive = matches!(renderer.format, Format::Text) && std::io::stdin().is_terminal();
+    let mut streams: VecDeque<EventStream> = VecDeque::new();
+    streams.push_back(primary);
+    let mut pending: VecDeque<(SessionKey, String, ApprovalChoice)> = VecDeque::new();
+    while let Some(mut stream) = streams.pop_front() {
+        while let Some(event) = stream.next().await {
+            if let Some(approval) = ask_approval(&event, style, interactive) {
+                pending.push_back(approval);
+            }
+            answer_if_asked(service, &event).await?;
+            renderer.event(&event)?;
+        }
+        while let Some((session, approval, choice)) = pending.pop_front() {
+            let request = approval_request(session, approval.clone(), choice);
+            match service.submit(request).await {
+                Ok(next) => streams.push_back(next),
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        style.yellow(format!(
+                            "warning: could not resolve approval {}: {error}",
+                            short(&approval)
+                        ))
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What the human chose for a parked call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApprovalChoice {
+    /// Run this call once.
+    Once,
+    /// Run any call to this tool for the rest of the session.
+    Session,
+    /// Refuse the call.
+    Deny,
+}
+
+/// Prints an approval request and asks for a decision when stdin is a terminal.
+///
+/// Returns the decision to submit later, or `None` when the call stays parked
+/// (no interactive client) or the event is not an approval request.
+fn ask_approval(
+    event: &ServerEvent,
+    style: Style,
+    interactive: bool,
+) -> Option<(SessionKey, String, ApprovalChoice)> {
+    let ServerEventKind::ApprovalRequested {
+        approval,
+        tool,
+        call_id,
+        arguments,
+        ..
+    } = &event.kind
+    else {
+        return None;
+    };
+    let session = event.session.clone()?;
+    eprintln!();
+    eprintln!(
+        "{} {} {}",
+        style.yellow("approval required"),
+        style.bold(tool),
+        style.dim(format!("#{}", short(call_id)))
+    );
+    if let Some(arguments) = arguments {
+        for line in argument_preview(arguments) {
+            eprintln!("  {}", style.dim(line));
+        }
+    }
+    if !interactive {
+        eprintln!(
+            "  {}",
+            style.dim(
+                "not an interactive terminal; the session stays parked. Use --approval-mode \
+                 auto-edit or yolo to run without asking."
+            )
+        );
+        return None;
+    }
+    loop {
+        eprint!(
+            "{} ",
+            style.cyan("[y]es / [n]o / [a]lways for this session ›")
+        );
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let read = std::io::stdin().read_line(&mut line);
+        if read.is_err() || read.is_ok_and(|bytes| bytes == 0) {
+            return Some((session, approval.clone(), ApprovalChoice::Deny));
+        }
+        if let Some(choice) = parse_approval_choice(&line) {
+            return Some((session, approval.clone(), choice));
+        }
+        eprintln!("{}", style.dim("answer y, n or a"));
+    }
+}
+
+/// Parses one line of the approval prompt. `None` means ask again.
+fn parse_approval_choice(line: &str) -> Option<ApprovalChoice> {
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(ApprovalChoice::Once),
+        "a" | "always" => Some(ApprovalChoice::Session),
+        "n" | "no" | "" => Some(ApprovalChoice::Deny),
+        _ => None,
+    }
+}
+
+/// A compact rendering of a tool call's arguments for the approval prompt.
+fn argument_preview(arguments: &serde_json::Value) -> Vec<String> {
+    const MAX_LINES: usize = 10;
+    const MAX_WIDTH: usize = 120;
+    let compact = serde_json::to_string(arguments).unwrap_or_default();
+    if compact.chars().count() <= MAX_WIDTH {
+        return vec![compact];
+    }
+    let pretty = serde_json::to_string_pretty(arguments).unwrap_or(compact);
+    let total = pretty.lines().count();
+    let mut lines: Vec<String> = pretty
+        .lines()
+        .take(MAX_LINES)
+        .map(|line| {
+            if line.chars().count() > MAX_WIDTH {
+                let mut shortened: String = line.chars().take(MAX_WIDTH).collect();
+                shortened.push('…');
+                shortened
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    if total > MAX_LINES {
+        lines.push("…".to_owned());
+    }
+    lines
+}
+
+/// The protocol request that resolves a parked approval.
+fn approval_request(
+    session: SessionKey,
+    approval: String,
+    choice: ApprovalChoice,
+) -> ClientRequest {
+    let kind = match choice {
+        ApprovalChoice::Once => ClientRequestKind::Approve {
+            session,
+            approval,
+            arguments: None,
+            scope: None,
+            remember: None,
+        },
+        ApprovalChoice::Session => ClientRequestKind::Approve {
+            session,
+            approval,
+            arguments: None,
+            scope: Some(GrantScope::Session),
+            remember: Some(true),
+        },
+        ApprovalChoice::Deny => ClientRequestKind::Deny {
+            session,
+            approval,
+            reason: Some("denied from the command line".to_owned()),
+        },
+    };
+    ClientRequest {
+        request_id: 0,
+        kind,
+    }
 }
 
 /// Answers a `QuestionAsked` event, prompting on a terminal and leaving a note
@@ -543,8 +751,14 @@ struct Renderer {
     format: Format,
     quiet: bool,
     verbose: bool,
+    style: Style,
     last_char: Option<char>,
     failed: bool,
+    requests: u64,
+    input: u64,
+    output: u64,
+    cost: f64,
+    unpriced: u64,
 }
 
 impl Renderer {
@@ -556,9 +770,29 @@ impl Renderer {
         }
         match &event.kind {
             ServerEventKind::Delta { delta, .. } => self.delta(delta),
+            ServerEventKind::ToolStarted { .. } | ServerEventKind::ToolFinished { .. } => {
+                self.tool_event(&event.kind);
+            }
+            ServerEventKind::RequestReconstructed { .. }
+            | ServerEventKind::CostNotReported { .. } => {
+                self.usage_event(&event.kind);
+            }
+            kind => self.status_event(kind),
+        }
+        Ok(())
+    }
+
+    /// Renders tool activity: what started, and how it ended.
+    fn tool_event(&mut self, kind: &ServerEventKind) {
+        match kind {
             ServerEventKind::ToolStarted { tool, call_id, .. } => {
                 if !self.quiet {
-                    eprintln!("· {tool} ({})", short(call_id));
+                    eprintln!(
+                        "{} {} {}",
+                        self.style.dim("→"),
+                        self.style.bold(tool),
+                        self.style.dim(format!("#{}", short(call_id)))
+                    );
                 }
             }
             ServerEventKind::ToolFinished {
@@ -569,72 +803,121 @@ impl Renderer {
                 ..
             } => {
                 if !self.quiet {
-                    let outcome = if *is_error { "failed" } else { "ok" };
-                    eprintln!("· {tool} {outcome} in {duration_ms} ms");
+                    if *is_error {
+                        eprintln!(
+                            "{} {} {}",
+                            self.style.red("✗"),
+                            self.style.red(tool),
+                            self.style.dim(format!("failed in {duration_ms} ms"))
+                        );
+                    } else {
+                        eprintln!(
+                            "{} {} {}",
+                            self.style.green("✓"),
+                            tool,
+                            self.style.dim(format!("in {duration_ms} ms"))
+                        );
+                    }
                 }
                 if *is_error && self.verbose {
                     if let Some(error) = error {
-                        eprintln!("  error: {error}");
+                        eprintln!("  {}", self.style.red(error));
                     }
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Renders usage for one reconstructed request and keeps the run totals.
+    fn usage_event(&mut self, kind: &ServerEventKind) {
+        match kind {
             ServerEventKind::RequestReconstructed {
                 usage,
                 cost_usd,
                 truncated,
                 ..
             } => {
-                if !self.quiet {
-                    let mut parts = Vec::new();
-                    if let Some(input) = usage.input_tokens {
-                        parts.push(format!("{input} in"));
-                    }
-                    if let Some(output) = usage.output_tokens {
-                        parts.push(format!("{output} out"));
-                    }
-                    if let Some(cost) = cost_usd {
-                        parts.push(format!("${cost:.6}"));
-                    }
-                    if !parts.is_empty() {
-                        eprintln!("· {}", parts.join(", "));
-                    }
-                    if *truncated {
-                        eprintln!("warning: the output hit the token limit");
-                    }
+                self.requests += 1;
+                self.input += usage.input_tokens.unwrap_or(0);
+                self.output += usage.output_tokens.unwrap_or(0);
+                if let Some(cost) = cost_usd {
+                    self.cost += cost;
+                } else {
+                    self.unpriced += 1;
                 }
-            }
-            ServerEventKind::CostNotReported { requests } => {
+                if self.quiet {
+                    return;
+                }
+                let mut parts = Vec::new();
+                if let Some(input) = usage.input_tokens {
+                    parts.push(format!("{} in", human_tokens(input)));
+                }
+                if let Some(output) = usage.output_tokens {
+                    parts.push(format!("{} out", human_tokens(output)));
+                }
+                parts.push(match cost_usd {
+                    Some(cost) => format!("${cost:.6}"),
+                    None => "cost not reported".to_owned(),
+                });
                 eprintln!(
-                    "warning: {requests} request(s) carried no cost; the total is incomplete"
+                    "  {} {}",
+                    self.style.dim("↳"),
+                    self.style.dim(parts.join(" · "))
                 );
-            }
-            ServerEventKind::Error { code, message } => {
-                eprintln!("error: {message} ({})", code_name(*code));
-                self.failed = true;
-            }
-            ServerEventKind::ApprovalRequested { approval, tool, .. } => {
-                if !self.quiet {
+                if *truncated {
                     eprintln!(
-                        "approval needed for {tool} ({approval}); resume from a client that can approve"
+                        "  {}",
+                        self.style
+                            .yellow("warning: the answer hit the output limit")
                     );
                 }
             }
-            ServerEventKind::ApprovalResolved { approved, .. } => {
-                if !self.quiet {
-                    eprintln!("approval {}", if *approved { "granted" } else { "denied" });
-                }
-            }
-            ServerEventKind::TurnFinished {
-                committed: false, ..
-            } => {
-                if self.last_char.is_none() {
-                    eprintln!("norte-code: the turn ended without an answer");
-                }
-                self.failed = true;
+            ServerEventKind::CostNotReported { requests } if !self.quiet => {
+                eprintln!(
+                    "  {}",
+                    self.style.yellow(format!(
+                        "warning: {requests} request(s) carried no cost; the total is incomplete"
+                    ))
+                );
             }
             _ => {}
         }
-        Ok(())
+    }
+
+    /// Renders errors, approval outcomes and the turn's final state.
+    fn status_event(&mut self, kind: &ServerEventKind) {
+        match kind {
+            ServerEventKind::Error { code, message } => {
+                eprintln!(
+                    "{} {} {}",
+                    self.style.red("error:"),
+                    self.style.bold(message),
+                    self.style.dim(format!("({})", code_name(*code)))
+                );
+                self.failed = true;
+            }
+            ServerEventKind::ApprovalResolved { approved, .. } => {
+                if !self.quiet {
+                    if *approved {
+                        eprintln!("{}", self.style.green("✓ approval granted"));
+                    } else {
+                        eprintln!("{}", self.style.red("✗ approval denied"));
+                    }
+                }
+            }
+            ServerEventKind::TurnFinished {
+                committed, phase, ..
+            } => {
+                if !*committed {
+                    eprintln!("{}", self.style.red("the turn did not commit"));
+                    self.failed = true;
+                } else if *phase == Phase::AwaitingApproval && !self.quiet {
+                    eprintln!("{}", self.style.yellow("paused: waiting for approval"));
+                }
+            }
+            _ => {}
+        }
     }
 
     fn delta(&mut self, delta: &Delta) {
@@ -648,15 +931,41 @@ impl Renderer {
             }
             Delta::Reasoning { text, .. } => {
                 if !self.quiet {
-                    eprint!("{text}");
+                    eprint!("{}", self.style.thought(text));
+                    let _ = std::io::stderr().flush();
                 }
             }
             Delta::Refusal { text, .. } => {
-                eprintln!("refusal: {text}");
+                eprintln!("{}", self.style.red(format!("refusal: {text}")));
                 self.failed = true;
             }
             Delta::ToolArguments { .. } | Delta::Media { .. } => {}
         }
+    }
+
+    /// Writes the run's cost summary, if the run made any requests.
+    fn summary(&self) {
+        if matches!(self.format, Format::Jsonl) || self.quiet || self.requests == 0 {
+            return;
+        }
+        let mut parts = vec![
+            format!("{} request(s)", self.requests),
+            format!("{} in", human_tokens(self.input)),
+            format!("{} out", human_tokens(self.output)),
+        ];
+        if self.unpriced == self.requests {
+            parts.push("cost not reported".to_owned());
+        } else {
+            parts.push(format!("${:.6}", self.cost));
+            if self.unpriced > 0 {
+                parts.push(format!("{} not reported", self.unpriced));
+            }
+        }
+        eprintln!(
+            "{} {}",
+            self.style.dim("──"),
+            self.style.dim(parts.join(" · "))
+        );
     }
 }
 
@@ -759,5 +1068,72 @@ fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Provider => "provider",
         ErrorCode::Internal => "internal",
         ErrorCode::Unsupported => "unsupported",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ApprovalChoice, GrantScope, approval_request, argument_preview, parse_approval_choice,
+    };
+    use norte_code_protocol::{ClientRequestKind, SessionKey};
+
+    #[test]
+    fn approval_answers_are_parsed_leniently() {
+        assert_eq!(parse_approval_choice("y"), Some(ApprovalChoice::Once));
+        assert_eq!(parse_approval_choice(" YES "), Some(ApprovalChoice::Once));
+        assert_eq!(parse_approval_choice("A"), Some(ApprovalChoice::Session));
+        assert_eq!(
+            parse_approval_choice("always"),
+            Some(ApprovalChoice::Session)
+        );
+        assert_eq!(parse_approval_choice("n"), Some(ApprovalChoice::Deny));
+        assert_eq!(parse_approval_choice(""), Some(ApprovalChoice::Deny));
+        assert_eq!(parse_approval_choice("maybe"), None);
+    }
+
+    #[test]
+    fn short_arguments_stay_on_one_line() {
+        let arguments = serde_json::json!({"path": "src/main.rs"});
+        assert_eq!(
+            argument_preview(&arguments),
+            vec![r#"{"path":"src/main.rs"}"#.to_owned()]
+        );
+    }
+
+    #[test]
+    fn long_arguments_are_bounded() {
+        let arguments = serde_json::json!({
+            "path": "src/main.rs",
+            "content": "x".repeat(500),
+        });
+        let lines = argument_preview(&arguments);
+        assert!(lines.len() <= 11);
+        assert!(lines.iter().all(|line| line.chars().count() <= 121));
+        assert!(lines.iter().any(|line| line.ends_with('…')));
+    }
+
+    #[test]
+    fn always_grants_the_session_and_deny_carries_a_reason() {
+        let session = SessionKey::new("s");
+        let always = approval_request(
+            session.clone(),
+            "approval".to_owned(),
+            ApprovalChoice::Session,
+        );
+        match always.kind {
+            ClientRequestKind::Approve {
+                scope, remember, ..
+            } => {
+                assert!(matches!(scope, Some(GrantScope::Session)));
+                assert_eq!(remember, Some(true));
+            }
+            other => panic!("expected an approval, got {other:?}"),
+        }
+        let deny = approval_request(session, "approval".to_owned(), ApprovalChoice::Deny);
+        match deny.kind {
+            ClientRequestKind::Deny { reason, .. } => assert!(reason.is_some()),
+            other => panic!("expected a denial, got {other:?}"),
+        }
     }
 }

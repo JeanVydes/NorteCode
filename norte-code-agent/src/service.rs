@@ -164,6 +164,7 @@ impl Service {
             directory,
             system_prompt,
         )?;
+        service.directory.repair_interrupted().await?;
         service.load_sessions().await?;
         service.effects.load().await?;
         Ok(service)
@@ -249,8 +250,10 @@ impl Service {
         let stored = self.directory.sessions().await?;
         let catalog = self.catalog();
         let mut records = Vec::with_capacity(stored.len());
+        let mut repaired = Vec::new();
         for entry in stored {
             let key = SessionKey::new(entry.key.clone());
+            let stored_phase = entry.phase.clone();
             let spec = match ModelSpec::from_catalog(&self.config, &catalog, &entry.model, None) {
                 Ok(spec) => spec,
                 Err(error) => {
@@ -265,8 +268,33 @@ impl Service {
             };
             // Norte's store is the authority on phase: a parked tool or
             // approval committed it, while the directory snapshot may predate
-            // the park.
+            // the park. `streaming` is the exception: no process is streaming
+            // a session it just loaded, so a hard kill left it behind. Put the
+            // store back to idle and rewrite the directory row.
+            let mut needs_repair = stored_phase == "streaming";
             let phase = match self.store.load(entry.north).await {
+                Ok(session) if session.phase == norte::Phase::Streaming => {
+                    needs_repair = true;
+                    let commit = norte::Commit {
+                        session_id: entry.north,
+                        expected_version: Some(session.version),
+                        nodes: Vec::new(),
+                        head: session.head,
+                        phase: norte::Phase::Idle,
+                        turn: session.turn,
+                        queue: session.queue.clone(),
+                        grants: session.grants.clone(),
+                        metadata: Some(session.metadata.clone()),
+                    };
+                    if let Err(error) = self.store.commit(commit).await {
+                        tracing::warn!(
+                            session = %entry.key,
+                            %error,
+                            "could not mark an interrupted session idle"
+                        );
+                    }
+                    norte_code_protocol::Phase::Idle
+                }
                 Ok(session) => to_phase(session.phase),
                 Err(error) => {
                     tracing::warn!(
@@ -274,10 +302,11 @@ impl Service {
                         %error,
                         "could not read the session phase; using the directory copy"
                     );
-                    match entry.phase.as_str() {
-                        "streaming" => norte_code_protocol::Phase::Streaming,
+                    match stored_phase.as_str() {
                         "awaiting_tool" => norte_code_protocol::Phase::AwaitingTool,
                         "awaiting_approval" => norte_code_protocol::Phase::AwaitingApproval,
+                        // `streaming` cannot survive a process; everything
+                        // else starts idle.
                         _ => norte_code_protocol::Phase::Idle,
                     }
                 }
@@ -307,11 +336,19 @@ impl Service {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
             };
-            records.push((key, record));
+            records.push((key.clone(), record));
+            if needs_repair {
+                repaired.push(key);
+            }
         }
-        let mut sessions = self.lock_sessions();
-        for (key, record) in records {
-            sessions.insert(key, record);
+        {
+            let mut sessions = self.lock_sessions();
+            for (key, record) in records {
+                sessions.insert(key, record);
+            }
+        }
+        for key in &repaired {
+            self.persist(key).await?;
         }
         Ok(())
     }
@@ -841,23 +878,22 @@ impl Service {
         // A resumable park: after a restart the engine will not re-emit the
         // pending approvals, so surface them from the store before the turn.
         let restored: Vec<ServerEvent> = if state.phase == norte::Phase::AwaitingApproval {
-            engine
-                .pending_approvals(nid)
-                .await?
-                .into_iter()
-                .map(|record| {
-                    ServerEvent::new(
-                        request_id,
-                        Some(key.clone()),
-                        ServerEventKind::ApprovalRequested {
-                            turn,
-                            approval: record.id.to_string(),
-                            call_id: record.call_id.to_string(),
-                            tool: record.tool.to_string(),
-                        },
-                    )
-                })
-                .collect()
+            let mut restored = Vec::new();
+            for record in engine.pending_approvals(nid).await? {
+                let arguments = call_arguments(&engine, nid, record.call_id).await;
+                restored.push(ServerEvent::new(
+                    request_id,
+                    Some(key.clone()),
+                    ServerEventKind::ApprovalRequested {
+                        turn,
+                        approval: record.id.to_string(),
+                        call_id: record.call_id.to_string(),
+                        tool: record.tool.to_string(),
+                        arguments,
+                    },
+                ));
+            }
+            restored
         } else {
             Vec::new()
         };
@@ -1086,12 +1122,16 @@ impl Service {
                 call_id,
                 tool,
                 ..
-            } => Some(ServerEventKind::ApprovalRequested {
-                turn: stats.turn,
-                approval: approval.to_string(),
-                call_id: call_id.to_string(),
-                tool: tool.to_string(),
-            }),
+            } => {
+                let arguments = call_arguments(engine, nid, *call_id).await;
+                Some(ServerEventKind::ApprovalRequested {
+                    turn: stats.turn,
+                    approval: approval.to_string(),
+                    call_id: call_id.to_string(),
+                    tool: tool.to_string(),
+                    arguments,
+                })
+            }
             EngineEvent::ApprovalGranted { approval, .. } => {
                 Some(ServerEventKind::ApprovalResolved {
                     approval: approval.to_string(),
@@ -1744,6 +1784,21 @@ fn to_usage(usage: &Usage) -> norte_code_protocol::Usage {
     }
 }
 
+/// The arguments a pending call would run with, for showing a human what they
+/// are approving. Missing history is not an error: the fields are optional.
+async fn call_arguments(
+    engine: &Engine,
+    session: SessionId,
+    call_id: CallId,
+) -> Option<serde_json::Value> {
+    let history = engine.history(session).await.ok()?;
+    history
+        .iter()
+        .flat_map(|message| message.tool_calls())
+        .find(|call| call.call_id == call_id)
+        .map(|call| call.arguments.clone())
+}
+
 fn to_phase(phase: norte::Phase) -> norte_code_protocol::Phase {
     match phase {
         norte::Phase::Streaming => norte_code_protocol::Phase::Streaming,
@@ -2211,13 +2266,21 @@ mod tests {
         )
         .await;
         let session = first[0].session.clone().expect("session");
-        let approval = first
+        let (approval, arguments) = first
             .iter()
             .find_map(|event| match &event.kind {
-                ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+                ServerEventKind::ApprovalRequested {
+                    approval,
+                    arguments,
+                    ..
+                } => Some((approval.clone(), arguments.clone())),
                 _ => None,
             })
             .expect("approval request");
+        assert_eq!(
+            arguments.expect("approval arguments")["path"],
+            target.display().to_string()
+        );
         assert!(first.iter().any(|event| matches!(
             event.kind,
             ServerEventKind::TurnFinished {

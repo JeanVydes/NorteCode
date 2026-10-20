@@ -116,6 +116,16 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn delete_session(&self, key: &str) -> Result<()>;
+    /// Marks stored phases that cannot survive a process as idle.
+    ///
+    /// `streaming` describes a live turn; a hard kill leaves it behind, and no
+    /// process is streaming that session after a restart. Returns how many rows
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    async fn repair_interrupted(&self) -> Result<usize>;
     /// The durable question for a call, if one was recorded.
     ///
     /// # Errors
@@ -217,6 +227,18 @@ impl SessionDirectory for InMemoryDirectory {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(key);
         Ok(())
+    }
+
+    async fn repair_interrupted(&self) -> Result<usize> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut repaired = 0;
+        for session in sessions.values_mut() {
+            if session.phase == "streaming" {
+                "idle".clone_into(&mut session.phase);
+                repaired += 1;
+            }
+        }
+        Ok(repaired)
     }
 
     async fn question(&self, call_id: &str) -> Result<Option<StoredQuestion>> {
@@ -910,21 +932,57 @@ impl BlobStore for SqliteStore {
 #[async_trait]
 impl SessionDirectory for SqliteStore {
     async fn sessions(&self) -> Result<Vec<StoredSession>> {
-        let rows: Vec<String> = self
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            String,
+        )> = self
             .run(|connection| {
                 let mut statement = connection
-                    .prepare("SELECT data FROM logical_sessions ORDER BY created_at DESC")
+                    .prepare(
+                        "SELECT key, north, title, model, created_at, phase, stats
+                         FROM logical_sessions ORDER BY created_at DESC",
+                    )
                     .map_err(Fault::from)?;
                 let mapped = statement
-                    .query_map([], |row| row.get(0))
+                    .query_map([], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    })
                     .map_err(Fault::from)?;
                 mapped
-                    .collect::<rusqlite::Result<Vec<String>>>()
+                    .collect::<rusqlite::Result<Vec<_>>>()
                     .map_err(Fault::from)
             })
             .await?;
-        rows.iter()
-            .map(|data| decode(data, "stored session").map_err(Error::from))
+        rows.into_iter()
+            .map(|(key, north, title, model, created_at, phase, stats)| {
+                Ok(StoredSession {
+                    key,
+                    north: north.parse()?,
+                    title,
+                    model,
+                    created_at: created_at.parse().map_err(|error: chrono::ParseError| {
+                        Fault::Corrupt {
+                            what: "stored session".to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?,
+                    phase,
+                    stats: decode(&stats, "session stats")?,
+                })
+            })
             .collect()
     }
 
@@ -964,6 +1022,18 @@ impl SessionDirectory for SqliteStore {
                 .execute("DELETE FROM logical_sessions WHERE key = ?1", params![key])
                 .map_err(Fault::from)?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn repair_interrupted(&self) -> Result<usize> {
+        self.run(|connection| {
+            connection
+                .execute(
+                    "UPDATE logical_sessions SET phase = 'idle' WHERE phase = 'streaming'",
+                    [],
+                )
+                .map_err(Fault::from)
         })
         .await
     }
@@ -1127,6 +1197,27 @@ mod tests {
     async fn passes_nortes_store_conformance() {
         let store = SqliteStore::in_memory().expect("open");
         norte_testing::store_conformance(&store).await;
+    }
+
+    #[tokio::test]
+    async fn interrupted_streaming_sessions_become_idle() {
+        let store = SqliteStore::in_memory().expect("open");
+        store
+            .save_session(&StoredSession {
+                key: "session".to_owned(),
+                north: SessionId::new(),
+                title: None,
+                model: "provider/model".to_owned(),
+                created_at: Utc::now(),
+                phase: "streaming".to_owned(),
+                stats: serde_json::json!({}),
+            })
+            .await
+            .expect("save");
+        assert_eq!(store.repair_interrupted().await.expect("repair"), 1);
+        let sessions = store.sessions().await.expect("sessions");
+        assert_eq!(sessions[0].phase, "idle");
+        assert_eq!(store.repair_interrupted().await.expect("repair"), 0);
     }
 
     #[tokio::test]

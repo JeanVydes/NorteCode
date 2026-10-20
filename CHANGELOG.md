@@ -70,5 +70,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   was still at intent when the process started is refused on replay instead of
   being run a second time. Norte guarantees commit-at-most-once, not
   effect-at-most-once.
+- Interactive approvals on stdin: a parked call prints the tool and a bounded
+  preview of its arguments, then accepts `y`/`n`/`a` (yes, no, always for this
+  session). The resumed turn is folded back into the same render loop, so a
+  turn can park and resume several times. Piped stdin still leaves the session
+  parked rather than guessing.
+- A styled text renderer: model and tool names, outcomes, usage and errors use
+  colour when the destination is a terminal, reasoning is dim italic, and the
+  run ends with a compact request/token/cost summary. `NO_COLOR`, `TERM=dumb`,
+  `CLICOLOR=0`, pipes and `--jsonl` all keep the output plain.
+- Interrupted sessions are repaired on startup: Norte's `streaming` phase
+  describes a live process, so a session left there by a hard kill is committed
+  back to `idle` instead of being listed as streaming forever.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

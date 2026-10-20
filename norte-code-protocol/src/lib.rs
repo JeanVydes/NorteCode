@@ -291,6 +291,9 @@ pub enum ServerEventKind {
         call_id: String,
         /// The tool.
         tool: String,
+        /// The arguments the tool would run with, when they can be recovered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<serde_json::Value>,
     },
     /// A parked call was approved or denied.
     ApprovalResolved {
@@ -771,5 +774,27 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.session.expect("session").as_str(), "s");
+    }
+
+    #[test]
+    fn an_approval_without_arguments_still_deserializes() {
+        let json = r#"{
+            "request_id": 1,
+            "session": "s",
+            "kind": {
+                "event": "approval_requested",
+                "turn": 1,
+                "approval": "a",
+                "call_id": "c",
+                "tool": "write"
+            }
+        }"#;
+        let event: ServerEvent = serde_json::from_str(json).expect("deserialize");
+        match event.kind {
+            ServerEventKind::ApprovalRequested { arguments, .. } => {
+                assert!(arguments.is_none());
+            }
+            other => panic!("expected an approval, got {other:?}"),
+        }
     }
 }
