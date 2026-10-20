@@ -93,6 +93,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   rules live in the user config. The resumed turn is folded back into the same
   render loop, so a turn can park and resume several times. Piped stdin still
   leaves the session parked rather than guessing.
+- Interactive chat commands: `/help`, `/compact`, `/refresh`, `/allow <tool>
+  [session|global]` and `/deny <tool> [session|global]`. Rules default to the
+  session and are stored with it; `global` writes the user config and replaces
+  the opposite rule. An allow rule revokes a previous deny without another
+  pending call. `/refresh` re-scans the skill roots so the next turn registers
+  the new tools.
 - A styled text renderer: model and tool names, outcomes, usage and errors use
   colour when the destination is a terminal, reasoning streams in its own dim
   gutter instead of mixing with the answer, and the run ends with a compact
@@ -139,5 +145,55 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Vendor request extensions via `--extension KEY=JSON` or the config
   `extensions` map, keyed `<wire-family>:<field>`. OpenRouter upstream routing
   works through `openai.chat:provider.order`.
+- Local request telemetry: a `requests` table in SQLite records every provider
+  attempt with session and model, prompt/output/cache tokens, tools called,
+  latency to first output and total, reasoning, reported cost, status and
+  metadata. `norte-code telemetry` rolls the rows up by hour, day, month, year
+  or total, with top providers, models and sessions. Nothing leaves the machine.
+- Compaction at a safe boundary: when the provider-reported context crosses
+  `compaction.threshold`, Norte Code summarises the old conversation and seeds a
+  fresh Norte session with the summary, the todo list and the last
+  `keep_recent` messages. `compaction.trigger` selects `idle` (the default,
+  compact at a turn boundary) or `eager` (compact at the first safe
+  model-request boundary inside a turn, after a complete tool result). Tool
+  calls are never split from their results, eager never runs while an approval
+  is pending and runs at most once per turn, the old session is kept for audit,
+  the new session id is shown, and the summary request enters the cost ledger
+  and budgets. `/compact` in the interactive prompt triggers the same path on
+  demand; a failed summary leaves history unchanged.
+- Project instructions: an `AGENTS.md` in the workspace root is appended to the
+  system prompt of every new session. Only a regular file is read, the read is
+  capped at 64 KiB, and the text is treated as repository guidance that does
+  not override the user's request, the approvals or the budgets. `--debug` shows
+  the file and its size.
+- Bounded retries for transient provider failures (rate limits, overload,
+  server and transport errors). The wait honours the provider's `retry_after`,
+  capped by `retry.max_delay_ms`, and falls back to `retry.backoff_ms` with
+  exponential growth when the provider gives no hint. A retry resumes the same
+  session instead of resending the user's message, permanent failures (quota,
+  authentication, malformed requests) are not retried, and
+  `retry.max_attempts: 0` disables retries. Clients see a `RetryScheduled`
+  event with the attempt, the delay and the reason.
+- Optional command sandbox (`tools.sandbox`): `command` runs through bubblewrap
+  on Linux or `sandbox-exec` on macOS with the workspace writable, the rest of
+  the filesystem read-only, a private `/tmp` and no network unless enabled.
+  `--sandbox`, `--no-sandbox` and `--sandbox-network on|off` override the config
+  for one run or resume; the network option needs the sandbox and conflicts with
+  `--no-sandbox`. Approvals and the effect journal keep the original command,
+  the panel adds a `[bwrap]`/`[seatbelt]` badge, and a missing platform binary
+  fails closed instead of running unsandboxed. Request telemetry rows record
+  whether the sandbox was on and whether it allowed network, and `--debug` shows
+  the effective sandbox state.
+- A lost store race is reported as a conflict with a resume hint instead of a
+  provider error. The session version is an optimistic-concurrency token, not a
+  message count; a turn that loses the race did not commit.
+- The per-request footer now includes answer tokens per second, total duration,
+  first-token latency and the tools that request called, alongside the existing
+  input/output, cache-read share, input:output ratio and reported cost.
+  `--quiet` still hides all usage lines.
+- The per-request token rate is answer tokens from the first delta to the end
+  of the request. The wait for the first token is reported separately as
+  latency, and a single final burst falls back to the whole duration instead of
+  dividing by a sliver.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

@@ -73,6 +73,9 @@ pub enum ServiceError {
     /// An approval rule could not be read or written.
     #[error("approval: {0}")]
     Approval(String),
+    /// Compaction could not produce a safe summary.
+    #[error("compaction: {0}")]
+    Compaction(String),
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),

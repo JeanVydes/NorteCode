@@ -18,6 +18,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use norte::{
@@ -37,7 +38,7 @@ use norte_code_protocol::{
     ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
-use norte_code_store_sqlite::{SessionDirectory, SqliteStore};
+use norte_code_store_sqlite::{RequestRecord, SessionDirectory, SqliteStore};
 use tokio::sync::mpsc;
 
 use crate::style::Style;
@@ -84,6 +85,8 @@ enum Command {
     Sessions(SessionsArgs),
     /// Report the provider-reported cost ledger.
     Cost(CostArgs),
+    /// Report local request telemetry: counts, tokens, cache, tools and latency.
+    Telemetry(TelemetryArgs),
 }
 
 #[derive(Args)]
@@ -113,6 +116,9 @@ struct RunArgs {
     /// The used-context fraction that triggers compaction, in (0, 1].
     #[arg(long, value_name = "FRACTION")]
     compaction_threshold: Option<f64>,
+    /// Sandbox overrides for this run.
+    #[command(flatten)]
+    sandbox: SandboxOptions,
     /// A reasoning setting: `auto`, `off`, or an effort such as `low`.
     #[arg(long, value_name = "SETTING")]
     reasoning: Option<String>,
@@ -159,6 +165,9 @@ struct ResumeArgs {
     /// The used-context fraction that triggers compaction, in (0, 1].
     #[arg(long, value_name = "FRACTION")]
     compaction_threshold: Option<f64>,
+    /// Sandbox overrides for this resume.
+    #[command(flatten)]
+    sandbox: SandboxOptions,
     /// Stop after this many model iterations; keeps the config's limit when
     /// omitted.
     #[arg(long, value_name = "N")]
@@ -177,6 +186,58 @@ struct ResumeArgs {
     interactive: bool,
 }
 
+/// Flags that override the command sandbox for one run or resume.
+#[derive(Args)]
+struct SandboxOptions {
+    /// Run commands inside the OS sandbox, overriding `tools.sandbox.enabled`.
+    #[arg(long, conflicts_with = "no_sandbox")]
+    sandbox: bool,
+    /// Run commands without the OS sandbox, overriding `tools.sandbox.enabled`.
+    #[arg(long, conflicts_with_all = ["sandbox", "sandbox_network"])]
+    no_sandbox: bool,
+    /// Let the sandbox use the network: `on` or `off`.
+    #[arg(
+        long,
+        value_name = "ON|OFF",
+        value_parser = ["on", "off"],
+        conflicts_with = "no_sandbox"
+    )]
+    sandbox_network: Option<String>,
+}
+
+impl SandboxOptions {
+    /// Applies the flags over the loaded config.
+    fn apply(&self, config: &mut Config) -> Result<(), String> {
+        if self.sandbox && self.no_sandbox {
+            return Err("--sandbox cannot be combined with --no-sandbox".to_owned());
+        }
+        if self.no_sandbox && self.sandbox_network.is_some() {
+            return Err("--sandbox-network cannot be combined with --no-sandbox".to_owned());
+        }
+        if self.sandbox {
+            config.tools.sandbox.enabled = true;
+        }
+        if self.no_sandbox {
+            config.tools.sandbox.enabled = false;
+        }
+        if let Some(network) = self.sandbox_network.as_deref() {
+            if !config.tools.sandbox.enabled {
+                return Err(
+                    "--sandbox-network needs the sandbox; pass --sandbox or set \
+                     tools.sandbox.enabled"
+                        .to_owned(),
+                );
+            }
+            config.tools.sandbox.network = match network {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("unknown sandbox network setting `{other}`")),
+            };
+        }
+        Ok(())
+    }
+}
+
 #[derive(Args)]
 struct SessionsArgs {
     /// Write one JSON object per line.
@@ -192,6 +253,25 @@ struct CostArgs {
     /// Group by UTC day only.
     #[arg(long)]
     daily: bool,
+    /// Write one JSON object.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct TelemetryArgs {
+    /// Only this session key.
+    #[arg(long, value_name = "KEY")]
+    session: Option<String>,
+    /// Only this provider id.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
+    /// Only this model id.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<String>,
+    /// The time bucket for the series.
+    #[arg(long, value_name = "BUCKET", value_parser = ["hour", "day", "month", "year", "total"], default_value = "day")]
+    bucket: String,
     /// Write one JSON object.
     #[arg(long)]
     json: bool,
@@ -256,6 +336,7 @@ async fn run(cli: Cli) -> Result<u8, String> {
         Command::Skills(args) => skills_command(&config, &args),
         Command::Sessions(args) => sessions_command(&args).await,
         Command::Cost(args) => cost_command(&config, &args).await,
+        Command::Telemetry(args) => telemetry_command(&args).await,
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
@@ -266,7 +347,10 @@ async fn run(cli: Cli) -> Result<u8, String> {
                     resume_session(config, catalog, source, args, verbose, debug, user_config).await
                 }
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
-                Command::Skills(_) | Command::Sessions(_) | Command::Cost(_) => {
+                Command::Skills(_)
+                | Command::Sessions(_)
+                | Command::Cost(_)
+                | Command::Telemetry(_) => {
                     unreachable!("these commands do not need the catalogue")
                 }
             }
@@ -478,6 +562,282 @@ fn cost_summary(summary: &CostSummary) -> String {
     parts.join(" · ")
 }
 
+/// Counts and sums one slice of the request telemetry.
+#[derive(Default, Clone)]
+struct RequestSummary {
+    requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    reasoning_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    cache_hits: u64,
+    tool_calls: u64,
+    cost_usd: f64,
+    unpriced: u64,
+    errors: u64,
+    cancelled: u64,
+    durations: Vec<u64>,
+}
+
+impl RequestSummary {
+    fn add(&mut self, record: &RequestRecord) {
+        self.requests += 1;
+        self.input_tokens += record.input_tokens.unwrap_or(0);
+        self.output_tokens += record.output_tokens.unwrap_or(0);
+        self.reasoning_tokens += record.reasoning_tokens.unwrap_or(0);
+        self.cache_read_tokens += record.cache_read_tokens.unwrap_or(0);
+        self.cache_write_tokens += record.cache_write_tokens.unwrap_or(0);
+        self.cache_hits += u64::from(record.cache_hit);
+        self.tool_calls += u64::try_from(record.tool_calls.len()).unwrap_or(u64::MAX);
+        if let Some(cost) = record.cost_usd {
+            self.cost_usd += cost;
+        } else {
+            self.unpriced += 1;
+        }
+        match record.status.as_str() {
+            "ok" => {}
+            "cancelled" => self.cancelled += 1,
+            _ => self.errors += 1,
+        }
+        self.durations.push(record.duration_ms);
+    }
+
+    fn average_ms(&self) -> u64 {
+        if self.requests == 0 {
+            return 0;
+        }
+        self.durations.iter().sum::<u64>() / self.requests
+    }
+
+    fn p95_ms(&mut self) -> u64 {
+        if self.durations.is_empty() {
+            return 0;
+        }
+        self.durations.sort_unstable();
+        let index = (self.durations.len() * 95 / 100).min(self.durations.len() - 1);
+        self.durations[index]
+    }
+
+    fn cost_label(&self) -> String {
+        if self.requests == 0 {
+            return "no requests".to_owned();
+        }
+        if self.unpriced == self.requests {
+            return "cost not reported".to_owned();
+        }
+        if self.unpriced > 0 {
+            return format!("${:.6} · {} not reported", self.cost_usd, self.unpriced);
+        }
+        format!("${:.6}", self.cost_usd)
+    }
+
+    fn line(&mut self) -> String {
+        let mut parts = vec![
+            format!("{} req", self.requests),
+            format!("{} in", human_tokens(self.input_tokens)),
+            format!("{} out", human_tokens(self.output_tokens)),
+        ];
+        if self.requests > 0 && self.cache_hits > 0 {
+            parts.push(format!(
+                "cache {} hit",
+                percent_label(self.cache_hits, self.requests)
+            ));
+        }
+        if self.tool_calls > 0 {
+            parts.push(format!("{} tool(s)", self.tool_calls));
+        }
+        parts.push(format!(
+            "latency {} avg / {} p95",
+            duration_label(self.average_ms()),
+            duration_label(self.p95_ms())
+        ));
+        parts.push(self.cost_label());
+        if self.errors + self.cancelled > 0 {
+            parts.push(format!("{} error(s)", self.errors + self.cancelled));
+        }
+        parts.join(" · ")
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn json(&mut self) -> serde_json::Value {
+        serde_json::json!({
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cache_hits": self.cache_hits,
+            "cache_hit_rate": if self.requests == 0 { 0.0 } else { self.cache_hits as f64 / self.requests as f64 },
+            "tool_calls": self.tool_calls,
+            "cost_usd": self.cost_usd,
+            "unpriced": self.unpriced,
+            "errors": self.errors,
+            "cancelled": self.cancelled,
+            "average_ms": self.average_ms(),
+            "p95_ms": self.p95_ms(),
+        })
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn duration_label(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{:.1}m", ms as f64 / 60_000.0)
+    } else if ms >= 1_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn bucket_label(at: DateTime<Utc>, bucket: &str) -> String {
+    match bucket {
+        "hour" => at.format("%Y-%m-%d %H:00").to_string(),
+        "month" => at.format("%Y-%m").to_string(),
+        "year" => at.format("%Y").to_string(),
+        "total" => "total".to_owned(),
+        _ => at.format("%Y-%m-%d").to_string(),
+    }
+}
+
+fn top(groups: &BTreeMap<String, RequestSummary>) -> Vec<(&String, &RequestSummary)> {
+    let mut top: Vec<_> = groups.iter().collect();
+    top.sort_by(|left, right| {
+        right
+            .1
+            .requests
+            .cmp(&left.1.requests)
+            .then_with(|| left.0.cmp(right.0))
+    });
+    top
+}
+
+#[allow(clippy::too_many_lines)]
+async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String> {
+    let path = database_path();
+    if !path.exists() {
+        println!(
+            "no request telemetry yet (the database is {})",
+            path.display()
+        );
+        return Ok(0);
+    }
+    let store = SqliteStore::open(&path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let records = store
+        .requests(args.session.as_deref())
+        .await
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|record| args.provider.as_ref().is_none_or(|p| &record.provider == p))
+        .filter(|record| args.model.as_ref().is_none_or(|m| &record.model == m))
+        .collect();
+    if records.is_empty() {
+        println!("no matching request telemetry");
+        return Ok(0);
+    }
+    let mut total = RequestSummary::default();
+    let mut buckets: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    let mut providers: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    let mut models: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    for record in &records {
+        total.add(record);
+        buckets
+            .entry(bucket_label(record.started_at, &args.bucket))
+            .or_default()
+            .add(record);
+        providers
+            .entry(record.provider.clone())
+            .or_default()
+            .add(record);
+        models
+            .entry(format!("{}/{}", record.provider, record.model))
+            .or_default()
+            .add(record);
+        sessions
+            .entry(record.session.clone())
+            .or_default()
+            .add(record);
+    }
+    if args.json {
+        let mut total_json = total.clone();
+        let bucket_json: Vec<_> = buckets
+            .iter_mut()
+            .map(|(bucket, summary)| {
+                serde_json::json!({
+                    "bucket": bucket,
+                    "summary": summary.json(),
+                })
+            })
+            .collect();
+        let provider_json: Vec<_> = top(&providers)
+            .into_iter()
+            .map(|(provider, summary)| {
+                let mut summary = summary.clone();
+                serde_json::json!({"provider": provider, "summary": summary.json()})
+            })
+            .collect();
+        let model_json: Vec<_> = top(&models)
+            .into_iter()
+            .map(|(model, summary)| {
+                let mut summary = summary.clone();
+                serde_json::json!({"model": model, "summary": summary.json()})
+            })
+            .collect();
+        let session_json: Vec<_> = top(&sessions)
+            .into_iter()
+            .map(|(session, summary)| {
+                let mut summary = summary.clone();
+                serde_json::json!({"session": session, "summary": summary.json()})
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "bucket": args.bucket,
+                "total": total_json.json(),
+                "series": bucket_json,
+                "providers": provider_json,
+                "models": model_json,
+                "sessions": session_json,
+            })
+        );
+        return Ok(0);
+    }
+    let style = Style::stdout();
+    println!("{}  {}", style.bold("total"), total.line());
+    println!();
+    println!("{}", style.bold(format!("by {}", args.bucket)));
+    for (bucket, summary) in &mut buckets {
+        println!("  {bucket:<16}  {}", summary.line());
+    }
+    if args.session.is_none() {
+        println!();
+        println!("{}", style.bold("top providers"));
+        for (provider, summary) in top(&providers).into_iter().take(10) {
+            let mut summary = summary.clone();
+            println!("  {provider:<16}  {}", summary.line());
+        }
+        println!();
+        println!("{}", style.bold("top models"));
+        for (model, summary) in top(&models).into_iter().take(10) {
+            let mut summary = summary.clone();
+            println!("  {model:<40}  {}", summary.line());
+        }
+        println!();
+        println!("{}", style.bold("sessions"));
+        for (session, summary) in top(&sessions).into_iter().take(20) {
+            let mut summary = summary.clone();
+            println!("  {}  {}", short(session), summary.line());
+        }
+    }
+    Ok(0)
+}
+
 fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
     let user = path.or_else(user_config_path);
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -566,6 +926,7 @@ async fn run_prompt(
         }
         config.compaction.threshold = threshold;
     }
+    args.sandbox.apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     let reasoning = args
@@ -754,6 +1115,7 @@ async fn resume_session(
         }
         config.compaction.threshold = threshold;
     }
+    args.sandbox.apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     if args.interactive && args.jsonl {
@@ -910,6 +1272,54 @@ async fn resume_session(
 
 /// Reads and sends messages until the human exits, a turn parks or the budget
 /// stops the session.
+/// Parses `/allow` and `/deny` into `(allow, tool, global)`.
+///
+/// The scope is optional and defaults to the current session. Anything that is
+/// not one of these commands returns `None`, so an ordinary message that starts
+/// with `/` is still sent to the model.
+fn parse_approval_command(text: &str) -> Option<Result<(bool, String, bool), String>> {
+    let (allow, rest) = text
+        .strip_prefix("/allow")
+        .map(|rest| (true, rest))
+        .or_else(|| text.strip_prefix("/deny").map(|rest| (false, rest)))?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let command = if allow { "/allow" } else { "/deny" };
+    let mut parts = rest.split_whitespace();
+    let Some(tool) = parts.next() else {
+        return Some(Err(format!("usage: {command} <tool> [session|global]")));
+    };
+    let scope = parts.next().unwrap_or("session");
+    if parts.next().is_some() {
+        return Some(Err(format!("usage: {command} <tool> [session|global]")));
+    }
+    let global = match scope {
+        "session" => false,
+        "global" => true,
+        other => {
+            return Some(Err(format!(
+                "unknown scope `{other}`; use session or global"
+            )));
+        }
+    };
+    Some(Ok((allow, tool.to_owned(), global)))
+}
+
+fn print_chat_help(style: Style) {
+    eprintln!("{}", style.bold("chat commands"));
+    eprintln!("  /help                     show this list");
+    eprintln!("  /compact                  summarise and continue on a new session");
+    eprintln!("  /allow <tool> [session|global]  allow without asking");
+    eprintln!("  /deny <tool> [session|global]   refuse without asking");
+    eprintln!("  /refresh                  re-scan the skills and their tools");
+    eprintln!("  /exit, /quit              leave the chat");
+    eprintln!(
+        "{}",
+        style.dim("  scope defaults to session; global writes the user config")
+    );
+}
+
 async fn interactive_loop(
     service: &Arc<Service>,
     mut session: Option<SessionKey>,
@@ -922,7 +1332,7 @@ async fn interactive_loop(
     if !renderer.quiet {
         eprintln!(
             "{}",
-            style.dim("interactive: type /exit, quit or press Ctrl-D to leave")
+            style.dim("interactive: /help for commands; /compact, /allow, /deny, /refresh, /exit")
         );
     }
     let mut request_id = 2_u64;
@@ -930,6 +1340,64 @@ async fn interactive_loop(
         let Some(text) = read_repl_line(input, style).await? else {
             break;
         };
+        if text == "/help" {
+            print_chat_help(style);
+            continue;
+        }
+        if text == "/compact" {
+            let Some(current) = session.clone() else {
+                eprintln!(
+                    "{}",
+                    style.yellow("there is no session to compact yet; send a message first")
+                );
+                continue;
+            };
+            let stream = service
+                .submit(ClientRequest {
+                    request_id,
+                    kind: ClientRequestKind::Compact { session: current },
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            request_id = request_id.saturating_add(1);
+            let outcome = drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
+            session = outcome.session.or(session);
+            renderer.ensure_newline();
+            if outcome.parked || renderer.budget_stopped {
+                break;
+            }
+            continue;
+        }
+        if let Some(rule) = parse_approval_command(&text) {
+            match rule {
+                Ok((allow, tool, global)) => {
+                    match service
+                        .set_approval_rule(session.as_ref(), &tool, allow, global)
+                        .await
+                    {
+                        Ok(()) => {
+                            let verb = if allow { "allowed" } else { "denied" };
+                            let scope = if global {
+                                "globally"
+                            } else {
+                                "for this session"
+                            };
+                            eprintln!("{}", style.green(format!("{verb} `{tool}` {scope}")));
+                        }
+                        Err(error) => {
+                            eprintln!("{}", style.red(format!("could not set the rule: {error}")));
+                        }
+                    }
+                }
+                Err(message) => eprintln!("{}", style.yellow(message)),
+            }
+            continue;
+        }
+        if text == "/refresh" {
+            let count = service.refresh_skills();
+            eprintln!("{}", style.green(format!("skills refreshed: {count}")));
+            continue;
+        }
         let stream = service
             .submit(ClientRequest {
                 request_id,
@@ -1191,6 +1659,7 @@ async fn ask_approval(
         tool,
         call_id,
         arguments,
+        sandbox,
         ..
     } = &event.kind
     else {
@@ -1208,6 +1677,9 @@ async fn ask_approval(
         style.tool(tool),
         style.dim(format!("#{}", short(call_id)))
     );
+    if let Some(sandbox) = sandbox {
+        eprintln!("  {}", style.green(format!("[{sandbox}] sandboxed")));
+    }
     if let Some(arguments) = arguments {
         for line in argument_preview(tool, arguments) {
             match line {
@@ -2270,12 +2742,18 @@ impl Renderer {
     }
 
     /// Renders usage for one reconstructed request and keeps the run totals.
+    #[allow(clippy::too_many_lines)]
     fn usage_event(&mut self, kind: &ServerEventKind) {
         match kind {
             ServerEventKind::RequestReconstructed {
                 usage,
                 cost_usd,
                 truncated,
+                duration_ms,
+                first_token_ms,
+                tokens_per_second,
+                cache_hit,
+                tools,
                 ..
             } => {
                 self.requests += 1;
@@ -2306,17 +2784,37 @@ impl Renderer {
                 if let Some(output) = usage.output_tokens {
                     parts.push(self.style.dim(format!("{} out", human_tokens(output))));
                 }
+                if let Some(rate) = tokens_per_second {
+                    parts.push(self.style.dim(format!("{rate:.1} tok/s")));
+                }
+                if *duration_ms > 0 {
+                    parts.push(
+                        self.style
+                            .dim(format!("took {}", duration_label(*duration_ms))),
+                    );
+                }
+                if let Some(first) = first_token_ms {
+                    parts.push(
+                        self.style
+                            .dim(format!("latency {}", duration_label(*first))),
+                    );
+                }
                 if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
                     parts.push(
                         self.style
                             .dim(format!("cache {}", percent_label(cache, input))),
                     );
+                } else if *cache_hit {
+                    parts.push(self.style.dim("cache hit".to_owned()));
                 }
                 if let (Some(input), Some(output)) = (usage.input_tokens, usage.output_tokens) {
                     parts.push(
                         self.style
                             .dim(format!("in:out {}", token_ratio(input, output))),
                     );
+                }
+                if !tools.is_empty() {
+                    parts.push(self.style.dim(format!("tools {}", Self::tool_list(tools))));
                 }
                 if self.show_cost {
                     parts.push(match cost_usd {
@@ -2354,9 +2852,67 @@ impl Renderer {
     #[allow(clippy::too_many_lines)]
     fn status_event(&mut self, kind: &ServerEventKind) {
         match kind {
+            ServerEventKind::CompactionStarted { reason } => {
+                if !self.quiet {
+                    self.end_blocks();
+                    eprintln!(
+                        "{} {}",
+                        self.style.dim("compacting context…"),
+                        self.style.faint(format!("({reason})"))
+                    );
+                }
+            }
+            ServerEventKind::CompactionFinished {
+                compacted,
+                north_session,
+                error,
+            } => {
+                self.end_blocks();
+                if *compacted {
+                    let detail = if self.quiet {
+                        String::new()
+                    } else {
+                        north_session
+                            .as_ref()
+                            .map_or_else(String::new, |id| format!(" · new session {}", short(id)))
+                    };
+                    eprintln!(
+                        "{}{}",
+                        self.style.green("✓ context compacted"),
+                        self.style.dim(detail)
+                    );
+                } else {
+                    let detail = error
+                        .as_ref()
+                        .map_or_else(String::new, |reason| format!(": {reason}"));
+                    eprintln!(
+                        "{}{}",
+                        self.style
+                            .yellow("compaction did not happen; history is unchanged"),
+                        self.style.dim(detail)
+                    );
+                }
+            }
             ServerEventKind::TurnStarted { .. } => {
                 self.cancelled = false;
                 self.reasoning_placeholder = false;
+            }
+            ServerEventKind::RetryScheduled {
+                attempt,
+                delay_ms,
+                reason,
+                ..
+            } => {
+                self.end_blocks();
+                if !self.quiet {
+                    eprintln!(
+                        "{} {} {}",
+                        self.style.yellow("retrying"),
+                        self.style
+                            .dim(format!("in {delay_ms} ms (attempt {attempt}):")),
+                        self.style.faint(reason)
+                    );
+                }
             }
             ServerEventKind::Error { code, message } => {
                 self.end_blocks();
@@ -2491,6 +3047,23 @@ impl Renderer {
             }
             Delta::ToolArguments { .. } | Delta::Media { .. } => {}
         }
+    }
+
+    /// Formats the tools of one request, with counts, in first-seen order.
+    fn tool_list(tools: &[String]) -> String {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for tool in tools {
+            if let Some((_, count)) = counts.iter_mut().find(|(name, _)| *name == tool) {
+                *count += 1;
+            } else {
+                counts.push((tool, 1));
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(tool, count)| format!("{tool} ×{count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Formats how many times each tool ran, in name order.
@@ -2700,15 +3273,37 @@ fn debug_start(
         ))
     );
     eprintln!("{}", style.dim(format!("  iterations {iterations}")));
+    let sandbox = if configuration.tools.sandbox.enabled {
+        let name = if cfg!(target_os = "linux") {
+            "bwrap"
+        } else if cfg!(target_os = "macos") {
+            "seatbelt"
+        } else {
+            "unsupported platform"
+        };
+        format!(
+            "enabled · {name} · network {}",
+            if configuration.tools.sandbox.network {
+                "on"
+            } else {
+                "off"
+            }
+        )
+    } else {
+        "disabled".to_owned()
+    };
+    eprintln!("{}", style.dim(format!("  sandbox    {sandbox}")));
     eprintln!(
         "{}",
         style.dim(format!(
             "  compaction {}{}",
             configuration.compaction.threshold,
-            if configuration.compaction.enabled {
-                ""
-            } else {
+            if !configuration.compaction.enabled {
                 " (disabled)"
+            } else if configuration.compaction.trigger == "eager" {
+                " (eager)"
+            } else {
+                " (idle)"
             }
         ))
     );
@@ -2749,6 +3344,16 @@ fn debug_prompt_size(style: Style, service: &Service, source: &str) {
                 "{}",
                 style.dim(format!("  system     {} chars", size.system_chars))
             );
+            if let Some(path) = &size.project_path {
+                eprintln!(
+                    "{}",
+                    style.dim(format!(
+                        "  project    {} chars ({})",
+                        size.project_chars,
+                        path.display()
+                    ))
+                );
+            }
             eprintln!(
                 "{}",
                 style.dim(format!("  tools      {} chars", size.tool_chars))
@@ -3186,13 +3791,77 @@ fn code_name(code: ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, apply_extensions,
-        approval_request, argument_preview, budget_label, compose_selection, cost_summary,
-        parse_approval_choice, parse_reasoning_setting, parse_selection, select_system_prompt,
+        ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions,
+        apply_extensions, approval_request, argument_preview, budget_label, compose_selection,
+        cost_summary, parse_approval_choice, parse_approval_command, parse_reasoning_setting,
+        parse_selection, select_system_prompt,
     };
     use clap::Parser;
+    use norte_code_config::Config;
     use norte_code_cost::CostSummary;
     use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
+
+    #[test]
+    fn sandbox_flags_override_the_config_and_respect_the_network() {
+        let mut config = Config::default();
+        assert!(!config.tools.sandbox.enabled);
+        let enable = SandboxOptions {
+            sandbox: true,
+            no_sandbox: false,
+            sandbox_network: None,
+        };
+        enable.apply(&mut config).expect("enable");
+        assert!(config.tools.sandbox.enabled);
+
+        let networked = SandboxOptions {
+            sandbox: false,
+            no_sandbox: false,
+            sandbox_network: Some("on".to_owned()),
+        };
+        networked.apply(&mut config).expect("network on");
+        assert!(config.tools.sandbox.network);
+
+        let offline = SandboxOptions {
+            sandbox: false,
+            no_sandbox: false,
+            sandbox_network: Some("off".to_owned()),
+        };
+        offline.apply(&mut config).expect("network off");
+        assert!(!config.tools.sandbox.network);
+
+        let disable = SandboxOptions {
+            sandbox: false,
+            no_sandbox: true,
+            sandbox_network: None,
+        };
+        disable.apply(&mut config).expect("disable");
+        assert!(!config.tools.sandbox.enabled);
+    }
+
+    #[test]
+    fn sandbox_flags_reject_contradictions_and_a_network_without_a_sandbox() {
+        let mut config = Config::default();
+        let both = SandboxOptions {
+            sandbox: true,
+            no_sandbox: true,
+            sandbox_network: None,
+        };
+        assert!(both.apply(&mut config).is_err());
+
+        let denied = SandboxOptions {
+            sandbox: false,
+            no_sandbox: true,
+            sandbox_network: Some("on".to_owned()),
+        };
+        assert!(denied.apply(&mut config).is_err());
+
+        let orphan = SandboxOptions {
+            sandbox: false,
+            no_sandbox: false,
+            sandbox_network: Some("on".to_owned()),
+        };
+        assert!(orphan.apply(&mut config).is_err());
+    }
 
     #[test]
     fn the_system_prompt_prefers_the_flag_then_the_config() {
@@ -3285,6 +3954,36 @@ mod tests {
             compose_selection(&options, &[0, 1], Some("something custom")),
             "Read, Write, something custom"
         );
+    }
+
+    #[test]
+    fn chat_approval_commands_default_to_the_session_and_reject_bad_scopes() {
+        assert_eq!(
+            parse_approval_command("/allow command"),
+            Some(Ok((true, "command".to_owned(), false)))
+        );
+        assert_eq!(
+            parse_approval_command("/deny write global"),
+            Some(Ok((false, "write".to_owned(), true)))
+        );
+        assert_eq!(
+            parse_approval_command("/allow skill_script session"),
+            Some(Ok((true, "skill_script".to_owned(), false)))
+        );
+        assert!(parse_approval_command("/allow").expect("command").is_err());
+        assert!(
+            parse_approval_command("/deny write everywhere")
+                .expect("command")
+                .is_err()
+        );
+        assert!(
+            parse_approval_command("/allow write global extra")
+                .expect("command")
+                .is_err()
+        );
+        assert_eq!(parse_approval_command("/allowance"), None);
+        assert_eq!(parse_approval_command("/other command"), None);
+        assert_eq!(parse_approval_command("hello"), None);
     }
 
     #[test]

@@ -305,6 +305,11 @@ pub enum ServerEventKind {
         /// The arguments the tool would run with, when they can be recovered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments: Option<serde_json::Value>,
+        /// The OS sandbox that will wrap the call, when one will. The arguments
+        /// still describe the command the model asked for, not the sandbox
+        /// launcher.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox: Option<String>,
     },
     /// A parked call was approved or denied.
     ApprovalResolved {
@@ -325,6 +330,21 @@ pub enum ServerEventKind {
         cost_usd: Option<f64>,
         /// Whether the answer's text was truncated by the output budget.
         truncated: bool,
+        /// How long the request took, including streaming.
+        #[serde(default)]
+        duration_ms: u64,
+        /// Time to the first answer token, when one arrived.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_token_ms: Option<u64>,
+        /// Answer tokens per second of generation, when both are known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_per_second: Option<f64>,
+        /// Whether the provider served any prompt token from cache.
+        #[serde(default)]
+        cache_hit: bool,
+        /// Tools the model called while producing this message, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
     },
     /// A commit landed.
     Committed {
@@ -334,12 +354,22 @@ pub enum ServerEventKind {
         version: u64,
     },
     /// Compaction started.
-    CompactionStarted,
+    CompactionStarted {
+        /// Why it started: `manual` or `threshold`.
+        #[serde(default)]
+        reason: String,
+    },
     /// Compaction finished, possibly with a new Norte session behind the same
     /// logical one.
     CompactionFinished {
         /// Whether compaction happened.
         compacted: bool,
+        /// The new Norte session id, when one was created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        north_session: Option<String>,
+        /// Why it failed, when it did. History is unchanged in that case.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// A budget crossed its warning threshold.
     BudgetWarning {
@@ -456,6 +486,21 @@ pub enum ServerEventKind {
         phase: Phase,
         /// Whether the turn committed an assistant message.
         committed: bool,
+    },
+    /// A transient request failed and the host will retry it.
+    ///
+    /// The retry resumes the same session, so the user's message is not sent
+    /// again. No `TurnFinished` follows until the retry succeeds or the host
+    /// gives up.
+    RetryScheduled {
+        /// The turn.
+        turn: u64,
+        /// The retry that will run, starting at 1.
+        attempt: u32,
+        /// How long the host will wait before it retries.
+        delay_ms: u64,
+        /// Why the request failed, written for the person reading it.
+        reason: String,
     },
     /// A request failed.
     Error {
@@ -817,6 +862,35 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.session.expect("session").as_str(), "s");
+    }
+
+    #[test]
+    fn a_retry_event_round_trips() {
+        let event = ServerEvent::new(
+            1,
+            Some(SessionKey::new("s")),
+            ServerEventKind::RetryScheduled {
+                turn: 3,
+                attempt: 2,
+                delay_ms: 1_500,
+                reason: "rate limited".to_owned(),
+            },
+        );
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"retry_scheduled\""));
+        let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
+        match back.kind {
+            ServerEventKind::RetryScheduled {
+                turn,
+                attempt,
+                delay_ms,
+                reason,
+            } => {
+                assert_eq!((turn, attempt, delay_ms), (3, 2, 1_500));
+                assert_eq!(reason, "rate limited");
+            }
+            other => panic!("expected a retry, got {other:?}"),
+        }
     }
 
     #[test]

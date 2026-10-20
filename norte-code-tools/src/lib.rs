@@ -451,6 +451,20 @@ impl TodoState {
         self.lock().get(&session).cloned().unwrap_or_default()
     }
 
+    /// Moves the list from one Norte session to another, as compaction does.
+    pub fn carry(&self, from: SessionId, to: SessionId) {
+        let mut lists = self.lock();
+        if let Some(todos) = lists.get(&Some(from)).cloned() {
+            lists.insert(Some(to), todos);
+        }
+    }
+
+    /// The list rendered as the model sees it.
+    #[must_use]
+    pub fn text(&self, session: Option<SessionId>) -> String {
+        render_todos(&self.list(session))
+    }
+
     fn replace(&self, session: Option<SessionId>, todos: Vec<TodoItem>) {
         self.lock().insert(session, todos);
     }

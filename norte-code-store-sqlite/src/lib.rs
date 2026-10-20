@@ -63,6 +63,95 @@ pub struct StoredSession {
     /// Tools this session refuses without asking again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied_tools: Vec<String>,
+    /// Tools this session allows without asking again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
+    /// The Norte session this one was compacted from, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_from: Option<SessionId>,
+}
+
+/// One provider request, with everything a local telemetry report needs.
+///
+/// A request row is written even when the provider fails, so the report counts
+/// attempts rather than only billed answers. Token and cost fields stay
+/// optional: `None` means the provider did not report that counter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RequestRecord {
+    /// A stable request id.
+    pub id: String,
+    /// The logical session key.
+    pub session: String,
+    /// The Norte session the request belongs to.
+    pub north_session: String,
+    /// The turn inside that session.
+    pub turn: u64,
+    /// The provider id.
+    pub provider: String,
+    /// The model id.
+    pub model: String,
+    /// When the request started.
+    pub started_at: DateTime<Utc>,
+    /// How long the request took, including streaming.
+    pub duration_ms: u64,
+    /// Time to the first answer delta, when one arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_ms: Option<u64>,
+    /// Time to the last answer delta, when one arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_token_ms: Option<u64>,
+    /// Prompt tokens the provider reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Answer tokens the provider reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Reasoning tokens the provider reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    /// Prompt tokens served from the provider cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt tokens written to the provider cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// A local bytes/4 estimate, used only when usage is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_input_tokens: Option<u64>,
+    /// Whether the provider served any prompt token from cache.
+    pub cache_hit: bool,
+    /// Tools the model called in this request, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
+    /// The reasoning setting the request carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Whether the command sandbox was enabled for this request's run.
+    #[serde(default)]
+    pub sandbox: bool,
+    /// Whether that sandbox allowed network access.
+    #[serde(default)]
+    pub sandbox_network: bool,
+    /// The generation parameters the request carried.
+    #[serde(default)]
+    pub params: Value,
+    /// The vendor extensions the request carried.
+    #[serde(default)]
+    pub extensions: Value,
+    /// Anything else the host measured.
+    #[serde(default)]
+    pub metadata: Value,
+    /// The cost the provider reported, in USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Why generation stopped, as the wire named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    /// `ok`, `error` or `cancelled`.
+    pub status: String,
+    /// The provider or transport error, when the request failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A question a turn is parked on, durable across a restart.
@@ -151,6 +240,20 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn costs(&self, session: Option<&str>) -> Result<Vec<CostRecord>>;
+    /// Records one provider request for local telemetry.
+    ///
+    /// The id is the key, so replaying the same request replaces its row.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    async fn record_request(&self, record: &RequestRecord) -> Result<()>;
+    /// Every telemetry request, optionally only one session's, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    async fn requests(&self, session: Option<&str>) -> Result<Vec<RequestRecord>>;
     /// The durable question for a call, if one was recorded.
     ///
     /// # Errors
@@ -207,6 +310,7 @@ pub struct InMemoryDirectory {
     questions: Mutex<BTreeMap<String, StoredQuestion>>,
     effects: Mutex<BTreeMap<(SessionId, CallId), EffectEntry>>,
     costs: Mutex<BTreeMap<(String, u64), CostRecord>>,
+    requests: Mutex<BTreeMap<String, RequestRecord>>,
 }
 
 #[derive(Debug)]
@@ -288,6 +392,27 @@ impl SessionDirectory for InMemoryDirectory {
                 right.session.as_str(),
                 right.index,
             ))
+        });
+        Ok(records)
+    }
+
+    async fn record_request(&self, record: &RequestRecord) -> Result<()> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(record.id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn requests(&self, session: Option<&str>) -> Result<Vec<RequestRecord>> {
+        let requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut records: Vec<RequestRecord> = requests
+            .values()
+            .filter(|record| session.is_none_or(|key| record.session == key))
+            .cloned()
+            .collect();
+        records.sort_by(|left, right| {
+            (left.started_at, left.id.as_str()).cmp(&(right.started_at, right.id.as_str()))
         });
         Ok(records)
     }
@@ -441,6 +566,19 @@ impl SqliteStore {
             "multiple",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(&connection, "requests", "last_token_ms", "INTEGER")?;
+        ensure_column(
+            &connection,
+            "requests",
+            "sandbox",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "requests",
+            "sandbox_network",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -574,6 +712,40 @@ CREATE TABLE IF NOT EXISTS costs (
 );
 CREATE INDEX IF NOT EXISTS costs_recorded_at ON costs(recorded_at);
 CREATE INDEX IF NOT EXISTS costs_session ON costs(session);
+CREATE TABLE IF NOT EXISTS requests (
+    id                      TEXT PRIMARY KEY,
+    session                 TEXT NOT NULL,
+    north_session           TEXT NOT NULL,
+    turn                    INTEGER NOT NULL,
+    provider                TEXT NOT NULL,
+    model                   TEXT NOT NULL,
+    started_at              TEXT NOT NULL,
+    duration_ms             INTEGER NOT NULL,
+    first_token_ms          INTEGER,
+    last_token_ms           INTEGER,
+    input_tokens            INTEGER,
+    output_tokens           INTEGER,
+    reasoning_tokens        INTEGER,
+    cache_read_tokens       INTEGER,
+    cache_write_tokens      INTEGER,
+    estimated_input_tokens  INTEGER,
+    cache_hit               INTEGER NOT NULL,
+    tool_calls              TEXT NOT NULL,
+    reasoning               TEXT,
+    params                  TEXT NOT NULL,
+    extensions              TEXT NOT NULL,
+    metadata                TEXT NOT NULL,
+    cost_usd                REAL,
+    finish_reason           TEXT,
+    status                  TEXT NOT NULL,
+    error                   TEXT,
+    sandbox                 INTEGER NOT NULL DEFAULT 0,
+    sandbox_network         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS requests_started_at ON requests(started_at);
+CREATE INDEX IF NOT EXISTS requests_session ON requests(session);
+CREATE INDEX IF NOT EXISTS requests_provider ON requests(provider);
+CREATE INDEX IF NOT EXISTS requests_model ON requests(model);
 ";
 
 /// The internal error a blocking section can raise.
@@ -1103,6 +1275,8 @@ impl SessionDirectory for SqliteStore {
                         phase,
                         stats: decode(&stats, "session stats")?,
                         denied_tools: extra.denied_tools,
+                        allowed_tools: extra.allowed_tools,
+                        compacted_from: extra.compacted_from,
                     })
                 },
             )
@@ -1302,6 +1476,264 @@ impl SessionDirectory for SqliteStore {
                             reason: error.to_string(),
                         }
                     })?,
+                })
+            })
+            .collect()
+    }
+
+    async fn record_request(&self, record: &RequestRecord) -> Result<()> {
+        let record = record.clone();
+        self.run(move |connection| {
+            connection
+                .execute(
+                    "INSERT INTO requests (
+                         id, session, north_session, turn, provider, model, started_at,
+                         duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
+                         reasoning_tokens, cache_read_tokens, cache_write_tokens,
+                         estimated_input_tokens, cache_hit, tool_calls, reasoning,
+                         params, extensions, metadata, cost_usd, finish_reason, status, error,
+                         sandbox, sandbox_network
+                     ) VALUES (
+                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
+                         ?28
+                     )
+                     ON CONFLICT(id) DO UPDATE SET
+                         session = excluded.session,
+                         north_session = excluded.north_session,
+                         turn = excluded.turn,
+                         provider = excluded.provider,
+                         model = excluded.model,
+                         started_at = excluded.started_at,
+                         duration_ms = excluded.duration_ms,
+                         first_token_ms = excluded.first_token_ms,
+                         last_token_ms = excluded.last_token_ms,
+                         input_tokens = excluded.input_tokens,
+                         output_tokens = excluded.output_tokens,
+                         reasoning_tokens = excluded.reasoning_tokens,
+                         cache_read_tokens = excluded.cache_read_tokens,
+                         cache_write_tokens = excluded.cache_write_tokens,
+                         estimated_input_tokens = excluded.estimated_input_tokens,
+                         cache_hit = excluded.cache_hit,
+                         tool_calls = excluded.tool_calls,
+                         reasoning = excluded.reasoning,
+                         params = excluded.params,
+                         extensions = excluded.extensions,
+                         metadata = excluded.metadata,
+                         cost_usd = excluded.cost_usd,
+                         finish_reason = excluded.finish_reason,
+                         status = excluded.status,
+                         error = excluded.error,
+                         sandbox = excluded.sandbox,
+                         sandbox_network = excluded.sandbox_network",
+                    params![
+                        record.id,
+                        record.session,
+                        record.north_session,
+                        sqlite_u64(record.turn),
+                        record.provider,
+                        record.model,
+                        record.started_at.to_rfc3339(),
+                        sqlite_u64(record.duration_ms),
+                        record.first_token_ms.map(sqlite_u64),
+                        record.last_token_ms.map(sqlite_u64),
+                        record.input_tokens.map(sqlite_u64),
+                        record.output_tokens.map(sqlite_u64),
+                        record.reasoning_tokens.map(sqlite_u64),
+                        record.cache_read_tokens.map(sqlite_u64),
+                        record.cache_write_tokens.map(sqlite_u64),
+                        record.estimated_input_tokens.map(sqlite_u64),
+                        i64::from(record.cache_hit),
+                        encode(&record.tool_calls, "request tool calls")?,
+                        record.reasoning,
+                        encode(&record.params, "request params")?,
+                        encode(&record.extensions, "request extensions")?,
+                        encode(&record.metadata, "request metadata")?,
+                        record.cost_usd,
+                        record.finish_reason,
+                        record.status,
+                        record.error,
+                        i64::from(record.sandbox),
+                        i64::from(record.sandbox_network),
+                    ],
+                )
+                .map_err(Fault::from)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn requests(&self, session: Option<&str>) -> Result<Vec<RequestRecord>> {
+        let session = session.map(str::to_owned);
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            i64,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<f64>,
+            Option<String>,
+            String,
+            Option<String>,
+            i64,
+            i64,
+        )> = self
+            .run(move |connection| {
+                let sql = if session.is_some() {
+                    "SELECT id, session, north_session, turn, provider, model, started_at,
+                            duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
+                            reasoning_tokens, cache_read_tokens, cache_write_tokens,
+                            estimated_input_tokens, cache_hit, tool_calls, reasoning,
+                            params, extensions, metadata, cost_usd, finish_reason, status, error,
+                            sandbox, sandbox_network
+                     FROM requests WHERE session = ?1 ORDER BY started_at, id"
+                } else {
+                    "SELECT id, session, north_session, turn, provider, model, started_at,
+                            duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
+                            reasoning_tokens, cache_read_tokens, cache_write_tokens,
+                            estimated_input_tokens, cache_hit, tool_calls, reasoning,
+                            params, extensions, metadata, cost_usd, finish_reason, status, error,
+                            sandbox, sandbox_network
+                     FROM requests ORDER BY started_at, id"
+                };
+                let mut statement = connection.prepare(sql).map_err(Fault::from)?;
+                let map = |row: &rusqlite::Row<'_>| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                        row.get(14)?,
+                        row.get(15)?,
+                        row.get(16)?,
+                        row.get(17)?,
+                        row.get(18)?,
+                        row.get(19)?,
+                        row.get(20)?,
+                        row.get(21)?,
+                        row.get(22)?,
+                        row.get(23)?,
+                        row.get(24)?,
+                        row.get(25)?,
+                        row.get(26)?,
+                        row.get(27)?,
+                    ))
+                };
+                let mapped = if let Some(session) = session.as_deref() {
+                    statement
+                        .query_map(params![session], map)
+                        .map_err(Fault::from)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(Fault::from)?
+                } else {
+                    statement
+                        .query_map([], map)
+                        .map_err(Fault::from)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(Fault::from)?
+                };
+                Ok(mapped)
+            })
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let (
+                    id,
+                    session,
+                    north_session,
+                    turn,
+                    provider,
+                    model,
+                    started_at,
+                    duration_ms,
+                    first_token_ms,
+                    last_token_ms,
+                    input_tokens,
+                    output_tokens,
+                    reasoning_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    estimated_input_tokens,
+                    cache_hit,
+                    tool_calls,
+                    reasoning,
+                    params,
+                    extensions,
+                    metadata,
+                    cost_usd,
+                    finish_reason,
+                    status,
+                    error,
+                    sandbox,
+                    sandbox_network,
+                ) = row;
+                let token = |value: Option<i64>, what: &str| {
+                    value.map(|value| rust_u64(value, what)).transpose()
+                };
+                Ok(RequestRecord {
+                    id,
+                    session,
+                    north_session,
+                    turn: rust_u64(turn, "request turn")?,
+                    provider,
+                    model,
+                    started_at: started_at.parse().map_err(|error: chrono::ParseError| {
+                        Fault::Corrupt {
+                            what: "request started_at".to_owned(),
+                            reason: error.to_string(),
+                        }
+                    })?,
+                    duration_ms: rust_u64(duration_ms, "request duration")?,
+                    first_token_ms: token(first_token_ms, "first token")?,
+                    last_token_ms: token(last_token_ms, "last token")?,
+                    input_tokens: token(input_tokens, "input tokens")?,
+                    output_tokens: token(output_tokens, "output tokens")?,
+                    reasoning_tokens: token(reasoning_tokens, "reasoning tokens")?,
+                    cache_read_tokens: token(cache_read_tokens, "cache read tokens")?,
+                    cache_write_tokens: token(cache_write_tokens, "cache write tokens")?,
+                    estimated_input_tokens: token(
+                        estimated_input_tokens,
+                        "estimated input tokens",
+                    )?,
+                    cache_hit: cache_hit != 0,
+                    tool_calls: decode(&tool_calls, "request tool calls")?,
+                    reasoning,
+                    sandbox: sandbox != 0,
+                    sandbox_network: sandbox_network != 0,
+                    params: decode(&params, "request params")?,
+                    extensions: decode(&extensions, "request extensions")?,
+                    metadata: decode(&metadata, "request metadata")?,
+                    cost_usd,
+                    finish_reason,
+                    status,
+                    error,
                 })
             })
             .collect()
@@ -1510,6 +1942,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_rows_keep_the_sandbox_flags() {
+        let store = SqliteStore::in_memory().expect("open");
+        let record = RequestRecord {
+            id: "request".to_owned(),
+            session: "session".to_owned(),
+            north_session: SessionId::new().to_string(),
+            turn: 1,
+            provider: "provider".to_owned(),
+            model: "model".to_owned(),
+            started_at: Utc::now(),
+            duration_ms: 10,
+            first_token_ms: Some(1),
+            last_token_ms: Some(9),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            reasoning_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            estimated_input_tokens: None,
+            cache_hit: false,
+            tool_calls: vec!["command".to_owned()],
+            reasoning: None,
+            sandbox: true,
+            sandbox_network: true,
+            params: serde_json::Value::Null,
+            extensions: serde_json::Value::Null,
+            metadata: serde_json::Value::Null,
+            cost_usd: None,
+            finish_reason: None,
+            status: "ok".to_owned(),
+            error: None,
+        };
+        store.record_request(&record).await.expect("record");
+        let rows = store.requests(Some("session")).await.expect("requests");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].sandbox);
+        assert!(rows[0].sandbox_network);
+        assert_eq!(rows[0].tool_calls, ["command"]);
+    }
+
+    #[tokio::test]
     async fn interrupted_streaming_sessions_become_idle() {
         let store = SqliteStore::in_memory().expect("open");
         store
@@ -1522,6 +1995,8 @@ mod tests {
                 phase: "streaming".to_owned(),
                 stats: serde_json::json!({}),
                 denied_tools: Vec::new(),
+                allowed_tools: Vec::new(),
+                compacted_from: None,
             })
             .await
             .expect("save");
@@ -1639,6 +2114,8 @@ mod tests {
             phase: "idle".to_owned(),
             stats: serde_json::json!({"cost": 0.5}),
             denied_tools: vec!["command".to_owned()],
+            allowed_tools: vec!["write".to_owned()],
+            compacted_from: None,
         };
         store.save_session(&session).await.expect("save");
         assert_eq!(store.sessions().await.expect("list"), vec![session.clone()]);

@@ -22,8 +22,54 @@ Norte Code never forks Norte.
 | `norte-code-cost` | The cost ledger and budget evaluation. Provider-reported cost only. |
 | `norte-code-tools` | The tools Norte does not ship: `glob`, `list_dir`, `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | A Norte `Store` + `BlobStore` over SQLite, plus Norte Code's own tables. |
-| `norte-code-cli` | The headless `norte-code` command. |
-| `norte-code-tui` | The interactive terminal UI. |
+| `norte-code-cli` | The `norte-code` command and its interactive prompt. |
+| `norte-code-tui` | The interactive terminal UI (not implemented yet). |
+
+## Architecture
+
+```text
+CLI / TUI
+   │  ClientRequest { request_id, kind }
+   ▼
+norte-code-protocol          versioned serde wire; no Norte types
+   ▼
+norte-code-agent (Service)
+   ├─ config, catalogue, cost, skills, approvals, sandbox
+   ├─ Norte Engine ── one model, one Norte session, policies, tools
+   └─ agent loop ──── iterations, approvals, compaction, retries
+   ▼
+norte-code-store-sqlite
+   ├─ Norte sessions and nodes
+   ├─ logical sessions, rules, approvals, questions, effects
+   ├─ costs (one row per billed request)
+   └─ requests (one row per provider attempt)
+```
+
+The service maps Norte's events into the protocol once; clients never see a
+Norte ID or type. [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the turn
+lifecycle, compaction, model switching, the sandbox, retries, telemetry and
+the provider cost probes.
+
+## Configuration
+
+`config.json` is merged from the user config file and an optional
+`.norte-code/config.json` project overlay. Every key, its type, default and
+validation rule is documented in [`CONFIG.md`](CONFIG.md). The smallest useful
+file names a model and a provider key source:
+
+```json
+{
+  "version": 1,
+  "default_model": "openrouter/anthropic/claude-sonnet-4",
+  "providers": {
+    "openrouter": { "api_key_env": "OPENROUTER_API_KEY" }
+  }
+}
+```
+
+The full schema also covers the catalogue cache, compaction, retries,
+reasoning, approval rules, budgets, the command sandbox, skills and per-model
+capability overrides.
 
 ## Building
 
@@ -44,6 +90,7 @@ norte-code run --session <key> "continue with the tests"
 norte-code resume <key> --budget 20000 --budget-unit tokens
 norte-code sessions
 norte-code cost
+norte-code telemetry --bucket day
 norte-code skills list
 
 # Startup details, tool I/O and a vendor extension
@@ -53,14 +100,18 @@ norte-code run --debug --verbose \
 ```
 
 `--debug` prints the session id, model, wire, approval mode, iteration limit,
-compaction threshold, workspace, config and database paths, and the configured
-extension keys. It also prints the selected model's modalities, context and
+compaction threshold and trigger, sandbox state and network access, workspace,
+config and database paths, and the configured extension keys. It also prints the selected model's modalities, context and
 output limits, tool kinds, reasoning controls, streaming, cache, features,
 structured output and catalogue metadata, the effective reasoning setting for
 the session, and where the system prompt came from (flag, config or built-in),
 plus how many characters the system prompt and tool declarations contain.
 Tokens are not estimated: only the provider counts them, and the per-request
-usage line reports the provider's number. `--verbose` prints each tool call's
+usage line reports the provider's number. Unless `--quiet` is set, each request
+also shows answer tokens per second from the first token to the end of the
+request, total time, time to the first token,
+the cache-read share, the input:output ratio and the tools called by that
+request. `--verbose` prints each tool call's
 effective arguments and its result as fenced blocks; large values are shortened,
 and long tool output is capped before it crosses the wire. The final summary
 lists the tools that ran and their counts. Iterations are unlimited by default;
@@ -68,10 +119,18 @@ lists the tools that ran and their counts. Iterations are unlimited by default;
 `compaction.threshold` (default `0.90`) and can be overridden for one run or
 resume with `--compaction-threshold FRACTION`. The system prompt comes from
 `--system-prompt` when given, otherwise from `system_prompt` in the config, and
-otherwise from the built-in prompt.
+otherwise from the built-in prompt. An `AGENTS.md` in the workspace root is
+appended to whichever prompt is used, as project instructions. It is untrusted
+input: only a regular file is read, the read is capped at 64 KiB, and the
+instructions never override the user's request, the approvals or the budgets.
 
 `--interactive` keeps the same session open after each turn and prints a `›`
-prompt for the next message; `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
+prompt for the next message. `/help` lists the commands; `/compact` summarises
+the conversation on demand, `/refresh` re-scans the skill roots and their tools,
+and `/allow <tool> [session|global]` or `/deny <tool> [session|global]` set an
+approval rule without waiting for a pending call. The scope defaults to the
+current session; `global` writes the user config. Setting an allow rule is also
+how a previous deny is revoked. `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
 leave. `run --interactive` may omit its first prompt and start at the prompt;
 `resume --interactive` reopens a parked session and then continues the
 conversation. It needs a terminal and cannot be combined with `--jsonl`. The
@@ -90,6 +149,33 @@ routing is for example:
 ```
 
 A key whose wire family does not match the selected model is ignored.
+
+Compaction runs automatically when the last provider-reported prompt plus answer
+crosses `compaction.threshold` (default `0.90` of the model's context window).
+`compaction.trigger` selects when: `idle` (the default) waits for an idle turn
+boundary and also checks before the next turn when a session is resumed or
+switched to a smaller model; `eager` checks at the first safe model-request
+boundary inside a turn, after a complete tool result and before the next
+request. Eager still never splits a tool call from its results, never runs
+while an approval is pending, and runs at most once per turn. It also runs on
+`/compact`. The summary is built from the old transcript and the new session is
+seeded with the summary, the current todo list and the last `keep_recent`
+messages (default `6`). A suffix never starts with a tool result whose call was
+dropped. The old Norte session is left untouched for audit; the logical session
+keeps its key but shows the new session id. The summary request is a normal
+provider request: its reported cost enters the ledger and counts toward budgets.
+If the summary fails, history and the active session id stay unchanged, and an
+eager turn stops at the safe point so it can be resumed. Models without a
+catalogue context limit do not compact automatically.
+
+A transient provider failure (a rate limit, an overload, a server error or a
+transport error) is retried up to `retry.max_attempts` times (default `2`). The
+wait is the provider's `retry_after` when it sent one, capped by
+`retry.max_delay_ms` (default 30 s); without a hint the first wait is
+`retry.backoff_ms` (default 1 s) and doubles on each attempt. A retry resumes
+the same session with no new input, so the user's message is never appended
+twice. Permanent failures (quota, authentication, a malformed request) fail
+immediately, and `retry.max_attempts: 0` disables retries.
 
 Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or
@@ -132,6 +218,51 @@ an answer. The approval or question stays pending, the command exits cleanly and
 prints how to resume, so a mistaken keypress never turns into a deny or an
 invented answer.
 
+## Command sandbox
+
+`tools.sandbox.enabled` (default `false`) runs every `command` inside the host
+sandbox: bubblewrap on Linux, `sandbox-exec` on macOS. The workspace is
+writable, the rest of the filesystem is read-only, `/tmp` is a private tmpfs,
+and the network is off unless `tools.sandbox.network` is `true`. Extra writable
+directories go in `tools.sandbox.writable`. The approval panel still shows the
+command the model asked for, with a `[bwrap]` or `[seatbelt]` badge; the sandbox
+flags are internal and never replace the approved arguments. The wrapper sits
+inside the command tool's executor, after policies, approvals and the effect
+journal.
+
+On `run` and `resume`, `--sandbox` and `--no-sandbox` override
+`tools.sandbox.enabled` for that invocation, and `--sandbox-network on|off`
+overrides `tools.sandbox.network`. `--sandbox-network` needs the sandbox to be
+on, so pass `--sandbox` or enable it in the config; it cannot be combined with
+`--no-sandbox`, and `--sandbox` and `--no-sandbox` are mutually exclusive.
+
+```bash
+norte-code run --sandbox --sandbox-network on \
+  "fetch the changelog and summarise it"
+```
+
+The sandbox needs the platform binary (`apt install bubblewrap`, `dnf install
+bubblewrap`, `pacman -S bubblewrap`, or the `sandbox-exec` that ships with
+macOS). If it is missing, or the platform cannot create the namespaces, the
+command fails instead of running unsandboxed. It contains writes, processes and
+(by default) the network, but it is not a VM: it can still read files the user
+can read, reach Unix sockets visible in the filesystem, consume CPU, memory or
+disk, and share the kernel. Treat it as one layer with the approval rules, not
+as a replacement for them. `skill_script` has its own switch
+(`skills.allow_scripts`) and is not covered by the command sandbox.
+
+## Local request telemetry
+
+Every provider attempt is recorded locally in the `requests` table: session,
+provider and model, prompt/output/reasoning/cache tokens, tools called, latency
+to first output and to completion, reasoning setting, whether the command
+sandbox was enabled and whether it allowed network, reported cost, status and
+response metadata. `norte-code telemetry` prints totals and averages; `--bucket
+hour|day|month|year|total` changes the grouping, `--session`, `--provider` and
+`--model` filter, and `--json` emits one object. It also lists the top
+providers, models and sessions by requests and tokens. This is a local audit
+log only: Norte Code sends no telemetry anywhere.
+
 ## Cost and budgets
 
 Norte Code never computes a price. The only dollar figure is the one the
@@ -159,8 +290,9 @@ existing USD budget unmeasurable is blocked.
 ## Network
 
 The only network destinations are the configured model endpoints and the model
-catalogue URL (default `https://models.dev/catalog.json`). Norte Code has no
-telemetry.
+catalogue URL (default `https://models.dev/catalog.json`). Norte Code sends no
+telemetry; the request history and cost ledger stay in the local SQLite
+database.
 
 ## License
 
