@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -77,6 +77,21 @@ pub struct StoredQuestion {
     pub answer: Option<String>,
 }
 
+/// A tool call that started but never recorded finishing.
+///
+/// At startup these are the calls a crash may have interrupted. A journaled
+/// tool is not run again with the same call id, because its effect may already
+/// have happened while Norte only guarantees commit-at-most-once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingEffect {
+    /// The session the call belongs to.
+    pub session: SessionId,
+    /// The call that started.
+    pub call_id: CallId,
+    /// The tool that started.
+    pub tool: String,
+}
+
 /// Norte Code's own persistence, beside Norte's [`Store`].
 ///
 /// The agent keeps an in-memory map for speed and mirrors every change here so a
@@ -120,6 +135,34 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn answer_question(&self, call_id: &str, answer: &str) -> Result<bool>;
+    /// Records that a journaled tool is about to run.
+    ///
+    /// Synchronous because the engine calls it from the tool-metadata callback,
+    /// immediately before the executor, with no await point in between.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    fn effect_started(
+        &self,
+        session: SessionId,
+        call_id: CallId,
+        tool: &str,
+        epoch: &str,
+    ) -> Result<()>;
+    /// Records that a journaled tool returned. A row that was never started is
+    /// left alone (a denied call never reaches the metadata callback).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    fn effect_finished(&self, session: SessionId, call_id: CallId, is_error: bool) -> Result<()>;
+    /// Every call that started and has no recorded finish, from any process.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a database failure.
+    async fn unfinished_effects(&self) -> Result<Vec<PendingEffect>>;
 }
 
 /// A directory that keeps everything in memory, for tests and one-shot runs.
@@ -127,6 +170,15 @@ pub trait SessionDirectory: Send + Sync {
 pub struct InMemoryDirectory {
     sessions: Mutex<BTreeMap<String, StoredSession>>,
     questions: Mutex<BTreeMap<String, StoredQuestion>>,
+    effects: Mutex<BTreeMap<(SessionId, CallId), EffectEntry>>,
+}
+
+#[derive(Debug)]
+struct EffectEntry {
+    tool: String,
+    done: bool,
+    #[allow(dead_code)]
+    is_error: Option<bool>,
 }
 
 impl InMemoryDirectory {
@@ -209,6 +261,55 @@ impl SessionDirectory for InMemoryDirectory {
         question.answer = Some(answer.to_owned());
         Ok(true)
     }
+
+    fn effect_started(
+        &self,
+        session: SessionId,
+        call_id: CallId,
+        tool: &str,
+        _epoch: &str,
+    ) -> Result<()> {
+        self.effects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                (session, call_id),
+                EffectEntry {
+                    tool: tool.to_owned(),
+                    done: false,
+                    is_error: None,
+                },
+            );
+        Ok(())
+    }
+
+    fn effect_finished(&self, session: SessionId, call_id: CallId, is_error: bool) -> Result<()> {
+        if let Some(entry) = self
+            .effects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&(session, call_id))
+        {
+            entry.done = true;
+            entry.is_error = Some(is_error);
+        }
+        Ok(())
+    }
+
+    async fn unfinished_effects(&self) -> Result<Vec<PendingEffect>> {
+        Ok(self
+            .effects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, entry)| !entry.done)
+            .map(|((session, call_id), entry)| PendingEffect {
+                session: *session,
+                call_id: *call_id,
+                tool: entry.tool.clone(),
+            })
+            .collect())
+    }
 }
 
 /// A `SQLite` store: Norte's graph, approvals and blobs, plus host tables.
@@ -256,6 +357,12 @@ impl SqliteStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn run<T, F>(&self, work: F) -> Result<T>
@@ -331,6 +438,16 @@ CREATE TABLE IF NOT EXISTS questions (
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS effects (
+    session    TEXT NOT NULL,
+    call_id    TEXT NOT NULL,
+    tool       TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    epoch      TEXT NOT NULL,
+    is_error   INTEGER,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (session, call_id)
 );
 ";
 
@@ -926,6 +1043,78 @@ impl SessionDirectory for SqliteStore {
         })
         .await
     }
+
+    fn effect_started(
+        &self,
+        session: SessionId,
+        call_id: CallId,
+        tool: &str,
+        epoch: &str,
+    ) -> Result<()> {
+        let connection = self.lock();
+        connection
+            .execute(
+                "INSERT INTO effects (session, call_id, tool, status, epoch, is_error, updated_at)
+                 VALUES (?1, ?2, ?3, 'intent', ?4, NULL, ?5)
+                 ON CONFLICT(session, call_id) DO UPDATE SET tool = excluded.tool,
+                   status = 'intent', epoch = excluded.epoch, is_error = NULL,
+                   updated_at = excluded.updated_at",
+                params![
+                    session.to_string(),
+                    call_id.to_string(),
+                    tool,
+                    epoch,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(Fault::from)?;
+        Ok(())
+    }
+
+    fn effect_finished(&self, session: SessionId, call_id: CallId, is_error: bool) -> Result<()> {
+        let connection = self.lock();
+        connection
+            .execute(
+                "UPDATE effects SET status = 'done', is_error = ?3, updated_at = ?4
+                 WHERE session = ?1 AND call_id = ?2",
+                params![
+                    session.to_string(),
+                    call_id.to_string(),
+                    is_error,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(Fault::from)?;
+        Ok(())
+    }
+
+    async fn unfinished_effects(&self) -> Result<Vec<PendingEffect>> {
+        let rows: Vec<(String, String, String)> = self
+            .run(|connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT session, call_id, tool FROM effects
+                         WHERE status = 'intent' ORDER BY updated_at",
+                    )
+                    .map_err(Fault::from)?;
+                let mapped = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .map_err(Fault::from)?;
+                mapped
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(Fault::from)
+            })
+            .await?;
+        rows.into_iter()
+            .map(|(session, call_id, tool)| {
+                Ok(PendingEffect {
+                    session: session.parse()?,
+                    call_id: call_id.parse()?,
+                    tool,
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -938,6 +1127,32 @@ mod tests {
     async fn passes_nortes_store_conformance() {
         let store = SqliteStore::in_memory().expect("open");
         norte_testing::store_conformance(&store).await;
+    }
+
+    #[tokio::test]
+    async fn the_effect_journal_tracks_intents_until_they_finish() {
+        let store = SqliteStore::in_memory().expect("open");
+        let session = SessionId::new();
+        let call = CallId::new();
+        store
+            .effect_started(session, call, "write", "epoch-one")
+            .expect("intent");
+        let pending = store.unfinished_effects().await.expect("pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session, session);
+        assert_eq!(pending[0].call_id, call);
+        assert_eq!(pending[0].tool, "write");
+
+        store
+            .effect_finished(session, call, false)
+            .expect("finished");
+        assert!(
+            store
+                .unfinished_effects()
+                .await
+                .expect("pending")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
