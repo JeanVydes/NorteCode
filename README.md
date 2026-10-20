@@ -124,18 +124,23 @@ appended to whichever prompt is used, as project instructions. It is untrusted
 input: only a regular file is read, the read is capped at 64 KiB, and the
 instructions never override the user's request, the approvals or the budgets.
 
-`--interactive` keeps the same session open after each turn and prints a `›`
-prompt for the next message. `/help` lists the commands; `/compact` summarises
-the conversation on demand, `/refresh` re-scans the skill roots and their tools,
-and `/allow <tool> [session|global]` or `/deny <tool> [session|global]` set an
+`--interactive` keeps the same session open after each turn and pins an input
+line below the streamed output. It is a real line editor: arrow keys, Home/End,
+Delete, Backspace, paste and the usual control keys work, and a reverse-video
+cursor marks the insertion point. What you type stays in that line; it never
+leaks into the answer. Lines completed while a turn is still running are queued
+and sent together as the next message, even after a failed or cancelled turn.
+`/help` lists the commands; `/compact` summarises the conversation on demand,
+`/refresh` re-scans the skill roots and their tools, and
+`/allow <tool> [session|global]` or `/deny <tool> [session|global]` set an
 approval rule without waiting for a pending call. The scope defaults to the
 current session; `global` writes the user config. Setting an allow rule is also
 how a previous deny is revoked. `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
 leave. `run --interactive` may omit its first prompt and start at the prompt;
 `resume --interactive` reopens a parked session and then continues the
 conversation. It needs a terminal and cannot be combined with `--jsonl`. The
-interactive prompt shares stdin with approvals and questions, so input typed
-ahead is consumed in order by the next prompt that needs it.
+interactive prompt shares stdin with approvals and questions, so lines typed
+ahead are consumed in order by the next prompt that needs them.
 
 Vendor-specific request fields use Norte's extension mechanism: a key is
 `<wire-family>:<field>`, and the value is JSON. The config has the same shape

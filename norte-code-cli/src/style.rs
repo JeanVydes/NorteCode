@@ -109,10 +109,10 @@ impl Style {
         self.paint("90", text)
     }
 
-    /// Bold cyan, for a tool name.
+    /// Bold blue, for a tool call and its name.
     #[must_use]
     pub fn tool(self, text: impl Display) -> String {
-        self.paint("1;36", text)
+        self.paint("1;34", text)
     }
 }
 

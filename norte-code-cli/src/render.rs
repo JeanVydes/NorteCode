@@ -51,6 +51,9 @@ pub(crate) struct Renderer {
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
     pub(crate) requests: u64,
+    /// Requests settled during the current turn, used to explain a cancel
+    /// before the provider reported any usage.
+    pub(crate) turn_requests: u64,
     pub(crate) input: u64,
     pub(crate) output: u64,
     pub(crate) cache_read: u64,
@@ -219,14 +222,30 @@ impl Renderer {
                 ..
             } => {
                 *self.tool_counts.entry(tool.clone()).or_default() += 1;
-                if !self.quiet {
+                let command = Self::command_summary(arguments.as_ref());
+                if self.quiet {
+                    if tool == "command" {
+                        if let Some(command) = &command {
+                            self.end_blocks();
+                            eprintln!(
+                                "{} {} {}",
+                                self.style.blue("→"),
+                                self.style.tool(tool),
+                                self.style.dim(format!("$ {command}"))
+                            );
+                        }
+                    }
+                } else {
                     self.end_blocks();
                     eprintln!(
                         "{} {} {}",
-                        self.style.cyan("→"),
+                        self.style.blue("→"),
                         self.style.tool(tool),
                         self.style.faint(format!("#{}", short(call_id)))
                     );
+                    if let Some(command) = &command {
+                        eprintln!("  {}", self.style.dim(format!("$ {command}")));
+                    }
                     if self.verbose && tool.as_str() != "ask_user" {
                         if let Some(arguments) = arguments {
                             let text = serde_json::to_string_pretty(arguments)
@@ -289,6 +308,42 @@ impl Renderer {
         }
     }
 
+    /// Returns the command a `command` tool call ran, clipped to one line.
+    fn command_summary(arguments: Option<&serde_json::Value>) -> Option<String> {
+        let arguments = arguments?;
+        let command = arguments.get("command")?;
+        let text = if let Some(text) = command.as_str() {
+            text.to_owned()
+        } else {
+            match command.get("kind").and_then(serde_json::Value::as_str) {
+                Some("shell") => command
+                    .get("script")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_owned(),
+                Some("program") => {
+                    let program = command.get("program").and_then(serde_json::Value::as_str)?;
+                    let args = command
+                        .get("args")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|args| {
+                            args.iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    if args.is_empty() {
+                        program.to_owned()
+                    } else {
+                        format!("{program} {args}")
+                    }
+                }
+                _ => return None,
+            }
+        };
+        Some(clip_command(&text, 160))
+    }
+
     /// Renders usage for one reconstructed request and keeps the run totals.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn usage_event(&mut self, kind: &ServerEventKind) {
@@ -305,6 +360,7 @@ impl Renderer {
                 ..
             } => {
                 self.requests += 1;
+                self.turn_requests += 1;
                 self.input += usage.input_tokens.unwrap_or(0);
                 self.output += usage.output_tokens.unwrap_or(0);
                 if let Some(cache) = usage.cache_read_tokens {
@@ -444,6 +500,7 @@ impl Renderer {
             ServerEventKind::TurnStarted { .. } => {
                 self.cancelled = false;
                 self.reasoning_placeholder = false;
+                self.turn_requests = 0;
             }
             ServerEventKind::RetryScheduled {
                 attempt,
@@ -495,6 +552,14 @@ impl Renderer {
                             self.style
                                 .yellow("turn cancelled · the session is saved and can be resumed")
                         );
+                        if self.show_cost && self.turn_requests == 0 {
+                            eprintln!(
+                                "  {}",
+                                self.style.dim(
+                                    "no provider usage arrived before the cancel, so no cost is shown; the cancelled request is still recorded in telemetry"
+                                )
+                            );
+                        }
                     }
                 } else if !*committed && self.budget_stopped {
                     if !self.quiet {
@@ -666,6 +731,22 @@ impl Renderer {
         if !self.tool_counts.is_empty() {
             eprintln!("  {} {}", self.style.faint("tools"), self.tool_summary());
         }
+    }
+}
+
+/// Shortens a command to one display line without splitting a character.
+fn clip_command(text: &str, max: usize) -> String {
+    let first = text.lines().next().unwrap_or_default().trim();
+    let mut shortened: String = first.chars().take(max).collect();
+    if first.chars().count() > max {
+        shortened.push('…');
+    } else if text.lines().count() > 1 {
+        shortened.push_str(" …");
+    }
+    if shortened.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        shortened
     }
 }
 

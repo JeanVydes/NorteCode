@@ -10,13 +10,15 @@
 //! tool calling or reasoning.
 
 mod commands;
+mod input;
 mod interaction;
 mod render;
 mod style;
 
 use commands::{apply_extensions, database_path, duration_label, run};
+use input::InteractiveInput;
 use interaction::{
-    clip_text, compact_json, drive_turns, interactive_loop, list_models, resolve_spec, stdin_lines,
+    clip_text, compact_json, drive_turns, interactive_loop, list_models, resolve_spec,
 };
 use render::{
     Block, Format, Renderer, approval_label, debug_model, debug_prompt_size, debug_reasoning,
@@ -497,6 +499,7 @@ async fn run_prompt(
         cache_reported: false,
         budget_stopped: false,
         requests: 0,
+        turn_requests: 0,
         input: 0,
         output: 0,
         cost: 0.0,
@@ -504,12 +507,17 @@ async fn run_prompt(
         tool_counts: BTreeMap::new(),
     };
     let interactive = args.interactive;
-    let mut input = interactive.then(stdin_lines);
+    let mut input = if interactive {
+        Some(InteractiveInput::start(style)?)
+    } else {
+        None
+    };
     let mut session = args
         .session
         .as_ref()
         .map(|key| SessionKey::new(key.clone()));
     let mut parked = false;
+    let mut pending: Option<String> = None;
     if let Some(prompt) = args.prompt {
         let request = ClientRequest {
             request_id: 1,
@@ -521,13 +529,23 @@ async fn run_prompt(
             },
         };
         let stream = service.submit(request).await.map_err(|e| e.to_string())?;
-        let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+        let outcome = drive_turns(
+            &service,
+            stream,
+            &mut renderer,
+            style,
+            input.as_mut().map(InteractiveInput::lines),
+        )
+        .await?;
         session = outcome.session.or(session);
         parked = outcome.parked;
         renderer.ensure_newline();
+        if !outcome.parked && !renderer.budget_stopped && !outcome.queued.is_empty() {
+            pending = Some(outcome.queued.join("\n"));
+        }
     }
     if interactive && !parked && !renderer.budget_stopped {
-        if let Some(receiver) = input.as_mut() {
+        if let Some(receiver) = input.as_mut().map(InteractiveInput::lines) {
             interactive_loop(
                 &service,
                 session,
@@ -536,6 +554,7 @@ async fn run_prompt(
                 receiver,
                 message_budget,
                 reasoning,
+                pending,
             )
             .await?;
         }
@@ -664,6 +683,7 @@ async fn resume_session(
         cache_reported: false,
         budget_stopped: false,
         requests: 0,
+        turn_requests: 0,
         input: 0,
         output: 0,
         cost: 0.0,
@@ -672,7 +692,12 @@ async fn resume_session(
     };
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
-    let mut input = interactive.then(stdin_lines);
+    let mut input = if interactive {
+        Some(InteractiveInput::start(style)?)
+    } else {
+        None
+    };
+    let mut pending: Option<String> = None;
     if let Some(limit) = args.budget {
         if !limit.is_finite() || limit <= 0.0 {
             return Err(format!("--budget must be a positive number, got {limit}"));
@@ -693,7 +718,17 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+        let outcome = drive_turns(
+            &service,
+            stream,
+            &mut renderer,
+            style,
+            input.as_mut().map(InteractiveInput::lines),
+        )
+        .await?;
+        if !outcome.queued.is_empty() {
+            pending = Some(outcome.queued.join("\n"));
+        }
     }
     let stream = service
         .submit(ClientRequest {
@@ -704,10 +739,20 @@ async fn resume_session(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+    let outcome = drive_turns(
+        &service,
+        stream,
+        &mut renderer,
+        style,
+        input.as_mut().map(InteractiveInput::lines),
+    )
+    .await?;
     renderer.ensure_newline();
+    if !outcome.parked && !renderer.budget_stopped && !outcome.queued.is_empty() {
+        pending = Some(outcome.queued.join("\n"));
+    }
     if interactive && !outcome.parked && !renderer.budget_stopped {
-        if let Some(receiver) = input.as_mut() {
+        if let Some(receiver) = input.as_mut().map(InteractiveInput::lines) {
             interactive_loop(
                 &service,
                 Some(session),
@@ -716,6 +761,7 @@ async fn resume_session(
                 receiver,
                 None,
                 None,
+                pending,
             )
             .await?;
         }

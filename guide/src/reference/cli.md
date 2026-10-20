@@ -37,7 +37,7 @@ norte-code run [OPTIONS] [PROMPT]
 | `--max-iterations N` | Cap model iterations for this run. |
 | `--extension KEY=JSON` | Add a vendor request field; repeatable. |
 | `--jsonl` | One protocol event per line on stdout. |
-| `--quiet` | Redact reasoning and hide tool activity and usage. |
+| `--quiet` | Redact reasoning and hide tool activity and usage. The `command` tool still prints the command it ran. |
 | `--session KEY` | Continue an existing logical session. |
 | `-i, --interactive` | Keep the session open after each turn. |
 

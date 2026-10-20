@@ -11,6 +11,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The built-in system prompt now states the Norte Code identity, requires tool
   use and verification, and tells the model not to guess its harness or claim
   to be another product.
+- Tool calls render in blue, and a `command` call shows the command it ran even
+  under `--quiet`; a long command is clipped to one line. Cancelling a turn
+  before the provider reports usage now explains that the cancelled request is
+  still recorded in telemetry.
 
 ### Added
 
@@ -39,10 +43,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   presets when no URL is configured.
 - The headless `norte-code run` command, with streamed text and `--jsonl`
   output, plus `--budget`, `--reasoning` and `--approval-mode`.
-- `--interactive` on `run` and `resume`: the same session stays open after each
-  turn and prints a `›` prompt for the next message. `/exit`, `quit`, Ctrl-D or
-  Ctrl-C at the prompt leave; a first prompt is optional on `run`. The prompt
-  shares stdin with approvals and questions so queued input stays in order.
+- `--interactive` on `run` and `resume`: the same session stays open and a line
+  editor is pinned below the streamed output. Arrow keys, Home/End, Delete,
+  Backspace, paste and the usual control keys work; a reverse-video cursor marks
+  the insertion point and typed text never leaks into the answer. Lines
+  completed while a turn is still running are queued and sent together as the
+  next message, even after a failed or cancelled turn. `/exit`, `quit`, Ctrl-D
+  or Ctrl-C at the prompt leave; a first prompt is optional on `run`. The prompt
+  shares stdin with approvals and questions so typed input stays in order.
 - The models.dev catalog client: tolerant schema, capability and reasoning
   mapping, ETag/TTL cache with stale and bundled fallbacks, and a live refresh
   request.

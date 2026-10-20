@@ -85,7 +85,9 @@ norte-code run --model openrouter/anthropic/claude-sonnet-4 "review the diff"
 norte-code run --interactive "start here"
 ```
 
-The prompt keeps the same session open. Type `/help` to see the chat commands,
+The prompt keeps the same session open. It is a line editor: the arrow keys,
+Home/End, Delete and paste work, and text typed while a turn is streaming is
+queued and sent as the next message. Type `/help` to see the chat commands,
 `/exit` or Ctrl-D to leave. A first prompt is optional with `--interactive`:
 
 ```sh

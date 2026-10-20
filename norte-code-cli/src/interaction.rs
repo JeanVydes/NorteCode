@@ -4,8 +4,7 @@ use super::{
     Arc, Budget, Catalog, ClientRequest, ClientRequestKind, Config, DenyScope, Duration,
     EventStream, GrantScope, ModelInfo, ModelSpec, ModelsArgs, Phase, Reasoning, Renderer,
     ServerEvent, ServerEventKind, Service, ServiceError, SessionKey, Source, StreamExt, Style,
-    VecDeque, Write, fallback_env, human_tokens, model_list, mpsc, reasoning_label, short,
-    source_label,
+    VecDeque, fallback_env, human_tokens, model_list, mpsc, reasoning_label, short, source_label,
 };
 
 /// Parses `/allow` and `/deny` into `(allow, tool, global)`.
@@ -58,6 +57,7 @@ pub(crate) fn print_chat_help(style: Style) {
 
 /// Reads and sends messages until the human exits, a turn parks or the budget
 /// stops the session.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn interactive_loop(
     service: &Arc<Service>,
     mut session: Option<SessionKey>,
@@ -66,6 +66,7 @@ pub(crate) async fn interactive_loop(
     input: &mut mpsc::UnboundedReceiver<Option<String>>,
     message_budget: Option<Budget>,
     reasoning: Option<Reasoning>,
+    mut pending: Option<String>,
 ) -> Result<Option<SessionKey>, String> {
     if !renderer.quiet {
         eprintln!(
@@ -75,9 +76,17 @@ pub(crate) async fn interactive_loop(
     }
     let mut request_id = 2_u64;
     loop {
-        let Some(text) = read_repl_line(input, style).await? else {
+        let next = if let Some(text) = pending.take() {
+            Some(text)
+        } else {
+            read_repl_line(input, style).await?
+        };
+        let Some(text) = next else {
             break;
         };
+        if matches!(text.as_str(), "/exit" | "/quit" | "exit" | "quit") {
+            break;
+        }
         if text == "/help" {
             print_chat_help(style);
             continue;
@@ -99,8 +108,9 @@ pub(crate) async fn interactive_loop(
                 .map_err(|error| error.to_string())?;
             request_id = request_id.saturating_add(1);
             let outcome = drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
-            session = outcome.session.or(session);
             renderer.ensure_newline();
+            queue_after_turn(renderer, style, &mut pending, &outcome);
+            session = outcome.session.or(session);
             if outcome.parked || renderer.budget_stopped {
                 break;
             }
@@ -150,13 +160,36 @@ pub(crate) async fn interactive_loop(
             .map_err(|error| error.to_string())?;
         request_id = request_id.saturating_add(1);
         let outcome = drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
-        session = outcome.session.or(session);
         renderer.ensure_newline();
+        queue_after_turn(renderer, style, &mut pending, &outcome);
+        session = outcome.session.or(session);
         if outcome.parked || renderer.budget_stopped {
             break;
         }
     }
     Ok(session)
+}
+
+/// Turns queued lines into the next message, unless the turn stopped.
+fn queue_after_turn(
+    renderer: &Renderer,
+    style: Style,
+    pending: &mut Option<String>,
+    outcome: &DriveOutcome,
+) {
+    if outcome.parked || renderer.budget_stopped || outcome.queued.is_empty() {
+        return;
+    }
+    if !renderer.quiet {
+        eprintln!(
+            "{}",
+            style.blue(format!(
+                "↳ sending {} queued message(s)",
+                outcome.queued.len()
+            ))
+        );
+    }
+    *pending = Some(outcome.queued.join("\n"));
 }
 
 /// Prints the interactive prompt and waits for the next message.
@@ -167,9 +200,8 @@ pub(crate) async fn read_repl_line(
     input: &mut mpsc::UnboundedReceiver<Option<String>>,
     style: Style,
 ) -> Result<Option<String>, String> {
+    let _ = style;
     loop {
-        eprint!("{} ", style.cyan("›"));
-        let _ = std::io::stderr().flush();
         let line = tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => {
@@ -199,6 +231,20 @@ pub(crate) struct DriveOutcome {
     pub(crate) session: Option<SessionKey>,
     /// The turn stopped with an approval still waiting for a human.
     pub(crate) parked: bool,
+    /// Lines typed while the turn was running, in arrival order.
+    pub(crate) queued: Vec<String>,
+}
+
+/// What woke the turn loop: a signal, a completed input line, or an event.
+enum Wake {
+    /// Ctrl-C or another interrupt.
+    Interrupt,
+    /// A line completed in the input box.
+    Line(String),
+    /// End of input.
+    Eof,
+    /// The next server event.
+    Event(Box<Option<ServerEvent>>),
 }
 
 /// Streams the primary turn, then any turns resumed by an approval.
@@ -226,21 +272,37 @@ pub(crate) async fn drive_turns(
     });
     let mut current: Option<SessionKey> = None;
     let mut parked = false;
+    let mut queued: Vec<String> = Vec::new();
     let mut cancel_requested: Option<std::time::Instant> = None;
     while let Some(mut stream) = streams.pop_front() {
         loop {
-            let event = tokio::select! {
-                biased;
-                Some(()) = interrupt_rx.recv() => {
-                    let Some(session) = current.clone() else { continue };
+            let wake = if let Some(receiver) = input.as_mut() {
+                tokio::select! {
+                    biased;
+                    Some(()) = interrupt_rx.recv() => Wake::Interrupt,
+                    line = receiver.recv() => match line {
+                        Some(Some(line)) => Wake::Line(line),
+                        Some(None) | None => Wake::Eof,
+                    },
+                    event = stream.next() => Wake::Event(Box::new(event)),
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    Some(()) = interrupt_rx.recv() => Wake::Interrupt,
+                    event = stream.next() => Wake::Event(Box::new(event)),
+                }
+            };
+            let event = match wake {
+                Wake::Interrupt => {
+                    let Some(session) = current.clone() else {
+                        continue;
+                    };
                     match cancel_requested {
                         None => {
                             cancel_requested = Some(std::time::Instant::now());
                             renderer.mark_cancelled();
-                            eprintln!(
-                                "{}",
-                                style.yellow("cancelling the running turn…")
-                            );
+                            eprintln!("{}", style.yellow("cancelling the running turn…"));
                             eprintln!(
                                 "  {}",
                                 style.dim(
@@ -262,10 +324,7 @@ pub(crate) async fn drive_turns(
                             }
                         }
                         Some(at) if at.elapsed() < Duration::from_secs(5) => {
-                            eprintln!(
-                                "{}",
-                                style.yellow("still cancelling…")
-                            );
+                            eprintln!("{}", style.yellow("still cancelling…"));
                             eprintln!(
                                 "  {}",
                                 style.dim(
@@ -282,7 +341,18 @@ pub(crate) async fn drive_turns(
                     }
                     continue;
                 }
-                event = stream.next() => event,
+                Wake::Line(line) => {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        queued.push(line.to_owned());
+                    }
+                    continue;
+                }
+                Wake::Eof => {
+                    input = None;
+                    continue;
+                }
+                Wake::Event(event) => *event,
             };
             let Some(event) = event else { break };
             if let Some(session) = &event.session {
@@ -314,6 +384,7 @@ pub(crate) async fn drive_turns(
                     return Ok(DriveOutcome {
                         session: current,
                         parked: true,
+                        queued,
                     });
                 }
             }
@@ -327,6 +398,7 @@ pub(crate) async fn drive_turns(
                 return Ok(DriveOutcome {
                     session: current,
                     parked: true,
+                    queued,
                 });
             }
             renderer.event(&event)?;
@@ -351,6 +423,7 @@ pub(crate) async fn drive_turns(
     Ok(DriveOutcome {
         session: current,
         parked,
+        queued,
     })
 }
 
@@ -460,7 +533,7 @@ pub(crate) async fn ask_approval(
             style.red("[ns] deny this tool for this session"),
             style.red("[ng] deny this tool always")
         );
-        match prompt_input(&format!("  {} ", style.dim("›")), &mut *input, interrupts).await? {
+        match prompt_input("", &mut *input, interrupts).await? {
             PromptInput::Line(line) => {
                 if let Some(choice) = parse_approval_choice(&line) {
                     return Ok(ApprovalOutcome::Decision((
@@ -1005,40 +1078,15 @@ pub(crate) enum PromptInput {
     Cancelled,
 }
 
-/// Reads lines on a blocking thread.
-///
-/// The async prompt owns only the receiver, so it can select a line against the
-/// Ctrl-C channel. A read that is already blocked stays on the thread; the
-/// process exits or resumes without waiting for it.
-pub(crate) fn stdin_lines() -> mpsc::UnboundedReceiver<Option<String>> {
-    let (sender, receiver) = mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        loop {
-            let mut line = String::new();
-            match std::io::stdin().read_line(&mut line) {
-                Ok(0) | Err(_) => {
-                    let _ = sender.send(None);
-                    break;
-                }
-                Ok(_) => {
-                    if sender.send(Some(line.trim_end().to_owned())).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    receiver
-}
-
 /// Prints a prompt and waits for one line or Ctrl-C.
 pub(crate) async fn prompt_input(
     prompt: &str,
     input: &mut mpsc::UnboundedReceiver<Option<String>>,
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<PromptInput, String> {
-    eprint!("{prompt}");
-    let _ = std::io::stderr().flush();
+    if !prompt.is_empty() {
+        eprintln!("{prompt}");
+    }
     let line = tokio::select! {
         biased;
         Some(()) = interrupts.recv() => return Ok(PromptInput::Cancelled),
