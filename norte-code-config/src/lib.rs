@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,10 @@ use serde_json::Value;
 
 /// The only config schema revision this build understands.
 pub const CONFIG_VERSION: u32 = 1;
+/// Largest config file accepted.
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+/// Largest API key file accepted.
+const MAX_SECRET_BYTES: usize = 64 * 1024;
 
 /// Where the catalogue is fetched from unless configured otherwise.
 pub const DEFAULT_CATALOG_URL: &str = "https://models.dev/catalog.json";
@@ -647,10 +652,11 @@ impl Config {
             }
         }
         if let Some(path) = file {
-            let text = fs::read_to_string(path).map_err(|source| ConfigError::Secret {
-                provider: provider.to_owned(),
-                message: format!("could not read {}: {source}", path.display()),
-            })?;
+            let text =
+                read_limited(path, MAX_SECRET_BYTES).map_err(|source| ConfigError::Secret {
+                    provider: provider.to_owned(),
+                    message: format!("could not read {}: {source}", path.display()),
+                })?;
             let key = text.trim();
             if !key.is_empty() {
                 return Ok(ApiKey::new(key.to_owned()));
@@ -669,9 +675,31 @@ impl Config {
     }
 }
 
+/// Reads a regular file, refusing a special file and a size over `limit`.
+fn read_limited(path: &Path, limit: usize) -> std::io::Result<String> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let file = fs::File::open(path)?;
+    let mut text = String::new();
+    file.take(limit.saturating_add(1) as u64)
+        .read_to_string(&mut text)?;
+    if text.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file is larger than {limit} bytes"),
+        ));
+    }
+    Ok(text)
+}
+
 /// Reads a JSON file into a value.
 fn read_value(path: &Path) -> Result<Value, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+    let text = read_limited(path, MAX_CONFIG_BYTES).map_err(|source| ConfigError::Read {
         path: path.to_path_buf(),
         source,
     })?;
@@ -822,6 +850,22 @@ mod tests {
         assert_eq!(loaded.config.version, CONFIG_VERSION);
         assert_eq!(loaded.config.max_iterations, None);
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_refused_before_parsing() {
+        let path = temp_file("0123456789");
+        let error = read_limited(&path, 4).expect_err("file must be bounded");
+        assert!(error.to_string().contains("larger than 4 bytes"));
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn a_directory_is_not_a_regular_file() {
+        let path = temp_file("{}");
+        let error = read_limited(path.parent().expect("parent"), 64).expect_err("directory");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 
     #[test]
