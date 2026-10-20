@@ -55,8 +55,9 @@ norte-code run --debug --verbose \
 workspace, config and database paths, and the configured extension keys.
 `--verbose` prints each tool call's effective arguments and its result as fenced
 blocks; large values are shortened, and long tool output is capped before it
-crosses the wire. Iterations are unlimited by default; `--max-iterations N`
-caps one run or resume.
+crosses the wire. The final summary lists the tools that ran and their counts.
+Iterations are unlimited by default; `--max-iterations N` caps one run or
+resume.
 
 Vendor-specific request fields use Norte's extension mechanism: a key is
 `<wire-family>:<field>`, and the value is JSON. The config has the same shape

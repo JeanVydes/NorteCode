@@ -10,7 +10,7 @@
 
 mod style;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -640,6 +640,7 @@ async fn run_prompt(
         output: 0,
         cost: 0.0,
         unpriced: 0,
+        tool_counts: BTreeMap::new(),
     };
 
     drive_turns(&service, stream, &mut renderer, style).await?;
@@ -746,6 +747,7 @@ async fn resume_session(
         output: 0,
         cost: 0.0,
         unpriced: 0,
+        tool_counts: BTreeMap::new(),
     };
     let session = SessionKey::new(args.session);
     if let Some(limit) = args.budget {
@@ -1809,6 +1811,7 @@ struct Renderer {
     cache_reported: bool,
     cost: f64,
     unpriced: u64,
+    tool_counts: BTreeMap<String, u64>,
 }
 
 impl Renderer {
@@ -1959,6 +1962,7 @@ impl Renderer {
                 arguments,
                 ..
             } => {
+                *self.tool_counts.entry(tool.clone()).or_default() += 1;
                 if !self.quiet {
                     self.end_blocks();
                     eprintln!(
@@ -2247,7 +2251,16 @@ impl Renderer {
         }
     }
 
-    /// Writes the run's cost summary, if the run made any requests.
+    /// Formats how many times each tool ran, in name order.
+    fn tool_summary(&self) -> String {
+        self.tool_counts
+            .iter()
+            .map(|(tool, count)| format!("{} ×{count}", self.style.tool(tool.clone())))
+            .collect::<Vec<_>>()
+            .join(&self.style.faint(" · "))
+    }
+
+    /// Writes the run's cost and tool summary, if the run made any requests.
     fn summary(&self) {
         if matches!(self.format, Format::Jsonl) || self.quiet || self.requests == 0 {
             return;
@@ -2287,6 +2300,9 @@ impl Renderer {
             self.style.faint("──"),
             parts.join(&self.style.faint(" · "))
         );
+        if !self.tool_counts.is_empty() {
+            eprintln!("  {} {}", self.style.faint("tools"), self.tool_summary());
+        }
     }
 }
 

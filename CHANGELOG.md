@@ -113,6 +113,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   decision pending and exits with a resume hint instead of guessing.
 - `--verbose` prints each tool's effective arguments and returned output as
   fenced blocks, with a visible truncation marker instead of an unbounded dump.
+  The run summary also lists every tool that executed and how many times.
 - `--debug` prints startup details: session id, model and wire, approval mode,
   iteration limit, workspace, config and database paths, and extension keys.
 - Model iterations are unlimited by default, with `--max-iterations N` to cap a
