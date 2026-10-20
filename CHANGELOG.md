@@ -43,6 +43,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Config loading reads at most 1 MiB, API key files at most 64 KiB, and both
   must be regular files. A project overlay can no longer point `api_key_file` at
   a FIFO or an endless device and hang or exhaust the host at startup.
+- The catalogue cache and download are read in bounded chunks, so a corrupt
+  cache file or an oversized response is refused instead of being loaded whole.
 
 ### Fixed
 

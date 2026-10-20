@@ -6,6 +6,7 @@
 //! parse never replaces a good cache.
 
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,6 +17,31 @@ use crate::schema::{Catalog, CatalogError, MAX_CATALOG_BYTES};
 
 /// The largest download this build accepts.
 pub const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
+/// Largest metadata sidecar accepted.
+const MAX_META_BYTES: usize = 64 * 1024;
+
+/// Reads a regular file with a hard size cap.
+fn read_limited(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let file = fs::File::open(path)?;
+    let capacity = usize::try_from(metadata.len().min(limit as u64)).unwrap_or(limit);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file is larger than {limit} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
 
 /// How long a cached catalogue stays fresh by default.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -117,13 +143,13 @@ impl Cache {
     /// not a valid catalogue. A missing file is `Ok(None)`.
     pub fn read(&self) -> Result<Option<(Catalog, Meta)>, CatalogError> {
         let path = self.catalog_path();
-        let bytes = match fs::read(&path) {
+        let bytes = match read_limited(&path, MAX_CATALOG_BYTES) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(CatalogError::Read { path, source }),
         };
         let catalog = Catalog::parse(&bytes)?;
-        let meta = fs::read(self.meta_path())
+        let meta = read_limited(&self.meta_path(), MAX_META_BYTES)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
@@ -305,18 +331,24 @@ async fn fetch(options: &LoadOptions<'_>, cached: Option<&Meta>) -> Result<Fetch
         .map_err(|error| CatalogError::Http(error.to_string()))?;
     let etag = header(&response, reqwest::header::ETAG);
     let last_modified = header(&response, reqwest::header::LAST_MODIFIED);
-    let bytes = response
-        .bytes()
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|error| CatalogError::Http(error.to_string()))?;
-    if bytes.len() > MAX_DOWNLOAD_BYTES {
-        return Err(CatalogError::TooLarge {
-            size: bytes.len(),
-            max: MAX_DOWNLOAD_BYTES,
-        });
+        .map_err(|error| CatalogError::Http(error.to_string()))?
+    {
+        let size = bytes.len().saturating_add(chunk.len());
+        if size > MAX_DOWNLOAD_BYTES {
+            return Err(CatalogError::TooLarge {
+                size,
+                max: MAX_DOWNLOAD_BYTES,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
     }
     Ok(Fetched::Body {
-        bytes: bytes.to_vec(),
+        bytes,
         meta: Meta {
             etag,
             last_modified,
@@ -369,6 +401,16 @@ mod tests {
         };
         Cache::new(dir).write(&bytes, &meta).expect("write");
         catalog
+    }
+
+    #[test]
+    fn a_cache_file_over_the_limit_is_refused() {
+        let dir = temp_dir();
+        let path = dir.join("big.json");
+        fs::write(&path, b"0123456789").expect("write");
+        let error = read_limited(&path, 4).expect_err("file must be bounded");
+        assert!(error.to_string().contains("larger than 4 bytes"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
