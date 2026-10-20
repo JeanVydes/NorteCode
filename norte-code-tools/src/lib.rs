@@ -526,24 +526,63 @@ pub struct QuestionEvent {
     pub question: String,
 }
 
+/// A durable record of a question, for hosts that survive a restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableQuestion {
+    /// The id shown to the client.
+    pub id: String,
+    /// The session that asked.
+    pub session: SessionId,
+    /// The tool call it belongs to, the durable key.
+    pub call_id: String,
+    /// What the model asked.
+    pub question: String,
+    /// The answer, once one was given.
+    pub answer: Option<String>,
+}
+
+/// Storage for pending questions.
+///
+/// The broker keeps the live wait in memory; this trait is the write-through
+/// log that lets a restart re-ask a question or replay a late answer.
+#[async_trait]
+pub trait QuestionStore: Send + Sync {
+    /// The record for a call, if one was stored.
+    async fn load(&self, call_id: &str) -> Option<DurableQuestion>;
+    /// Stores a question that is now waiting.
+    async fn save(&self, question: &DurableQuestion);
+    /// Stores the answer. Returns `false` when the answer was already recorded.
+    async fn answer(&self, call_id: &str, answer: &str) -> bool;
+}
+
 /// A question still waiting for its answer.
 #[derive(Debug)]
 struct PendingQuestion {
     session: Option<SessionId>,
+    call_id: Option<String>,
     sender: oneshot::Sender<String>,
 }
 
 /// The questions a running turn is waiting on.
 ///
 /// The broker lives above the tool so a client can answer a session without
-/// cancelling the turn. It is in memory for now; the `SQLite` milestone persists
-/// the pending questions next to the parked approvals.
-#[derive(Debug)]
+/// cancelling the turn. With a [`QuestionStore`] attached, a question and its
+/// answer survive a restart: a resumed turn re-asks an unanswered question and
+/// replays an answer that arrived late.
 pub struct QuestionBroker {
     next: AtomicU64,
     pending: Mutex<BTreeMap<String, PendingQuestion>>,
     events: broadcast::Sender<QuestionEvent>,
     timeout: Duration,
+    store: Option<Arc<dyn QuestionStore>>,
+}
+
+impl std::fmt::Debug for QuestionBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionBroker")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for QuestionBroker {
@@ -561,7 +600,15 @@ impl QuestionBroker {
             pending: Mutex::new(BTreeMap::new()),
             events: broadcast::channel(64).0,
             timeout: QUESTION_TIMEOUT,
+            store: None,
         }
+    }
+
+    /// Attaches the durable log questions are written to.
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<dyn QuestionStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// A broker that gives up after `timeout`.
@@ -579,21 +626,28 @@ impl QuestionBroker {
 
     /// Answers a pending question. Returns `false` when it is no longer waiting
     /// or belongs to another session.
-    pub fn answer(&self, session: Option<SessionId>, id: &str, answer: String) -> bool {
-        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(question) = pending.get(id) else {
+    pub async fn answer(&self, session: Option<SessionId>, id: &str, answer: String) -> bool {
+        let question = {
+            let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            match pending.get(id) {
+                Some(question) if question.session == session => pending.remove(id),
+                _ => None,
+            }
+        };
+        let Some(question) = question else {
             return false;
         };
-        if question.session != session {
-            return false;
+        if let (Some(store), Some(call_id)) = (&self.store, &question.call_id) {
+            let _ = store.answer(call_id, &answer).await;
         }
-        let Some(question) = pending.remove(id) else {
-            return false;
-        };
         question.sender.send(answer).is_ok()
     }
 
     /// Asks a question and waits for its answer or the turn's cancellation.
+    ///
+    /// With a [`QuestionStore`], the call id is the durable key: a resumed turn
+    /// finds the same question, replays an answer that was already given, or
+    /// asks again when none was.
     ///
     /// # Errors
     ///
@@ -602,9 +656,34 @@ impl QuestionBroker {
     pub async fn ask(
         &self,
         context: &ToolContext,
-        question: String,
+        mut question: String,
     ) -> std::result::Result<String, String> {
-        let id = format!("q{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let call_id = context.call_id.map(|call| call.to_string());
+        let mut id = call_id.as_ref().map_or_else(
+            || format!("q{}", self.next.fetch_add(1, Ordering::Relaxed)),
+            |call| format!("q-{call}"),
+        );
+        if let (Some(store), Some(call), Some(session)) =
+            (&self.store, call_id.as_deref(), context.session)
+        {
+            if let Some(existing) = store.load(call).await {
+                id.clone_from(&existing.id);
+                if let Some(answer) = existing.answer {
+                    return Ok(answer);
+                }
+                question.clone_from(&existing.question);
+            } else {
+                store
+                    .save(&DurableQuestion {
+                        id: id.clone(),
+                        session,
+                        call_id: call.to_owned(),
+                        question: question.clone(),
+                        answer: None,
+                    })
+                    .await;
+            }
+        }
         let (sender, receiver) = oneshot::channel();
         self.pending
             .lock()
@@ -613,6 +692,7 @@ impl QuestionBroker {
                 id.clone(),
                 PendingQuestion {
                     session: context.session,
+                    call_id,
                     sender,
                 },
             );
@@ -915,8 +995,90 @@ mod tests {
         });
         let event = events.recv().await.expect("question event");
         assert_eq!(event.question, "Continue?");
-        assert!(broker.answer(None, &event.id, "yes".to_owned()));
+        assert!(broker.answer(None, &event.id, "yes".to_owned()).await);
         let answer = task.await.expect("task").expect("answer");
+        assert_eq!(answer, "yes");
+    }
+
+    #[derive(Default)]
+    struct MemoryQuestionStore {
+        questions: Mutex<BTreeMap<String, DurableQuestion>>,
+    }
+
+    #[async_trait]
+    impl QuestionStore for MemoryQuestionStore {
+        async fn load(&self, call_id: &str) -> Option<DurableQuestion> {
+            self.questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(call_id)
+                .cloned()
+        }
+
+        async fn save(&self, question: &DurableQuestion) {
+            self.questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(question.call_id.clone(), question.clone());
+        }
+
+        async fn answer(&self, call_id: &str, answer: &str) -> bool {
+            let mut questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let Some(question) = questions.get_mut(call_id) else {
+                return false;
+            };
+            if question.answer.is_some() {
+                return false;
+            }
+            question.answer = Some(answer.to_owned());
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stored_question_is_reasked_then_replayed_across_brokers() {
+        let store = Arc::new(MemoryQuestionStore::default());
+        let context = ToolContext::new()
+            .with_session(SessionId::new())
+            .with_call(norte::CallId::new());
+
+        let first = Arc::new(QuestionBroker::new().with_store(Arc::clone(&store) as _));
+        let mut events = first.subscribe();
+        let asking = Arc::clone(&first);
+        let task = tokio::spawn({
+            let context = context.clone();
+            async move { asking.ask(&context, "Continue?".to_owned()).await }
+        });
+        let asked = events.recv().await.expect("question event");
+        task.abort();
+
+        let second = Arc::new(QuestionBroker::new().with_store(Arc::clone(&store) as _));
+        let mut events = second.subscribe();
+        let asking = Arc::clone(&second);
+        let task = tokio::spawn({
+            let context = context.clone();
+            async move { asking.ask(&context, "Continue?".to_owned()).await }
+        });
+        let reasked = events.recv().await.expect("question event");
+        assert_eq!(reasked.id, asked.id);
+        assert!(
+            second
+                .answer(context.session, &reasked.id, "yes".to_owned())
+                .await
+        );
+        assert_eq!(task.await.expect("task").expect("answer"), "yes");
+
+        let third = Arc::new(QuestionBroker::new().with_store(store as _));
+        let answer = tokio::time::timeout(
+            Duration::from_secs(1),
+            third.ask(&context, "Continue?".to_owned()),
+        )
+        .await
+        .expect("a replayed answer returns immediately")
+        .expect("answer");
         assert_eq!(answer, "yes");
     }
 }

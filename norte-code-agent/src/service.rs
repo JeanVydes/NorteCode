@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -23,8 +24,10 @@ use norte::{
 use norte_code_skills::{
     SkillRegistry, SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
+use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredQuestion, StoredSession};
 use norte_code_tools::{
-    AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
+    AskUserTool, DurableQuestion, GlobTool, GrepTool, ListDirTool, QuestionBroker, QuestionStore,
+    TodoState, TodoTool, WebFetchTool,
 };
 use norte_tools::{CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::{Notify, mpsc};
@@ -94,12 +97,13 @@ pub struct Service {
     todo: Arc<TodoState>,
     questions: Arc<QuestionBroker>,
     secrets: Vec<String>,
+    directory: Arc<dyn SessionDirectory>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
 }
 
 impl Service {
-    /// Builds a service.
+    /// Builds a service with an in-memory session directory.
     ///
     /// The default spec is used for new sessions; every turn builds an engine
     /// for the session's current spec over the shared store and blob store.
@@ -116,6 +120,64 @@ impl Service {
         blobs: Arc<dyn BlobStore>,
         system_prompt: impl Into<String>,
     ) -> Result<Self, ServiceError> {
+        Self::build(
+            config,
+            catalog,
+            default_spec,
+            factory,
+            store,
+            blobs,
+            Arc::new(InMemoryDirectory::new()),
+            system_prompt,
+        )
+    }
+
+    /// Builds a service that restores its sessions from `directory`.
+    ///
+    /// Mirrors [`Service::new`] but reloads the logical sessions a previous
+    /// process persisted. A stored session whose model can no longer be
+    /// resolved falls back to the default spec instead of aborting startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when the default model cannot be built or the
+    /// directory cannot be read.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn with_directory(
+        config: Config,
+        catalog: Arc<Catalog>,
+        default_spec: ModelSpec,
+        factory: Arc<dyn ModelFactory>,
+        store: Arc<dyn Store>,
+        blobs: Arc<dyn BlobStore>,
+        directory: Arc<dyn SessionDirectory>,
+        system_prompt: impl Into<String>,
+    ) -> Result<Self, ServiceError> {
+        let service = Self::build(
+            config,
+            catalog,
+            default_spec,
+            factory,
+            store,
+            blobs,
+            directory,
+            system_prompt,
+        )?;
+        service.load_sessions().await?;
+        Ok(service)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        config: Config,
+        catalog: Arc<Catalog>,
+        default_spec: ModelSpec,
+        factory: Arc<dyn ModelFactory>,
+        store: Arc<dyn Store>,
+        blobs: Arc<dyn BlobStore>,
+        directory: Arc<dyn SessionDirectory>,
+        system_prompt: impl Into<String>,
+    ) -> Result<Self, ServiceError> {
         let settings = CatalogSettings {
             url: config.catalog.url.clone(),
             ttl: Duration::from_secs(config.catalog.ttl_hours.saturating_mul(3600)),
@@ -127,6 +189,10 @@ impl Service {
         let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
         let secrets = collect_secrets(&config, &catalog);
         let skills = Arc::new(discover_skills(&config, &workspace_root));
+        let questions = Arc::new(
+            QuestionBroker::new()
+                .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
+        );
         let service = Self {
             config,
             catalog: RwLock::new(catalog),
@@ -139,8 +205,9 @@ impl Service {
             workspace_root,
             skills: RwLock::new(skills),
             todo: Arc::new(TodoState::default()),
-            questions: Arc::new(QuestionBroker::new()),
+            questions,
             secrets,
+            directory,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
         };
@@ -171,6 +238,106 @@ impl Service {
             Arc::new(InMemoryBlobStore::new()),
             system_prompt,
         )
+    }
+
+    /// Rebuilds the in-memory session map from the durable directory.
+    async fn load_sessions(&self) -> Result<(), ServiceError> {
+        let stored = self.directory.sessions().await?;
+        let catalog = self.catalog();
+        let mut records = Vec::with_capacity(stored.len());
+        for entry in stored {
+            let key = SessionKey::new(entry.key.clone());
+            let spec = match ModelSpec::from_catalog(&self.config, &catalog, &entry.model, None) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    tracing::warn!(
+                        session = %entry.key,
+                        model = %entry.model,
+                        %error,
+                        "stored session model is unavailable; using the default"
+                    );
+                    self.default_spec.clone()
+                }
+            };
+            // Norte's store is the authority on phase: a parked tool or
+            // approval committed it, while the directory snapshot may predate
+            // the park.
+            let phase = match self.store.load(entry.north).await {
+                Ok(session) => to_phase(session.phase),
+                Err(error) => {
+                    tracing::warn!(
+                        session = %entry.key,
+                        %error,
+                        "could not read the session phase; using the directory copy"
+                    );
+                    match entry.phase.as_str() {
+                        "streaming" => norte_code_protocol::Phase::Streaming,
+                        "awaiting_tool" => norte_code_protocol::Phase::AwaitingTool,
+                        "awaiting_approval" => norte_code_protocol::Phase::AwaitingApproval,
+                        _ => norte_code_protocol::Phase::Idle,
+                    }
+                }
+            };
+            let stats = &entry.stats;
+            let record = SessionRecord {
+                id: entry.north,
+                title: entry.title,
+                spec,
+                created_at: entry.created_at,
+                phase,
+                billed: stats
+                    .get("billed")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(0),
+                requests: stats
+                    .get("requests")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                cost: stats
+                    .get("cost")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0),
+                unpriced: stats
+                    .get("unpriced")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            };
+            records.push((key, record));
+        }
+        let mut sessions = self.lock_sessions();
+        for (key, record) in records {
+            sessions.insert(key, record);
+        }
+        Ok(())
+    }
+
+    /// Writes one session back to the directory.
+    async fn persist(&self, key: &SessionKey) -> Result<(), ServiceError> {
+        let stored = self.lock_sessions().get(key).map(|record| StoredSession {
+            key: key.to_string(),
+            north: record.id,
+            title: record.title.clone(),
+            model: format!("{}/{}", record.spec.provider, record.spec.model),
+            created_at: record.created_at,
+            phase: match record.phase {
+                norte_code_protocol::Phase::Idle => "idle",
+                norte_code_protocol::Phase::Streaming => "streaming",
+                norte_code_protocol::Phase::AwaitingTool => "awaiting_tool",
+                norte_code_protocol::Phase::AwaitingApproval => "awaiting_approval",
+            }
+            .to_owned(),
+            stats: serde_json::json!({
+                "billed": record.billed,
+                "requests": record.requests,
+                "cost": record.cost,
+                "unpriced": record.unpriced,
+            }),
+        });
+        if let Some(stored) = stored {
+            self.directory.save_session(&stored).await?;
+        }
+        Ok(())
     }
 
     /// Builds an engine for one spec over the shared stores.
@@ -319,7 +486,7 @@ impl Service {
                 ))
             }
             Kind::RenameSession { session, title } => {
-                self.rename(&session, &title)?;
+                self.rename(&session, &title).await?;
                 Ok(single(
                     request_id,
                     Some(session),
@@ -327,7 +494,7 @@ impl Service {
                 ))
             }
             Kind::DeleteSession { session } => {
-                self.delete(&session)?;
+                self.delete(&session).await?;
                 Ok(single(
                     request_id,
                     Some(session),
@@ -349,7 +516,9 @@ impl Service {
             Kind::ListSkills => Ok(self.skill_list_event(request_id)),
             Kind::RefreshSkills => Ok(self.refresh_skills_event(request_id)),
             Kind::RefreshCatalog => self.refresh_catalog(request_id).await,
-            Kind::SetModel { session, model } => self.set_model_event(request_id, session, model),
+            Kind::SetModel { session, model } => {
+                self.set_model_event(request_id, session, model).await
+            }
             Kind::SetReasoning { .. } | Kind::SetBudget { .. } => Err(ServiceError::Unsupported(
                 "session settings arrive in a later milestone",
             )),
@@ -377,7 +546,10 @@ impl Service {
                 session,
                 question,
                 answer,
-            } => self.answer_question(request_id, session, question, answer),
+            } => {
+                self.answer_question(request_id, session, question, answer)
+                    .await
+            }
             Kind::Steer { .. } => Err(ServiceError::Unsupported("steering arrives with the TUI")),
             Kind::Compact { .. } => Err(ServiceError::Unsupported(
                 "compaction arrives in milestone 6",
@@ -455,14 +627,14 @@ impl Service {
         ))
     }
 
-    fn set_model_event(
+    async fn set_model_event(
         &self,
         request_id: u64,
         session: SessionKey,
         model: String,
     ) -> Result<EventStream, ServiceError> {
         let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), &model, None)?;
-        self.set_model(&session, spec)?;
+        self.set_model(&session, spec).await?;
         Ok(single(
             request_id,
             Some(session),
@@ -542,7 +714,7 @@ impl Service {
         Ok(Box::pin(head.chain(resumed)))
     }
 
-    fn answer_question(
+    async fn answer_question(
         &self,
         request_id: u64,
         session: SessionKey,
@@ -550,7 +722,7 @@ impl Service {
         answer: String,
     ) -> Result<EventStream, ServiceError> {
         let (nid, _, _) = self.require_record(&session)?;
-        if !self.questions.answer(Some(nid), &question, answer) {
+        if !self.questions.answer(Some(nid), &question, answer).await {
             return Err(ServiceError::UnknownQuestion(question));
         }
         Ok(single(
@@ -604,6 +776,7 @@ impl Service {
             unpriced: 0,
         };
         self.lock_sessions().insert(key.clone(), record);
+        self.persist(&key).await?;
         Ok(key)
     }
 
@@ -629,6 +802,7 @@ impl Service {
             unpriced: 0,
         };
         self.lock_sessions().insert(key.clone(), record);
+        self.persist(&key).await?;
         Ok(key)
     }
 
@@ -650,6 +824,29 @@ impl Service {
         let engine = self.engine(&spec)?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
+        // A resumable park: after a restart the engine will not re-emit the
+        // pending approvals, so surface them from the store before the turn.
+        let restored: Vec<ServerEvent> = if state.phase == norte::Phase::AwaitingApproval {
+            engine
+                .pending_approvals(nid)
+                .await?
+                .into_iter()
+                .map(|record| {
+                    ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::ApprovalRequested {
+                            turn,
+                            approval: record.id.to_string(),
+                            call_id: record.call_id.to_string(),
+                            tool: record.tool.to_string(),
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
         let notify = Arc::new(Notify::new());
         self.lock_cancels().insert(key.clone(), notify.clone());
@@ -675,9 +872,10 @@ impl Service {
             this.lock_cancels().remove(&task_key);
         });
 
-        Ok(Box::pin(futures_util::stream::unfold(
-            rx,
-            |mut rx| async move { rx.recv().await.map(|event| (event, rx)) },
+        Ok(Box::pin(futures_util::stream::iter(restored).chain(
+            futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }),
         )))
     }
 
@@ -722,8 +920,8 @@ impl Service {
                 }
                 question = questions.recv() => {
                     if let Ok(question) = question {
-                        if question.session == Some(nid)
-                            && !emit(
+                        if question.session == Some(nid) {
+                            if !emit(
                                 tx,
                                 ServerEvent::new(
                                     request_id,
@@ -736,8 +934,10 @@ impl Service {
                                 ),
                             )
                             .await
-                        {
-                            return Ok(());
+                            {
+                                return Ok(());
+                            }
+                            self.set_phase(key, norte_code_protocol::Phase::AwaitingTool).await;
                         }
                     }
                 }
@@ -767,12 +967,12 @@ impl Service {
         let _ = self
             .settle(engine, request_id, key, nid, &mut stats, tx)
             .await;
-        self.store_stats(key, &stats);
+        self.store_stats(key, &stats).await;
 
         match outcome {
             Ok(outcome) => {
                 let phase = to_phase(outcome.session.phase);
-                self.set_phase(key, phase);
+                self.set_phase(key, phase).await;
                 emit(
                     tx,
                     ServerEvent::new(
@@ -793,7 +993,7 @@ impl Service {
                     .session(nid)
                     .await
                     .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
-                self.set_phase(key, phase);
+                self.set_phase(key, phase).await;
                 emit(
                     tx,
                     ServerEvent::error(request_id, Some(key.clone()), ErrorCode::Provider, message),
@@ -1017,48 +1217,59 @@ impl Service {
         )
     }
 
-    fn store_stats(&self, key: &SessionKey, stats: &Stats) {
+    async fn store_stats(&self, key: &SessionKey, stats: &Stats) {
         if let Some(record) = self.lock_sessions().get_mut(key) {
             record.billed = stats.billed;
             record.requests = stats.requests;
             record.cost = stats.cost;
             record.unpriced = stats.unpriced;
         }
+        if let Err(error) = self.persist(key).await {
+            tracing::warn!(session = %key, %error, "could not persist session counters");
+        }
     }
 
-    fn set_phase(&self, key: &SessionKey, phase: norte_code_protocol::Phase) {
+    async fn set_phase(&self, key: &SessionKey, phase: norte_code_protocol::Phase) {
         if let Some(record) = self.lock_sessions().get_mut(key) {
             record.phase = phase;
         }
-    }
-
-    fn set_model(&self, key: &SessionKey, spec: ModelSpec) -> Result<(), ServiceError> {
-        let mut lock = self.lock_sessions();
-        let record = lock
-            .get_mut(key)
-            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-        if record.phase != norte_code_protocol::Phase::Idle {
-            return Err(ServiceError::Unsupported(
-                "switch the model at a turn boundary",
-            ));
+        if let Err(error) = self.persist(key).await {
+            tracing::warn!(session = %key, %error, "could not persist session phase");
         }
-        record.spec = spec;
-        Ok(())
     }
 
-    fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
-        let mut lock = self.lock_sessions();
-        let record = lock
-            .get_mut(key)
-            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-        record.title = Some(title.to_owned());
-        Ok(())
+    async fn set_model(&self, key: &SessionKey, spec: ModelSpec) -> Result<(), ServiceError> {
+        {
+            let mut lock = self.lock_sessions();
+            let record = lock
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            if record.phase != norte_code_protocol::Phase::Idle {
+                return Err(ServiceError::Unsupported(
+                    "switch the model at a turn boundary",
+                ));
+            }
+            record.spec = spec;
+        }
+        self.persist(key).await
     }
 
-    fn delete(&self, key: &SessionKey) -> Result<(), ServiceError> {
+    async fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
+        {
+            let mut lock = self.lock_sessions();
+            let record = lock
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.title = Some(title.to_owned());
+        }
+        self.persist(key).await
+    }
+
+    async fn delete(&self, key: &SessionKey) -> Result<(), ServiceError> {
         self.lock_sessions()
             .remove(key)
             .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        self.directory.delete_session(key.as_str()).await?;
         Ok(())
     }
 
@@ -1094,6 +1305,59 @@ impl Service {
 
     fn lock_skills_write(&self) -> RwLockWriteGuard<'_, Arc<SkillRegistry>> {
         self.skills.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Bridges the question broker's durable log onto the session directory.
+struct DirectoryQuestions {
+    directory: Arc<dyn SessionDirectory>,
+}
+
+impl DirectoryQuestions {
+    fn new(directory: Arc<dyn SessionDirectory>) -> Self {
+        Self { directory }
+    }
+}
+
+#[async_trait]
+impl QuestionStore for DirectoryQuestions {
+    async fn load(&self, call_id: &str) -> Option<DurableQuestion> {
+        match self.directory.question(call_id).await {
+            Ok(question) => question.map(|stored| DurableQuestion {
+                id: stored.id,
+                session: stored.session,
+                call_id: stored.call_id,
+                question: stored.question,
+                answer: stored.answer,
+            }),
+            Err(error) => {
+                tracing::warn!(%error, "could not read a stored question");
+                None
+            }
+        }
+    }
+
+    async fn save(&self, question: &DurableQuestion) {
+        let stored = StoredQuestion {
+            id: question.id.clone(),
+            session: question.session,
+            call_id: question.call_id.clone(),
+            question: question.question.clone(),
+            answer: question.answer.clone(),
+        };
+        if let Err(error) = self.directory.save_question(&stored).await {
+            tracing::warn!(%error, "could not store a pending question");
+        }
+    }
+
+    async fn answer(&self, call_id: &str, answer: &str) -> bool {
+        match self.directory.answer_question(call_id, answer).await {
+            Ok(recorded) => recorded,
+            Err(error) => {
+                tracing::warn!(%error, "could not store a question answer");
+                false
+            }
+        }
     }
 }
 
@@ -1425,6 +1689,7 @@ mod tests {
     };
     use norte_code_config::ApiKey;
     use norte_code_protocol::{ClientRequest, ClientRequestKind};
+    use norte_code_store_sqlite::SqliteStore;
     use norte_testing::ScriptedModel;
 
     struct ScriptedFactory {
@@ -1530,7 +1795,7 @@ mod tests {
                 kind,
             })
             .await
-            .expect("request")
+            .unwrap_or_else(|error| panic!("request failed: {error}"))
             .collect()
             .await
     }
@@ -1901,5 +2166,254 @@ mod tests {
             })
             .await;
         assert!(error.is_err());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_parked_approval_survives_a_restart() {
+        let directory = std::env::temp_dir().join(format!(
+            "norte-code-approval-restart-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("sessions.db");
+        let target = std::env::current_dir()
+            .expect("working directory")
+            .join("target")
+            .join(format!(
+                "norte-code-restart-{}-{}.txt",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+        let _ = std::fs::remove_file(&target);
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "write",
+                    &serde_json::json!({
+                        "path": target.display().to_string(),
+                        "content": "survived",
+                        "overwrite": true
+                    }),
+                )
+                .turn_text("done"),
+        );
+
+        let (store, first) = sqlite_service(&path, Arc::clone(&model)).await;
+        let events = drain(
+            &first,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "write it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let session = events[0].session.clone().expect("session");
+        let approval = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+                _ => None,
+            })
+            .expect("approval request");
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                phase: norte_code_protocol::Phase::AwaitingApproval,
+                ..
+            }
+        )));
+        drop(first);
+        drop(store);
+
+        let (store, second) = sqlite_service(&path, model).await;
+        let listed = drain(&second, ClientRequestKind::ListSessions).await;
+        let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
+            panic!("expected a list");
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session, session);
+        assert_eq!(
+            sessions[0].phase,
+            norte_code_protocol::Phase::AwaitingApproval
+        );
+
+        let resumed = drain(
+            &second,
+            ClientRequestKind::Resume {
+                session: session.clone(),
+            },
+        )
+        .await;
+        assert!(resumed.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::ApprovalRequested { approval: pending, .. } if pending == &approval
+        )));
+
+        let approved = drain(
+            &second,
+            ClientRequestKind::Approve {
+                session,
+                approval,
+                arguments: None,
+                scope: None,
+                remember: None,
+            },
+        )
+        .await;
+        assert!(approved.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: false,
+                ..
+            } if tool == "write"
+        )));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("written file"),
+            "survived"
+        );
+        drop(second);
+        drop(store);
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn a_pending_question_survives_a_restart() {
+        let directory = std::env::temp_dir().join(format!(
+            "norte-code-question-restart-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("sessions.db");
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "ask_user",
+                    &serde_json::json!({"question": "Which file?"}),
+                )
+                .turn_text("done"),
+        );
+
+        let (store, first) = sqlite_service(&path, Arc::clone(&model)).await;
+        let request = ClientRequest {
+            request_id: 7,
+            kind: ClientRequestKind::SendMessage {
+                session: None,
+                text: "go".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        };
+        let mut stream = first.submit(request).await.expect("turn");
+        let mut session = None;
+        let mut asked = None;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the turn should park")
+        {
+            session = session.or(event.session.clone());
+            if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
+                asked = Some(question.clone());
+                break;
+            }
+        }
+        let session = session.expect("session");
+        let asked = asked.expect("question");
+        drop(stream);
+        drop(first);
+        drop(store);
+
+        let (store, second) = sqlite_service(&path, model).await;
+        let mut resumed = second
+            .submit(ClientRequest {
+                request_id: 8,
+                kind: ClientRequestKind::Resume {
+                    session: session.clone(),
+                },
+            })
+            .await
+            .expect("resume");
+
+        let mut reasked = None;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+            .await
+            .expect("the resume should re-ask")
+        {
+            if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
+                reasked = Some(question.clone());
+                break;
+            }
+        }
+        assert_eq!(reasked.as_deref(), Some(asked.as_str()));
+
+        let answered = drain(
+            &second,
+            ClientRequestKind::AnswerQuestion {
+                session: session.clone(),
+                question: asked,
+                answer: "src/lib.rs".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            answered[0].kind,
+            ServerEventKind::QuestionAnswered { .. }
+        ));
+
+        let mut finished = false;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+            .await
+            .expect("the resume should finish")
+        {
+            if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the resumed turn should finish after the answer");
+        drop(second);
+        drop(store);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    async fn sqlite_service(
+        path: &std::path::Path,
+        model: Arc<ScriptedModel>,
+    ) -> (Arc<SqliteStore>, Arc<Service>) {
+        let store = Arc::new(SqliteStore::open(path).expect("open"));
+        let session_store: Arc<dyn Store> = store.clone();
+        let blobs: Arc<dyn BlobStore> = store.clone();
+        let directory: Arc<dyn SessionDirectory> = store.clone();
+        let service = Service::with_directory(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            session_store,
+            blobs,
+            directory,
+            "system",
+        )
+        .await
+        .expect("service");
+        (store, Arc::new(service))
     }
 }

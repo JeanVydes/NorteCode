@@ -53,5 +53,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   pre-approval behind `skills.honor_allowed_tools`.
 - Failed tool calls carry the error text the model saw, shown by
   `norte-code run --verbose`.
+- A SQLite `Store` + `BlobStore` that passes Norte's `store_conformance` suite,
+  with one transaction per commit, optimistic concurrency and the host's own
+  tables for logical sessions, pending questions and settings.
+- Restart-resume of parked approvals and pending questions. A resumed session
+  re-emits the approvals still waiting and a question is replayed by its tool
+  call id, so an answer given after a restart reaches the parked tool.
+- Approval records and sessions are stored with their grants lifted into a
+  side table shape, because `GrantScope`'s internally tagged newtype variants
+  are not representable in JSON.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev
