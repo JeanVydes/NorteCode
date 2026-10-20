@@ -22,8 +22,54 @@ Norte Code never forks Norte.
 | `norte-code-cost` | The cost ledger and budget evaluation. Provider-reported cost only. |
 | `norte-code-tools` | The tools Norte does not ship: `glob`, `list_dir`, `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | A Norte `Store` + `BlobStore` over SQLite, plus Norte Code's own tables. |
-| `norte-code-cli` | The headless `norte-code` command. |
-| `norte-code-tui` | The interactive terminal UI. |
+| `norte-code-cli` | The `norte-code` command and its interactive prompt. |
+| `norte-code-tui` | The interactive terminal UI (not implemented yet). |
+
+## Architecture
+
+```text
+CLI / TUI
+   │  ClientRequest { request_id, kind }
+   ▼
+norte-code-protocol          versioned serde wire; no Norte types
+   ▼
+norte-code-agent (Service)
+   ├─ config, catalogue, cost, skills, approvals, sandbox
+   ├─ Norte Engine ── one model, one Norte session, policies, tools
+   └─ agent loop ──── iterations, approvals, compaction, retries
+   ▼
+norte-code-store-sqlite
+   ├─ Norte sessions and nodes
+   ├─ logical sessions, rules, approvals, questions, effects
+   ├─ costs (one row per billed request)
+   └─ requests (one row per provider attempt)
+```
+
+The service maps Norte's events into the protocol once; clients never see a
+Norte ID or type. [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the turn
+lifecycle, compaction, model switching, the sandbox, retries, telemetry and
+the provider cost probes.
+
+## Configuration
+
+`config.json` is merged from the user config file and an optional
+`.norte-code/config.json` project overlay. Every key, its type, default and
+validation rule is documented in [`CONFIG.md`](CONFIG.md). The smallest useful
+file names a model and a provider key source:
+
+```json
+{
+  "version": 1,
+  "default_model": "openrouter/anthropic/claude-sonnet-4",
+  "providers": {
+    "openrouter": { "api_key_env": "OPENROUTER_API_KEY" }
+  }
+}
+```
+
+The full schema also covers the catalogue cache, compaction, retries,
+reasoning, approval rules, budgets, the command sandbox, skills and per-model
+capability overrides.
 
 ## Building
 
@@ -79,8 +125,13 @@ input: only a regular file is read, the read is capped at 64 KiB, and the
 instructions never override the user's request, the approvals or the budgets.
 
 `--interactive` keeps the same session open after each turn and prints a `›`
-prompt for the next message; `/compact` summarises the conversation on demand
-and `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt leave. `run --interactive` may omit its first prompt and start at the prompt;
+prompt for the next message. `/help` lists the commands; `/compact` summarises
+the conversation on demand, `/refresh` re-scans the skill roots and their tools,
+and `/allow <tool> [session|global]` or `/deny <tool> [session|global]` set an
+approval rule without waiting for a pending call. The scope defaults to the
+current session; `global` writes the user config. Setting an allow rule is also
+how a previous deny is revoked. `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
+leave. `run --interactive` may omit its first prompt and start at the prompt;
 `resume --interactive` reopens a parked session and then continues the
 conversation. It needs a terminal and cannot be combined with `--jsonl`. The
 interactive prompt shares stdin with approvals and questions, so input typed

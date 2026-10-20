@@ -93,6 +93,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   rules live in the user config. The resumed turn is folded back into the same
   render loop, so a turn can park and resume several times. Piped stdin still
   leaves the session parked rather than guessing.
+- Interactive chat commands: `/help`, `/compact`, `/refresh`, `/allow <tool>
+  [session|global]` and `/deny <tool> [session|global]`. Rules default to the
+  session and are stored with it; `global` writes the user config and replaces
+  the opposite rule. An allow rule revokes a previous deny without another
+  pending call. `/refresh` re-scans the skill roots so the next turn registers
+  the new tools.
 - A styled text renderer: model and tool names, outcomes, usage and errors use
   colour when the destination is a terminal, reasoning streams in its own dim
   gutter instead of mixing with the answer, and the run ends with a compact

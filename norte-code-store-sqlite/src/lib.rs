@@ -63,6 +63,9 @@ pub struct StoredSession {
     /// Tools this session refuses without asking again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied_tools: Vec<String>,
+    /// Tools this session allows without asking again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
     /// The Norte session this one was compacted from, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compacted_from: Option<SessionId>,
@@ -1272,6 +1275,7 @@ impl SessionDirectory for SqliteStore {
                         phase,
                         stats: decode(&stats, "session stats")?,
                         denied_tools: extra.denied_tools,
+                        allowed_tools: extra.allowed_tools,
                         compacted_from: extra.compacted_from,
                     })
                 },
@@ -1991,6 +1995,7 @@ mod tests {
                 phase: "streaming".to_owned(),
                 stats: serde_json::json!({}),
                 denied_tools: Vec::new(),
+                allowed_tools: Vec::new(),
                 compacted_from: None,
             })
             .await
@@ -2109,6 +2114,7 @@ mod tests {
             phase: "idle".to_owned(),
             stats: serde_json::json!({"cost": 0.5}),
             denied_tools: vec!["command".to_owned()],
+            allowed_tools: vec!["write".to_owned()],
             compacted_from: None,
         };
         store.save_session(&session).await.expect("save");

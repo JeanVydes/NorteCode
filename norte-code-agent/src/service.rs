@@ -6,6 +6,8 @@
 //! model switch a change of model rather than a change of session.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(target_os = "macos", test))]
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -80,6 +82,8 @@ struct SessionRecord {
     budget: Option<Budget>,
     /// Tools this session refuses without asking again.
     denied_tools: Vec<String>,
+    /// Tools this session allows without asking again.
+    allowed_tools: Vec<String>,
     /// The Norte session this one was compacted from, when it was.
     compacted_from: Option<SessionId>,
     /// Whether a compaction is running, so a concurrent turn does not repeat it.
@@ -522,18 +526,15 @@ fn linux_wrap(
     Ok(("bwrap".to_owned(), wrapped))
 }
 
-/// macOS seatbelt: a profile that keeps reads but denies writes outside the
-/// workspace and the usual temporary roots, and denies the network by default.
-#[cfg(target_os = "macos")]
-fn macos_wrap(
-    program: String,
-    args: Vec<String>,
-    cwd: Option<&Path>,
+/// The seatbelt policy for macOS: reads stay open, writes are limited to the
+/// workspace, the configured extras and the temporary roots, and the network is
+/// denied unless it was enabled.
+#[cfg(any(target_os = "macos", test))]
+fn macos_profile(
     workspace: &Path,
     network: bool,
     writable: &[PathBuf],
-) -> std::result::Result<(String, Vec<String>), String> {
-    let _ = cwd;
+) -> std::result::Result<String, String> {
     let mut profile = String::from("(version 1)\n(allow default)\n");
     if !network {
         profile.push_str("(deny network*)\n");
@@ -548,11 +549,33 @@ fn macos_wrap(
         let path = root
             .to_str()
             .ok_or_else(|| "a sandbox path is not UTF-8".to_owned())?;
+        if path.chars().any(char::is_control) {
+            return Err("a sandbox path contains a control character".to_owned());
+        }
         let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-        profile.push_str(&format!("  (subpath \"{escaped}\")\n"));
+        writeln!(profile, "  (subpath \"{escaped}\")").expect("writing to a String");
     }
     profile.push_str(")\n");
-    let mut wrapped = vec!["-p".to_owned(), profile, "--".to_owned(), program];
+    Ok(profile)
+}
+
+/// macOS seatbelt: wraps the command in `sandbox-exec` with [`macos_profile`].
+#[cfg(target_os = "macos")]
+fn macos_wrap(
+    program: String,
+    args: Vec<String>,
+    cwd: Option<&Path>,
+    workspace: &Path,
+    network: bool,
+    writable: &[PathBuf],
+) -> std::result::Result<(String, Vec<String>), String> {
+    let _ = cwd;
+    let mut wrapped = vec![
+        "-p".to_owned(),
+        macos_profile(workspace, network, writable)?,
+        "--".to_owned(),
+        program,
+    ];
     wrapped.extend(args);
     Ok(("sandbox-exec".to_owned(), wrapped))
 }
@@ -824,8 +847,11 @@ impl Service {
                     }
                 }
             };
-            self.approval_rules
-                .load_session(entry.north, &entry.denied_tools);
+            self.approval_rules.load_session(
+                entry.north,
+                &entry.denied_tools,
+                &entry.allowed_tools,
+            );
             let stats = &entry.stats;
             let record = SessionRecord {
                 id: entry.north,
@@ -862,6 +888,7 @@ impl Service {
                     .get("budget")
                     .and_then(|value| serde_json::from_value(value.clone()).ok()),
                 denied_tools: entry.denied_tools.clone(),
+                allowed_tools: entry.allowed_tools.clone(),
                 compacted_from: entry.compacted_from,
                 compacting: false,
                 compaction_baseline: stats
@@ -913,6 +940,7 @@ impl Service {
                 "compaction_baseline": record.compaction_baseline,
             }),
             denied_tools: record.denied_tools.clone(),
+            allowed_tools: record.allowed_tools.clone(),
             compacted_from: record.compacted_from,
         });
         if let Some(stored) = stored {
@@ -1151,6 +1179,80 @@ impl Service {
         Ok(())
     }
 
+    /// Sets one approval rule for a session or the user config.
+    ///
+    /// A session rule is stored with the logical session, so it survives a
+    /// restart. A global rule is written to the user config and replaces the
+    /// opposite rule for the same tool. Setting an allow rule is also how a
+    /// previous deny is revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool name is empty, the session is unknown, a
+    /// session rule is requested without a session, or the config cannot be
+    /// written.
+    pub async fn set_approval_rule(
+        &self,
+        session: Option<&SessionKey>,
+        tool: &str,
+        allow: bool,
+        global: bool,
+    ) -> Result<(), ServiceError> {
+        let tool = tool.trim();
+        if tool.is_empty() {
+            return Err(ServiceError::Approval(
+                "the approval rule needs a tool name".to_owned(),
+            ));
+        }
+        if global {
+            self.remember_global_rule(tool, allow)?;
+            return Ok(());
+        }
+        let session = session.ok_or_else(|| {
+            ServiceError::Approval(
+                "a session rule needs an open session; send a message first".to_owned(),
+            )
+        })?;
+        let (nid, _, _) = self.require_record(session)?;
+        {
+            let mut records = self.lock_sessions();
+            let record = records
+                .get_mut(session)
+                .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
+            record.denied_tools.retain(|denied| denied != tool);
+            record.allowed_tools.retain(|allowed| allowed != tool);
+            if allow {
+                record.allowed_tools.push(tool.to_owned());
+            } else {
+                record.denied_tools.push(tool.to_owned());
+            }
+        }
+        if allow {
+            self.approval_rules.allow_session(nid, tool);
+        } else {
+            self.approval_rules.deny_session(nid, tool);
+        }
+        self.persist(session).await
+    }
+
+    /// Re-scans the skill roots and returns how many valid skills remain.
+    ///
+    /// The next engine build registers the refreshed tools; a turn already in
+    /// flight keeps the registry it started with.
+    pub fn refresh_skills(&self) -> usize {
+        let registry = Arc::new(discover_skills(&self.config, &self.workspace_root));
+        let count = registry.len();
+        for warning in registry.warnings() {
+            tracing::warn!(
+                path = %warning.path.display(),
+                "skipping skill: {}",
+                warning.message
+            );
+        }
+        *self.lock_skills_write() = registry;
+        count
+    }
+
     /// The skills registry in use.
     #[must_use]
     pub fn skills(&self) -> Arc<SkillRegistry> {
@@ -1337,16 +1439,7 @@ impl Service {
     }
 
     fn refresh_skills_event(&self, request_id: u64) -> EventStream {
-        let registry = Arc::new(discover_skills(&self.config, &self.workspace_root));
-        let count = registry.len();
-        for warning in registry.warnings() {
-            tracing::warn!(
-                path = %warning.path.display(),
-                "skipping skill: {}",
-                warning.message
-            );
-        }
-        *self.lock_skills_write() = registry;
+        let count = self.refresh_skills();
         single(
             request_id,
             None,
@@ -1549,6 +1642,7 @@ impl Service {
             output_tokens: 0,
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
+            allowed_tools: Vec::new(),
             compacted_from: None,
             compacting: false,
             compaction_baseline: 0,
@@ -1756,7 +1850,7 @@ impl Service {
             record.compaction_baseline = seeded;
             record.phase = norte_code_protocol::Phase::Idle;
             self.approval_rules
-                .load_session(fresh.id, &record.denied_tools);
+                .load_session(fresh.id, &record.denied_tools, &record.allowed_tools);
         }
         self.todo.carry(old, fresh.id);
         self.persist(key).await?;
@@ -1857,6 +1951,7 @@ impl Service {
             output_tokens: 0,
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
+            allowed_tools: Vec::new(),
             compacted_from: Some(source),
             compacting: false,
             compaction_baseline: 0,
@@ -3399,6 +3494,7 @@ impl Policy for EffectJournalPolicy {
 struct ApprovalRules {
     global_allow: Mutex<BTreeSet<String>>,
     global_deny: Mutex<BTreeSet<String>>,
+    session_allow: Mutex<BTreeMap<SessionId, BTreeSet<String>>>,
     session_deny: Mutex<BTreeMap<SessionId, BTreeSet<String>>>,
 }
 
@@ -3407,6 +3503,7 @@ impl ApprovalRules {
         Self {
             global_allow: Mutex::new(config.allow.iter().cloned().collect()),
             global_deny: Mutex::new(config.deny.iter().cloned().collect()),
+            session_allow: Mutex::new(BTreeMap::new()),
             session_deny: Mutex::new(BTreeMap::new()),
         }
     }
@@ -3428,12 +3525,22 @@ impl ApprovalRules {
     }
 
     fn allows(&self, session: SessionId, tool: &str) -> bool {
-        !self.denies(session, tool)
-            && self
-                .global_allow
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(tool)
+        if self.denies(session, tool) {
+            return false;
+        }
+        if self
+            .global_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(tool)
+        {
+            return true;
+        }
+        self.session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .is_some_and(|tools| tools.contains(tool))
     }
 
     fn allow_global(&self, tool: &str) {
@@ -3458,7 +3565,28 @@ impl ApprovalRules {
             .insert(tool.to_owned());
     }
 
+    fn allow_session(&self, session: SessionId, tool: &str) {
+        self.session_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session)
+            .or_default()
+            .remove(tool);
+        self.session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session)
+            .or_default()
+            .insert(tool.to_owned());
+    }
+
     fn deny_session(&self, session: SessionId, tool: &str) {
+        self.session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session)
+            .or_default()
+            .remove(tool);
         self.session_deny
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -3467,11 +3595,15 @@ impl ApprovalRules {
             .insert(tool.to_owned());
     }
 
-    fn load_session(&self, session: SessionId, tools: &[String]) {
+    fn load_session(&self, session: SessionId, denied: &[String], allowed: &[String]) {
         self.session_deny
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(session, tools.iter().cloned().collect());
+            .insert(session, denied.iter().cloned().collect());
+        self.session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session, allowed.iter().cloned().collect());
     }
 }
 
@@ -4724,6 +4856,29 @@ mod tests {
 
         let broken = serde_json::json!({"command": {"kind": "teleport"}});
         assert!(sandboxed_arguments(&broken, &workspace, false, &[]).is_err());
+    }
+
+    #[test]
+    fn the_macos_profile_limits_writes_and_the_network() {
+        let profile = macos_profile(
+            Path::new("/work"),
+            false,
+            &[PathBuf::from("/cache"), PathBuf::from("/tmp/a b")],
+        )
+        .expect("profile");
+        assert!(profile.starts_with("(version 1)\n(allow default)\n"));
+        assert!(profile.contains("(deny network*)"));
+        assert!(profile.contains("(deny file-write*)"));
+        assert!(profile.contains("(subpath \"/work\")"));
+        assert!(profile.contains("(subpath \"/cache\")"));
+        assert!(profile.contains("(subpath \"/tmp/a b\")"));
+        assert!(profile.contains("(subpath \"/private/tmp\")"));
+        assert!(profile.contains("(subpath \"/dev\")"));
+
+        let online = macos_profile(Path::new("/work"), true, &[]).expect("online profile");
+        assert!(!online.contains("(deny network*)"));
+
+        assert!(macos_profile(Path::new("/work\n(allow default)"), false, &[]).is_err());
     }
 
     #[test]
@@ -6275,6 +6430,64 @@ mod tests {
         assert_eq!(loaded.config.approvals.allow, ["write"]);
         assert!(loaded.config.approvals.deny.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn session_rules_persist_and_allow_revokes_a_deny() {
+        let service = service();
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "hello".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = events
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session");
+        let nid = service.require_record(&key).expect("record").0;
+
+        service
+            .set_approval_rule(Some(&key), "command", false, false)
+            .await
+            .expect("deny");
+        assert!(service.approval_rules.denies(nid, "command"));
+        {
+            let records = service.lock_sessions();
+            let record = records.get(&key).expect("session");
+            assert_eq!(record.denied_tools, ["command"]);
+            assert!(record.allowed_tools.is_empty());
+        }
+
+        service
+            .set_approval_rule(Some(&key), "command", true, false)
+            .await
+            .expect("allow");
+        assert!(service.approval_rules.allows(nid, "command"));
+        assert!(!service.approval_rules.denies(nid, "command"));
+        {
+            let records = service.lock_sessions();
+            let record = records.get(&key).expect("session");
+            assert!(record.denied_tools.is_empty());
+            assert_eq!(record.allowed_tools, ["command"]);
+        }
+
+        assert!(
+            service
+                .set_approval_rule(Some(&key), " ", true, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .set_approval_rule(None, "command", true, false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

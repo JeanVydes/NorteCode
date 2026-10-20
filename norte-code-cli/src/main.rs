@@ -1272,6 +1272,54 @@ async fn resume_session(
 
 /// Reads and sends messages until the human exits, a turn parks or the budget
 /// stops the session.
+/// Parses `/allow` and `/deny` into `(allow, tool, global)`.
+///
+/// The scope is optional and defaults to the current session. Anything that is
+/// not one of these commands returns `None`, so an ordinary message that starts
+/// with `/` is still sent to the model.
+fn parse_approval_command(text: &str) -> Option<Result<(bool, String, bool), String>> {
+    let (allow, rest) = text
+        .strip_prefix("/allow")
+        .map(|rest| (true, rest))
+        .or_else(|| text.strip_prefix("/deny").map(|rest| (false, rest)))?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let command = if allow { "/allow" } else { "/deny" };
+    let mut parts = rest.split_whitespace();
+    let Some(tool) = parts.next() else {
+        return Some(Err(format!("usage: {command} <tool> [session|global]")));
+    };
+    let scope = parts.next().unwrap_or("session");
+    if parts.next().is_some() {
+        return Some(Err(format!("usage: {command} <tool> [session|global]")));
+    }
+    let global = match scope {
+        "session" => false,
+        "global" => true,
+        other => {
+            return Some(Err(format!(
+                "unknown scope `{other}`; use session or global"
+            )));
+        }
+    };
+    Some(Ok((allow, tool.to_owned(), global)))
+}
+
+fn print_chat_help(style: Style) {
+    eprintln!("{}", style.bold("chat commands"));
+    eprintln!("  /help                     show this list");
+    eprintln!("  /compact                  summarise and continue on a new session");
+    eprintln!("  /allow <tool> [session|global]  allow without asking");
+    eprintln!("  /deny <tool> [session|global]   refuse without asking");
+    eprintln!("  /refresh                  re-scan the skills and their tools");
+    eprintln!("  /exit, /quit              leave the chat");
+    eprintln!(
+        "{}",
+        style.dim("  scope defaults to session; global writes the user config")
+    );
+}
+
 async fn interactive_loop(
     service: &Arc<Service>,
     mut session: Option<SessionKey>,
@@ -1284,7 +1332,7 @@ async fn interactive_loop(
     if !renderer.quiet {
         eprintln!(
             "{}",
-            style.dim("interactive: type /compact to summarise, /exit or Ctrl-D to leave")
+            style.dim("interactive: /help for commands; /compact, /allow, /deny, /refresh, /exit")
         );
     }
     let mut request_id = 2_u64;
@@ -1292,6 +1340,10 @@ async fn interactive_loop(
         let Some(text) = read_repl_line(input, style).await? else {
             break;
         };
+        if text == "/help" {
+            print_chat_help(style);
+            continue;
+        }
         if text == "/compact" {
             let Some(current) = session.clone() else {
                 eprintln!(
@@ -1314,6 +1366,36 @@ async fn interactive_loop(
             if outcome.parked || renderer.budget_stopped {
                 break;
             }
+            continue;
+        }
+        if let Some(rule) = parse_approval_command(&text) {
+            match rule {
+                Ok((allow, tool, global)) => {
+                    match service
+                        .set_approval_rule(session.as_ref(), &tool, allow, global)
+                        .await
+                    {
+                        Ok(()) => {
+                            let verb = if allow { "allowed" } else { "denied" };
+                            let scope = if global {
+                                "globally"
+                            } else {
+                                "for this session"
+                            };
+                            eprintln!("{}", style.green(format!("{verb} `{tool}` {scope}")));
+                        }
+                        Err(error) => {
+                            eprintln!("{}", style.red(format!("could not set the rule: {error}")));
+                        }
+                    }
+                }
+                Err(message) => eprintln!("{}", style.yellow(message)),
+            }
+            continue;
+        }
+        if text == "/refresh" {
+            let count = service.refresh_skills();
+            eprintln!("{}", style.green(format!("skills refreshed: {count}")));
             continue;
         }
         let stream = service
@@ -3711,8 +3793,8 @@ mod tests {
     use super::{
         ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions,
         apply_extensions, approval_request, argument_preview, budget_label, compose_selection,
-        cost_summary, parse_approval_choice, parse_reasoning_setting, parse_selection,
-        select_system_prompt,
+        cost_summary, parse_approval_choice, parse_approval_command, parse_reasoning_setting,
+        parse_selection, select_system_prompt,
     };
     use clap::Parser;
     use norte_code_config::Config;
@@ -3872,6 +3954,36 @@ mod tests {
             compose_selection(&options, &[0, 1], Some("something custom")),
             "Read, Write, something custom"
         );
+    }
+
+    #[test]
+    fn chat_approval_commands_default_to_the_session_and_reject_bad_scopes() {
+        assert_eq!(
+            parse_approval_command("/allow command"),
+            Some(Ok((true, "command".to_owned(), false)))
+        );
+        assert_eq!(
+            parse_approval_command("/deny write global"),
+            Some(Ok((false, "write".to_owned(), true)))
+        );
+        assert_eq!(
+            parse_approval_command("/allow skill_script session"),
+            Some(Ok((true, "skill_script".to_owned(), false)))
+        );
+        assert!(parse_approval_command("/allow").expect("command").is_err());
+        assert!(
+            parse_approval_command("/deny write everywhere")
+                .expect("command")
+                .is_err()
+        );
+        assert!(
+            parse_approval_command("/allow write global extra")
+                .expect("command")
+                .is_err()
+        );
+        assert_eq!(parse_approval_command("/allowance"), None);
+        assert_eq!(parse_approval_command("/other command"), None);
+        assert_eq!(parse_approval_command("hello"), None);
     }
 
     #[test]
