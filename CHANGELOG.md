@@ -185,5 +185,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   first-token latency and the tools that request called, alongside the existing
   input/output, cache-read share, input:output ratio and reported cost.
   `--quiet` still hides all usage lines.
+- The per-request token rate is answer tokens from the first delta to the end
+  of the request. The wait for the first token is reported separately as
+  latency, and a single final burst falls back to the whole duration instead of
+  dividing by a sliver.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

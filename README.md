@@ -62,7 +62,8 @@ the session, and where the system prompt came from (flag, config or built-in),
 plus how many characters the system prompt and tool declarations contain.
 Tokens are not estimated: only the provider counts them, and the per-request
 usage line reports the provider's number. Unless `--quiet` is set, each request
-also shows answer tokens per second, total time, time to the first token,
+also shows answer tokens per second from the first token to the end of the
+request, total time, time to the first token,
 the cache-read share, the input:output ratio and the tools called by that
 request. `--verbose` prints each tool call's
 effective arguments and its result as fenced blocks; large values are shortened,
