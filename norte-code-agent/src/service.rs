@@ -44,6 +44,7 @@ use norte_code_protocol::{
 
 use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec, Wire};
+use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 
 /// A stream of events answering one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
@@ -72,6 +73,8 @@ struct SessionRecord {
     budget: Option<Budget>,
     /// Tools this session refuses without asking again.
     denied_tools: Vec<String>,
+    /// The Norte session this one was compacted from, when it was.
+    compacted_from: Option<SessionId>,
 }
 
 /// Live counters for the turn in flight.
@@ -229,6 +232,7 @@ pub struct Service {
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
+    telemetry: Arc<Telemetry>,
 }
 
 impl Service {
@@ -349,6 +353,7 @@ impl Service {
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
             config_path: Mutex::new(norte_code_config::user_config_path()),
+            telemetry: Arc::new(Telemetry::default()),
         };
         // Fail at construction, not at the first message, when the model's
         // provider cannot be built.
@@ -484,6 +489,7 @@ impl Service {
                     .get("budget")
                     .and_then(|value| serde_json::from_value(value.clone()).ok()),
                 denied_tools: entry.denied_tools.clone(),
+                compacted_from: entry.compacted_from,
             };
             records.push((key.clone(), record));
             if needs_repair {
@@ -527,6 +533,7 @@ impl Service {
                 "budget": record.budget,
             }),
             denied_tools: record.denied_tools.clone(),
+            compacted_from: record.compacted_from,
         });
         if let Some(stored) = stored {
             self.directory.save_session(&stored).await?;
@@ -568,10 +575,20 @@ impl Service {
                         .insert(info.call_id, info.arguments.clone());
                     BTreeMap::new()
                 }
-            });
+            })
+            .observers(vec![
+                Arc::new(TelemetryObserver::new(Arc::clone(&self.telemetry)))
+                    as Arc<dyn norte::Observer>,
+            ]);
+        let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
         if let Some(book) = budget {
-            builder = builder.layers(LayerStack::new(vec![Arc::new(BudgetLayer { book })]));
+            layers.push(Arc::new(BudgetLayer { book }));
         }
+        layers.push(Arc::new(TelemetryLayer::new(
+            Arc::clone(&self.telemetry),
+            spec.clone(),
+        )));
+        builder = builder.layers(LayerStack::new(layers));
         Ok(builder.build()?)
     }
 
@@ -1126,6 +1143,7 @@ impl Service {
             output_tokens: 0,
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
+            compacted_from: None,
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -1156,6 +1174,7 @@ impl Service {
             output_tokens: 0,
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
+            compacted_from: Some(source),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -1556,6 +1575,14 @@ impl Service {
         let Ok(history) = engine.history(nid).await else {
             return true;
         };
+        let mut ok = std::collections::VecDeque::new();
+        for record in self.telemetry_for(key, nid) {
+            if record.status == "ok" {
+                ok.push_back(record);
+            } else {
+                self.record_request(key, &record).await;
+            }
+        }
         for message in history.iter().skip(stats.billed) {
             let Some(origin) = &message.origin else {
                 continue;
@@ -1585,19 +1612,11 @@ impl Service {
             if let Err(error) = self.directory.record_cost(&record).await {
                 tracing::warn!(session = %key, %error, "could not record request cost");
             }
-            let notices =
-                self.lock_budget_states()
-                    .get(key)
-                    .cloned()
-                    .map_or_else(Vec::new, |book| {
-                        let mut book = book.lock().unwrap_or_else(PoisonError::into_inner);
-                        book.record(&record);
-                        if final_check {
-                            book.notices()
-                        } else {
-                            book.warnings()
-                        }
-                    });
+            let telemetry = ok
+                .pop_front()
+                .unwrap_or_else(|| self.request_from_usage(key, nid, stats.turn, &origin.usage));
+            self.record_request(key, &telemetry).await;
+            let notices = self.budget_notices(key, &record, final_check);
             let event = ServerEvent::new(
                 request_id,
                 Some(key.clone()),
@@ -1636,7 +1655,95 @@ impl Service {
             }
         }
         stats.billed = history.len();
+        for record in ok {
+            self.record_request(key, &record).await;
+        }
         true
+    }
+
+    /// Takes the requests the telemetry layer finished since the last look.
+    fn telemetry_for(
+        &self,
+        key: &SessionKey,
+        nid: SessionId,
+    ) -> Vec<norte_code_store_sqlite::RequestRecord> {
+        let mut records = self.telemetry.take(nid);
+        records.sort_by_key(|record| record.started_at);
+        for record in &mut records {
+            record.session = key.to_string();
+        }
+        records
+    }
+
+    fn budget_notices(
+        &self,
+        key: &SessionKey,
+        record: &CostRecord,
+        final_check: bool,
+    ) -> Vec<BudgetNotice> {
+        self.lock_budget_states()
+            .get(key)
+            .cloned()
+            .map_or_else(Vec::new, |book| {
+                let mut book = book.lock().unwrap_or_else(PoisonError::into_inner);
+                book.record(record);
+                if final_check {
+                    book.notices()
+                } else {
+                    book.warnings()
+                }
+            })
+    }
+
+    async fn record_request(
+        &self,
+        key: &SessionKey,
+        record: &norte_code_store_sqlite::RequestRecord,
+    ) {
+        if let Err(error) = self.directory.record_request(record).await {
+            tracing::warn!(session = %key, %error, "could not record request telemetry");
+        }
+    }
+
+    fn request_from_usage(
+        &self,
+        key: &SessionKey,
+        nid: SessionId,
+        turn: u64,
+        usage: &Usage,
+    ) -> norte_code_store_sqlite::RequestRecord {
+        let model = self.model_label(key);
+        let (provider, model) = model.split_once('/').map_or_else(
+            || (String::new(), model.clone()),
+            |(p, m)| (p.to_owned(), m.to_owned()),
+        );
+        norte_code_store_sqlite::RequestRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            session: key.to_string(),
+            north_session: nid.to_string(),
+            turn,
+            provider,
+            model,
+            started_at: Utc::now(),
+            duration_ms: 0,
+            first_token_ms: None,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_tokens: usage.reasoning_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_write_tokens: usage.cache_write_tokens,
+            estimated_input_tokens: None,
+            cache_hit: usage.cache_read_tokens.unwrap_or(0) > 0,
+            tool_calls: Vec::new(),
+            reasoning: None,
+            params: serde_json::Value::Null,
+            extensions: serde_json::Value::Null,
+            metadata: serde_json::json!({"source": "history"}),
+            cost_usd: reported_cost(usage),
+            finish_reason: None,
+            status: "ok".to_owned(),
+            error: None,
+        }
     }
 
     /// The `provider/model` a session currently uses.
@@ -3600,6 +3707,51 @@ mod tests {
         .await
         .expect("service");
         (Arc::new(service), store)
+    }
+
+    #[tokio::test]
+    async fn the_request_table_records_usage_latency_and_metadata() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(ScriptedModel::new(reference).turn(vec![
+            norte::StreamEvent::Usage(usage(120, 30, Some(0.125))),
+            norte::StreamEvent::TextDelta {
+                index: 0,
+                text: "hello".to_owned(),
+            },
+            norte::StreamEvent::Finish(FinishReason::Stop),
+        ]));
+        let (service, store) = persistent_service(model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "hi".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let session = events
+            .iter()
+            .find_map(|event| event.session.as_ref())
+            .expect("session")
+            .to_string();
+        let requests = store.requests(None).await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let record = &requests[0];
+        assert_eq!(record.session, session);
+        assert_eq!(record.provider, "test");
+        assert_eq!(record.model, "scripted");
+        assert_eq!(record.input_tokens, Some(120));
+        assert_eq!(record.output_tokens, Some(30));
+        assert_eq!(record.cost_usd, Some(0.125));
+        assert_eq!(record.status, "ok");
+        assert!(record.first_token_ms.is_some());
+        assert!(record.metadata.get("engine_events").is_some());
+        assert_eq!(record.params, serde_json::json!({}));
     }
 
     #[tokio::test]

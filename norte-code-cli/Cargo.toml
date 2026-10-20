@@ -22,6 +22,7 @@ norte-code-skills = { path = "../norte-code-skills" }
 norte-code-store-sqlite = { path = "../norte-code-store-sqlite" }
 
 clap = { workspace = true }
+chrono = { workspace = true }
 futures-util = { workspace = true }
 norte = { workspace = true }
 serde_json = { workspace = true }

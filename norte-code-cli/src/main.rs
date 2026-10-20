@@ -18,6 +18,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use norte::{
@@ -37,7 +38,7 @@ use norte_code_protocol::{
     ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
-use norte_code_store_sqlite::{SessionDirectory, SqliteStore};
+use norte_code_store_sqlite::{RequestRecord, SessionDirectory, SqliteStore};
 use tokio::sync::mpsc;
 
 use crate::style::Style;
@@ -84,6 +85,8 @@ enum Command {
     Sessions(SessionsArgs),
     /// Report the provider-reported cost ledger.
     Cost(CostArgs),
+    /// Report local request telemetry: counts, tokens, cache, tools and latency.
+    Telemetry(TelemetryArgs),
 }
 
 #[derive(Args)]
@@ -198,6 +201,25 @@ struct CostArgs {
 }
 
 #[derive(Args)]
+struct TelemetryArgs {
+    /// Only this session key.
+    #[arg(long, value_name = "KEY")]
+    session: Option<String>,
+    /// Only this provider id.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
+    /// Only this model id.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<String>,
+    /// The time bucket for the series.
+    #[arg(long, value_name = "BUCKET", value_parser = ["hour", "day", "month", "year", "total"], default_value = "day")]
+    bucket: String,
+    /// Write one JSON object.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 struct SkillsArgs {
     /// What to do with the installed skills.
     #[command(subcommand)]
@@ -256,6 +278,7 @@ async fn run(cli: Cli) -> Result<u8, String> {
         Command::Skills(args) => skills_command(&config, &args),
         Command::Sessions(args) => sessions_command(&args).await,
         Command::Cost(args) => cost_command(&config, &args).await,
+        Command::Telemetry(args) => telemetry_command(&args).await,
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
@@ -266,7 +289,10 @@ async fn run(cli: Cli) -> Result<u8, String> {
                     resume_session(config, catalog, source, args, verbose, debug, user_config).await
                 }
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
-                Command::Skills(_) | Command::Sessions(_) | Command::Cost(_) => {
+                Command::Skills(_)
+                | Command::Sessions(_)
+                | Command::Cost(_)
+                | Command::Telemetry(_) => {
                     unreachable!("these commands do not need the catalogue")
                 }
             }
@@ -476,6 +502,282 @@ fn cost_summary(summary: &CostSummary) -> String {
         }
     }
     parts.join(" · ")
+}
+
+/// Counts and sums one slice of the request telemetry.
+#[derive(Default, Clone)]
+struct RequestSummary {
+    requests: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    reasoning_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    cache_hits: u64,
+    tool_calls: u64,
+    cost_usd: f64,
+    unpriced: u64,
+    errors: u64,
+    cancelled: u64,
+    durations: Vec<u64>,
+}
+
+impl RequestSummary {
+    fn add(&mut self, record: &RequestRecord) {
+        self.requests += 1;
+        self.input_tokens += record.input_tokens.unwrap_or(0);
+        self.output_tokens += record.output_tokens.unwrap_or(0);
+        self.reasoning_tokens += record.reasoning_tokens.unwrap_or(0);
+        self.cache_read_tokens += record.cache_read_tokens.unwrap_or(0);
+        self.cache_write_tokens += record.cache_write_tokens.unwrap_or(0);
+        self.cache_hits += u64::from(record.cache_hit);
+        self.tool_calls += u64::try_from(record.tool_calls.len()).unwrap_or(u64::MAX);
+        if let Some(cost) = record.cost_usd {
+            self.cost_usd += cost;
+        } else {
+            self.unpriced += 1;
+        }
+        match record.status.as_str() {
+            "ok" => {}
+            "cancelled" => self.cancelled += 1,
+            _ => self.errors += 1,
+        }
+        self.durations.push(record.duration_ms);
+    }
+
+    fn average_ms(&self) -> u64 {
+        if self.requests == 0 {
+            return 0;
+        }
+        self.durations.iter().sum::<u64>() / self.requests
+    }
+
+    fn p95_ms(&mut self) -> u64 {
+        if self.durations.is_empty() {
+            return 0;
+        }
+        self.durations.sort_unstable();
+        let index = (self.durations.len() * 95 / 100).min(self.durations.len() - 1);
+        self.durations[index]
+    }
+
+    fn cost_label(&self) -> String {
+        if self.requests == 0 {
+            return "no requests".to_owned();
+        }
+        if self.unpriced == self.requests {
+            return "cost not reported".to_owned();
+        }
+        if self.unpriced > 0 {
+            return format!("${:.6} · {} not reported", self.cost_usd, self.unpriced);
+        }
+        format!("${:.6}", self.cost_usd)
+    }
+
+    fn line(&mut self) -> String {
+        let mut parts = vec![
+            format!("{} req", self.requests),
+            format!("{} in", human_tokens(self.input_tokens)),
+            format!("{} out", human_tokens(self.output_tokens)),
+        ];
+        if self.requests > 0 && self.cache_hits > 0 {
+            parts.push(format!(
+                "cache {} hit",
+                percent_label(self.cache_hits, self.requests)
+            ));
+        }
+        if self.tool_calls > 0 {
+            parts.push(format!("{} tool(s)", self.tool_calls));
+        }
+        parts.push(format!(
+            "latency {} avg / {} p95",
+            duration_label(self.average_ms()),
+            duration_label(self.p95_ms())
+        ));
+        parts.push(self.cost_label());
+        if self.errors + self.cancelled > 0 {
+            parts.push(format!("{} error(s)", self.errors + self.cancelled));
+        }
+        parts.join(" · ")
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn json(&mut self) -> serde_json::Value {
+        serde_json::json!({
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cache_hits": self.cache_hits,
+            "cache_hit_rate": if self.requests == 0 { 0.0 } else { self.cache_hits as f64 / self.requests as f64 },
+            "tool_calls": self.tool_calls,
+            "cost_usd": self.cost_usd,
+            "unpriced": self.unpriced,
+            "errors": self.errors,
+            "cancelled": self.cancelled,
+            "average_ms": self.average_ms(),
+            "p95_ms": self.p95_ms(),
+        })
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn duration_label(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{:.1}m", ms as f64 / 60_000.0)
+    } else if ms >= 1_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn bucket_label(at: DateTime<Utc>, bucket: &str) -> String {
+    match bucket {
+        "hour" => at.format("%Y-%m-%d %H:00").to_string(),
+        "month" => at.format("%Y-%m").to_string(),
+        "year" => at.format("%Y").to_string(),
+        "total" => "total".to_owned(),
+        _ => at.format("%Y-%m-%d").to_string(),
+    }
+}
+
+fn top(groups: &BTreeMap<String, RequestSummary>) -> Vec<(&String, &RequestSummary)> {
+    let mut top: Vec<_> = groups.iter().collect();
+    top.sort_by(|left, right| {
+        right
+            .1
+            .requests
+            .cmp(&left.1.requests)
+            .then_with(|| left.0.cmp(right.0))
+    });
+    top
+}
+
+#[allow(clippy::too_many_lines)]
+async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String> {
+    let path = database_path();
+    if !path.exists() {
+        println!(
+            "no request telemetry yet (the database is {})",
+            path.display()
+        );
+        return Ok(0);
+    }
+    let store = SqliteStore::open(&path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let records = store
+        .requests(args.session.as_deref())
+        .await
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|record| args.provider.as_ref().is_none_or(|p| &record.provider == p))
+        .filter(|record| args.model.as_ref().is_none_or(|m| &record.model == m))
+        .collect();
+    if records.is_empty() {
+        println!("no matching request telemetry");
+        return Ok(0);
+    }
+    let mut total = RequestSummary::default();
+    let mut buckets: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    let mut providers: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    let mut models: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, RequestSummary> = BTreeMap::new();
+    for record in &records {
+        total.add(record);
+        buckets
+            .entry(bucket_label(record.started_at, &args.bucket))
+            .or_default()
+            .add(record);
+        providers
+            .entry(record.provider.clone())
+            .or_default()
+            .add(record);
+        models
+            .entry(format!("{}/{}", record.provider, record.model))
+            .or_default()
+            .add(record);
+        sessions
+            .entry(record.session.clone())
+            .or_default()
+            .add(record);
+    }
+    if args.json {
+        let mut total_json = total.clone();
+        let bucket_json: Vec<_> = buckets
+            .iter_mut()
+            .map(|(bucket, summary)| {
+                serde_json::json!({
+                    "bucket": bucket,
+                    "summary": summary.json(),
+                })
+            })
+            .collect();
+        let provider_json: Vec<_> = top(&providers)
+            .into_iter()
+            .map(|(provider, summary)| {
+                let mut summary = summary.clone();
+                serde_json::json!({"provider": provider, "summary": summary.json()})
+            })
+            .collect();
+        let model_json: Vec<_> = top(&models)
+            .into_iter()
+            .map(|(model, summary)| {
+                let mut summary = summary.clone();
+                serde_json::json!({"model": model, "summary": summary.json()})
+            })
+            .collect();
+        let session_json: Vec<_> = top(&sessions)
+            .into_iter()
+            .map(|(session, summary)| {
+                let mut summary = summary.clone();
+                serde_json::json!({"session": session, "summary": summary.json()})
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "bucket": args.bucket,
+                "total": total_json.json(),
+                "series": bucket_json,
+                "providers": provider_json,
+                "models": model_json,
+                "sessions": session_json,
+            })
+        );
+        return Ok(0);
+    }
+    let style = Style::stdout();
+    println!("{}  {}", style.bold("total"), total.line());
+    println!();
+    println!("{}", style.bold(format!("by {}", args.bucket)));
+    for (bucket, summary) in &mut buckets {
+        println!("  {bucket:<16}  {}", summary.line());
+    }
+    if args.session.is_none() {
+        println!();
+        println!("{}", style.bold("top providers"));
+        for (provider, summary) in top(&providers).into_iter().take(10) {
+            let mut summary = summary.clone();
+            println!("  {provider:<16}  {}", summary.line());
+        }
+        println!();
+        println!("{}", style.bold("top models"));
+        for (model, summary) in top(&models).into_iter().take(10) {
+            let mut summary = summary.clone();
+            println!("  {model:<40}  {}", summary.line());
+        }
+        println!();
+        println!("{}", style.bold("sessions"));
+        for (session, summary) in top(&sessions).into_iter().take(20) {
+            let mut summary = summary.clone();
+            println!("  {}  {}", short(session), summary.line());
+        }
+    }
+    Ok(0)
 }
 
 fn load_config(path: Option<PathBuf>) -> Result<Config, String> {

@@ -10,6 +10,7 @@
 pub mod error;
 pub mod provider;
 pub mod service;
+pub mod telemetry;
 
 pub use error::ServiceError;
 pub use provider::{ModelFactory, ModelSpec, VendorModels, Wire};
