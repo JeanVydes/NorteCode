@@ -256,6 +256,15 @@ pub(crate) struct DriveOutcome {
     pub(crate) queued: Vec<String>,
 }
 
+/// Aborts the Ctrl-C listener when the turn loop returns, including on error.
+struct SignalGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// What woke the turn loop: a signal, a completed input line, or an event.
 enum Wake {
     /// Ctrl-C or another interrupt.
@@ -284,13 +293,13 @@ pub(crate) async fn drive_turns(
     streams.push_back(primary);
     let mut pending: VecDeque<(SessionKey, String, ApprovalChoice)> = VecDeque::new();
     let (interrupt_tx, mut interrupt_rx) = tokio::sync::mpsc::channel::<()>(4);
-    let signal = tokio::spawn(async move {
+    let _signal = SignalGuard(tokio::spawn(async move {
         loop {
             if tokio::signal::ctrl_c().await.is_err() || interrupt_tx.send(()).await.is_err() {
                 break;
             }
         }
-    });
+    }));
     let mut current: Option<SessionKey> = None;
     let mut parked = false;
     let mut queued: Vec<String> = Vec::new();
@@ -356,7 +365,6 @@ pub(crate) async fn drive_turns(
                         }
                         Some(_) => {
                             eprintln!("{}", style.red("interrupted; forcing exit"));
-                            signal.abort();
                             return Err("interrupted".to_owned());
                         }
                     }
@@ -402,7 +410,6 @@ pub(crate) async fn drive_turns(
                             "approval left pending; the session is saved and can be resumed"
                         )
                     );
-                    signal.abort();
                     return Ok(DriveOutcome {
                         session: current,
                         parked: true,
@@ -416,7 +423,6 @@ pub(crate) async fn drive_turns(
                     "{}",
                     style.yellow("question left pending; the session is saved and can be resumed")
                 );
-                signal.abort();
                 return Ok(DriveOutcome {
                     session: current,
                     parked: true,
@@ -441,10 +447,30 @@ pub(crate) async fn drive_turns(
             }
         }
     }
-    signal.abort();
     Ok(DriveOutcome {
         session: current,
         parked,
         queued,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::SignalGuard;
+
+    #[tokio::test]
+    async fn dropping_the_guard_aborts_the_interrupt_listener() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let guard = SignalGuard(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            flag.store(true, Ordering::SeqCst);
+        }));
+        drop(guard);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!ran.load(Ordering::SeqCst));
+    }
 }
