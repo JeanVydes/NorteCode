@@ -81,13 +81,14 @@ impl Pinned {
 
 #[cfg(unix)]
 mod unix {
+    use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::io::{self, IsTerminal, Write};
     use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::{self, JoinHandle};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use termios::{
@@ -101,6 +102,49 @@ mod unix {
     /// Rows reserved below the scroll region: session status, queued preview
     /// and the input line.
     const FOOTER_ROWS: u16 = 3;
+
+    /// How long a drag must pause before its last size is applied.
+    const RESIZE_QUIET: Duration = Duration::from_millis(80);
+
+    /// The longest a drag may postpone applying a size.
+    const RESIZE_MAX_DELAY: Duration = Duration::from_millis(150);
+
+    /// Coalesces the stream of resize events a terminal drag produces.
+    ///
+    /// Resetting the scroll region on every step duplicates and breaks the
+    /// transcript, so the editor keeps the latest size and applies it after a
+    /// short pause. A maximum delay keeps a slow, continuous drag responsive.
+    #[derive(Debug, Default)]
+    struct ResizeDebounce {
+        pending: Option<(u16, u16)>,
+        deadline: Option<Instant>,
+        started: Option<Instant>,
+    }
+
+    impl ResizeDebounce {
+        /// Records the latest size and extends the quiet period.
+        fn note(&mut self, width: u16, height: u16, now: Instant) {
+            self.pending = Some((width, height.max(FOOTER_ROWS + 1)));
+            self.deadline = Some(now + RESIZE_QUIET);
+            self.started.get_or_insert(now);
+        }
+
+        /// Returns the size to apply once the drag has paused, if any.
+        fn take_due(&mut self, now: Instant) -> Option<(u16, u16)> {
+            let due = self.pending.is_some_and(|_| {
+                self.deadline.is_some_and(|deadline| now >= deadline)
+                    || self
+                        .started
+                        .is_some_and(|started| now.duration_since(started) >= RESIZE_MAX_DELAY)
+            });
+            if !due {
+                return None;
+            }
+            self.deadline = None;
+            self.started = None;
+            self.pending.take()
+        }
+    }
 
     /// A running input line editor and its channel of completed lines.
     pub(crate) struct InteractiveInput {
@@ -331,9 +375,7 @@ mod unix {
 
         draw_input(style, cols, rows, &buffer);
         draw_footer(style, cols, rows, pinned);
-        let mut pending_resize: Option<(u16, u16)> = None;
-        let mut resize_deadline: Option<std::time::Instant> = None;
-        let mut resize_started: Option<std::time::Instant> = None;
+        let mut resize = ResizeDebounce::default();
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -362,14 +404,7 @@ mod unix {
                             redraw = true;
                         }
                         Ok(Event::Resize(width, height)) => {
-                            // A drag sends one event per step. Keep the latest
-                            // size and apply it once the drag pauses: resetting
-                            // the scroll region on every step is what used to
-                            // duplicate and break the transcript.
-                            let now = std::time::Instant::now();
-                            pending_resize = Some((width, height.max(FOOTER_ROWS + 1)));
-                            resize_deadline = Some(now + Duration::from_millis(80));
-                            resize_started.get_or_insert(now);
+                            resize.note(width, height, Instant::now());
                         }
                         _ => {}
                     }
@@ -383,25 +418,14 @@ mod unix {
                     break;
                 }
             }
-            let resize_due = pending_resize.is_some_and(|_| {
-                let now = std::time::Instant::now();
-                resize_deadline.is_some_and(|deadline| now >= deadline)
-                    || resize_started.is_some_and(|started| {
-                        now.duration_since(started) >= Duration::from_millis(150)
-                    })
-            });
-            if resize_due {
-                if let Some((width, height)) = pending_resize.take() {
-                    let old_rows = rows;
-                    cols = width;
-                    rows = height;
-                    resize_terminal(rows, old_rows);
-                    pinned.mark_resized();
-                    draw_footer(style, cols, rows, pinned);
-                    draw_input(style, cols, rows, &buffer);
-                }
-                resize_deadline = None;
-                resize_started = None;
+            if let Some((width, height)) = resize.take_due(Instant::now()) {
+                let old_rows = rows;
+                cols = width;
+                rows = height;
+                resize_terminal(rows, old_rows);
+                pinned.mark_resized();
+                draw_footer(style, cols, rows, pinned);
+                draw_input(style, cols, rows, &buffer);
             }
             if pinned.take_dirty() {
                 draw_footer(style, cols, rows, pinned);
@@ -617,27 +641,44 @@ mod unix {
         let _ = out.flush();
     }
 
-    fn resize_terminal(rows: u16, old_rows: u16) {
+    /// Builds the frame that moves the scroll region after a resize.
+    ///
+    /// The frame is assembled first and written once: the renderer writes to
+    /// the same terminal from another thread, and a cursor move split across
+    /// writes is exactly how streamed text ends up duplicated or overwritten.
+    fn resize_frame(rows: u16, old_rows: u16) -> String {
         let bottom = scroll_bottom(rows);
-        // One atomic write: the renderer writes to the same terminal from
-        // another thread, and a cursor move split across writes is exactly how
-        // streamed text ends up duplicated or overwritten while resizing.
         let mut frame = String::from("\x1b[r");
-        let old_first = scroll_bottom(old_rows).saturating_add(1);
-        for row in old_first..=old_rows.max(1) {
-            if row <= rows {
-                let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+
+        // Clear each row that was, or is now, part of the footer. A set keeps
+        // an unchanged size from emitting the same clear twice.
+        let mut cleared = BTreeSet::new();
+        for row in scroll_bottom(old_rows).saturating_add(1)..=old_rows.max(1) {
+            if row <= rows.max(1) {
+                cleared.insert(row);
             }
         }
         for row in bottom.saturating_add(1)..=rows.max(1) {
+            cleared.insert(row);
+        }
+        for row in cleared {
             let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
         }
-        // Release the old region above, clear the rows that are footer in the
-        // old or the new size, then set the new region and scroll one fresh
-        // line at its bottom. Scrolling (rather than jumping onto the last
-        // line) preserves whatever the terminal reflowed instead of writing
-        // over it.
+
+        // Release the old region above, then set the new one and scroll one
+        // fresh line at its bottom. Scrolling (rather than jumping onto the
+        // last line) preserves whatever the terminal reflowed instead of
+        // writing over it.
         let _ = write!(frame, "\x1b[{bottom};1H\x1b[1;{bottom}r\r\n");
+        frame
+    }
+
+    fn resize_terminal(rows: u16, old_rows: u16) {
+        write_frame(&resize_frame(rows, old_rows));
+    }
+
+    /// Writes one complete terminal frame with a single flush.
+    fn write_frame(frame: &str) {
         let mut out = io::stderr().lock();
         let _ = out.write_all(frame.as_bytes());
         let _ = out.flush();
@@ -670,9 +711,7 @@ mod unix {
             status_row(rows),
             clip_visible(&session, width)
         );
-        let mut out = io::stderr().lock();
-        let _ = out.write_all(frame.as_bytes());
-        let _ = out.flush();
+        write_frame(&frame);
     }
 
     /// Clips a styled line to `max` visible columns, keeping ANSI escapes.
@@ -723,15 +762,105 @@ mod unix {
             visible.push_str("\x1b[7m \x1b[27m");
         }
         let row = rows.max(1);
-        let frame = format!("\x1b7\x1b[{row};1H\x1b[2K{prompt}{visible}\x1b8");
-        let mut out = io::stderr().lock();
-        let _ = out.write_all(frame.as_bytes());
-        let _ = out.flush();
+        write_frame(&format!("\x1b7\x1b[{row};1H\x1b[2K{prompt}{visible}\x1b8"));
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{LineBuffer, clip_visible, queue_row, scroll_bottom, status_row};
+        use std::time::{Duration, Instant};
+
+        use super::{
+            FOOTER_ROWS, LineBuffer, ResizeDebounce, clip_visible, queue_row, resize_frame,
+            scroll_bottom, status_row,
+        };
+
+        #[test]
+        fn resize_debounce_waits_for_the_drag_to_pause() {
+            let start = Instant::now();
+            let mut resize = ResizeDebounce::default();
+            resize.note(80, 24, start);
+            assert_eq!(resize.take_due(start + Duration::from_millis(79)), None);
+            assert_eq!(
+                resize.take_due(start + Duration::from_millis(80)),
+                Some((80, 24))
+            );
+            assert_eq!(resize.take_due(start + Duration::from_millis(200)), None);
+        }
+
+        #[test]
+        fn resize_debounce_applies_a_long_drag_without_waiting_for_it_to_end() {
+            let start = Instant::now();
+            let mut resize = ResizeDebounce::default();
+            resize.note(80, 24, start);
+            resize.note(100, 30, start + Duration::from_millis(100));
+            // The quiet period has not elapsed since the last event...
+            assert_eq!(resize.take_due(start + Duration::from_millis(149)), None);
+            // ...but the maximum delay since the first event wins.
+            assert_eq!(
+                resize.take_due(start + Duration::from_millis(150)),
+                Some((100, 30))
+            );
+        }
+
+        #[test]
+        fn resize_debounce_keeps_room_for_the_footer() {
+            let start = Instant::now();
+            let mut resize = ResizeDebounce::default();
+            resize.note(80, 1, start);
+            assert_eq!(
+                resize.take_due(start + Duration::from_millis(200)),
+                Some((80, FOOTER_ROWS + 1))
+            );
+        }
+
+        #[test]
+        fn resize_frame_clears_each_footer_row_once() {
+            let frame = resize_frame(24, 24);
+            assert!(frame.starts_with("\x1b[r"));
+            for row in 22..=24 {
+                assert_eq!(
+                    frame.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
+                    1,
+                    "row {row} should be cleared once"
+                );
+            }
+            assert!(frame.ends_with("\x1b[21;1H\x1b[1;21r\r\n"));
+        }
+
+        #[test]
+        fn resize_frame_clears_old_and_new_footer_rows() {
+            let grown = resize_frame(30, 24);
+            for row in [22, 23, 24, 28, 29, 30] {
+                assert_eq!(
+                    grown.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
+                    1,
+                    "row {row} should be cleared once"
+                );
+            }
+            for row in 25..=27 {
+                assert!(
+                    !grown.contains(&format!("\x1b[{row};1H\x1b[2K")),
+                    "scroll row {row} must be preserved"
+                );
+            }
+            assert!(grown.ends_with("\x1b[27;1H\x1b[1;27r\r\n"));
+
+            let shrunk = resize_frame(24, 30);
+            for row in 22..=24 {
+                assert_eq!(
+                    shrunk.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
+                    1,
+                    "row {row} should be cleared once"
+                );
+            }
+            for row in 28..=30 {
+                assert!(
+                    !shrunk.contains(&format!("\x1b[{row};1H\x1b[2K")),
+                    "rows beyond the new height must not be addressed"
+                );
+            }
+            assert!(shrunk.ends_with("\x1b[21;1H\x1b[1;21r\r\n"));
+        }
 
         #[test]
         fn footer_rows_stay_below_the_scroll_region() {
