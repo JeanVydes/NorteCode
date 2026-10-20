@@ -5,7 +5,7 @@
 //! one for the model the session selected. That is what makes a mid-session
 //! model switch a change of model rather than a change of session.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
-    ApprovalId, BlobStore, Decision, Engine, EngineBuilder, EngineConfig, EngineEvent,
+    ApprovalId, BlobStore, CallId, Decision, Engine, EngineBuilder, EngineConfig, EngineEvent,
     FinishReason, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore, Message, Model, Policy,
     PolicySet, PolicyView, ReasoningEffort, SessionId, Store, StreamDelta, ToolKind, ToolRegistry,
     Usage,
@@ -98,6 +98,7 @@ pub struct Service {
     questions: Arc<QuestionBroker>,
     secrets: Vec<String>,
     directory: Arc<dyn SessionDirectory>,
+    effects: Arc<EffectJournal>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
 }
@@ -164,6 +165,7 @@ impl Service {
             system_prompt,
         )?;
         service.load_sessions().await?;
+        service.effects.load().await?;
         Ok(service)
     }
 
@@ -193,6 +195,7 @@ impl Service {
             QuestionBroker::new()
                 .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
         );
+        let effects = Arc::new(EffectJournal::new(Arc::clone(&directory)));
         let service = Self {
             config,
             catalog: RwLock::new(catalog),
@@ -208,6 +211,7 @@ impl Service {
             questions,
             secrets,
             directory,
+            effects,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
         };
@@ -353,6 +357,13 @@ impl Service {
                 max_iterations: self.config.max_iterations,
                 ..EngineConfig::default()
             })
+            .tool_metadata({
+                let effects = Arc::clone(&self.effects);
+                move |info| {
+                    effects.intent(info.session, info.call_id, info.tool.as_str());
+                    BTreeMap::new()
+                }
+            })
             .build()?)
     }
 
@@ -410,6 +421,9 @@ impl Service {
 
     fn policies(&self) -> PolicySet {
         PolicySet::new(vec![
+            Arc::new(EffectJournalPolicy {
+                journal: Arc::clone(&self.effects),
+            }),
             Arc::new(WorkspacePolicy {
                 root: self.workspace_root.clone(),
             }),
@@ -1051,6 +1065,8 @@ impl Service {
                 duration_ms,
                 ..
             } => {
+                self.effects
+                    .finished(nid, *call_id, tool.as_str(), *is_error);
                 let error = if *is_error {
                     tool_error(engine, nid, call_id).await
                 } else {
@@ -1462,6 +1478,97 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+/// The tools whose effects are not safely repeatable after a crash.
+const JOURNALED_TOOLS: [&str; 4] = ["write", "edit", "command", "skill_script"];
+
+fn is_journaled(tool: &str) -> bool {
+    JOURNALED_TOOLS.contains(&tool)
+}
+
+/// Intent/done records for effectful tools, keyed by session and call id.
+///
+/// Norte guarantees commit-at-most-once, not effect-at-most-once. The intent is
+/// written by the engine's tool-metadata callback immediately before the
+/// executor runs; a row still at `intent` when the process starts means a crash
+/// may have happened mid-effect.
+struct EffectJournal {
+    directory: Arc<dyn SessionDirectory>,
+    epoch: String,
+    suspects: Mutex<BTreeSet<(SessionId, CallId)>>,
+}
+
+impl EffectJournal {
+    fn new(directory: Arc<dyn SessionDirectory>) -> Self {
+        Self {
+            directory,
+            epoch: uuid::Uuid::new_v4().to_string(),
+            suspects: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// Loads the calls a previous process started without finishing.
+    async fn load(&self) -> Result<(), ServiceError> {
+        let pending = self.directory.unfinished_effects().await?;
+        let mut suspects = self.suspects.lock().unwrap_or_else(PoisonError::into_inner);
+        for effect in pending {
+            suspects.insert((effect.session, effect.call_id));
+        }
+        Ok(())
+    }
+
+    fn intent(&self, session: SessionId, call_id: CallId, tool: &str) {
+        if !is_journaled(tool) {
+            return;
+        }
+        if let Err(error) = self
+            .directory
+            .effect_started(session, call_id, tool, &self.epoch)
+        {
+            tracing::warn!(%error, %call_id, "could not journal a tool intent");
+        }
+    }
+
+    fn finished(&self, session: SessionId, call_id: CallId, tool: &str, is_error: bool) {
+        if !is_journaled(tool) {
+            return;
+        }
+        if let Err(error) = self.directory.effect_finished(session, call_id, is_error) {
+            tracing::warn!(%error, %call_id, "could not journal a tool result");
+        }
+    }
+
+    fn is_suspect(&self, session: SessionId, call_id: CallId) -> bool {
+        self.suspects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(session, call_id))
+    }
+}
+
+/// Refuses to replay an effectful call a crashed process may have run.
+struct EffectJournalPolicy {
+    journal: Arc<EffectJournal>,
+}
+
+impl Policy for EffectJournalPolicy {
+    fn name(&self) -> &'static str {
+        "effect-journal"
+    }
+
+    fn decide(&self, view: &PolicyView<'_>) -> Decision {
+        let tool = view.call.name.as_str();
+        if is_journaled(tool) && self.journal.is_suspect(view.session.id, view.call.call_id) {
+            return Decision::Deny(format!(
+                "`{tool}` call {} started before a restart and may already have taken effect, \
+                 so it is not run again. Inspect the workspace; to retry, ask in a new turn \
+                 so the model gets a fresh call.",
+                view.call.call_id
+            ));
+        }
+        Decision::Allow
+    }
 }
 
 /// Parks the tools a human must approve, according to the session's mode.
@@ -2370,6 +2477,114 @@ mod tests {
         drop(second);
         drop(store);
         let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn a_write_that_started_before_a_crash_is_not_repeated() {
+        let directory = std::env::temp_dir().join(format!(
+            "norte-code-effect-restart-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("sessions.db");
+        let target = std::env::current_dir()
+            .expect("working directory")
+            .join("target")
+            .join(format!(
+                "norte-code-effect-{}-{}.txt",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+        let _ = std::fs::remove_file(&target);
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "write",
+                    &serde_json::json!({
+                        "path": target.display().to_string(),
+                        "content": "should not appear",
+                        "overwrite": true
+                    }),
+                )
+                .turn_text("done"),
+        );
+
+        let (store, first) = sqlite_service(&path, Arc::clone(&model)).await;
+        let events = drain(
+            &first,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "write it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let session = events[0].session.clone().expect("session");
+        let approval = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+                _ => None,
+            })
+            .expect("approval request");
+        let north = store
+            .sessions()
+            .await
+            .expect("stored sessions")
+            .first()
+            .expect("one session")
+            .north;
+        // Pretend the previous process died after the effect but before the
+        // result was recorded.
+        store
+            .effect_started(north, call, "write", "crashed-process")
+            .expect("intent");
+        drop(first);
+        drop(store);
+
+        let (store, second) = sqlite_service(&path, model).await;
+        let approved = drain(
+            &second,
+            ClientRequestKind::Approve {
+                session,
+                approval,
+                arguments: None,
+                scope: None,
+                remember: None,
+            },
+        )
+        .await;
+        assert!(approved.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: true,
+                ..
+            } if tool == "write"
+        )));
+        assert!(
+            !target.exists(),
+            "a write that may have run before the crash must not run again"
+        );
+        assert!(
+            store
+                .unfinished_effects()
+                .await
+                .expect("journal")
+                .is_empty(),
+            "the refusal is recorded as a finished effect"
+        );
+        drop(second);
+        drop(store);
         let _ = std::fs::remove_dir_all(directory);
     }
 

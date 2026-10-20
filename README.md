@@ -48,7 +48,9 @@ Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or
 `~/.local/share/norte-code/sessions.db`). A run creates a new session unless
 `--session` names an existing key. Parked approvals and pending questions are
-in that database, so a session can be resumed after a restart.
+in that database, so a session can be resumed after a restart. Effectful tool
+calls are journaled: if a process dies after a write or command may have run,
+the next process refuses to run that same call again rather than repeat it.
 
 ## Network
 

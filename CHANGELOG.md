@@ -64,5 +64,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Approval records and sessions are stored with their grants lifted into a
   side table shape, because `GrantScope`'s internally tagged newtype variants
   are not representable in JSON.
+- An effect journal for `write`, `edit`, `command` and `skill_script`. The
+  intent is written from the engine's tool-metadata callback immediately before
+  the executor runs and the finish is written from the tool event; a call that
+  was still at intent when the process started is refused on replay instead of
+  being run a second time. Norte guarantees commit-at-most-once, not
+  effect-at-most-once.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev
