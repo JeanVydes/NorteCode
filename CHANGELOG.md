@@ -6,6 +6,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The built-in system prompt now states the Norte Code identity, requires tool
+  use and verification, and tells the model not to guess its harness or claim
+  to be another product.
+
 ### Added
 
 - The mdBook guide under `guide/`: concepts, task guides and reference pages for
