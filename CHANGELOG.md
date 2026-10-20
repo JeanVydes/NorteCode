@@ -34,6 +34,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   (including cloud metadata endpoints) are refused, every resolved address is
   checked and pinned for the request, proxies are bypassed, and each redirect is
   validated before the next hop.
+- `skill_script` keeps at most the configured output bytes per stream while
+  draining the pipes, so a script that floods stdout or stderr cannot exhaust
+  host memory before the timeout stops it.
 
 ### Fixed
 

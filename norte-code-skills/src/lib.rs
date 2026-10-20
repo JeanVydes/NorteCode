@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use norte::{FnExecutor, Result, SessionId, ToolContext, ToolDeclaration, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 
 /// Largest `SKILL.md` accepted, before parsing.
 pub const MAX_SKILL_FILE_BYTES: usize = 1024 * 1024;
@@ -1011,15 +1012,34 @@ impl SkillScriptTool {
             .timeout_ms
             .map_or(self.config.timeout, Duration::from_millis)
             .min(MAX_SCRIPT_TIMEOUT);
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|error| format!("could not start `{program}`: {error}"))?;
-        let mut wait = Box::pin(child.wait_with_output());
-        let output = tokio::select! {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "could not capture stdout".to_owned())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "could not capture stderr".to_owned())?;
+        let output_limit = self.config.max_output_bytes;
+        // Read both pipes while the child runs, but keep at most `output_limit`
+        // bytes for each. Draining the rest is what prevents a chatty script
+        // from filling its pipe and deadlocking before the timeout.
+        let run = Box::pin(async move {
+            let (stdout, stderr) = tokio::join!(
+                read_limited(stdout, output_limit),
+                read_limited(stderr, output_limit)
+            );
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((status, stdout?, stderr?))
+        });
+        let (status, stdout, stderr) = tokio::select! {
             () = context.cancelled() => {
                 return Ok(ToolOutput::error("skill_script cancelled"));
             }
-            result = tokio::time::timeout(timeout, &mut wait) => {
+            result = tokio::time::timeout(timeout, run) => {
                 match result {
                     Ok(output) => output.map_err(|error| format!("could not run `{program}`: {error}"))?,
                     Err(_) => return Ok(ToolOutput::error(format!(
@@ -1032,13 +1052,18 @@ impl SkillScriptTool {
         };
 
         let mut text = format!(
-            "exit: {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            render(&output.stdout, self.config.max_model_bytes),
-            render(&output.stderr, self.config.max_model_bytes)
+            "exit: {status}\nstdout:\n{}\nstderr:\n{}",
+            render(&stdout.0, self.config.max_model_bytes),
+            render(&stderr.0, self.config.max_model_bytes)
         );
+        if stdout.1 {
+            let _ = write!(text, "\n[stdout truncated at {output_limit} bytes]");
+        }
+        if stderr.1 {
+            let _ = write!(text, "\n[stderr truncated at {output_limit} bytes]");
+        }
         text = clip(&text, self.config.max_model_bytes.saturating_mul(2));
-        if output.status.success() {
+        if status.success() {
             Ok(ToolOutput::text(text))
         } else {
             Ok(ToolOutput::error(text))
@@ -1066,6 +1091,34 @@ impl FnExecutor<SkillScriptArgs, ToolOutput> for SkillScriptTool {
             Err(message) => Ok(ToolOutput::error(message)),
         }
     }
+}
+
+/// Reads a stream, keeping at most `limit` bytes but draining the rest.
+///
+/// The boolean is true when bytes after the cap were discarded.
+async fn read_limited<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len() < limit {
+            let take = (limit - bytes.len()).min(read);
+            bytes.extend_from_slice(&buffer[..take]);
+            if take < read {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    Ok((bytes, truncated))
 }
 
 fn render(bytes: &[u8], max_bytes: usize) -> String {
@@ -1315,5 +1368,17 @@ mod tests {
             .expect("escape output");
         assert!(escaped.is_error);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn script_capture_keeps_at_most_the_limit() {
+        let input = [b'x'; 32];
+        let (bytes, truncated) = read_limited(&input[..], 10).await.expect("read");
+        assert_eq!(bytes.len(), 10);
+        assert!(truncated);
+
+        let (bytes, truncated) = read_limited(&input[..], 64).await.expect("read");
+        assert_eq!(bytes.len(), 32);
+        assert!(!truncated);
     }
 }
