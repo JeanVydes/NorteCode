@@ -1,12 +1,16 @@
 use super::*;
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use crate::provider::Wire;
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use norte::{
-    CallId, Capabilities, InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ProviderId,
-    Reasoning as ReasoningCapability, ReasoningEffort,
+    CallId, Capabilities, InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ModelRequest,
+    ModelStream, ProviderErrorKind, ProviderId, Reasoning as ReasoningCapability, ReasoningEffort,
 };
-use norte_code_config::ApiKey;
-use norte_code_protocol::{ClientRequest, ClientRequestKind};
+use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
+use norte_code_protocol::{ClientRequest, ClientRequestKind, Delta};
 use norte_code_store_sqlite::SqliteStore;
 use norte_testing::ScriptedModel;
 use norte_tools::CommandRequest;
