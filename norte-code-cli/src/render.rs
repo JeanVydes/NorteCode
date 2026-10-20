@@ -225,6 +225,7 @@ impl Renderer {
 
     /// Writes answer text, closing reasoning and separating it first.
     pub(crate) fn answer_delta(&mut self, text: &str) {
+        let text = crate::text::terminal(text);
         if self.quiet {
             print!("{text}");
             if let Some(last) = text.chars().last() {
@@ -254,6 +255,7 @@ impl Renderer {
     /// be copied into a markdown report.
     pub(crate) fn code_block(&self, language: &str, text: &str) {
         eprintln!("  {}", self.style.faint(format!("```{language}")));
+        let text = crate::text::terminal(text);
         if text.is_empty() {
             eprintln!("  {}", self.style.faint("(empty)"));
         } else {

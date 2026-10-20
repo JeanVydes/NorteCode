@@ -308,6 +308,37 @@ fn write_content_is_bounded() {
 }
 
 #[test]
+fn previews_escape_terminal_controls() {
+    let arguments = serde_json::json!({
+        "path": "safe\u{1b}[2Jowned",
+        "content": "first\nsecond\u{202e}spoofed",
+    });
+    let lines = argument_preview("write", &arguments);
+    assert!(lines.iter().any(|line| matches!(
+        line,
+        PreviewLine::Field { key, .. } if key == "path"
+    )));
+    assert!(lines.iter().any(|line| matches!(
+        line,
+        PreviewLine::Block { label, .. } if label == "content"
+    )));
+    for line in lines {
+        let text = match line {
+            PreviewLine::Field { key, value } => format!("{key}{value}"),
+            PreviewLine::Block { label, lines } => {
+                format!("{label}{}", lines.join(""))
+            }
+            PreviewLine::Note(note) => note,
+        };
+        assert!(!text.contains('\u{1b}'), "ESC reached the preview: {text}");
+        assert!(
+            !text.contains('\u{202e}'),
+            "bidi override reached the preview: {text}"
+        );
+    }
+}
+
+#[test]
 fn cost_totals_show_cache_and_the_input_output_ratio() {
     let mixed = CostSummary {
         requests: 2,

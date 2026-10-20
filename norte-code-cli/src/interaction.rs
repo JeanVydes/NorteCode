@@ -63,7 +63,7 @@ pub(crate) fn echo_user_message(style: Style, text: &str) {
         None => eprintln!("{}", style.cyan("›")),
     }
     for line in lines {
-        eprintln!("  {line}");
+        eprintln!("  {}", crate::text::terminal(line));
     }
 }
 
@@ -870,8 +870,8 @@ pub(crate) fn generic_preview(
 
 pub(crate) fn field(key: &str, value: &str) -> PreviewLine {
     PreviewLine::Field {
-        key: key.to_owned(),
-        value: value.to_owned(),
+        key: crate::text::terminal(key).into_owned(),
+        value: crate::text::terminal(value).into_owned(),
     }
 }
 
@@ -888,7 +888,7 @@ pub(crate) fn block(label: &str, text: &str, max_lines: usize) -> PreviewLine {
         ));
     }
     PreviewLine::Block {
-        label: label.to_owned(),
+        label: crate::text::terminal(label).into_owned(),
         lines,
     }
 }
@@ -899,8 +899,9 @@ pub(crate) fn compact_json(value: &serde_json::Value, max: usize) -> String {
 }
 
 pub(crate) fn clip_line(line: &str, max: usize) -> String {
+    let line = crate::text::terminal(line);
     if line.chars().count() <= max {
-        return line.to_owned();
+        return line.into_owned();
     }
     let mut shortened: String = line.chars().take(max).collect();
     shortened.push('…');
@@ -909,8 +910,9 @@ pub(crate) fn clip_line(line: &str, max: usize) -> String {
 
 /// Shortens a multi-line block on a character boundary.
 pub(crate) fn clip_text(text: &str, max: usize) -> (String, bool) {
+    let text = crate::text::terminal(text);
     if text.chars().count() <= max {
-        return (text.to_owned(), false);
+        return (text.into_owned(), false);
     }
     let mut shortened: String = text.chars().take(max).collect();
     shortened.push_str("\n… [truncated]");
@@ -1006,7 +1008,7 @@ pub(crate) async fn answer_if_asked(
         .clone()
         .ok_or("a question arrived without a session")?;
     let question = question.clone();
-    eprintln!("? {prompt}");
+    eprintln!("? {}", crate::text::terminal(prompt));
     let Some(input) = input else {
         eprintln!("(no interactive client; answering with a note)");
         let answer =
@@ -1023,7 +1025,7 @@ pub(crate) async fn answer_if_asked(
         }
     } else {
         for (index, option) in options.iter().enumerate() {
-            eprintln!("  {}. {option}", index + 1);
+            eprintln!("  {}. {}", index + 1, crate::text::terminal(option));
         }
         eprintln!("  {}. Something else (type it)", options.len() + 1);
         eprintln!(
@@ -1106,7 +1108,7 @@ pub(crate) async fn prompt_input(
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<PromptInput, String> {
     if !prompt.is_empty() {
-        eprintln!("{prompt}");
+        eprintln!("{}", crate::text::terminal(prompt));
     }
     let line = tokio::select! {
         biased;
@@ -1240,17 +1242,20 @@ pub(crate) fn list_models(
 }
 
 pub(crate) fn print_model(model: &ModelInfo) {
-    let reference = format!("{}/{}", model.provider, model.model);
+    let reference_text = format!("{}/{}", model.provider, model.model);
+    let reference = crate::text::terminal(&reference_text);
     let context = model
         .max_context
         .map_or_else(|| "-".to_owned(), human_tokens);
     let tools = if model.tools { "tools" } else { "-" };
-    let reasoning = reasoning_label(&model.reasoning);
-    let name = if model.deprecated {
+    let reasoning_text = reasoning_label(&model.reasoning);
+    let reasoning = crate::text::terminal(&reasoning_text);
+    let name_text = if model.deprecated {
         format!("{} (deprecated)", model.name)
     } else {
         model.name.clone()
     };
+    let name = crate::text::terminal(&name_text);
     println!("{reference:<54} {context:>8}  {tools:<5}  {reasoning:<18} {name}");
 }
 
@@ -1269,13 +1274,17 @@ pub(crate) fn resolve_spec(
     match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
         Ok(spec) => Ok(spec),
         Err(ServiceError::UnknownModel { .. }) => {
-            eprintln!("note: `{reference}` is not in the catalogue; using its provider's facts");
+            eprintln!(
+                "note: `{}` is not in the catalogue; using its provider's facts",
+                crate::text::terminal(&reference)
+            );
             ModelSpec::from_provider(config, catalog, &reference, endpoint)
                 .map_err(|error| error.to_string())
         }
         Err(ServiceError::UnknownProvider(_)) => {
             eprintln!(
-                "note: `{reference}` names a provider the catalogue does not list; using the fallback"
+                "note: `{}` names a provider the catalogue does not list; using the fallback",
+                crate::text::terminal(&reference)
             );
             let provider = reference
                 .split_once('/')

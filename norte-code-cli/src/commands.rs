@@ -60,9 +60,9 @@ pub(crate) fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, S
                 } else {
                     println!(
                         "{}\t{}\t{}",
-                        skill.name,
-                        skill.root.display(),
-                        skill.description
+                        crate::text::terminal(&skill.name),
+                        crate::text::terminal(&skill.root.display().to_string()),
+                        crate::text::terminal(&skill.description)
                     );
                 }
             }
@@ -72,13 +72,17 @@ pub(crate) fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, S
             for skill in registry.skills() {
                 println!(
                     "ok\t{}\t{}\t{}",
-                    skill.name,
-                    skill.root.display(),
-                    skill.description
+                    crate::text::terminal(&skill.name),
+                    crate::text::terminal(&skill.root.display().to_string()),
+                    crate::text::terminal(&skill.description)
                 );
             }
             for warning in registry.warnings() {
-                eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+                eprintln!(
+                    "warning: {}: {}",
+                    crate::text::terminal(&warning.path.display().to_string()),
+                    crate::text::terminal(&warning.message)
+                );
             }
             if registry.warnings().is_empty() {
                 Ok(0)
@@ -134,10 +138,10 @@ pub(crate) async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> 
         } else {
             println!(
                 "{}\t{}\t{}\t{}",
-                session.key,
-                session.title.as_deref().unwrap_or("(untitled)"),
-                session.model,
-                session.phase
+                crate::text::terminal(&session.key),
+                crate::text::terminal(session.title.as_deref().unwrap_or("(untitled)")),
+                crate::text::terminal(&session.model),
+                crate::text::terminal(&session.phase)
             );
         }
     }
@@ -504,13 +508,17 @@ pub(crate) async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String
         println!("{}", style.bold("top providers"));
         for (provider, summary) in top(&providers).into_iter().take(10) {
             let mut summary = summary.clone();
-            println!("  {provider:<16}  {}", summary.line());
+            println!(
+                "  {:<16}  {}",
+                crate::text::terminal(provider),
+                summary.line()
+            );
         }
         println!();
         println!("{}", style.bold("top models"));
         for (model, summary) in top(&models).into_iter().take(10) {
             let mut summary = summary.clone();
-            println!("  {model:<40}  {}", summary.line());
+            println!("  {:<40}  {}", crate::text::terminal(model), summary.line());
         }
         println!();
         println!("{}", style.bold("sessions"));
@@ -528,7 +536,10 @@ pub(crate) fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
     let project = find_project_config(&cwd);
     let loaded = Config::load(user.as_deref(), project.as_deref()).map_err(|e| e.to_string())?;
     for warning in &loaded.warnings {
-        eprintln!("warning: unknown config key `{warning}`");
+        eprintln!(
+            "warning: unknown config key `{}`",
+            crate::text::terminal(warning)
+        );
     }
     Ok(loaded.config)
 }
@@ -571,7 +582,7 @@ pub(crate) async fn load_catalogue(
     .await
     .map_err(|e| e.to_string())?;
     for warning in &loaded.warnings {
-        eprintln!("warning: {warning}");
+        eprintln!("warning: {}", crate::text::terminal(warning));
     }
     Ok((loaded.catalog, loaded.source))
 }

@@ -20,6 +20,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   before the provider reports usage now explains that the cancelled request is
   still recorded in telemetry.
 
+### Security
+
+- Model answers, reasoning, tool output, approval previews and catalogue or
+  report text are escaped before they reach the terminal. ANSI escapes and
+  bidi overrides can no longer move the cursor, rewrite a line, spoof an
+  approval prompt or change the terminal title; newlines and tabs are kept.
+
 ### Fixed
 
 - Resizing the terminal no longer duplicates or breaks streamed text. Resize

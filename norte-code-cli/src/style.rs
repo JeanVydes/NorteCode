@@ -71,24 +71,35 @@ impl Style {
     /// Wraps `text` in the given SGR codes.
     #[must_use]
     pub fn paint(self, codes: &str, text: impl Display) -> String {
-        if self.colors == Colors::None {
-            text.to_string()
-        } else {
-            format!("\x1b[{codes}m{text}\x1b[0m")
+        self.decorate(codes, text)
+    }
+
+    /// Sanitises the text and wraps it in the given SGR codes.
+    ///
+    /// Every styled string passes through here, so untrusted model, tool and
+    /// catalogue text cannot inject terminal controls even when it reaches a
+    /// caller that forgot to escape it.
+    fn decorate(self, codes: &str, text: impl Display) -> String {
+        let text = text.to_string();
+        let text = crate::text::terminal(&text);
+        match self.colors {
+            Colors::None => text.into_owned(),
+            _ => format!("\x1b[{codes}m{text}\x1b[0m"),
         }
     }
 
     /// Paints with a 24-bit colour, falling back to a 256/16-colour code.
     fn color(self, rgb: (u8, u8, u8), ansi256: u8, ansi16: &str, text: impl Display) -> String {
-        match self.colors {
-            Colors::None => text.to_string(),
+        let codes = match self.colors {
+            Colors::None => return self.decorate("", text),
             Colors::True => {
                 let (r, g, b) = rgb;
-                format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m")
+                format!("38;2;{r};{g};{b}")
             }
-            Colors::Ansi256 => format!("\x1b[38;5;{ansi256}m{text}\x1b[0m"),
-            Colors::Ansi16 => format!("\x1b[{ansi16}m{text}\x1b[0m"),
-        }
+            Colors::Ansi256 => format!("38;5;{ansi256}"),
+            Colors::Ansi16 => ansi16.to_owned(),
+        };
+        self.decorate(&codes, text)
     }
 
     /// Bold, for names and headings.
@@ -106,15 +117,16 @@ impl Style {
     /// Dim italic, for the model's reasoning.
     #[must_use]
     pub fn thought(self, text: impl Display) -> String {
-        match self.colors {
-            Colors::None => text.to_string(),
+        let codes = match self.colors {
+            Colors::None => return self.decorate("", text),
             Colors::True => {
                 let (r, g, b) = MUTED;
-                format!("\x1b[38;2;{r};{g};{b};3m{text}\x1b[0m")
+                format!("38;2;{r};{g};{b};3")
             }
-            Colors::Ansi256 => format!("\x1b[38;5;245;3m{text}\x1b[0m"),
-            Colors::Ansi16 => format!("\x1b[2;3m{text}\x1b[0m"),
-        }
+            Colors::Ansi256 => "38;5;245;3".to_owned(),
+            Colors::Ansi16 => "2;3".to_owned(),
+        };
+        self.decorate(&codes, text)
     }
 
     /// Green, for a successful action.
@@ -165,15 +177,16 @@ impl Style {
     /// Bold blue, for a tool call and its name.
     #[must_use]
     pub fn tool(self, text: impl Display) -> String {
-        match self.colors {
-            Colors::None => text.to_string(),
+        let codes = match self.colors {
+            Colors::None => return self.decorate("", text),
             Colors::True => {
                 let (r, g, b) = BLUE;
-                format!("\x1b[1;38;2;{r};{g};{b}m{text}\x1b[0m")
+                format!("1;38;2;{r};{g};{b}")
             }
-            Colors::Ansi256 => format!("\x1b[1;38;5;75m{text}\x1b[0m"),
-            Colors::Ansi16 => format!("\x1b[1;34m{text}\x1b[0m"),
-        }
+            Colors::Ansi256 => "1;38;5;75".to_owned(),
+            Colors::Ansi16 => "1;34".to_owned(),
+        };
+        self.decorate(&codes, text)
     }
 }
 
@@ -224,5 +237,15 @@ mod tests {
         assert_eq!(styled(Colors::Ansi256).green("x"), "\x1b[38;5;71mx\x1b[0m");
         assert_eq!(styled(Colors::Ansi16).green("x"), "\x1b[32mx\x1b[0m");
         assert_eq!(styled(Colors::None).green("x"), "x");
+    }
+
+    #[test]
+    fn styled_text_cannot_inject_terminal_controls() {
+        let injected = "safe\x1b[2Jowned";
+        assert_eq!(
+            styled(Colors::True).cyan(injected),
+            "\x1b[38;2;86;182;194msafe\\u{1b}[2Jowned\x1b[0m"
+        );
+        assert_eq!(styled(Colors::None).dim(injected), "safe\\u{1b}[2Jowned");
     }
 }

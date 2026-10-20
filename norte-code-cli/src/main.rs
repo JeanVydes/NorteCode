@@ -14,6 +14,7 @@ mod input;
 mod interaction;
 mod render;
 mod style;
+mod text;
 
 use commands::{apply_extensions, database_path, duration_label, run};
 use input::{InteractiveInput, Pinned};
@@ -382,7 +383,7 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(code) => ExitCode::from(code),
         Err(message) => {
-            eprintln!("norte-code: {message}");
+            eprintln!("norte-code: {}", text::terminal(&message));
             ExitCode::from(2)
         }
     }
