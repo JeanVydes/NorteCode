@@ -39,7 +39,7 @@ use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredSession
 use norte_code_tools::{
     AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
 };
-use norte_tools::{CommandTool, EditTool, ReadTool, WriteTool};
+use norte_tools::{CommandLimits, CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::{Notify, mpsc};
 
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
@@ -654,6 +654,10 @@ impl Service {
             env.insert("PATH".to_owned(), path);
         }
         let command = CommandTool::new()
+            .with_limits(CommandLimits {
+                max_model_bytes: self.config.tools.command_max_model_bytes,
+                ..CommandLimits::default()
+            })
             .with_env(env)
             .with_secrets(self.secrets.clone())
             .with_blobs(Arc::clone(&self.blobs))

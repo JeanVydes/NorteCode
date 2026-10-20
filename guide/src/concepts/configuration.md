@@ -56,7 +56,7 @@ secret type and are registered for output redaction with the command tool.
 | `extensions` | Vendor-specific request fields. |
 | `cost` | Whether to display reported cost. |
 | `budgets` | Message, session and daily limits. |
-| `tools` | `web_fetch` and the command sandbox. |
+| `tools` | `web_fetch`, the command output cap and the command sandbox. |
 | `skills` | Discovery roots, scripts and allowed-tools behaviour. |
 | `model_overrides` | Per-model context, output and reasoning overrides. |
 

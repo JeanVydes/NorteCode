@@ -223,6 +223,7 @@ from the catalogue.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `web_fetch` | boolean | `false` | Register the `web_fetch` tool. |
+| `command_max_model_bytes` | integer | `131072` | Bytes of each `command` stream and summary that reach the model. The tool still captures up to its own larger ceiling; this only bounds the text the model sees, eliding the middle with a marker. Valid range: `1024`–`1048576`. |
 | `sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
 | `sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
 | `sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |

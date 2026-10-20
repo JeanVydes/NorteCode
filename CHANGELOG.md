@@ -51,6 +51,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   next message, even after a failed or cancelled turn. `/exit`, `quit`, Ctrl-D
   or Ctrl-C at the prompt leave; a first prompt is optional on `run`. The prompt
   shares stdin with approvals and questions so typed input stays in order.
+- `tools.command_max_model_bytes` (default `131072`, range `1024`–`1048576`)
+  bounds the bytes of each `command` stream that reach the model; the rest is
+  elided around the marker. Previously this was fixed at Norte's 32 KiB default
+  and could not be raised from the config.
 - The models.dev catalog client: tolerant schema, capability and reasoning
   mapping, ETag/TTL cache with stale and bundled fallbacks, and a live refresh
   request.

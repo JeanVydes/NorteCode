@@ -279,14 +279,32 @@ impl Default for BudgetConfig {
     }
 }
 
+/// Default cap on the bytes of each command stream that reach the model.
+pub const DEFAULT_COMMAND_MAX_MODEL_BYTES: usize = 128 * 1024;
+
 /// Tool switches.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
     /// Whether the `web_fetch` tool is registered.
     pub web_fetch: bool,
+    /// Bytes of each `command` stream and summary that reach the model.
+    ///
+    /// The tool still captures up to its own larger ceiling; this bounds only
+    /// the text the model sees, eliding the middle with a marker.
+    pub command_max_model_bytes: usize,
     /// How `command` is sandboxed.
     pub sandbox: SandboxConfig,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            web_fetch: false,
+            command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
+            sandbox: SandboxConfig::default(),
+        }
+    }
 }
 
 /// Command sandbox settings.
@@ -562,6 +580,12 @@ impl Config {
             .any(|path| path.as_os_str().is_empty())
         {
             return Err(invalid("tools.sandbox.writable", "paths must not be empty"));
+        }
+        if !(1024..=1024 * 1024).contains(&self.tools.command_max_model_bytes) {
+            return Err(invalid(
+                "tools.command_max_model_bytes",
+                "must be between 1024 and 1048576 bytes",
+            ));
         }
         for (scope, budget) in [
             ("message", &self.budgets.message),
@@ -868,6 +892,25 @@ mod tests {
         let error =
             Config::from_json(r#"{"retry":{"max_delay_ms":600001}}"#).expect_err("max_delay_ms");
         assert!(error.to_string().contains("retry.max_delay_ms"));
+    }
+
+    #[test]
+    fn command_model_bytes_default_and_validation() {
+        let loaded = Config::from_json("{}").expect("config");
+        assert_eq!(
+            loaded.config.tools.command_max_model_bytes,
+            DEFAULT_COMMAND_MAX_MODEL_BYTES
+        );
+        let custom = Config::from_json(r#"{"tools":{"command_max_model_bytes":65536}}"#)
+            .expect("custom limit");
+        assert_eq!(custom.config.tools.command_max_model_bytes, 65_536);
+        for value in ["0", "1023", "1048577"] {
+            let error = Config::from_json(&format!(
+                r#"{{"tools":{{"command_max_model_bytes":{value}}}}}"#
+            ))
+            .expect_err("out of range");
+            assert!(error.to_string().contains("tools.command_max_model_bytes"));
+        }
     }
 
     #[test]

@@ -107,6 +107,7 @@ edits run and still asks for commands and scripts. `yolo` runs everything.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `web_fetch` | `false` | Register `web_fetch`. |
+| `command_max_model_bytes` | `131072` | Bytes of each `command` stream that reach the model; the rest is elided. Range `1024`–`1048576`. |
 | `sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
 | `sandbox.network` | `false` | Allow network in the sandbox. |
 | `sandbox.writable` | `[]` | Extra writable roots. |
