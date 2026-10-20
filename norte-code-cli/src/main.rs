@@ -3161,6 +3161,16 @@ fn debug_prompt_size(style: Style, service: &Service, source: &str) {
                 "{}",
                 style.dim(format!("  system     {} chars", size.system_chars))
             );
+            if let Some(path) = &size.project_path {
+                eprintln!(
+                    "{}",
+                    style.dim(format!(
+                        "  project    {} chars ({})",
+                        size.project_chars,
+                        path.display()
+                    ))
+                );
+            }
             eprintln!(
                 "{}",
                 style.dim(format!("  tools      {} chars", size.tool_chars))

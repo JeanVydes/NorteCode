@@ -155,6 +155,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   the new session id is shown, and the summary request enters the cost ledger
   and budgets. `/compact` in the interactive prompt triggers the same path on
   demand; a failed summary leaves history unchanged.
+- Project instructions: an `AGENTS.md` in the workspace root is appended to the
+  system prompt of every new session. Only a regular file is read, the read is
+  capped at 64 KiB, and the text is treated as repository guidance that does
+  not override the user's request, the approvals or the budgets. `--debug` shows
+  the file and its size.
 - A lost store race is reported as a conflict with a resume hint instead of a
   provider error. The session version is an optimistic-concurrency token, not a
   message count; a turn that loses the race did not commit.

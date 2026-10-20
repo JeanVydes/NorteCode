@@ -72,7 +72,10 @@ lists the tools that ran and their counts. Iterations are unlimited by default;
 `compaction.threshold` (default `0.90`) and can be overridden for one run or
 resume with `--compaction-threshold FRACTION`. The system prompt comes from
 `--system-prompt` when given, otherwise from `system_prompt` in the config, and
-otherwise from the built-in prompt.
+otherwise from the built-in prompt. An `AGENTS.md` in the workspace root is
+appended to whichever prompt is used, as project instructions. It is untrusted
+input: only a regular file is read, the read is capped at 64 KiB, and the
+instructions never override the user's request, the approvals or the budgets.
 
 `--interactive` keeps the same session open after each turn and prints a `›`
 prompt for the next message; `/compact` summarises the conversation on demand
