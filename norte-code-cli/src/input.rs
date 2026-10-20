@@ -3,8 +3,69 @@
 //! While a turn streams, typed text stays in the input line and never leaks
 //! into the answer. Pressing Enter sends the line to the caller, which either
 //! starts a turn or queues the line for the next one. The terminal keeps a
-//! scroll region above the input line, so streamed output scrolls without
-//! touching what the human is typing.
+//! scroll region above the footer, so streamed output scrolls without touching
+//! the pinned rows: the running session totals, the queued-message preview and
+//! the input line itself.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// The pinned text above the input line.
+///
+/// The renderer owns the session totals; the input editor owns the terminal.
+/// Both share this handle: the renderer replaces the text, the editor redraws
+/// it when it changes.
+#[derive(Default)]
+pub(crate) struct Pinned {
+    inner: Mutex<PinnedInner>,
+    dirty: AtomicBool,
+}
+
+#[derive(Default)]
+struct PinnedInner {
+    session: String,
+    queued: Vec<String>,
+}
+
+impl Pinned {
+    /// A shared handle for the input editor and the event renderer.
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Replaces the session status line.
+    pub(crate) fn set_session(&self, text: String) {
+        let mut inner = self.lock();
+        if inner.session != text {
+            inner.session = text;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Replaces the queued-message preview. An empty list clears it.
+    pub(crate) fn set_queued(&self, lines: Vec<String>) {
+        let mut inner = self.lock();
+        if inner.queued != lines {
+            inner.queued = lines;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn snapshot(&self) -> (String, Vec<String>) {
+        let inner = self.lock();
+        (inner.session.clone(), inner.queued.clone())
+    }
+
+    fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
+    }
+}
 
 #[cfg(unix)]
 mod unix {
@@ -21,7 +82,12 @@ mod unix {
     };
     use tokio::sync::mpsc;
 
+    use super::Pinned;
     use crate::style::Style;
+
+    /// Rows reserved below the scroll region: session status, queued preview
+    /// and the input line.
+    const FOOTER_ROWS: u16 = 3;
 
     /// A running input line editor and its channel of completed lines.
     pub(crate) struct InteractiveInput {
@@ -31,7 +97,7 @@ mod unix {
 
     impl InteractiveInput {
         /// Starts the editor on the current terminal.
-        pub(crate) fn start(style: Style) -> Result<Self, String> {
+        pub(crate) fn start(style: Style, pinned: Arc<Pinned>) -> Result<Self, String> {
             if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
                 return Err("interactive input needs a terminal on stdin and stderr".to_owned());
             }
@@ -54,7 +120,7 @@ mod unix {
                     return Err(format!("could not measure the terminal: {error}"));
                 }
             };
-            if rows < 2 {
+            if rows < FOOTER_ROWS + 1 {
                 let _ = tcsetattr(fd, TCSANOW, &original);
                 return Err("the terminal is too small for the input line".to_owned());
             }
@@ -68,7 +134,7 @@ mod unix {
             let thread_stop = Arc::clone(&stop);
             let handle = match thread::Builder::new()
                 .name("norte-input".to_owned())
-                .spawn(move || run_editor(style, cols, rows, &sender, &thread_stop))
+                .spawn(move || run_editor(style, cols, rows, &pinned, &sender, &thread_stop))
             {
                 Ok(handle) => handle,
                 Err(error) => {
@@ -241,6 +307,7 @@ mod unix {
         style: Style,
         mut cols: u16,
         mut rows: u16,
+        pinned: &Pinned,
         sender: &mpsc::UnboundedSender<Option<String>>,
         stop: &AtomicBool,
     ) {
@@ -250,6 +317,7 @@ mod unix {
         let mut draft = String::new();
 
         draw_input(style, cols, rows, &buffer);
+        draw_footer(style, cols, rows, pinned);
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -279,8 +347,9 @@ mod unix {
                         }
                         Ok(Event::Resize(width, height)) => {
                             cols = width;
-                            rows = height.max(2);
+                            rows = height.max(FOOTER_ROWS + 1);
                             reset_region(cols, rows);
+                            draw_footer(style, cols, rows, pinned);
                             redraw = true;
                         }
                         _ => {}
@@ -294,6 +363,9 @@ mod unix {
                     let _ = sender.send(None);
                     break;
                 }
+            }
+            if pinned.take_dirty() {
+                draw_footer(style, cols, rows, pinned);
             }
         }
     }
@@ -467,20 +539,42 @@ mod unix {
         }
     }
 
+    /// The bottom row of the scroll region; the footer lives below it.
+    fn scroll_bottom(rows: u16) -> u16 {
+        rows.saturating_sub(FOOTER_ROWS).max(1)
+    }
+
+    fn status_row(rows: u16) -> u16 {
+        rows.saturating_sub(2).max(1)
+    }
+
+    fn queue_row(rows: u16) -> u16 {
+        rows.saturating_sub(1).max(1)
+    }
+
     fn enter_terminal(cols: u16, rows: u16) -> Result<(), String> {
         let mut out = io::stderr().lock();
         write!(out, "\x1b[?25l\x1b[?2004h").map_err(|error| error.to_string())?;
+        // The startup and `--debug` blocks are printed before this point. Reset
+        // the scroll region, drop to the last row and scroll the footer height
+        // so those rows are blank; otherwise the first streamed lines would
+        // overwrite the last debug line.
+        write!(out, "\x1b[r\x1b[{rows};1H").map_err(|error| error.to_string())?;
+        for _ in 0..FOOTER_ROWS {
+            writeln!(out).map_err(|error| error.to_string())?;
+        }
         set_region(&mut out, cols, rows).map_err(|error| error.to_string())?;
         out.flush().map_err(|error| error.to_string())
     }
 
     fn leave_terminal(rows: u16) {
         let mut out = io::stderr().lock();
-        let _ = write!(
-            out,
-            "\x1b[?2004l\x1b[r\x1b[{};1H\x1b[2K\x1b[?25h",
-            rows.max(1)
-        );
+        let _ = write!(out, "\x1b[?2004l\x1b[r");
+        // Only the footer rows: the region still holds the final summary.
+        for row in scroll_bottom(rows).saturating_add(1)..=rows.max(1) {
+            let _ = write!(out, "\x1b[{row};1H\x1b[2K");
+        }
+        let _ = write!(out, "\x1b[{};1H\x1b[?25h", rows.max(1));
         let _ = out.flush();
     }
 
@@ -492,8 +586,61 @@ mod unix {
 
     fn set_region(out: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
         let _ = cols;
-        let bottom = rows.saturating_sub(2).max(1);
+        let bottom = scroll_bottom(rows);
         write!(out, "\x1b[1;{bottom}r\x1b[{bottom};1H")
+    }
+
+    /// Draws the pinned session line and the queued-message preview.
+    ///
+    /// Both rows are below the scroll region, so streamed output never touches
+    /// them. The cursor is saved and restored so the main thread's output
+    /// position is preserved.
+    fn draw_footer(style: Style, cols: u16, rows: u16, pinned: &Pinned) {
+        let (session, queued) = pinned.snapshot();
+        let width = usize::from(cols).saturating_sub(2);
+        let queue_text = if queued.is_empty() {
+            String::new()
+        } else {
+            let joined = queued.join(" · ");
+            format!("{} {}", style.faint("queued"), style.faint(joined))
+        };
+        let mut out = io::stderr().lock();
+        let _ = write!(
+            out,
+            "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
+            queue_row(rows),
+            clip_visible(&queue_text, width),
+            status_row(rows),
+            clip_visible(&session, width)
+        );
+        let _ = out.flush();
+    }
+
+    /// Clips a styled line to `max` visible columns, keeping ANSI escapes.
+    fn clip_visible(text: &str, max: usize) -> String {
+        let mut out = String::new();
+        let mut visible = 0usize;
+        let mut chars = text.chars();
+        while let Some(character) = chars.next() {
+            if character == '\x1b' {
+                out.push(character);
+                for next in chars.by_ref() {
+                    out.push(next);
+                    if next == 'm' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if visible >= max {
+                out.push('…');
+                out.push_str("\x1b[0m");
+                break;
+            }
+            out.push(character);
+            visible += 1;
+        }
+        out
     }
 
     fn draw_input(style: Style, cols: u16, rows: u16, buffer: &LineBuffer) {
@@ -524,7 +671,7 @@ mod unix {
 
     #[cfg(test)]
     mod tests {
-        use super::LineBuffer;
+        use super::{LineBuffer, clip_visible};
 
         #[test]
         fn arrows_move_the_insertion_point_without_reordering_text() {
@@ -577,6 +724,16 @@ mod unix {
             buffer.insert_text("one\r\ntwo\tthree");
             assert_eq!(buffer.text(), "one  two    three");
         }
+
+        #[test]
+        fn footer_clipping_counts_visible_columns_and_keeps_styles() {
+            // Six visible characters plus two escape sequences.
+            let text = "\x1b[2mabcdef\x1b[0m";
+            assert_eq!(clip_visible(text, 10), text);
+            let clipped = clip_visible(text, 3);
+            assert_eq!(clipped, "\x1b[2mabc…\x1b[0m");
+            assert_eq!(clip_visible("plain", 5), "plain");
+        }
     }
 }
 
@@ -586,6 +743,7 @@ pub(crate) use unix::InteractiveInput;
 #[cfg(not(unix))]
 mod fallback {
     use std::io;
+    use std::sync::Arc;
 
     use tokio::sync::mpsc;
 
@@ -598,7 +756,7 @@ mod fallback {
 
     impl InteractiveInput {
         /// Starts a blocking line reader on stdin.
-        pub(crate) fn start(_style: Style) -> Result<Self, String> {
+        pub(crate) fn start(_style: Style, _pinned: Arc<super::Pinned>) -> Result<Self, String> {
             let (sender, lines) = mpsc::unbounded_channel();
             std::thread::spawn(move || {
                 loop {

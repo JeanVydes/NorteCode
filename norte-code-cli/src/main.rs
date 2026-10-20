@@ -16,9 +16,10 @@ mod render;
 mod style;
 
 use commands::{apply_extensions, database_path, duration_label, run};
-use input::InteractiveInput;
+use input::{InteractiveInput, Pinned};
 use interaction::{
-    clip_text, compact_json, drive_turns, interactive_loop, list_models, resolve_spec,
+    clip_text, compact_json, drive_turns, echo_user_message, interactive_loop, list_models,
+    resolve_spec,
 };
 use render::{
     Block, Format, Renderer, approval_label, debug_model, debug_prompt_size, debug_reasoning,
@@ -476,6 +477,7 @@ async fn run_prompt(
     }
     service.set_config_path(config_path);
 
+    let pinned = Pinned::new();
     let mut renderer = Renderer {
         format: if args.jsonl {
             Format::Jsonl
@@ -488,6 +490,7 @@ async fn run_prompt(
         debug_session: false,
         show_cost,
         style,
+        pinned: Arc::clone(&pinned),
         block: Block::None,
         reasoning_line_start: false,
         reasoning_placeholder: false,
@@ -508,7 +511,7 @@ async fn run_prompt(
     };
     let interactive = args.interactive;
     let mut input = if interactive {
-        Some(InteractiveInput::start(style)?)
+        Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
     } else {
         None
     };
@@ -519,6 +522,9 @@ async fn run_prompt(
     let mut parked = false;
     let mut pending: Option<String> = None;
     if let Some(prompt) = args.prompt {
+        if interactive {
+            echo_user_message(style, &prompt);
+        }
         let request = ClientRequest {
             request_id: 1,
             kind: ClientRequestKind::SendMessage {
@@ -540,7 +546,9 @@ async fn run_prompt(
         session = outcome.session.or(session);
         parked = outcome.parked;
         renderer.ensure_newline();
-        if !outcome.parked && !renderer.budget_stopped && !outcome.queued.is_empty() {
+        if outcome.parked || renderer.budget_stopped {
+            renderer.clear_queued();
+        } else if !outcome.queued.is_empty() {
             pending = Some(outcome.queued.join("\n"));
         }
     }
@@ -660,6 +668,7 @@ async fn resume_session(
         debug_prompt_size(style, &service, system_prompt_source);
     }
     service.set_config_path(config_path);
+    let pinned = Pinned::new();
     let mut renderer = Renderer {
         format: if args.jsonl {
             Format::Jsonl
@@ -672,6 +681,7 @@ async fn resume_session(
         debug_session: false,
         show_cost,
         style,
+        pinned: Arc::clone(&pinned),
         block: Block::None,
         reasoning_line_start: false,
         reasoning_placeholder: false,
@@ -693,7 +703,7 @@ async fn resume_session(
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
     let mut input = if interactive {
-        Some(InteractiveInput::start(style)?)
+        Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
     } else {
         None
     };
@@ -726,7 +736,9 @@ async fn resume_session(
             input.as_mut().map(InteractiveInput::lines),
         )
         .await?;
-        if !outcome.queued.is_empty() {
+        if outcome.parked || renderer.budget_stopped {
+            renderer.clear_queued();
+        } else if !outcome.queued.is_empty() {
             pending = Some(outcome.queued.join("\n"));
         }
     }
@@ -748,7 +760,9 @@ async fn resume_session(
     )
     .await?;
     renderer.ensure_newline();
-    if !outcome.parked && !renderer.budget_stopped && !outcome.queued.is_empty() {
+    if outcome.parked || renderer.budget_stopped {
+        renderer.clear_queued();
+    } else if !outcome.queued.is_empty() {
         pending = Some(outcome.queued.join("\n"));
     }
     if interactive && !outcome.parked && !renderer.budget_stopped {

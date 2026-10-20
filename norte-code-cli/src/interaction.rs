@@ -55,6 +55,18 @@ pub(crate) fn print_chat_help(style: Style) {
     );
 }
 
+/// Echoes a message the human sent into the transcript, above the footer.
+pub(crate) fn echo_user_message(style: Style, text: &str) {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) => eprintln!("{} {}", style.cyan("›"), first),
+        None => eprintln!("{}", style.cyan("›")),
+    }
+    for line in lines {
+        eprintln!("  {line}");
+    }
+}
+
 /// Reads and sends messages until the human exits, a turn parks or the budget
 /// stops the session.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -76,14 +88,16 @@ pub(crate) async fn interactive_loop(
     }
     let mut request_id = 2_u64;
     loop {
-        let next = if let Some(text) = pending.take() {
-            Some(text)
-        } else {
-            read_repl_line(input, style).await?
+        let (next, from_pending) = match pending.take() {
+            Some(text) => (Some(text), true),
+            None => (read_repl_line(input, style).await?, false),
         };
         let Some(text) = next else {
             break;
         };
+        if from_pending {
+            renderer.clear_queued();
+        }
         if matches!(text.as_str(), "/exit" | "/quit" | "exit" | "quit") {
             break;
         }
@@ -146,6 +160,7 @@ pub(crate) async fn interactive_loop(
             eprintln!("{}", style.green(format!("skills refreshed: {count}")));
             continue;
         }
+        echo_user_message(style, &text);
         let stream = service
             .submit(ClientRequest {
                 request_id,
@@ -177,7 +192,12 @@ fn queue_after_turn(
     pending: &mut Option<String>,
     outcome: &DriveOutcome,
 ) {
-    if outcome.parked || renderer.budget_stopped || outcome.queued.is_empty() {
+    if outcome.parked || renderer.budget_stopped {
+        // These lines are not going to be sent; drop the pinned preview.
+        renderer.clear_queued();
+        return;
+    }
+    if outcome.queued.is_empty() {
         return;
     }
     if !renderer.quiet {
@@ -345,6 +365,7 @@ pub(crate) async fn drive_turns(
                     let line = line.trim();
                     if !line.is_empty() {
                         queued.push(line.to_owned());
+                        renderer.set_queued(queued.clone());
                     }
                     continue;
                 }

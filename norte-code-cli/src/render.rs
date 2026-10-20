@@ -2,6 +2,8 @@
 
 use norte_code_agent::DEFAULT_SYSTEM_PROMPT;
 
+use crate::input::Pinned;
+
 use super::{
     ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
     Delta, ErrorCode, Feature, Modality, ModelSpec, Path, PathBuf, Phase, Reasoning,
@@ -9,6 +11,7 @@ use super::{
     StreamingGranularity, StructuredOutputMode, Style, ToolKind, Write, clip_text, compact_json,
     duration_label,
 };
+use std::sync::Arc;
 
 /// How events are written.
 #[derive(Clone, Copy)]
@@ -41,6 +44,8 @@ pub(crate) struct Renderer {
     pub(crate) debug_session: bool,
     pub(crate) show_cost: bool,
     pub(crate) style: Style,
+    /// The pinned footer text shared with the input editor.
+    pub(crate) pinned: Arc<Pinned>,
     pub(crate) block: Block,
     pub(crate) reasoning_line_start: bool,
     /// Whether `--quiet` has already printed its one redacted reasoning marker
@@ -375,6 +380,10 @@ impl Renderer {
                 } else {
                     self.unpriced += 1;
                 }
+                if !self.quiet && matches!(self.format, Format::Text) {
+                    let status = self.session_status();
+                    self.pinned.set_session(status);
+                }
                 if self.quiet {
                     return;
                 }
@@ -686,6 +695,58 @@ impl Renderer {
             .map(|(tool, count)| format!("{} ×{count}", self.style.tool(tool.clone())))
             .collect::<Vec<_>>()
             .join(&self.style.faint(" · "))
+    }
+
+    /// The running session totals for the pinned footer.
+    ///
+    /// One line, always the same fields, so the footer only ever updates in
+    /// place: requests, input and output tokens, the average cache-read share,
+    /// the total input:output ratio and the reported cost.
+    pub(crate) fn session_status(&self) -> String {
+        let mut parts = vec![
+            self.style.cyan(format!("{} req", self.requests)),
+            self.style.dim(format!("{} in", human_tokens(self.input))),
+            self.style.dim(format!("{} out", human_tokens(self.output))),
+        ];
+        if self.cache_reported && self.input > 0 {
+            parts.push(self.style.blue(format!(
+                "cache {}",
+                percent_label(self.cache_read, self.input)
+            )));
+        }
+        parts.push(
+            self.style
+                .dim(format!("in:out {}", token_ratio(self.input, self.output))),
+        );
+        if self.show_cost {
+            if self.unpriced == self.requests {
+                parts.push(self.style.yellow("cost not reported"));
+            } else {
+                parts.push(if self.cost > 0.0 {
+                    self.style.green(format!("${:.6}", self.cost))
+                } else {
+                    self.style.faint(format!("${:.6}", self.cost))
+                });
+                if self.unpriced > 0 {
+                    parts.push(self.style.yellow(format!("{} not reported", self.unpriced)));
+                }
+            }
+        }
+        format!(
+            "{} {}",
+            self.style.faint("session"),
+            parts.join(&self.style.faint(" · "))
+        )
+    }
+
+    /// Replaces the queued-message preview above the input line.
+    pub(crate) fn set_queued(&self, lines: Vec<String>) {
+        self.pinned.set_queued(lines);
+    }
+
+    /// Clears the queued-message preview once the messages are sent.
+    pub(crate) fn clear_queued(&self) {
+        self.pinned.set_queued(Vec::new());
     }
 
     /// Writes the run's cost and tool summary, if the run made any requests.

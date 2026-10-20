@@ -43,14 +43,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   presets when no URL is configured.
 - The headless `norte-code run` command, with streamed text and `--jsonl`
   output, plus `--budget`, `--reasoning` and `--approval-mode`.
-- `--interactive` on `run` and `resume`: the same session stays open and a line
-  editor is pinned below the streamed output. Arrow keys, Home/End, Delete,
+- `--interactive` on `run` and `resume`: the same session stays open. A pinned
+  footer holds the running session totals, the queued-message preview and a line
+  editor. The totals update after every request (requests, input/output tokens,
+  average cache share, total input:output ratio and reported cost). Messages you
+  send are echoed above the footer; lines completed while a turn is still
+  running stay in the queued preview and are sent together as the next message,
+  even after a failed or cancelled turn. Arrow keys, Home/End, Delete,
   Backspace, paste and the usual control keys work; a reverse-video cursor marks
-  the insertion point and typed text never leaks into the answer. Lines
-  completed while a turn is still running are queued and sent together as the
-  next message, even after a failed or cancelled turn. `/exit`, `quit`, Ctrl-D
-  or Ctrl-C at the prompt leave; a first prompt is optional on `run`. The prompt
-  shares stdin with approvals and questions so typed input stays in order.
+  the insertion point and typed text never leaks into the answer. `/exit`,
+  `quit`, Ctrl-D or Ctrl-C at the prompt leave; a first prompt is optional on
+  `run`. The prompt shares stdin with approvals and questions so typed input
+  stays in order.
 - `tools.command_max_model_bytes` (default `131072`, range `1024`–`1048576`)
   bounds the bytes of each `command` stream that reach the model; the rest is
   elided around the marker. Previously this was fixed at Norte's 32 KiB default
