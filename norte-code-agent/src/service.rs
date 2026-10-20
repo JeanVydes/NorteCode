@@ -1879,6 +1879,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_sessions_run_turns_concurrently() {
+        struct FreshFactory {
+            reference: ModelRef,
+        }
+
+        impl ModelFactory for FreshFactory {
+            fn build(
+                &self,
+                _spec: &ModelSpec,
+                _capabilities: &Capabilities,
+            ) -> Result<Arc<dyn Model>, ServiceError> {
+                Ok(
+                    Arc::new(ScriptedModel::new(self.reference.clone()).turn_text("ok"))
+                        as Arc<dyn Model>,
+                )
+            }
+        }
+
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let service = Arc::new(
+            Service::new(
+                config(),
+                catalog(),
+                spec("scripted"),
+                Arc::new(FreshFactory { reference }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+
+        let mut keys = Vec::new();
+        for title in ["a", "b"] {
+            let events = drain(
+                &service,
+                ClientRequestKind::CreateSession {
+                    title: Some(title.to_owned()),
+                },
+            )
+            .await;
+            keys.push(events[0].session.clone().expect("session"));
+        }
+
+        let first = service
+            .submit(ClientRequest {
+                request_id: 1,
+                kind: ClientRequestKind::SendMessage {
+                    session: Some(keys[0].clone()),
+                    text: "one".to_owned(),
+                    budget: None,
+                    reasoning: None,
+                },
+            })
+            .await
+            .expect("first turn");
+        let second = service
+            .submit(ClientRequest {
+                request_id: 2,
+                kind: ClientRequestKind::SendMessage {
+                    session: Some(keys[1].clone()),
+                    text: "two".to_owned(),
+                    budget: None,
+                    reasoning: None,
+                },
+            })
+            .await
+            .expect("second turn");
+
+        let (first, second) = tokio::join!(first.collect::<Vec<_>>(), second.collect::<Vec<_>>());
+        for events in [first, second] {
+            assert!(events.iter().any(|event| matches!(
+                event.kind,
+                ServerEventKind::TurnFinished {
+                    committed: true,
+                    ..
+                }
+            )));
+        }
+    }
+
+    #[tokio::test]
     async fn models_are_listed_with_their_catalogue_limits() {
         let service = service();
         let events = drain(&service, ClientRequestKind::ListModels).await;
