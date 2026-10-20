@@ -17,10 +17,10 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
     ApprovalId, BlobStore, CallId, Continuation, Decision, Engine, EngineBuilder, EngineConfig,
-    EngineEvent, FinishReason, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore, Layer,
-    LayerContext, LayerStack, Message, Model, ModelRequest, ModelStream, Policy, PolicySet,
-    PolicyView, ReasoningEffort, SessionId, ShortCircuitReason, Store, StreamDelta, ToolKind,
-    ToolRegistry, Usage,
+    EngineEvent, FinishReason, FnExecutor, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore,
+    Layer, LayerContext, LayerStack, Message, Model, ModelRequest, ModelStream, Policy, PolicySet,
+    PolicyView, ReasoningEffort, SessionId, ShortCircuitReason, Store, StreamDelta, ToolArgs,
+    ToolContext, ToolDeclaration, ToolKind, ToolOutput, ToolRegistry, Usage,
 };
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord, CostSummary, summarize};
 use norte_code_skills::{
@@ -94,6 +94,100 @@ struct CatalogSettings {
     cache_dir: PathBuf,
 }
 
+/// Live arguments and results for tool calls in flight.
+///
+/// Norte's engine events carry no output, and a result is not in history until
+/// the turn commits, so the host records both sides around the executor. The
+/// renderer gets the effective arguments and the text the model will see.
+#[derive(Default)]
+struct ToolActivity {
+    arguments: Mutex<BTreeMap<CallId, serde_json::Value>>,
+    outputs: Mutex<BTreeMap<CallId, ToolOutput>>,
+}
+
+impl ToolActivity {
+    fn started(&self, call_id: &CallId) -> Option<serde_json::Value> {
+        self.arguments
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(call_id)
+    }
+
+    fn finished(&self, call_id: &CallId) -> Option<ToolOutput> {
+        self.outputs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(call_id)
+    }
+}
+
+/// A tool executor that keeps the output for the renderer.
+struct RecordingExecutor<A> {
+    inner: Arc<dyn FnExecutor<A, ToolOutput>>,
+    activity: Arc<ToolActivity>,
+}
+
+#[async_trait]
+impl<A> FnExecutor<A, ToolOutput> for RecordingExecutor<A>
+where
+    A: ToolArgs,
+{
+    async fn call(&self, args: A) -> norte::Result<ToolOutput> {
+        self.inner.call(args).await
+    }
+
+    async fn call_with_context(&self, context: &ToolContext, args: A) -> norte::Result<ToolOutput> {
+        let result = self.inner.call_with_context(context, args).await;
+        if let Some(call_id) = context.call_id {
+            let output = match &result {
+                Ok(output) => output.clone(),
+                Err(error) => ToolOutput::error(error.to_string()),
+            };
+            self.activity
+                .outputs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(call_id, output);
+        }
+        result
+    }
+}
+
+/// Wraps a rich tool declaration so its output is visible to the host.
+fn recording_tool<A>(
+    declaration: ToolDeclaration<A>,
+    activity: Arc<ToolActivity>,
+) -> ToolDeclaration<A>
+where
+    A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
+{
+    ToolDeclaration {
+        name: declaration.name,
+        description: declaration.description,
+        parameters: declaration.parameters,
+        executor: Arc::new(RecordingExecutor {
+            inner: declaration.executor,
+            activity,
+        }),
+        approval: declaration.approval,
+    }
+}
+
+/// The text a tool result carries, with structured output as a fallback.
+fn output_text(output: &ToolOutput) -> Option<String> {
+    let text = output
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        output.structured.as_ref().map(ToString::to_string)
+    } else {
+        Some(text)
+    }
+}
+
 /// The Norte Code service.
 pub struct Service {
     config: Config,
@@ -111,6 +205,7 @@ pub struct Service {
     secrets: Vec<String>,
     directory: Arc<dyn SessionDirectory>,
     effects: Arc<EffectJournal>,
+    activity: Arc<ToolActivity>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
@@ -212,6 +307,7 @@ impl Service {
                 .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
         );
         let effects = Arc::new(EffectJournal::new(Arc::clone(&directory)));
+        let activity = Arc::new(ToolActivity::default());
         let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
         let service = Self {
             config,
@@ -229,6 +325,7 @@ impl Service {
             secrets,
             directory,
             effects,
+            activity,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             budget_states: Mutex::new(BTreeMap::new()),
@@ -438,13 +535,19 @@ impl Service {
             .tools(self.tools()?)
             .policies(self.policies())
             .config(EngineConfig {
-                max_iterations: self.config.max_iterations,
+                max_iterations: self.config.max_iterations.unwrap_or(usize::MAX),
                 ..EngineConfig::default()
             })
             .tool_metadata({
                 let effects = Arc::clone(&self.effects);
+                let activity = Arc::clone(&self.activity);
                 move |info| {
                     effects.intent(info.session, info.call_id, info.tool.as_str());
+                    activity
+                        .arguments
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(info.call_id, info.arguments.clone());
                     BTreeMap::new()
                 }
             });
@@ -454,13 +557,26 @@ impl Service {
         Ok(builder.build()?)
     }
 
+    /// Registers one rich tool with the activity recorder attached.
+    fn register_tool<A>(
+        &self,
+        tools: &mut ToolRegistry,
+        declaration: ToolDeclaration<A>,
+    ) -> Result<(), ServiceError>
+    where
+        A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
+    {
+        tools.register_tool_declaration(recording_tool(declaration, Arc::clone(&self.activity)))?;
+        Ok(())
+    }
+
     /// The tool registry every engine shares, rebuilt cheaply per turn because
     /// Norte's registry is immutable and not cloneable.
     fn tools(&self) -> Result<ToolRegistry, ServiceError> {
         let mut tools = ToolRegistry::new();
-        tools.register_tool_declaration(ReadTool::new().into_declaration())?;
-        tools.register_tool_declaration(WriteTool::new().into_declaration())?;
-        tools.register_tool_declaration(EditTool::new().into_declaration())?;
+        self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
+        self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
+        self.register_tool(&mut tools, EditTool::new().into_declaration())?;
 
         let mut env = BTreeMap::new();
         if let Ok(path) = std::env::var("PATH") {
@@ -471,30 +587,44 @@ impl Service {
             .with_secrets(self.secrets.clone())
             .with_blobs(Arc::clone(&self.blobs))
             .into_declaration();
-        tools.register_tool_declaration(command)?;
-        tools.register_tool_declaration(GlobTool::new(&self.workspace_root).into_declaration())?;
-        tools
-            .register_tool_declaration(ListDirTool::new(&self.workspace_root).into_declaration())?;
-        tools.register_tool_declaration(GrepTool::new(&self.workspace_root).into_declaration())?;
-        tools
-            .register_tool_declaration(TodoTool::new(Arc::clone(&self.todo)).into_declaration())?;
-        tools.register_tool_declaration(
+        self.register_tool(&mut tools, command)?;
+        self.register_tool(
+            &mut tools,
+            GlobTool::new(&self.workspace_root).into_declaration(),
+        )?;
+        self.register_tool(
+            &mut tools,
+            ListDirTool::new(&self.workspace_root).into_declaration(),
+        )?;
+        self.register_tool(
+            &mut tools,
+            GrepTool::new(&self.workspace_root).into_declaration(),
+        )?;
+        self.register_tool(
+            &mut tools,
+            TodoTool::new(Arc::clone(&self.todo)).into_declaration(),
+        )?;
+        self.register_tool(
+            &mut tools,
             AskUserTool::new(Arc::clone(&self.questions)).into_declaration(),
         )?;
         if self.config.tools.web_fetch {
-            tools.register_tool_declaration(WebFetchTool::new().into_declaration())?;
+            self.register_tool(&mut tools, WebFetchTool::new().into_declaration())?;
         }
 
         if self.config.skills.enabled {
             let skills = self.skills();
-            tools.register_tool_declaration(
+            self.register_tool(
+                &mut tools,
                 SkillTool::new(Arc::clone(&skills)).into_declaration(),
             )?;
-            tools.register_tool_declaration(
+            self.register_tool(
+                &mut tools,
                 SkillResourceTool::new(Arc::clone(&skills)).into_declaration(),
             )?;
             if self.config.skills.allow_scripts {
-                tools.register_tool_declaration(
+                self.register_tool(
+                    &mut tools,
                     SkillScriptTool::new(
                         Arc::clone(&skills),
                         SkillScriptConfig::in_workspace(&self.workspace_root),
@@ -1100,10 +1230,14 @@ impl Service {
         tx: &mpsc::Sender<ServerEvent>,
         notify: &Notify,
     ) -> Result<(), ServiceError> {
-        let mut stream = input.map_or_else(
-            || engine.resume(nid),
-            |text| engine.turn(nid).input(Message::user(text)).start(),
-        );
+        let mut turn_builder = engine.turn(nid);
+        if let Some(text) = input {
+            turn_builder = turn_builder.input(Message::user(text));
+        }
+        for (key, value) in &self.config.extensions {
+            turn_builder = turn_builder.extension(key.clone(), value.clone());
+        }
+        let mut stream = turn_builder.start();
         let mut stats = self.stats(key, turn);
         if !emit(
             tx,
@@ -1230,7 +1364,7 @@ impl Service {
 
     /// Maps one engine event and answers whether to keep going (the client is
     /// still reading).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn handle(
         &self,
         engine: &Engine,
@@ -1249,10 +1383,16 @@ impl Service {
                 })
             }
             EngineEvent::ToolCallStarted { call_id, tool, .. } => {
+                let arguments = if let Some(arguments) = self.activity.started(call_id) {
+                    Some(arguments)
+                } else {
+                    call_arguments(engine, nid, *call_id).await
+                };
                 Some(ServerEventKind::ToolStarted {
                     turn: stats.turn,
                     call_id: call_id.to_string(),
                     tool: tool.to_string(),
+                    arguments,
                 })
             }
             EngineEvent::ToolCallFinished {
@@ -1264,10 +1404,27 @@ impl Service {
             } => {
                 self.effects
                     .finished(nid, *call_id, tool.as_str(), *is_error);
+                let recorded = self.activity.finished(call_id);
                 let error = if *is_error {
-                    tool_error(engine, nid, call_id).await
+                    if let Some(text) = recorded.as_ref().and_then(output_text) {
+                        Some(text)
+                    } else {
+                        tool_error(engine, nid, call_id).await
+                    }
                 } else {
                     None
+                };
+                let (output, truncated) = if *is_error {
+                    (None, false)
+                } else {
+                    let text = recorded
+                        .as_ref()
+                        .and_then(output_text)
+                        .or(tool_result_text(engine, nid, call_id).await);
+                    text.map_or((None, false), |text| {
+                        let (text, truncated) = shorten_tool_output(text);
+                        (Some(text), truncated)
+                    })
                 };
                 Some(ServerEventKind::ToolFinished {
                     turn: stats.turn,
@@ -1275,6 +1432,8 @@ impl Service {
                     tool: tool.to_string(),
                     is_error: *is_error,
                     error,
+                    output,
+                    truncated,
                     duration_ms: *duration_ms,
                 })
             }
@@ -2377,6 +2536,45 @@ async fn tool_error(
     None
 }
 
+/// The text a tool returned, whether it succeeded or failed.
+async fn tool_result_text(
+    engine: &Engine,
+    session: SessionId,
+    call_id: &norte::CallId,
+) -> Option<String> {
+    let history = engine.history(session).await.ok()?;
+    for message in history.iter().rev() {
+        for part in &message.parts {
+            if let norte::Part::ToolResult(result) = part {
+                if result.call_id == *call_id {
+                    return Some(
+                        result
+                            .parts
+                            .iter()
+                            .filter_map(norte::Part::as_text)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The most tool output the wire carries for a verbose renderer.
+const TOOL_OUTPUT_LIMIT: usize = 4_000;
+
+/// Shortens a tool result on a character boundary.
+fn shorten_tool_output(text: String) -> (String, bool) {
+    if text.chars().count() <= TOOL_OUTPUT_LIMIT {
+        return (text, false);
+    }
+    let mut shortened: String = text.chars().take(TOOL_OUTPUT_LIMIT).collect();
+    shortened.push_str("\n… [truncated]");
+    (shortened, true)
+}
+
 fn to_usage(usage: &Usage) -> norte_code_protocol::Usage {
     norte_code_protocol::Usage {
         input_tokens: usage.input_tokens,
@@ -3169,6 +3367,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vendor_extensions_reach_the_model_request() {
+        let mut config = config();
+        config.extensions.insert(
+            "openai.chat:provider.order".to_owned(),
+            serde_json::json!(["deepinfra"]),
+        );
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+        let seen = Arc::clone(&model);
+        let service = Arc::new(
+            Service::new(
+                config,
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "hello".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let requests = seen.requests();
+        assert_eq!(
+            requests[0].extensions["openai.chat:provider.order"],
+            serde_json::json!(["deepinfra"])
+        );
+    }
+
+    #[tokio::test]
     async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
         let reference = ModelRef::new(
             ProviderId::new("test").expect("provider"),
@@ -3214,6 +3454,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn a_write_parks_for_approval_and_resumes() {
         let target = std::env::current_dir()
             .expect("working directory")
@@ -3301,14 +3542,32 @@ mod tests {
             event.kind,
             ServerEventKind::ApprovalResolved { approved: true, .. }
         )));
-        assert!(second.iter().any(|event| matches!(
-            event.kind,
-            ServerEventKind::ToolFinished {
-                ref tool,
-                is_error: false,
-                ..
-            } if tool == "write"
-        )));
+        let started = second
+            .iter()
+            .find_map(|event| match &event.kind {
+                ServerEventKind::ToolStarted {
+                    tool, arguments, ..
+                } if tool == "write" => arguments.clone(),
+                _ => None,
+            })
+            .expect("tool start arguments");
+        assert_eq!(started["path"], target.display().to_string());
+        let finished = second
+            .iter()
+            .find_map(|event| match &event.kind {
+                ServerEventKind::ToolFinished {
+                    tool,
+                    is_error: false,
+                    output,
+                    ..
+                } if tool == "write" => output.clone(),
+                _ => None,
+            })
+            .expect("tool output");
+        assert!(
+            finished.contains("wrote") && finished.contains(&target.display().to_string()),
+            "unexpected write output: {finished}"
+        );
         assert_eq!(
             std::fs::read_to_string(&target).expect("written file"),
             "written by a tool"

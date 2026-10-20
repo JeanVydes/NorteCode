@@ -266,6 +266,9 @@ pub enum ServerEventKind {
         call_id: String,
         /// The tool.
         tool: String,
+        /// The arguments the call runs with, when they can be recovered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<serde_json::Value>,
     },
     /// A tool call finished.
     ToolFinished {
@@ -278,8 +281,14 @@ pub enum ServerEventKind {
         /// Whether the tool reported an error.
         is_error: bool,
         /// The error text the model saw, when the tool failed.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The text the tool returned, when it succeeded and the host kept it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        /// Whether `output` was shortened for the wire.
+        #[serde(default)]
+        truncated: bool,
         /// How long it ran, in milliseconds.
         duration_ms: u64,
     },

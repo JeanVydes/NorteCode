@@ -32,6 +32,7 @@ use norte_code_protocol::{
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
 use norte_code_store_sqlite::{SessionDirectory, SqliteStore};
+use tokio::sync::mpsc;
 
 use crate::style::Style;
 
@@ -41,6 +42,7 @@ use crate::style::Style;
     version,
     about = "A terminal-based agentic coding tool"
 )]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// The user configuration file.
     #[arg(long, global = true, value_name = "PATH")]
@@ -54,6 +56,9 @@ struct Cli {
     /// Show tool failures and other details.
     #[arg(long, global = true)]
     verbose: bool,
+    /// Print startup details, including the session id, paths and extensions.
+    #[arg(long, global = true)]
+    debug: bool,
     /// What to do.
     #[command(subcommand)]
     command: Command,
@@ -100,6 +105,13 @@ struct RunArgs {
     /// What needs approval: `ask` (default), `auto-edit` or `yolo`.
     #[arg(long, value_name = "MODE", value_parser = ["ask", "auto-edit", "yolo"])]
     approval_mode: Option<String>,
+    /// Stop after this many model iterations; unlimited by default.
+    #[arg(long, value_name = "N")]
+    max_iterations: Option<usize>,
+    /// A vendor request extra as `KEY=JSON` (repeatable). For `OpenRouter`,
+    /// `openai.chat:provider={"order":["deepinfra"]}` chooses the upstream.
+    #[arg(long, value_name = "KEY=JSON")]
+    extension: Vec<String>,
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
@@ -124,6 +136,13 @@ struct ResumeArgs {
     /// What to do when the budget is exhausted.
     #[arg(long, value_name = "ACTION", value_parser = ["warn", "ask", "stop"], default_value = "stop")]
     budget_action: String,
+    /// Stop after this many model iterations; keeps the config's limit when
+    /// omitted.
+    #[arg(long, value_name = "N")]
+    max_iterations: Option<usize>,
+    /// A vendor request extra as `KEY=JSON` (repeatable).
+    #[arg(long, value_name = "KEY=JSON")]
+    extension: Vec<String>,
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
@@ -205,6 +224,7 @@ async fn run(cli: Cli) -> Result<u8, String> {
     let offline = cli.offline;
     let refresh = cli.refresh;
     let verbose = cli.verbose;
+    let debug = cli.debug;
     let config = load_config(config_path)?;
     match cli.command {
         Command::Skills(args) => skills_command(&config, &args),
@@ -214,10 +234,10 @@ async fn run(cli: Cli) -> Result<u8, String> {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
                 Command::Run(args) => {
-                    run_prompt(config, catalog, source, args, verbose, user_config).await
+                    run_prompt(config, catalog, source, args, verbose, debug, user_config).await
                 }
                 Command::Resume(args) => {
-                    resume_session(config, catalog, source, args, verbose, user_config).await
+                    resume_session(config, catalog, source, args, verbose, debug, user_config).await
                 }
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
                 Command::Skills(_) | Command::Sessions(_) | Command::Cost(_) => {
@@ -443,6 +463,24 @@ fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
     Ok(loaded.config)
 }
 
+/// Applies `--extension KEY=JSON` values over the loaded config.
+fn apply_extensions(config: &mut Config, values: &[String]) -> Result<(), String> {
+    for value in values {
+        let Some((key, raw)) = value.split_once('=') else {
+            return Err(format!("--extension expects `KEY=JSON`, got `{value}`"));
+        };
+        if !key.contains(':') {
+            return Err(format!(
+                "--extension key `{key}` must name a wire family, as in `openai.chat:provider`"
+            ));
+        }
+        let value =
+            serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
+        config.extensions.insert(key.to_owned(), value);
+    }
+    Ok(())
+}
+
 async fn load_catalogue(
     config: &Config,
     offline: bool,
@@ -475,6 +513,7 @@ async fn run_prompt(
     source: Source,
     args: RunArgs,
     verbose: bool,
+    debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let spec = resolve_spec(&config, &catalog, args.model.clone(), args.endpoint.clone())?;
@@ -487,6 +526,13 @@ async fn run_prompt(
             other => return Err(format!("unknown approval mode `{other}`")),
         };
     }
+    if let Some(limit) = args.max_iterations {
+        if limit == 0 {
+            return Err("--max-iterations must be at least 1".to_owned());
+        }
+        config.max_iterations = Some(limit);
+    }
+    apply_extensions(&mut config, &args.extension)?;
     if let Some(limit) = args.budget {
         if !limit.is_finite() || limit <= 0.0 {
             return Err(format!("--budget must be a positive number, got {limit}"));
@@ -520,6 +566,17 @@ async fn run_prompt(
     }
     let show_cost = config.cost.show;
     let database = database_path();
+    if debug {
+        debug_start(
+            style,
+            &spec,
+            &config,
+            source,
+            &database,
+            config_path.as_deref(),
+            args.session.as_deref(),
+        );
+    }
     let store = Arc::new(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
@@ -565,6 +622,8 @@ async fn run_prompt(
         },
         quiet: args.quiet,
         verbose,
+        debug,
+        debug_session: false,
         show_cost,
         style,
         block: Block::None,
@@ -600,8 +659,17 @@ async fn resume_session(
     source: Source,
     args: ResumeArgs,
     verbose: bool,
+    debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
+    let mut config = config;
+    if let Some(limit) = args.max_iterations {
+        if limit == 0 {
+            return Err("--max-iterations must be at least 1".to_owned());
+        }
+        config.max_iterations = Some(limit);
+    }
+    apply_extensions(&mut config, &args.extension)?;
     let spec = resolve_spec(&config, &catalog, None, None)?;
     let style = if args.jsonl {
         Style::plain()
@@ -619,6 +687,17 @@ async fn resume_session(
     }
     let show_cost = config.cost.show;
     let database = database_path();
+    if debug {
+        debug_start(
+            style,
+            &spec,
+            &config,
+            source,
+            &database,
+            config_path.as_deref(),
+            Some(args.session.as_str()),
+        );
+    }
     let store = Arc::new(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
@@ -649,6 +728,8 @@ async fn resume_session(
         },
         quiet: args.quiet,
         verbose,
+        debug,
+        debug_session: false,
         show_cost,
         style,
         block: Block::None,
@@ -720,6 +801,7 @@ async fn drive_turns(
     style: Style,
 ) -> Result<(), String> {
     let interactive = matches!(renderer.format, Format::Text) && std::io::stdin().is_terminal();
+    let mut input = interactive.then(stdin_lines);
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
     let mut pending: VecDeque<(SessionKey, String, ApprovalChoice)> = VecDeque::new();
@@ -794,10 +876,30 @@ async fn drive_turns(
             if let Some(session) = &event.session {
                 current = Some(session.clone());
             }
-            if let Some(approval) = ask_approval(&event, style, interactive) {
-                pending.push_back(approval);
+            match ask_approval(&event, style, &mut input, &mut interrupt_rx).await? {
+                ApprovalOutcome::Decision(decision) => pending.push_back(decision),
+                ApprovalOutcome::None => {}
+                ApprovalOutcome::Cancelled => {
+                    renderer.mark_cancelled();
+                    eprintln!(
+                        "{}",
+                        style.yellow(
+                            "approval left pending; the session is saved and can be resumed"
+                        )
+                    );
+                    signal.abort();
+                    return Ok(());
+                }
             }
-            answer_if_asked(service, &event).await?;
+            if answer_if_asked(service, &event, &mut input, &mut interrupt_rx).await? {
+                renderer.mark_cancelled();
+                eprintln!(
+                    "{}",
+                    style.yellow("question left pending; the session is saved and can be resumed")
+                );
+                signal.abort();
+                return Ok(());
+            }
             renderer.event(&event)?;
         }
         while let Some((session, approval, choice)) = pending.pop_front() {
@@ -837,15 +939,27 @@ enum ApprovalChoice {
     DenyGlobal(Option<String>),
 }
 
+/// What happened at an approval panel.
+enum ApprovalOutcome {
+    /// A decision to submit once the stream is drained.
+    Decision((SessionKey, String, ApprovalChoice)),
+    /// No decision: no interactive client, or the event was not an approval.
+    None,
+    /// The human pressed Ctrl-C while the prompt waited for input.
+    Cancelled,
+}
+
 /// Prints an approval request and asks for a decision when stdin is a terminal.
 ///
-/// Returns the decision to submit later, or `None` when the call stays parked
-/// (no interactive client) or the event is not an approval request.
-fn ask_approval(
+/// Input is read by a background thread and selected against the Ctrl-C
+/// channel, so a parked approval cannot swallow the interrupt. A cancelled
+/// prompt leaves the decision pending and the session resumable.
+async fn ask_approval(
     event: &ServerEvent,
     style: Style,
-    interactive: bool,
-) -> Option<(SessionKey, String, ApprovalChoice)> {
+    input: &mut Option<mpsc::UnboundedReceiver<Option<String>>>,
+    interrupts: &mut mpsc::Receiver<()>,
+) -> Result<ApprovalOutcome, String> {
     let ServerEventKind::ApprovalRequested {
         approval,
         tool,
@@ -854,9 +968,11 @@ fn ask_approval(
         ..
     } = &event.kind
     else {
-        return None;
+        return Ok(ApprovalOutcome::None);
     };
-    let session = event.session.clone()?;
+    let Some(session) = event.session.clone() else {
+        return Ok(ApprovalOutcome::None);
+    };
     eprintln!();
     let rule = style.yellow("─".repeat(rule_width()));
     eprintln!("{rule}");
@@ -885,7 +1001,7 @@ fn ask_approval(
         }
     }
     eprintln!("{rule}");
-    if !interactive {
+    let Some(input) = input.as_mut() else {
         eprintln!(
             "  {}",
             style.dim(
@@ -893,8 +1009,8 @@ fn ask_approval(
                  auto-edit or yolo to run without asking."
             )
         );
-        return None;
-    }
+        return Ok(ApprovalOutcome::None);
+    };
     loop {
         eprintln!(
             "  {}  {}  {}",
@@ -908,15 +1024,24 @@ fn ask_approval(
             style.red("[ns] deny this tool for this session"),
             style.red("[ng] deny this tool always")
         );
-        eprint!("  {} ", style.dim("›"));
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        let read = std::io::stdin().read_line(&mut line);
-        if read.is_err() || read.is_ok_and(|bytes| bytes == 0) {
-            return Some((session, approval.clone(), ApprovalChoice::DenyOnce(None)));
-        }
-        if let Some(choice) = parse_approval_choice(&line) {
-            return Some((session, approval.clone(), choice));
+        match prompt_input(&format!("  {} ", style.dim("›")), input, interrupts).await? {
+            PromptInput::Line(line) => {
+                if let Some(choice) = parse_approval_choice(&line) {
+                    return Ok(ApprovalOutcome::Decision((
+                        session,
+                        approval.clone(),
+                        choice,
+                    )));
+                }
+            }
+            PromptInput::Eof => {
+                return Ok(ApprovalOutcome::Decision((
+                    session,
+                    approval.clone(),
+                    ApprovalChoice::DenyOnce(None),
+                )));
+            }
+            PromptInput::Cancelled => return Ok(ApprovalOutcome::Cancelled),
         }
         eprintln!(
             "  {}",
@@ -1242,6 +1367,16 @@ fn clip_line(line: &str, max: usize) -> String {
     shortened
 }
 
+/// Shortens a multi-line block on a character boundary.
+fn clip_text(text: &str, max: usize) -> (String, bool) {
+    if text.chars().count() <= max {
+        return (text.to_owned(), false);
+    }
+    let mut shortened: String = text.chars().take(max).collect();
+    shortened.push_str("\n… [truncated]");
+    (shortened, true)
+}
+
 fn rule_width() -> usize {
     std::env::var("COLUMNS")
         .ok()
@@ -1310,7 +1445,12 @@ fn approval_request(
 /// text, which travels through the same [`ClientRequestKind::AnswerQuestion`]
 /// channel as a plain answer. A multi-select answer joins the chosen option
 /// strings with `, `.
-async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<(), String> {
+async fn answer_if_asked(
+    service: &Arc<Service>,
+    event: &ServerEvent,
+    input: &mut Option<mpsc::UnboundedReceiver<Option<String>>>,
+    interrupts: &mut mpsc::Receiver<()>,
+) -> Result<bool, String> {
     let ServerEventKind::QuestionAsked {
         question,
         prompt,
@@ -1319,62 +1459,83 @@ async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<
         ..
     } = &event.kind
     else {
-        return Ok(());
+        return Ok(false);
     };
     let session = event
         .session
         .clone()
         .ok_or("a question arrived without a session")?;
     let question = question.clone();
-    let answer = if std::io::stdin().is_terminal() {
-        eprintln!("? {prompt}");
-        if options.is_empty() {
-            read_answer_line("answer> ")?.unwrap_or_else(|| {
+    eprintln!("? {prompt}");
+    let Some(input) = input.as_mut() else {
+        eprintln!("(no interactive client; answering with a note)");
+        let answer =
+            "(no interactive client is attached; continue with your best judgment)".to_owned();
+        return submit_answer(service, session, question, answer).await;
+    };
+    let answer = if options.is_empty() {
+        match prompt_input("answer> ", input, interrupts).await? {
+            PromptInput::Line(line) => line,
+            PromptInput::Eof => {
                 "(no interactive client is attached; continue with your best judgment)".to_owned()
-            })
-        } else {
-            for (index, option) in options.iter().enumerate() {
-                eprintln!("  {}. {option}", index + 1);
             }
-            eprintln!("  {}. Something else (type it)", options.len() + 1);
-            eprintln!(
-                "  {}",
-                if *multiple {
-                    "choose one or more numbers, separated by commas"
-                } else {
-                    "choose a number, or type an option"
-                }
-            );
-            loop {
-                let Some(line) = read_answer_line("choice> ")? else {
-                    break "(no interactive client is attached; continue with your best judgment)"
-                        .to_owned();
-                };
-                let Some((selected, other)) = parse_selection(&line, options, *multiple) else {
-                    eprintln!("  choose a listed number");
-                    continue;
-                };
-                let extra = if other {
-                    let Some(text) = read_answer_line("something else> ")? else {
-                        break "(no interactive client is attached; continue with your best judgment)"
-                            .to_owned();
-                    };
-                    Some(text)
-                } else {
-                    None
-                };
-                if selected.is_empty() && extra.as_deref().is_none_or(str::is_empty) {
-                    eprintln!("  type an answer, or choose a listed number");
-                    continue;
-                }
-                break compose_selection(options, &selected, extra.as_deref());
-            }
+            PromptInput::Cancelled => return Ok(true),
         }
     } else {
-        eprintln!("? {prompt}");
-        eprintln!("(no interactive client; answering with a note)");
-        "(no interactive client is attached; continue with your best judgment)".to_owned()
+        for (index, option) in options.iter().enumerate() {
+            eprintln!("  {}. {option}", index + 1);
+        }
+        eprintln!("  {}. Something else (type it)", options.len() + 1);
+        eprintln!(
+            "  {}",
+            if *multiple {
+                "choose one or more numbers, separated by commas"
+            } else {
+                "choose a number, or type an option"
+            }
+        );
+        loop {
+            let line = match prompt_input("choice> ", input, interrupts).await? {
+                PromptInput::Line(line) => line,
+                PromptInput::Eof => {
+                    break "(no interactive client is attached; continue with your best judgment)"
+                        .to_owned();
+                }
+                PromptInput::Cancelled => return Ok(true),
+            };
+            let Some((selected, other)) = parse_selection(&line, options, *multiple) else {
+                eprintln!("  choose a listed number");
+                continue;
+            };
+            let extra = if other {
+                match prompt_input("something else> ", input, interrupts).await? {
+                    PromptInput::Line(text) => Some(text),
+                    PromptInput::Eof => {
+                        break "(no interactive client is attached; continue with your best judgment)"
+                            .to_owned();
+                    }
+                    PromptInput::Cancelled => return Ok(true),
+                }
+            } else {
+                None
+            };
+            if selected.is_empty() && extra.as_deref().is_none_or(str::is_empty) {
+                eprintln!("  type an answer, or choose a listed number");
+                continue;
+            }
+            break compose_selection(options, &selected, extra.as_deref());
+        }
     };
+    submit_answer(service, session, question, answer).await
+}
+
+/// Sends one answer and drains its acknowledgement.
+async fn submit_answer(
+    service: &Arc<Service>,
+    session: SessionKey,
+    question: String,
+    answer: String,
+) -> Result<bool, String> {
     let response = ClientRequest {
         request_id: 0,
         kind: ClientRequestKind::AnswerQuestion {
@@ -1385,21 +1546,61 @@ async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<
     };
     let mut acknowledgement = service.submit(response).await.map_err(|e| e.to_string())?;
     while acknowledgement.next().await.is_some() {}
-    Ok(())
+    Ok(false)
 }
 
-/// Reads one line from the terminal; `None` means end of input.
-fn read_answer_line(prompt: &str) -> Result<Option<String>, String> {
+/// The three outcomes of waiting for one line of input.
+enum PromptInput {
+    /// A line, with its trailing newline removed.
+    Line(String),
+    /// End of input, or the reader thread stopped.
+    Eof,
+    /// Ctrl-C arrived before a line did.
+    Cancelled,
+}
+
+/// Reads lines on a blocking thread.
+///
+/// The async prompt owns only the receiver, so it can select a line against the
+/// Ctrl-C channel. A read that is already blocked stays on the thread; the
+/// process exits or resumes without waiting for it.
+fn stdin_lines() -> mpsc::UnboundedReceiver<Option<String>> {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        loop {
+            let mut line = String::new();
+            match std::io::stdin().read_line(&mut line) {
+                Ok(0) | Err(_) => {
+                    let _ = sender.send(None);
+                    break;
+                }
+                Ok(_) => {
+                    if sender.send(Some(line.trim_end().to_owned())).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// Prints a prompt and waits for one line or Ctrl-C.
+async fn prompt_input(
+    prompt: &str,
+    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    interrupts: &mut mpsc::Receiver<()>,
+) -> Result<PromptInput, String> {
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    let read = std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|error| error.to_string())?;
-    if read == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(line.trim_end().to_owned()))
+    let line = tokio::select! {
+        biased;
+        Some(()) = interrupts.recv() => return Ok(PromptInput::Cancelled),
+        line = input.recv() => line,
+    };
+    match line {
+        Some(Some(line)) => Ok(PromptInput::Line(line)),
+        Some(None) | None => Ok(PromptInput::Eof),
     }
 }
 
@@ -1590,6 +1791,8 @@ struct Renderer {
     format: Format,
     quiet: bool,
     verbose: bool,
+    debug: bool,
+    debug_session: bool,
     show_cost: bool,
     style: Style,
     block: Block,
@@ -1610,6 +1813,12 @@ struct Renderer {
 
 impl Renderer {
     fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
+        if self.debug && !self.debug_session {
+            if let Some(session) = &event.session {
+                eprintln!("{}", self.style.dim(format!("debug: session {session}")));
+                self.debug_session = true;
+            }
+        }
         if matches!(self.format, Format::Jsonl) {
             let line = serde_json::to_string(event).map_err(|error| error.to_string())?;
             println!("{line}");
@@ -1726,10 +1935,30 @@ impl Renderer {
         let _ = std::io::stdout().flush();
     }
 
+    /// Renders a fenced block, so verbose tool activity stays readable and can
+    /// be copied into a markdown report.
+    fn code_block(&self, language: &str, text: &str) {
+        eprintln!("  {}", self.style.faint(format!("```{language}")));
+        if text.is_empty() {
+            eprintln!("  {}", self.style.faint("(empty)"));
+        } else {
+            for line in text.lines() {
+                eprintln!("  {line}");
+            }
+        }
+        eprintln!("  {}", self.style.faint("```"));
+    }
+
     /// Renders tool activity: what started, and how it ended.
+    #[allow(clippy::collapsible_match)]
     fn tool_event(&mut self, kind: &ServerEventKind) {
         match kind {
-            ServerEventKind::ToolStarted { tool, call_id, .. } => {
+            ServerEventKind::ToolStarted {
+                tool,
+                call_id,
+                arguments,
+                ..
+            } => {
                 if !self.quiet {
                     self.end_blocks();
                     eprintln!(
@@ -1738,12 +1967,28 @@ impl Renderer {
                         self.style.tool(tool),
                         self.style.faint(format!("#{}", short(call_id)))
                     );
+                    if self.verbose && tool.as_str() != "ask_user" {
+                        if let Some(arguments) = arguments {
+                            let text = serde_json::to_string_pretty(arguments)
+                                .unwrap_or_else(|_| compact_json(arguments, 4_000));
+                            let (text, truncated) = clip_text(&text, 4_000);
+                            self.code_block("json", &text);
+                            if truncated {
+                                eprintln!(
+                                    "  {}",
+                                    self.style.yellow("arguments shortened for display")
+                                );
+                            }
+                        }
+                    }
                 }
             }
             ServerEventKind::ToolFinished {
                 tool,
                 is_error,
                 error,
+                output,
+                truncated,
                 duration_ms,
                 ..
             } => {
@@ -1763,11 +2008,19 @@ impl Renderer {
                             self.style.dim(format!("in {duration_ms} ms"))
                         );
                     }
-                }
-                if *is_error && self.verbose {
-                    if let Some(error) = error {
-                        for line in error.lines() {
-                            eprintln!("  {}", self.style.red(line));
+                    if self.verbose {
+                        if *is_error {
+                            if let Some(error) = error {
+                                self.code_block("text", error);
+                            }
+                        } else if let Some(output) = output {
+                            self.code_block("text", output);
+                            if *truncated {
+                                eprintln!(
+                                    "  {}",
+                                    self.style.yellow("output shortened for display")
+                                );
+                            }
                         }
                     }
                 }
@@ -2146,6 +2399,75 @@ fn source_label(source: Source) -> &'static str {
     }
 }
 
+/// Prints the startup facts that make a run or resume reproducible.
+#[allow(clippy::too_many_arguments)]
+fn debug_start(
+    style: Style,
+    spec: &ModelSpec,
+    configuration: &Config,
+    source: Source,
+    database: &Path,
+    config_path: Option<&Path>,
+    session: Option<&str>,
+) {
+    let workspace =
+        std::env::current_dir().map_or_else(|_| "?".to_owned(), |path| path.display().to_string());
+    let config_label =
+        config_path.map_or_else(|| "(default)".to_owned(), |path| path.display().to_string());
+    let iterations = configuration
+        .max_iterations
+        .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
+    eprintln!("{}", style.dim("debug: startup"));
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  session    {}",
+            session.unwrap_or("(new; shown on first event)")
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  model      {} · provider {} · wire {}",
+            spec.label(),
+            spec.provider,
+            spec.wire.family()
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  approval   {}",
+            approval_label(configuration.approval_mode)
+        ))
+    );
+    eprintln!("{}", style.dim(format!("  iterations {iterations}")));
+    eprintln!("{}", style.dim(format!("  workspace  {workspace}")));
+    eprintln!("{}", style.dim(format!("  config     {config_label}")));
+    eprintln!(
+        "{}",
+        style.dim(format!("  database   {}", database.display()))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!("  catalogue  {}", source_label(source)))
+    );
+    if !configuration.extensions.is_empty() {
+        eprintln!(
+            "{}",
+            style.dim(format!(
+                "  extensions {}",
+                configuration
+                    .extensions
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        );
+    }
+}
+
 fn approval_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::Ask => "ask",
@@ -2232,11 +2554,40 @@ fn code_name(code: ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalChoice, DenyScope, GrantScope, PreviewLine, approval_request, argument_preview,
-        budget_label, compose_selection, cost_summary, parse_approval_choice, parse_selection,
+        ApprovalChoice, DenyScope, GrantScope, PreviewLine, apply_extensions, approval_request,
+        argument_preview, budget_label, compose_selection, cost_summary, parse_approval_choice,
+        parse_selection,
     };
     use norte_code_cost::CostSummary;
     use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
+
+    #[test]
+    fn vendor_extensions_are_parsed_into_the_config() {
+        let mut config = norte_code_config::Config::default();
+        apply_extensions(
+            &mut config,
+            &[
+                r#"openai.chat:provider.order=["deepinfra"]"#.to_owned(),
+                "openai.chat:temperature=0.2".to_owned(),
+                "openai.chat:metadata=review".to_owned(),
+            ],
+        )
+        .expect("extensions");
+        assert_eq!(
+            config.extensions["openai.chat:provider.order"],
+            serde_json::json!(["deepinfra"])
+        );
+        assert_eq!(
+            config.extensions["openai.chat:temperature"],
+            serde_json::json!(0.2)
+        );
+        assert_eq!(
+            config.extensions["openai.chat:metadata"],
+            serde_json::json!("review")
+        );
+        assert!(apply_extensions(&mut config, &["provider".to_owned()]).is_err());
+        assert!(apply_extensions(&mut config, &["openai.chat:provider".to_owned()]).is_err());
+    }
 
     #[test]
     fn closed_question_selections_are_parsed() {

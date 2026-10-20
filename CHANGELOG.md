@@ -109,6 +109,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   replacing its budget first (`--budget`, `--budget-unit`, `--budget-action`).
 - `Ctrl-C` cancels the running turn through the protocol, so a hanging tool is
   stopped (including its process group) instead of leaving the terminal stuck;
-  a second `Ctrl-C` quits.
+  a second `Ctrl-C` quits. At an approval or question prompt it leaves the
+  decision pending and exits with a resume hint instead of guessing.
+- `--verbose` prints each tool's effective arguments and returned output as
+  fenced blocks, with a visible truncation marker instead of an unbounded dump.
+- `--debug` prints startup details: session id, model and wire, approval mode,
+  iteration limit, workspace, config and database paths, and extension keys.
+- Model iterations are unlimited by default, with `--max-iterations N` to cap a
+  run or resume.
+- Vendor request extensions via `--extension KEY=JSON` or the config
+  `extensions` map, keyed `<wire-family>:<field>`. OpenRouter upstream routing
+  works through `openai.chat:provider.order`.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

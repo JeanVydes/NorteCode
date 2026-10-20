@@ -44,7 +44,32 @@ norte-code resume <key> --budget 20000 --budget-unit tokens
 norte-code sessions
 norte-code cost
 norte-code skills list
+
+# Startup details, tool I/O and a vendor extension
+norte-code run --debug --verbose \
+  --extension 'openai.chat:provider.order=["deepinfra"]' \
+  "review the diff"
 ```
+
+`--debug` prints the session id, model, wire, approval mode, iteration limit,
+workspace, config and database paths, and the configured extension keys.
+`--verbose` prints each tool call's effective arguments and its result as fenced
+blocks; large values are shortened, and long tool output is capped before it
+crosses the wire. Iterations are unlimited by default; `--max-iterations N`
+caps one run or resume.
+
+Vendor-specific request fields use Norte's extension mechanism: a key is
+`<wire-family>:<field>`, and the value is JSON. The config has the same shape
+under `extensions`. For OpenRouter, the wire is `openai.chat`, so upstream
+routing is for example:
+
+```sh
+--extension 'openai.chat:provider.order=["deepinfra"]'
+# or pin one endpoint variant
+--extension 'openai.chat:provider.order=["deepinfra/turbo"]'
+```
+
+A key whose wire family does not match the selected model is ignored.
 
 Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or
@@ -79,6 +104,11 @@ While a turn is running, `Ctrl-C` cancels it: the running tool is asked to stop
 does not keep the terminal hostage) and the turn finishes uncommitted. A second
 `Ctrl-C` within five seconds only repeats “still cancelling”; after five seconds
 it force-exits. The session stays resumable with `norte-code resume`.
+
+`Ctrl-C` at an approval panel or a question prompt does not submit a decision or
+an answer. The approval or question stays pending, the command exits cleanly and
+prints how to resume, so a mistaken keypress never turns into a deny or an
+invented answer.
 
 ## Cost and budgets
 

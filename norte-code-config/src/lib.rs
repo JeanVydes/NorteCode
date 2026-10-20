@@ -44,8 +44,14 @@ pub struct Config {
     pub approval_mode: ApprovalMode,
     /// Tools always allowed or denied across sessions.
     pub approvals: ApprovalsConfig,
-    /// How many requests one turn may spend.
-    pub max_iterations: usize,
+    /// How many model iterations one turn may run, or `None` for no limit.
+    pub max_iterations: Option<usize>,
+    /// Vendor request extras, keyed `<wire-family>:<dotted.path>`.
+    ///
+    /// For example, `OpenRouter`'s upstream routing is
+    /// `openai.chat:provider` with `{"order": ["deepinfra"]}`. Norte ignores a
+    /// key whose family does not match the active wire.
+    pub extensions: BTreeMap<String, Value>,
     /// Display settings for cost.
     pub cost: CostConfig,
     /// Optional spending limits.
@@ -69,7 +75,8 @@ impl Default for Config {
             reasoning: ReasoningConfig::default(),
             approval_mode: ApprovalMode::default(),
             approvals: ApprovalsConfig::default(),
-            max_iterations: 32,
+            max_iterations: None,
+            extensions: BTreeMap::new(),
             cost: CostConfig::default(),
             budgets: BudgetsConfig::default(),
             tools: ToolsConfig::default(),
@@ -445,7 +452,7 @@ impl Config {
                 ),
             ));
         }
-        if self.max_iterations == 0 {
+        if self.max_iterations == Some(0) {
             return Err(invalid("max_iterations", "must be at least 1"));
         }
         if let Some(model) = &self.default_model {
@@ -698,8 +705,19 @@ mod tests {
     fn defaults_are_valid() {
         let loaded = Config::from_json("{}").expect("config");
         assert_eq!(loaded.config.version, CONFIG_VERSION);
-        assert_eq!(loaded.config.max_iterations, 32);
+        assert_eq!(loaded.config.max_iterations, None);
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn vendor_extensions_are_typed_json() {
+        let loaded =
+            Config::from_json(r#"{"extensions":{"openai.chat:provider":{"order":["deepinfra"]}}}"#)
+                .expect("config");
+        assert_eq!(
+            loaded.config.extensions["openai.chat:provider"],
+            serde_json::json!({"order": ["deepinfra"]})
+        );
     }
 
     #[test]
@@ -707,7 +725,7 @@ mod tests {
         let user = temp_file(r#"{"default_model":"openai/gpt-5","max_iterations":4}"#);
         let project = temp_file(r#"{"max_iterations":8}"#);
         let loaded = Config::load(Some(&user), Some(&project)).expect("config");
-        assert_eq!(loaded.config.max_iterations, 8);
+        assert_eq!(loaded.config.max_iterations, Some(8));
         assert_eq!(loaded.config.default_model.as_deref(), Some("openai/gpt-5"));
     }
 
