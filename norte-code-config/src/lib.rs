@@ -13,8 +13,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -757,6 +758,108 @@ pub fn project_config_path(root: &Path) -> PathBuf {
     root.join(".norte-code").join("config.json")
 }
 
+/// Writes a config file atomically, preserving an existing symlink and mode.
+///
+/// A fixed temporary name would race with another Norte Code process, and a
+/// truncating write would lose the file if the process died halfway. Write a
+/// unique sibling with `create_new`, then rename it over the target.
+fn atomic_write(path: &Path, body: &[u8]) -> Result<(), ConfigError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let target = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::canonicalize(path).map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?
+        }
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(source) => {
+            return Err(ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let existing = match fs::metadata(&target) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|metadata| !metadata.is_file())
+    {
+        return Err(ConfigError::Write {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+        });
+    }
+    let permissions = existing.map(|metadata| metadata.permissions());
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for _ in 0..16 {
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config.json");
+        let tmp = parent.join(format!(
+            ".{name}.{}.{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = match options.open(&tmp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(ConfigError::Write {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let result = (|| -> std::io::Result<()> {
+            let mut file = file;
+            file.write_all(body)?;
+            file.sync_all()?;
+            if let Some(permissions) = &permissions {
+                file.set_permissions(permissions.clone())?;
+            }
+            drop(file);
+            fs::rename(&tmp, &target)
+        })();
+        if let Err(source) = result {
+            let _ = fs::remove_file(&tmp);
+            return Err(ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        return Ok(());
+    }
+    Err(ConfigError::Write {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a unique temporary file",
+        ),
+    })
+}
+
 /// Adds one global approval rule to the user config, preserving the rest of
 /// the file.
 ///
@@ -821,10 +924,7 @@ pub fn update_user_approval(path: &Path, tool: &str, allow: bool) -> Result<(), 
         source,
     })?;
     body.push('\n');
-    fs::write(path, body).map_err(|source| ConfigError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
+    atomic_write(path, body.as_bytes())
 }
 
 #[cfg(test)]
@@ -1001,6 +1101,47 @@ mod tests {
         let loaded = Config::load(Some(&path), None).expect("config");
         assert!(loaded.config.approvals.allow.is_empty());
         assert_eq!(loaded.config.approvals.deny, ["command"]);
+        let leftovers = fs::read_dir(path.parent().expect("parent"))
+            .expect("directory")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_stays_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let target = temp_file("{}");
+        let directory = target.parent().expect("parent").join("link");
+        fs::create_dir_all(&directory).expect("directory");
+        let link = directory.join("config.json");
+        symlink(&target, &link).expect("symlink");
+        update_user_approval(&link, "command", true).expect("update");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("metadata")
+                .file_type()
+                .is_symlink()
+        );
+        let body = fs::read_to_string(&target).expect("target");
+        assert!(body.contains("\"command\""));
+        let _ = fs::remove_dir_all(target.parent().expect("parent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_config_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_file("{}");
+        fs::remove_file(&path).expect("remove");
+        update_user_approval(&path, "command", true).expect("update");
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 
     #[test]

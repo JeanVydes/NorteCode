@@ -57,6 +57,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The catalogue cache writes a unique temporary file with `create_new` and
   renames it, so a concurrent or interrupted write cannot replace a good cache
   with a partial one.
+- A global approval update writes the user config atomically, keeps a symlinked
+  config a symlink, preserves an existing mode, and creates a new config with
+  owner-only permissions.
 
 ### Added
 
