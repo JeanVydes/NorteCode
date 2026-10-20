@@ -2095,6 +2095,7 @@ impl Service {
             started_at: Utc::now(),
             duration_ms: 0,
             first_token_ms: None,
+            last_token_ms: None,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             reasoning_tokens: usage.reasoning_tokens,
@@ -3294,16 +3295,39 @@ fn request_metrics(record: &norte_code_store_sqlite::RequestRecord) -> RequestMe
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn tokens_per_second(record: &norte_code_store_sqlite::RequestRecord) -> Option<f64> {
-    let output = record.output_tokens.filter(|tokens| *tokens > 0)?;
-    let generation = record
-        .duration_ms
-        .saturating_sub(record.first_token_ms.unwrap_or(0));
-    if generation == 0 {
+    token_rate(
+        record.output_tokens,
+        record.duration_ms,
+        record.first_token_ms,
+        record.last_token_ms,
+    )
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn token_rate(
+    output: Option<u64>,
+    duration_ms: u64,
+    first_token_ms: Option<u64>,
+    last_token_ms: Option<u64>,
+) -> Option<f64> {
+    let output = output.filter(|tokens| *tokens > 0)?;
+    let first = first_token_ms.unwrap_or(0);
+    let last = last_token_ms.unwrap_or(duration_ms);
+    let generation = last.saturating_sub(first);
+    // A provider that delivers the whole answer in one final chunk reports the
+    // first and last token almost together. Dividing by that sliver would
+    // produce absurd rates, so fall back to the whole request when the window
+    // is too small to be meaningful.
+    let window = if generation >= 50 {
+        generation
+    } else {
+        duration_ms
+    };
+    if window == 0 {
         return None;
     }
-    Some(output as f64 * 1_000.0 / generation as f64)
+    Some(output as f64 * 1_000.0 / window as f64)
 }
 
 /// The context a session currently occupies, in tokens.
@@ -4494,6 +4518,19 @@ mod tests {
         assert!(record.first_token_ms.is_some());
         assert!(record.metadata.get("engine_events").is_some());
         assert_eq!(record.params, serde_json::json!({}));
+    }
+
+    #[test]
+    fn token_rate_ignores_a_last_chunk_that_arrived_too_late() {
+        // The whole answer arrived in one chunk at the end: use the request
+        // duration instead of dividing by a two-millisecond sliver.
+        let rate = token_rate(Some(64), 1_700, Some(1_698), Some(1_700)).expect("rate");
+        assert!((rate - 37.6).abs() < 0.2, "{rate}");
+        // A real streaming window is used as-is.
+        let rate = token_rate(Some(81), 2_300, Some(2_000), Some(2_300)).expect("rate");
+        assert!((rate - 270.0).abs() < 1.0, "{rate}");
+        assert_eq!(token_rate(None, 1_000, Some(10), Some(900)), None);
+        assert_eq!(token_rate(Some(10), 0, None, None), None);
     }
 
     #[tokio::test]

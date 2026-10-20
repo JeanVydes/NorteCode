@@ -177,6 +177,7 @@ impl Layer for TelemetryLayer {
                 started,
                 started_at,
                 first_token: None,
+                last_token: None,
                 usage: None,
                 finish_reason: None,
                 tool_calls: Vec::new(),
@@ -246,6 +247,7 @@ impl RequestMetadata {
             started_at,
             duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             first_token_ms: None,
+            last_token_ms: None,
             input_tokens: None,
             output_tokens: None,
             reasoning_tokens: None,
@@ -278,6 +280,7 @@ struct TelemetryStream {
     started: Instant,
     started_at: DateTime<Utc>,
     first_token: Option<Duration>,
+    last_token: Option<Duration>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
     tool_calls: Vec<String>,
@@ -307,6 +310,9 @@ impl TelemetryStream {
         record.first_token_ms = self
             .first_token
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+        record.last_token_ms = self
+            .last_token
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
         record.tool_calls.clone_from(&self.tool_calls);
         if let Some(usage) = &self.usage {
             record.input_tokens = usage.input_tokens;
@@ -331,8 +337,12 @@ impl Stream for TelemetryStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(event))) => {
-                if self.first_token.is_none() && starts_output(&event) {
-                    self.first_token = Some(self.started.elapsed());
+                if starts_output(&event) {
+                    let elapsed = self.started.elapsed();
+                    if self.first_token.is_none() {
+                        self.first_token = Some(elapsed);
+                    }
+                    self.last_token = Some(elapsed);
                 }
                 match &event {
                     StreamEvent::Usage(usage) => self.usage = Some(usage.clone()),

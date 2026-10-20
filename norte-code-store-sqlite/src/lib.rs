@@ -94,6 +94,9 @@ pub struct RequestRecord {
     /// Time to the first answer delta, when one arrived.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_token_ms: Option<u64>,
+    /// Time to the last answer delta, when one arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_token_ms: Option<u64>,
     /// Prompt tokens the provider reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -554,6 +557,7 @@ impl SqliteStore {
             "multiple",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(&connection, "requests", "last_token_ms", "INTEGER")?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -697,6 +701,7 @@ CREATE TABLE IF NOT EXISTS requests (
     started_at              TEXT NOT NULL,
     duration_ms             INTEGER NOT NULL,
     first_token_ms          INTEGER,
+    last_token_ms           INTEGER,
     input_tokens            INTEGER,
     output_tokens           INTEGER,
     reasoning_tokens        INTEGER,
@@ -1459,13 +1464,13 @@ impl SessionDirectory for SqliteStore {
                 .execute(
                     "INSERT INTO requests (
                          id, session, north_session, turn, provider, model, started_at,
-                         duration_ms, first_token_ms, input_tokens, output_tokens,
+                         duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                          reasoning_tokens, cache_read_tokens, cache_write_tokens,
                          estimated_input_tokens, cache_hit, tool_calls, reasoning,
                          params, extensions, metadata, cost_usd, finish_reason, status, error
                      ) VALUES (
                          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
                      )
                      ON CONFLICT(id) DO UPDATE SET
                          session = excluded.session,
@@ -1476,6 +1481,7 @@ impl SessionDirectory for SqliteStore {
                          started_at = excluded.started_at,
                          duration_ms = excluded.duration_ms,
                          first_token_ms = excluded.first_token_ms,
+                         last_token_ms = excluded.last_token_ms,
                          input_tokens = excluded.input_tokens,
                          output_tokens = excluded.output_tokens,
                          reasoning_tokens = excluded.reasoning_tokens,
@@ -1502,6 +1508,7 @@ impl SessionDirectory for SqliteStore {
                         record.started_at.to_rfc3339(),
                         sqlite_u64(record.duration_ms),
                         record.first_token_ms.map(sqlite_u64),
+                        record.last_token_ms.map(sqlite_u64),
                         record.input_tokens.map(sqlite_u64),
                         record.output_tokens.map(sqlite_u64),
                         record.reasoning_tokens.map(sqlite_u64),
@@ -1544,6 +1551,7 @@ impl SessionDirectory for SqliteStore {
             Option<i64>,
             Option<i64>,
             Option<i64>,
+            Option<i64>,
             i64,
             String,
             Option<String>,
@@ -1558,14 +1566,14 @@ impl SessionDirectory for SqliteStore {
             .run(move |connection| {
                 let sql = if session.is_some() {
                     "SELECT id, session, north_session, turn, provider, model, started_at,
-                            duration_ms, first_token_ms, input_tokens, output_tokens,
+                            duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
                             params, extensions, metadata, cost_usd, finish_reason, status, error
                      FROM requests WHERE session = ?1 ORDER BY started_at, id"
                 } else {
                     "SELECT id, session, north_session, turn, provider, model, started_at,
-                            duration_ms, first_token_ms, input_tokens, output_tokens,
+                            duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
                             params, extensions, metadata, cost_usd, finish_reason, status, error
@@ -1599,6 +1607,7 @@ impl SessionDirectory for SqliteStore {
                         row.get(22)?,
                         row.get(23)?,
                         row.get(24)?,
+                        row.get(25)?,
                     ))
                 };
                 let mapped = if let Some(session) = session.as_deref() {
@@ -1629,6 +1638,7 @@ impl SessionDirectory for SqliteStore {
                     started_at,
                     duration_ms,
                     first_token_ms,
+                    last_token_ms,
                     input_tokens,
                     output_tokens,
                     reasoning_tokens,
@@ -1664,6 +1674,7 @@ impl SessionDirectory for SqliteStore {
                     })?,
                     duration_ms: rust_u64(duration_ms, "request duration")?,
                     first_token_ms: token(first_token_ms, "first token")?,
+                    last_token_ms: token(last_token_ms, "last token")?,
                     input_tokens: token(input_tokens, "input tokens")?,
                     output_tokens: token(output_tokens, "output tokens")?,
                     reasoning_tokens: token(reasoning_tokens, "reasoning tokens")?,
