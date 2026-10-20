@@ -94,6 +94,28 @@ too. Approvals and questions are durable protocol objects, not terminal-only
 state. A non-interactive client leaves the session parked instead of guessing a
 decision.
 
+## Prompt and runtime awareness
+
+The persisted system message is the base prompt plus the optional `AGENTS.md`
+project instructions. On every model request, a `runtime-context` layer inserts
+a second system block after the leading instructions. That block is generated
+for the engine's current model and config, so it stays correct after a model
+switch or a config reload. It carries:
+
+- the `provider/model`, wire and catalogue display data;
+- context and output limits, input/output modalities, tool and reasoning
+  capabilities, attachments, temperature and structured output;
+- catalogue release and update dates, status, open weights and knowledge cutoff;
+- the compaction trigger, threshold, retained `keep_recent` messages and summary
+  model;
+- the workspace root, platform, command sandbox state and approval mode;
+- the effective budget, iteration, retry, skill and extension settings, plus a
+  short map of the CLI and configuration files for harness help.
+
+It deliberately contains no API key and no endpoint URL. The layer shifts the
+request's cache boundaries by one, so the block remains inside the leading
+system prefix and the cached prefix stays coherent. `PromptSize` includes it.
+
 ## Model switching
 
 A model switch happens at a turn boundary. The service keeps the logical

@@ -14,6 +14,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Runtime awareness in every model request: the host injects a system block with
+  the current model, provider and wire, catalogue dates and capabilities,
+  modalities, compaction threshold and retained messages, sandbox state,
+  approval mode, effective config and a short Norte Code help section. It is
+  generated per request, contains no keys or endpoint URLs, and is refreshed
+  after a model switch.
 - The mdBook guide under `guide/`: concepts, task guides and reference pages for
   the service, protocol, sessions, tools, approvals, compaction, budgets,
   storage, skills and CLI. A Pages workflow builds it on pull requests and

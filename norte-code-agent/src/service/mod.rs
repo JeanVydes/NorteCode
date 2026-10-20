@@ -64,7 +64,7 @@ use mapping::{
     tool_error, tool_result_text,
 };
 use models::resolve_reasoning;
-use prompt::{compose_system_prompt, load_project_instructions};
+use prompt::{RuntimeContextLayer, compose_system_prompt, load_project_instructions};
 use questions::DirectoryQuestions;
 use sandbox::{sandbox_name, sandboxed_command};
 use skills::{collect_secrets, discover_skills};
@@ -503,6 +503,27 @@ impl Service {
         self.engine_with_budget(spec, None, None)
     }
 
+    /// The runtime-awareness block for one model. It is generated at request
+    /// time, so a model switch or a config change cannot leave stale facts in
+    /// the persisted system message.
+    fn runtime_context(&self, spec: &ModelSpec) -> String {
+        let catalog = self.catalog();
+        let model = catalog.find(&spec.provider, &spec.model);
+        let config_path = self
+            .config_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let user_config = config_path.or_else(norte_code_config::user_config_path);
+        prompt::runtime_context(&prompt::RuntimeFacts {
+            spec,
+            model,
+            config: &self.config,
+            workspace: &self.workspace_root,
+            user_config: user_config.as_deref(),
+        })
+    }
+
     /// Builds an engine whose requests pass through the budget and telemetry
     /// layers, plus an optional eager-compaction layer.
     fn engine_with_budget(
@@ -539,7 +560,9 @@ impl Service {
                 Arc::new(TelemetryObserver::new(Arc::clone(&self.telemetry)))
                     as Arc<dyn norte::Observer>,
             ]);
-        let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
+        let mut layers: Vec<Arc<dyn Layer>> = vec![Arc::new(RuntimeContextLayer::new(
+            self.runtime_context(spec),
+        ))];
         if let Some(book) = budget {
             layers.push(Arc::new(BudgetLayer { book }));
         }
@@ -586,7 +609,11 @@ impl Service {
             .map(|spec| serde_json::to_string(spec).map_or(0, |json| json.chars().count()))
             .sum();
         Ok(PromptSize {
-            system_chars: self.system_prompt.chars().count(),
+            system_chars: self
+                .system_prompt
+                .chars()
+                .count()
+                .saturating_add(self.runtime_context(&self.default_spec).chars().count()),
             tool_chars,
             project_chars: self.project_chars,
             project_path: self.project_path.clone(),

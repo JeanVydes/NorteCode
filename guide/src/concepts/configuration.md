@@ -76,6 +76,18 @@ request, approvals or budgets.
 config overrides it by default. `--debug` prints where the effective prompt came
 from and how many characters the prompt and tool declarations contain.
 
+### Runtime awareness
+
+A second system block is generated for every request and inserted after the
+leading instructions. It tells the model the current `provider/model`, wire,
+catalogue dates and capabilities, input/output modalities, context and output
+limits, compaction threshold and `keep_recent`, workspace, sandbox and approval
+state, budgets, retries, skills and the current config paths. It also includes a
+short command/config map so the model can help with the harness itself.
+
+The block is rebuilt per request, so a model switch cannot leave stale facts in
+the persisted system message. It contains no API keys or endpoint URLs.
+
 ## Extensions
 
 Vendor-specific fields use Norte's extension mechanism:
