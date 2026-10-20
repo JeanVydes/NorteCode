@@ -1,4 +1,5 @@
-//! Interactive approval prompts, input handling, model selection and previews.
+//! The interactive turn loop: input, queued messages, approval handoff and
+//! cancellation.
 
 use super::{
     Arc, Budget, ClientRequest, ClientRequestKind, Duration, EventStream, Phase, Reasoning,
