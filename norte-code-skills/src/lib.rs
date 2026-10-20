@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::io::{BufRead as _, Read as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -37,6 +38,8 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const DEFAULT_RESOURCE_BYTES: usize = 256 * 1024;
 /// Recommended longest `SKILL.md` before the host warns.
 pub const RECOMMENDED_LINES: usize = 500;
+/// Longest shebang line accepted from a bundled script.
+const MAX_SHEBANG_BYTES: usize = 4096;
 /// Script output kept per stream.
 pub const MAX_SCRIPT_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Script output that reaches the model, per stream.
@@ -166,16 +169,21 @@ impl Skill {
         if !metadata.is_file() {
             return Err(format!("`{path}` is not a file"));
         }
-        let bytes = std::fs::read(&canonical)
+        // Read one byte past the cap so truncation is detectable without
+        // loading a multi-gigabyte resource into memory first.
+        let file = std::fs::File::open(&canonical)
+            .map_err(|error| format!("could not read `{path}`: {error}"))?;
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+        file.take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
             .map_err(|error| format!("could not read `{path}`: {error}"))?;
         let truncated = bytes.len() > max_bytes;
-        let shown = &bytes[..bytes.len().min(max_bytes)];
-        let mut text = escape(&String::from_utf8_lossy(shown));
+        bytes.truncate(max_bytes);
+        let mut text = escape(&String::from_utf8_lossy(&bytes));
         if truncated {
             let _ = write!(
                 text,
-                "\n\n[truncated at {max_bytes} bytes of {}; read a smaller file or a narrower resource]",
-                bytes.len()
+                "\n\n[truncated at {max_bytes} bytes; read a smaller file or a narrower resource]"
             );
         }
         Ok(text)
@@ -461,8 +469,18 @@ fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), 
     if !canonical_file.starts_with(&root) {
         return Err(format!("{} leaves the skill directory", file.display()));
     }
-    let text = std::fs::read_to_string(&canonical_file)
+    let mut text = String::new();
+    let source = std::fs::File::open(&canonical_file)
         .map_err(|error| format!("could not read {}: {error}", file.display()))?;
+    source
+        .take(MAX_SKILL_FILE_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| format!("could not read {}: {error}", file.display()))?;
+    if text.len() > MAX_SKILL_FILE_BYTES {
+        return Err(format!(
+            "SKILL.md is larger than {MAX_SKILL_FILE_BYTES} bytes"
+        ));
+    }
     let parsed = parse_skill(&text, directory_name)?;
     let lines = parsed.body.lines().count();
     let warning = (lines > RECOMMENDED_LINES).then(|| {
@@ -1135,13 +1153,20 @@ fn render(bytes: &[u8], max_bytes: usize) -> String {
 }
 
 fn interpreter(script: &Path) -> std::result::Result<(String, Vec<String>), String> {
-    let bytes = std::fs::read(script)
+    let file = std::fs::File::open(script)
         .map_err(|error| format!("could not read {}: {error}", script.display()))?;
-    let first_line = bytes
-        .split(|byte| *byte == b'\n')
-        .next()
-        .unwrap_or_default();
-    let first_line = String::from_utf8_lossy(first_line);
+    let mut first_line = Vec::new();
+    std::io::BufReader::new(file)
+        .take(MAX_SHEBANG_BYTES as u64)
+        .read_until(b'\n', &mut first_line)
+        .map_err(|error| format!("could not read {}: {error}", script.display()))?;
+    if first_line.len() == MAX_SHEBANG_BYTES && !first_line.ends_with(b"\n") {
+        return Err(format!(
+            "`{}` has a shebang line longer than {MAX_SHEBANG_BYTES} bytes",
+            script.display()
+        ));
+    }
+    let first_line = String::from_utf8_lossy(&first_line);
     let Some(shebang) = first_line.strip_prefix("#!") else {
         return Err(format!(
             "`{}` has no `#!` line, so its interpreter is unknown",
@@ -1380,5 +1405,39 @@ mod tests {
         let (bytes, truncated) = read_limited(&input[..], 64).await.expect("read");
         assert_eq!(bytes.len(), 32);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn a_resource_read_is_bounded() {
+        let root = temp_root("resource-bound");
+        let directory = write_skill(
+            &root,
+            "bounded",
+            "name: bounded\ndescription: Has a large reference.",
+            "body",
+        );
+        std::fs::create_dir_all(directory.join("references")).expect("references");
+        std::fs::write(directory.join("references/big.txt"), "x".repeat(1024)).expect("resource");
+        let registry = SkillRegistry::discover(std::slice::from_ref(&root), 8);
+        let skill = registry.get("bounded").expect("skill");
+        let text = skill
+            .read_resource("references/big.txt", 16)
+            .expect("bounded read");
+        assert!(text.starts_with(&"x".repeat(16)));
+        assert!(text.contains("truncated at 16 bytes"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_huge_shebang_is_refused() {
+        let root = temp_root("shebang");
+        let script = root.join("huge.sh");
+        let mut body = String::from("#!");
+        body.push_str(&"x".repeat(5_000));
+        body.push('\n');
+        std::fs::write(&script, body).expect("script");
+        let error = interpreter(&script).expect_err("shebang must be bounded");
+        assert!(error.contains("longer than"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

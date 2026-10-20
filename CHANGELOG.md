@@ -37,6 +37,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - `skill_script` keeps at most the configured output bytes per stream while
   draining the pipes, so a script that floods stdout or stderr cannot exhaust
   host memory before the timeout stops it.
+- `skill_resource` reads at most the configured bytes plus one instead of
+  loading the whole file, and `SKILL.md` and shebang parsing have the same kind
+  of bound, so a large or hostile skill file cannot exhaust memory first.
 
 ### Fixed
 
