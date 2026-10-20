@@ -152,6 +152,15 @@ pub enum ClientRequestKind {
         /// The grant to revoke.
         grant: String,
     },
+    /// Answer a question a running turn is waiting on.
+    AnswerQuestion {
+        /// The session.
+        session: SessionKey,
+        /// The question id.
+        question: String,
+        /// The human's answer.
+        answer: String,
+    },
     /// Switch the session's model at a turn boundary.
     SetModel {
         /// The session.
@@ -392,6 +401,20 @@ pub enum ServerEventKind {
         approval: String,
         /// The grant.
         grant: String,
+    },
+    /// The running turn needs an answer before it can continue.
+    QuestionAsked {
+        /// The turn.
+        turn: u64,
+        /// The question id to answer.
+        question: String,
+        /// What the model wants to know.
+        prompt: String,
+    },
+    /// A question was answered and the turn resumed.
+    QuestionAnswered {
+        /// The question id.
+        question: String,
     },
     /// The turn ended.
     TurnFinished {

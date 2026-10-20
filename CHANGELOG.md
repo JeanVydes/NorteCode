@@ -22,7 +22,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   same path as OpenRouter. Native OpenAI, Anthropic and Google use Norte's
   presets when no URL is configured.
 - The headless `norte-code run` command, with streamed text and `--jsonl`
-  output.
+  output, plus `--budget`, `--reasoning` and `--approval-mode`.
 - The models.dev catalog client: tolerant schema, capability and reasoning
   mapping, ETag/TTL cache with stale and bundled fallbacks, and a live refresh
   request.
@@ -43,7 +43,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   protocol.
 - A configured tool registry per engine: Norte's `read`, `write`, `edit` and
   `command` (with `PATH` and every resolved API key redacted), plus `glob`,
-  `list_dir`, `grep`, `todo` and opt-in `web_fetch`.
+  `list_dir`, `grep`, `todo`, `ask_user` and opt-in `web_fetch`.
+- A workspace-root policy that re-roots tool paths and refuses a lexical escape,
+  so `read`/`write`/`edit`/`glob`/`grep` cannot name `../../etc/passwd`.
+- `ask_user` parks a running turn on a question and resumes it through the
+  `QuestionAsked`/`AnswerQuestion` protocol, with a headless prompt on a terminal.
 - Approval modes (`ask`, `auto-edit`, `yolo`) as a Norte policy, with
   `Approve`/`Deny`/`Revoke` resuming a parked session and `allowed-tools`
   pre-approval behind `skills.honor_allowed_tools`.

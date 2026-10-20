@@ -52,6 +52,13 @@ pub const MAX_SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
 #[must_use]
 pub fn discovery_roots(workspace: &Path, extra: &[PathBuf], interop: bool) -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    // Bundled examples ship next to the executable; they are the lowest
+    // precedence root and are skipped when the directory is absent.
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            roots.push(directory.join("assets").join("skills"));
+        }
+    }
     let config_base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
@@ -230,7 +237,11 @@ impl SkillRegistry {
             active: Mutex::new(BTreeMap::new()),
         };
         let limit = max_skills.max(1);
+        let mut full = false;
         for root in roots {
+            if full {
+                break;
+            }
             if !root.is_dir() {
                 continue;
             }
@@ -251,6 +262,7 @@ impl SkillRegistry {
                         path,
                         format!("more than {limit} skills; the rest were ignored"),
                     );
+                    full = true;
                     break;
                 }
                 match std::fs::symlink_metadata(&path) {
@@ -1191,5 +1203,49 @@ mod tests {
     fn a_missing_closing_fence_is_an_error() {
         assert!(parse_skill("---\nname: x\n", "x").is_err());
         assert!(parse_skill("no frontmatter", "x").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_script_runs_without_a_shell_and_with_argv_entries() {
+        use norte::FnExecutor as _;
+
+        let root = temp_root("script");
+        let directory = write_skill(
+            &root,
+            "runner",
+            "name: runner\ndescription: Runs a script.",
+            "body",
+        );
+        std::fs::create_dir_all(directory.join("scripts")).expect("scripts");
+        std::fs::write(
+            directory.join("scripts/echo.sh"),
+            "#!/bin/sh\nprintf '%s' \"$1\"\n",
+        )
+        .expect("script");
+        let registry = Arc::new(SkillRegistry::discover(std::slice::from_ref(&root), 8));
+        let tool = SkillScriptTool::new(registry, SkillScriptConfig::in_workspace(root.clone()));
+        let output = tool
+            .call(SkillScriptArgs {
+                skill: "runner".to_owned(),
+                script: "scripts/echo.sh".to_owned(),
+                args: vec!["hello world".to_owned()],
+                timeout_ms: Some(5_000),
+            })
+            .await
+            .expect("script output");
+        assert!(!output.is_error, "{output:?}");
+        let text = format!("{:?}", output.parts);
+        assert!(text.contains("hello world"));
+        let escaped = tool
+            .call(SkillScriptArgs {
+                skill: "runner".to_owned(),
+                script: "../echo.sh".to_owned(),
+                args: Vec::new(),
+                timeout_ms: None,
+            })
+            .await
+            .expect("escape output");
+        assert!(escaped.is_error);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

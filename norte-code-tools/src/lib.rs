@@ -1,18 +1,16 @@
 //! The tools that Norte does not ship.
 //!
-//! `glob` / `list_dir`, `grep`, `todo` and the opt-in `web_fetch`. They follow
-//! Norte's conventions: strict arguments, bounded output, failures returned as
-//! an error tool result rather than an engine error, and no path may silently
-//! escape the workspace through `..`.
-//!
-//! `ask_user` is not here yet: it needs the durable question/parking mechanism
-//! from the session milestone, so the model still asks in plain text.
+//! `glob` / `list_dir`, `grep`, `todo`, `ask_user` and the opt-in `web_fetch`.
+//! They follow Norte's conventions: strict arguments, bounded output, failures
+//! returned as an error tool result rather than an engine error, and no path may
+//! silently escape the workspace through `..`.
 
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -23,6 +21,7 @@ use norte::{FnExecutor, Result, SessionId, ToolContext, ToolDeclaration, ToolOut
 use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, oneshot};
 
 /// Default cap on search results.
 pub const DEFAULT_MAX_RESULTS: usize = 500;
@@ -501,6 +500,200 @@ impl FnExecutor<TodoArgs, ToolOutput> for TodoTool {
     }
 }
 
+/// How long `ask_user` waits for an answer.
+pub const QUESTION_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// One question waiting for a client.
+#[derive(Clone, Debug)]
+pub struct QuestionEvent {
+    /// The question's id.
+    pub id: String,
+    /// The session that asked, when it has one.
+    pub session: Option<SessionId>,
+    /// What the model wants to know.
+    pub question: String,
+}
+
+/// A question still waiting for its answer.
+#[derive(Debug)]
+struct PendingQuestion {
+    session: Option<SessionId>,
+    sender: oneshot::Sender<String>,
+}
+
+/// The questions a running turn is waiting on.
+///
+/// The broker lives above the tool so a client can answer a session without
+/// cancelling the turn. It is in memory for now; the `SQLite` milestone persists
+/// the pending questions next to the parked approvals.
+#[derive(Debug)]
+pub struct QuestionBroker {
+    next: AtomicU64,
+    pending: Mutex<BTreeMap<String, PendingQuestion>>,
+    events: broadcast::Sender<QuestionEvent>,
+    timeout: Duration,
+}
+
+impl Default for QuestionBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QuestionBroker {
+    /// A broker with the default timeout.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            next: AtomicU64::new(0),
+            pending: Mutex::new(BTreeMap::new()),
+            events: broadcast::channel(64).0,
+            timeout: QUESTION_TIMEOUT,
+        }
+    }
+
+    /// A broker that gives up after `timeout`.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout.max(Duration::from_secs(1));
+        self
+    }
+
+    /// A receiver for the questions asked from now on.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<QuestionEvent> {
+        self.events.subscribe()
+    }
+
+    /// Answers a pending question. Returns `false` when it is no longer waiting
+    /// or belongs to another session.
+    pub fn answer(&self, session: Option<SessionId>, id: &str, answer: String) -> bool {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(question) = pending.get(id) else {
+            return false;
+        };
+        if question.session != session {
+            return false;
+        }
+        let Some(question) = pending.remove(id) else {
+            return false;
+        };
+        question.sender.send(answer).is_ok()
+    }
+
+    /// Asks a question and waits for its answer or the turn's cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when no client is listening, the turn is cancelled,
+    /// the question is dropped, or the timeout expires.
+    pub async fn ask(
+        &self,
+        context: &ToolContext,
+        question: String,
+    ) -> std::result::Result<String, String> {
+        let id = format!("q{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let (sender, receiver) = oneshot::channel();
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id.clone(),
+                PendingQuestion {
+                    session: context.session,
+                    sender,
+                },
+            );
+        let event = QuestionEvent {
+            id: id.clone(),
+            session: context.session,
+            question,
+        };
+        if self.events.send(event).is_err() {
+            self.pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            return Err(
+                "no client is listening for questions; answer in plain text instead".to_owned(),
+            );
+        }
+        let outcome = tokio::select! {
+            () = context.cancelled() => {
+                Err("the turn was cancelled while waiting for an answer".to_owned())
+            }
+            result = tokio::time::timeout(self.timeout, receiver) => match result {
+                Ok(Ok(answer)) => Ok(answer),
+                Ok(Err(_)) => Err("the question was dropped before it was answered".to_owned()),
+                Err(_) => Err(format!(
+                    "no answer after {} seconds; ask again or decide from context",
+                    self.timeout.as_secs()
+                )),
+            }
+        };
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        outcome
+    }
+}
+
+/// Arguments for `ask_user`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AskUserArgs {
+    /// The one question to ask, with enough context to answer without guessing.
+    pub question: String,
+}
+
+/// Ask the human a question and wait for the answer.
+#[derive(Clone, Debug)]
+pub struct AskUserTool {
+    broker: Arc<QuestionBroker>,
+}
+
+impl AskUserTool {
+    /// A tool backed by `broker`.
+    #[must_use]
+    pub fn new(broker: Arc<QuestionBroker>) -> Self {
+        Self { broker }
+    }
+
+    /// Turns the tool into a declaration the core registry accepts.
+    #[must_use]
+    pub fn into_declaration(self) -> ToolDeclaration<AskUserArgs> {
+        ToolDeclaration::new(
+            "ask_user",
+            "Ask the human one question and wait for their answer. Use it only when the task cannot proceed without a decision or missing fact, not for confirmation you can infer.",
+            Arc::new(self),
+        )
+    }
+}
+
+#[async_trait]
+impl FnExecutor<AskUserArgs, ToolOutput> for AskUserTool {
+    async fn call(&self, _args: AskUserArgs) -> Result<ToolOutput> {
+        Ok(ToolOutput::error(
+            "ask_user needs a client that can answer questions",
+        ))
+    }
+
+    async fn call_with_context(
+        &self,
+        context: &ToolContext,
+        args: AskUserArgs,
+    ) -> Result<ToolOutput> {
+        match self.broker.ask(context, args.question).await {
+            Ok(answer) => Ok(ToolOutput::text(format!(
+                "The user answered: {}",
+                escape(&answer)
+            ))),
+            Err(message) => Ok(ToolOutput::error(message)),
+        }
+    }
+}
+
 /// Arguments for `web_fetch`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -694,5 +887,22 @@ mod tests {
         let text = format!("{:?}", output.parts);
         assert!(text.contains("1/2 done"));
         assert_eq!(state.list(None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_question_is_answered_through_the_broker() {
+        let broker = Arc::new(QuestionBroker::new());
+        let mut events = broker.subscribe();
+        let asking = Arc::clone(&broker);
+        let task = tokio::spawn(async move {
+            asking
+                .ask(&ToolContext::new(), "Continue?".to_owned())
+                .await
+        });
+        let event = events.recv().await.expect("question event");
+        assert_eq!(event.question, "Continue?");
+        assert!(broker.answer(None, &event.id, "yes".to_owned()));
+        let answer = task.await.expect("task").expect("answer");
+        assert_eq!(answer, "yes");
     }
 }

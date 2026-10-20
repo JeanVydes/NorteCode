@@ -6,7 +6,7 @@
 //! model switch a change of model rather than a change of session.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
@@ -23,7 +23,9 @@ use norte::{
 use norte_code_skills::{
     SkillRegistry, SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
-use norte_code_tools::{GlobTool, GrepTool, ListDirTool, TodoState, TodoTool, WebFetchTool};
+use norte_code_tools::{
+    AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
+};
 use norte_tools::{CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::{Notify, mpsc};
 
@@ -90,6 +92,7 @@ pub struct Service {
     workspace_root: PathBuf,
     skills: RwLock<Arc<SkillRegistry>>,
     todo: Arc<TodoState>,
+    questions: Arc<QuestionBroker>,
     secrets: Vec<String>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
@@ -121,6 +124,7 @@ impl Service {
                 .unwrap_or_else(|| PathBuf::from(".norte-code").join("cache")),
         };
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
         let secrets = collect_secrets(&config, &catalog);
         let skills = Arc::new(discover_skills(&config, &workspace_root));
         let service = Self {
@@ -135,6 +139,7 @@ impl Service {
             workspace_root,
             skills: RwLock::new(skills),
             todo: Arc::new(TodoState::default()),
+            questions: Arc::new(QuestionBroker::new()),
             secrets,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
@@ -208,6 +213,9 @@ impl Service {
         tools.register_tool_declaration(GrepTool::new(&self.workspace_root).into_declaration())?;
         tools
             .register_tool_declaration(TodoTool::new(Arc::clone(&self.todo)).into_declaration())?;
+        tools.register_tool_declaration(
+            AskUserTool::new(Arc::clone(&self.questions)).into_declaration(),
+        )?;
         if self.config.tools.web_fetch {
             tools.register_tool_declaration(WebFetchTool::new().into_declaration())?;
         }
@@ -234,11 +242,16 @@ impl Service {
     }
 
     fn policies(&self) -> PolicySet {
-        PolicySet::new(vec![Arc::new(ApprovalModePolicy {
-            mode: self.config.approval_mode,
-            skills: self.skills(),
-            honor_allowed_tools: self.config.skills.honor_allowed_tools,
-        })])
+        PolicySet::new(vec![
+            Arc::new(WorkspacePolicy {
+                root: self.workspace_root.clone(),
+            }),
+            Arc::new(ApprovalModePolicy {
+                mode: self.config.approval_mode,
+                skills: self.skills(),
+                honor_allowed_tools: self.config.skills.honor_allowed_tools,
+            }),
+        ])
     }
 
     /// The skills registry in use.
@@ -266,6 +279,7 @@ impl Service {
     /// Returns [`ServiceError`] when the request cannot be started; a failure
     /// that happens while a turn runs is delivered as a
     /// [`ServerEventKind::Error`] event instead.
+    #[allow(clippy::too_many_lines)]
     pub async fn submit(
         self: &Arc<Self>,
         request: norte_code_protocol::ClientRequest,
@@ -359,6 +373,11 @@ impl Service {
                 approval,
                 grant,
             } => self.revoke(request_id, session, approval, grant).await,
+            Kind::AnswerQuestion {
+                session,
+                question,
+                answer,
+            } => self.answer_question(request_id, session, question, answer),
             Kind::Steer { .. } => Err(ServiceError::Unsupported("steering arrives with the TUI")),
             Kind::Compact { .. } => Err(ServiceError::Unsupported(
                 "compaction arrives in milestone 6",
@@ -523,6 +542,24 @@ impl Service {
         Ok(Box::pin(head.chain(resumed)))
     }
 
+    fn answer_question(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+        question: String,
+        answer: String,
+    ) -> Result<EventStream, ServiceError> {
+        let (nid, _, _) = self.require_record(&session)?;
+        if !self.questions.answer(Some(nid), &question, answer) {
+            return Err(ServiceError::UnknownQuestion(question));
+        }
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::QuestionAnswered { question },
+        ))
+    }
+
     async fn revoke(
         &self,
         request_id: u64,
@@ -644,7 +681,7 @@ impl Service {
         )))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_turn(
         &self,
         engine: &Engine,
@@ -676,11 +713,33 @@ impl Service {
 
         let mut cancelled = false;
         let mut failure: Option<String> = None;
+        let mut questions = self.questions.subscribe();
         loop {
             tokio::select! {
                 biased;
                 () = notify.notified() => {
                     cancelled = true;
+                }
+                question = questions.recv() => {
+                    if let Ok(question) = question {
+                        if question.session == Some(nid)
+                            && !emit(
+                                tx,
+                                ServerEvent::new(
+                                    request_id,
+                                    Some(key.clone()),
+                                    ServerEventKind::QuestionAsked {
+                                        turn,
+                                        question: question.id,
+                                        prompt: question.question,
+                                    },
+                                ),
+                            )
+                            .await
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
                 next = stream.next() => {
                     match next {
@@ -1036,6 +1095,109 @@ impl Service {
     fn lock_skills_write(&self) -> RwLockWriteGuard<'_, Arc<SkillRegistry>> {
         self.skills.write().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Re-roots tool paths into the workspace and refuses a lexical escape.
+///
+/// This is a gate on arguments, not a sandbox: a command or a symlink can still
+/// reach outside the workspace. It stops the common mistake of a model reading
+/// `../../etc/passwd` or writing outside the project.
+struct WorkspacePolicy {
+    root: PathBuf,
+}
+
+impl Policy for WorkspacePolicy {
+    fn name(&self) -> &'static str {
+        "workspace-root"
+    }
+
+    fn decide(&self, view: &PolicyView<'_>) -> Decision {
+        let tool = view.call.name.as_str();
+        let key = match tool {
+            "read" | "write" | "edit" => "path",
+            "glob" | "list_dir" | "grep" => {
+                return match transform_path(&view.call.arguments, "path", &self.root, true) {
+                    Ok(arguments) => Decision::Transform(arguments),
+                    Err(reason) => Decision::Deny(reason),
+                };
+            }
+            "command" => {
+                return match transform_path(&view.call.arguments, "cwd", &self.root, false) {
+                    Ok(arguments) => Decision::Transform(arguments),
+                    Err(reason) => Decision::Deny(reason),
+                };
+            }
+            _ => return Decision::Allow,
+        };
+        match transform_path(&view.call.arguments, key, &self.root, false) {
+            Ok(arguments) => Decision::Transform(arguments),
+            Err(reason) => Decision::Deny(reason),
+        }
+    }
+}
+
+/// Resolves `key` in `arguments` under `root`, rejecting an escape.
+///
+/// With `default_to_root`, a missing path becomes the root itself; otherwise a
+/// missing key is left alone.
+fn transform_path(
+    arguments: &serde_json::Value,
+    key: &str,
+    root: &Path,
+    default_to_root: bool,
+) -> std::result::Result<serde_json::Value, String> {
+    let Some(object) = arguments.as_object() else {
+        return Err("tool arguments must be a JSON object".to_owned());
+    };
+    let mut object = object.clone();
+    let Some(raw) = object.get(key) else {
+        if default_to_root {
+            object.insert(
+                key.to_owned(),
+                serde_json::Value::String(root.display().to_string()),
+            );
+            return Ok(serde_json::Value::Object(object));
+        }
+        return Ok(serde_json::Value::Object(object));
+    };
+    let Some(raw) = raw.as_str() else {
+        return Err(format!("`{key}` must be a string path"));
+    };
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let resolved = lexical_normalize(&joined);
+    if !resolved.starts_with(root) {
+        return Err(format!(
+            "`{raw}` is outside the workspace root `{}`; use a path inside it",
+            root.display()
+        ));
+    }
+    object.insert(
+        key.to_owned(),
+        serde_json::Value::String(resolved.display().to_string()),
+    );
+    Ok(serde_json::Value::Object(object))
+}
+
+/// Resolves `.` and `..` without touching the filesystem.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 /// Parks the tools a human must approve, according to the session's mode.
@@ -1498,10 +1660,57 @@ mod tests {
         assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
     }
 
+    #[test]
+    fn workspace_paths_are_rerooted_and_escapes_are_refused() {
+        let root = Path::new("/tmp/norte-workspace");
+        let relative = transform_path(
+            &serde_json::json!({"path": "src/lib.rs", "content": "x"}),
+            "path",
+            root,
+            false,
+        )
+        .expect("relative path");
+        assert_eq!(
+            relative.get("path").and_then(serde_json::Value::as_str),
+            Some("/tmp/norte-workspace/src/lib.rs")
+        );
+        assert!(
+            transform_path(
+                &serde_json::json!({"path": "../../etc/passwd"}),
+                "path",
+                root,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            transform_path(
+                &serde_json::json!({"path": "/etc/passwd"}),
+                "path",
+                root,
+                false
+            )
+            .is_err()
+        );
+        let missing = transform_path(
+            &serde_json::json!({"pattern": "**/*.rs"}),
+            "path",
+            root,
+            true,
+        )
+        .expect("default path");
+        assert_eq!(
+            missing.get("path").and_then(serde_json::Value::as_str),
+            Some("/tmp/norte-workspace")
+        );
+    }
+
     #[tokio::test]
     async fn a_write_parks_for_approval_and_resumes() {
-        let target =
-            std::env::temp_dir().join(format!("norte-code-write-{}.txt", std::process::id()));
+        let target = std::env::current_dir()
+            .expect("working directory")
+            .join("target")
+            .join(format!("norte-code-write-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&target);
         let reference = ModelRef::new(
             ProviderId::new("test").expect("provider"),
@@ -1601,6 +1810,80 @@ mod tests {
             refreshed[0].kind,
             ServerEventKind::SkillsUpdated { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn ask_user_parks_the_turn_until_the_client_answers() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(
+                    call,
+                    "ask_user",
+                    &serde_json::json!({"question": "Which file should I edit?"}),
+                )
+                .turn_text("I will wait for the answer."),
+        );
+        let service = Arc::new(
+            Service::new(
+                config(),
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let request = ClientRequest {
+            request_id: 7,
+            kind: ClientRequestKind::SendMessage {
+                session: None,
+                text: "do the work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        };
+        let mut stream = service.submit(request).await.expect("turn");
+        let mut session = None;
+        let mut asked = None;
+        let mut finished = false;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("turn should not hang")
+        {
+            session = session.or(event.session.clone());
+            if let ServerEventKind::QuestionAsked {
+                question, prompt, ..
+            } = &event.kind
+            {
+                asked = Some(question.clone());
+                assert_eq!(prompt, "Which file should I edit?");
+            }
+            if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
+                finished = true;
+                break;
+            }
+            if let Some(question) = asked.clone() {
+                let response = ClientRequest {
+                    request_id: 8,
+                    kind: ClientRequestKind::AnswerQuestion {
+                        session: session.clone().expect("session"),
+                        question,
+                        answer: "src/lib.rs".to_owned(),
+                    },
+                };
+                let mut ack = service.submit(response).await.expect("answer");
+                while ack.next().await.is_some() {}
+                asked = None;
+            }
+        }
+        assert!(finished, "the turn should finish after the answer");
     }
 
     #[tokio::test]

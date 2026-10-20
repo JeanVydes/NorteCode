@@ -8,7 +8,7 @@
 //! `norte-code models` lists what the catalogue knows, filtered by provider,
 //! tool calling or reasoning.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -20,10 +20,10 @@ use norte_code_agent::{
     DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, ServiceError, VendorModels, model_list,
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
-use norte_code_config::{Config, user_config_path};
+use norte_code_config::{ApprovalMode, Config, user_config_path};
 use norte_code_protocol::{
-    ClientRequest, ClientRequestKind, Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent,
-    ServerEventKind,
+    Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
+    ModelInfo, Reasoning, ReasoningInfo, ServerEvent, ServerEventKind,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
 
@@ -71,6 +71,15 @@ struct RunArgs {
     /// A base URL override for the provider.
     #[arg(long, value_name = "URL")]
     endpoint: Option<String>,
+    /// A spend limit for the whole run, in USD.
+    #[arg(long, value_name = "USD")]
+    budget: Option<f64>,
+    /// A reasoning effort such as `low`, `medium` or `high`.
+    #[arg(long, value_name = "EFFORT")]
+    reasoning: Option<String>,
+    /// What needs approval: `ask` (default), `auto-edit` or `yolo`.
+    #[arg(long, value_name = "MODE", value_parser = ["ask", "auto-edit", "yolo"])]
+    approval_mode: Option<String>,
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
@@ -235,12 +244,27 @@ async fn run_prompt(
     args: RunArgs,
     verbose: bool,
 ) -> Result<u8, String> {
-    let spec = resolve_spec(&config, &catalog, args.model, args.endpoint)?;
+    let spec = resolve_spec(&config, &catalog, args.model.clone(), args.endpoint.clone())?;
+    let mut config = config;
+    if let Some(mode) = args.approval_mode.as_deref() {
+        config.approval_mode = match mode {
+            "ask" => ApprovalMode::Ask,
+            "auto-edit" => ApprovalMode::AutoEdit,
+            "yolo" => ApprovalMode::Yolo,
+            other => return Err(format!("unknown approval mode `{other}`")),
+        };
+    }
+    if let Some(limit) = args.budget {
+        if !limit.is_finite() || limit <= 0.0 {
+            return Err(format!("--budget must be a positive number, got {limit}"));
+        }
+    }
     if !args.quiet && !args.jsonl {
         eprintln!(
-            "· {} · catalogue from {}",
+            "· {} · catalogue from {} · approval {}",
             spec.label(),
-            source_label(source)
+            source_label(source),
+            approval_label(config.approval_mode)
         );
     }
     let service = Arc::new(
@@ -259,8 +283,12 @@ async fn run_prompt(
         kind: ClientRequestKind::SendMessage {
             session: None,
             text: args.prompt,
-            budget: None,
-            reasoning: None,
+            budget: args.budget.map(|limit| Budget {
+                unit: BudgetUnit::Usd,
+                limit,
+                action: BudgetAction::Stop,
+            }),
+            reasoning: args.reasoning.map(|effort| Reasoning::Effort { effort }),
         },
     };
     let mut stream = service.submit(request).await.map_err(|e| e.to_string())?;
@@ -277,6 +305,7 @@ async fn run_prompt(
         failed: false,
     };
     while let Some(event) = stream.next().await {
+        answer_if_asked(&service, &event).await?;
         renderer.event(&event)?;
     }
     if matches!(renderer.format, Format::Text)
@@ -285,6 +314,47 @@ async fn run_prompt(
         println!();
     }
     Ok(u8::from(renderer.failed))
+}
+
+/// Answers a `QuestionAsked` event, prompting on a terminal and leaving a note
+/// when the client is not interactive.
+async fn answer_if_asked(service: &Arc<Service>, event: &ServerEvent) -> Result<(), String> {
+    let ServerEventKind::QuestionAsked {
+        question, prompt, ..
+    } = &event.kind
+    else {
+        return Ok(());
+    };
+    let session = event
+        .session
+        .clone()
+        .ok_or("a question arrived without a session")?;
+    let question = question.clone();
+    let answer = if std::io::stdin().is_terminal() {
+        eprintln!("? {prompt}");
+        eprint!("answer> ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        line.trim_end().to_owned()
+    } else {
+        eprintln!("? {prompt}");
+        eprintln!("(no interactive client; answering with a note)");
+        "(no interactive client is attached; continue with your best judgment)".to_owned()
+    };
+    let response = ClientRequest {
+        request_id: 0,
+        kind: ClientRequestKind::AnswerQuestion {
+            session,
+            question,
+            answer,
+        },
+    };
+    let mut acknowledgement = service.submit(response).await.map_err(|e| e.to_string())?;
+    while acknowledgement.next().await.is_some() {}
+    Ok(())
 }
 
 fn list_models(
@@ -458,6 +528,18 @@ impl Renderer {
                 eprintln!("error: {message} ({})", code_name(*code));
                 self.failed = true;
             }
+            ServerEventKind::ApprovalRequested { approval, tool, .. } => {
+                if !self.quiet {
+                    eprintln!(
+                        "approval needed for {tool} ({approval}); resume from a client that can approve"
+                    );
+                }
+            }
+            ServerEventKind::ApprovalResolved { approved, .. } => {
+                if !self.quiet {
+                    eprintln!("approval {}", if *approved { "granted" } else { "denied" });
+                }
+            }
             ServerEventKind::TurnFinished {
                 committed: false, ..
             } => {
@@ -568,6 +650,14 @@ fn source_label(source: Source) -> &'static str {
         Source::Network => "network",
         Source::StaleCache => "stale cache",
         Source::Bundled => "bundled snapshot",
+    }
+}
+
+fn approval_label(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Ask => "ask",
+        ApprovalMode::AutoEdit => "auto-edit",
+        ApprovalMode::Yolo => "yolo",
     }
 }
 

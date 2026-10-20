@@ -31,6 +31,9 @@ pub enum ServiceError {
     /// The named session is not known.
     #[error("session `{0}` is not known")]
     UnknownSession(String),
+    /// No running turn is waiting on that question.
+    #[error("question `{0}` is not pending for this session")]
+    UnknownQuestion(String),
     /// A provider has no endpoint and no native preset.
     #[error(
         "provider `{provider}` speaks the {wire:?} wire but has no API URL; \
