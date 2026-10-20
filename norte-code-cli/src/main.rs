@@ -22,10 +22,10 @@ use interaction::{
     resolve_spec,
 };
 use render::{
-    Block, Format, Renderer, approval_label, debug_model, debug_prompt_size, debug_reasoning,
-    debug_start, fallback_env, find_project_config, human_tokens, parse_budget_action,
-    parse_budget_unit, parse_reasoning_setting, percent_label, reasoning_label,
-    select_system_prompt, short, source_label, token_ratio,
+    Format, Renderer, approval_label, debug_model, debug_prompt_size, debug_reasoning, debug_start,
+    fallback_env, find_project_config, human_tokens, parse_budget_action, parse_budget_unit,
+    parse_reasoning_setting, percent_label, reasoning_label, select_system_prompt, short,
+    source_label, token_ratio,
 };
 
 #[cfg(test)]
@@ -264,6 +264,44 @@ impl SandboxOptions {
     }
 }
 
+/// Options shared by `run` and `resume` that only change the config.
+struct CommonOptions<'a> {
+    max_iterations: Option<usize>,
+    compaction_threshold: Option<f64>,
+    sandbox: &'a SandboxOptions,
+    extensions: &'a [String],
+    interactive: bool,
+    jsonl: bool,
+}
+
+impl CommonOptions<'_> {
+    /// Applies the options to a loaded config and checks their combinations.
+    fn apply(&self, config: &mut Config) -> Result<(), String> {
+        if let Some(limit) = self.max_iterations {
+            if limit == 0 {
+                return Err("--max-iterations must be at least 1".to_owned());
+            }
+            config.max_iterations = Some(limit);
+        }
+        if let Some(threshold) = self.compaction_threshold {
+            if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
+                return Err(format!(
+                    "--compaction-threshold must be a fraction in (0, 1], got {threshold}"
+                ));
+            }
+            config.compaction.threshold = threshold;
+        }
+        self.sandbox.apply(config)?;
+        if self.interactive && self.jsonl {
+            return Err("--interactive cannot be combined with --jsonl".to_owned());
+        }
+        if self.interactive && !std::io::stdin().is_terminal() {
+            return Err("--interactive needs a terminal on stdin".to_owned());
+        }
+        apply_extensions(config, self.extensions)
+    }
+}
+
 #[derive(Args)]
 struct SessionsArgs {
     /// Write one JSON object per line.
@@ -370,21 +408,15 @@ async fn run_prompt(
             other => return Err(format!("unknown approval mode `{other}`")),
         };
     }
-    if let Some(limit) = args.max_iterations {
-        if limit == 0 {
-            return Err("--max-iterations must be at least 1".to_owned());
-        }
-        config.max_iterations = Some(limit);
+    CommonOptions {
+        max_iterations: args.max_iterations,
+        compaction_threshold: args.compaction_threshold,
+        sandbox: &args.sandbox,
+        extensions: &args.extension,
+        interactive: args.interactive,
+        jsonl: args.jsonl,
     }
-    if let Some(threshold) = args.compaction_threshold {
-        if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
-            return Err(format!(
-                "--compaction-threshold must be a fraction in (0, 1], got {threshold}"
-            ));
-        }
-        config.compaction.threshold = threshold;
-    }
-    args.sandbox.apply(&mut config)?;
+    .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     let reasoning = args
@@ -398,13 +430,6 @@ async fn run_prompt(
         &spec.capabilities.reasoning,
     )
     .map_err(|error| error.to_string())?;
-    if args.interactive && args.jsonl {
-        return Err("--interactive cannot be combined with --jsonl".to_owned());
-    }
-    if args.interactive && !std::io::stdin().is_terminal() {
-        return Err("--interactive needs a terminal on stdin".to_owned());
-    }
-    apply_extensions(&mut config, &args.extension)?;
     if let Some(limit) = args.budget {
         if !limit.is_finite() || limit <= 0.0 {
             return Err(format!("--budget must be a positive number, got {limit}"));
@@ -478,37 +503,19 @@ async fn run_prompt(
     service.set_config_path(config_path);
 
     let pinned = Pinned::new();
-    let mut renderer = Renderer {
-        format: if args.jsonl {
+    let mut renderer = Renderer::new(
+        if args.jsonl {
             Format::Jsonl
         } else {
             Format::Text
         },
-        quiet: args.quiet,
+        args.quiet,
         verbose,
         debug,
-        debug_session: false,
         show_cost,
         style,
-        pinned: Arc::clone(&pinned),
-        block: Block::None,
-        reasoning_line_start: false,
-        reasoning_placeholder: false,
-        last_char: None,
-        failed: false,
-        cancelled: false,
-        cache_read: 0,
-        cache_write: 0,
-        cache_reported: false,
-        budget_stopped: false,
-        requests: 0,
-        turn_requests: 0,
-        input: 0,
-        output: 0,
-        cost: 0.0,
-        unpriced: 0,
-        tool_counts: BTreeMap::new(),
-    };
+        Arc::clone(&pinned),
+    );
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
@@ -583,30 +590,17 @@ async fn resume_session(
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let mut config = config;
-    if let Some(limit) = args.max_iterations {
-        if limit == 0 {
-            return Err("--max-iterations must be at least 1".to_owned());
-        }
-        config.max_iterations = Some(limit);
+    CommonOptions {
+        max_iterations: args.max_iterations,
+        compaction_threshold: args.compaction_threshold,
+        sandbox: &args.sandbox,
+        extensions: &args.extension,
+        interactive: args.interactive,
+        jsonl: args.jsonl,
     }
-    if let Some(threshold) = args.compaction_threshold {
-        if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
-            return Err(format!(
-                "--compaction-threshold must be a fraction in (0, 1], got {threshold}"
-            ));
-        }
-        config.compaction.threshold = threshold;
-    }
-    args.sandbox.apply(&mut config)?;
+    .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
-    if args.interactive && args.jsonl {
-        return Err("--interactive cannot be combined with --jsonl".to_owned());
-    }
-    if args.interactive && !std::io::stdin().is_terminal() {
-        return Err("--interactive needs a terminal on stdin".to_owned());
-    }
-    apply_extensions(&mut config, &args.extension)?;
     let spec = resolve_spec(&config, &catalog, None, None)?;
     let effective = effective_reasoning(
         None,
@@ -669,37 +663,19 @@ async fn resume_session(
     }
     service.set_config_path(config_path);
     let pinned = Pinned::new();
-    let mut renderer = Renderer {
-        format: if args.jsonl {
+    let mut renderer = Renderer::new(
+        if args.jsonl {
             Format::Jsonl
         } else {
             Format::Text
         },
-        quiet: args.quiet,
+        args.quiet,
         verbose,
         debug,
-        debug_session: false,
         show_cost,
         style,
-        pinned: Arc::clone(&pinned),
-        block: Block::None,
-        reasoning_line_start: false,
-        reasoning_placeholder: false,
-        last_char: None,
-        failed: false,
-        cancelled: false,
-        cache_read: 0,
-        cache_write: 0,
-        cache_reported: false,
-        budget_stopped: false,
-        requests: 0,
-        turn_requests: 0,
-        input: 0,
-        output: 0,
-        cost: 0.0,
-        unpriced: 0,
-        tool_counts: BTreeMap::new(),
-    };
+        Arc::clone(&pinned),
+    );
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
     let mut input = if interactive {

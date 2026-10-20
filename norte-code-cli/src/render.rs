@@ -70,6 +70,46 @@ pub(crate) struct Renderer {
 }
 
 impl Renderer {
+    /// A renderer with empty counters for a new run.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    pub(crate) fn new(
+        format: Format,
+        quiet: bool,
+        verbose: bool,
+        debug: bool,
+        show_cost: bool,
+        style: Style,
+        pinned: Arc<Pinned>,
+    ) -> Self {
+        Self {
+            format,
+            quiet,
+            verbose,
+            debug,
+            debug_session: false,
+            show_cost,
+            style,
+            pinned,
+            block: Block::None,
+            reasoning_line_start: false,
+            reasoning_placeholder: false,
+            last_char: None,
+            failed: false,
+            cancelled: false,
+            budget_stopped: false,
+            requests: 0,
+            turn_requests: 0,
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            cache_reported: false,
+            cost: 0.0,
+            unpriced: 0,
+            tool_counts: BTreeMap::new(),
+        }
+    }
+
     pub(crate) fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
         if self.debug && !self.debug_session {
             if let Some(session) = &event.session {
