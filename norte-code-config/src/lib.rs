@@ -38,6 +38,8 @@ pub struct Config {
     pub catalog: CatalogConfig,
     /// Automatic compaction.
     pub compaction: CompactionConfig,
+    /// Automatic retries for transient provider failures.
+    pub retry: RetryConfig,
     /// The session's default reasoning setting.
     pub reasoning: ReasoningConfig,
     /// A system prompt override; `None` uses the built-in default.
@@ -74,6 +76,7 @@ impl Default for Config {
             providers: BTreeMap::new(),
             catalog: CatalogConfig::default(),
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
             reasoning: ReasoningConfig::default(),
             system_prompt: None,
             approval_mode: ApprovalMode::default(),
@@ -152,6 +155,34 @@ impl Default for CompactionConfig {
             keep_recent: 6,
             model: None,
             reasoning: "lowest".to_owned(),
+        }
+    }
+}
+
+/// Automatic retries for transient provider failures.
+///
+/// The host retries by resuming the turn on the same session, so the user's
+/// message is never sent twice. Only failures that can clear on their own are
+/// retried: rate limits, overload, server errors and transport errors. A quota
+/// or authentication failure is permanent and fails the turn immediately.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetryConfig {
+    /// How many times to retry after the first failure. `0` disables retries.
+    pub max_attempts: u32,
+    /// The longest wait the host will accept, in milliseconds.
+    pub max_delay_ms: u64,
+    /// The first fallback wait when the provider gives no `retry_after`, in
+    /// milliseconds. It doubles on each attempt, up to `max_delay_ms`.
+    pub backoff_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 2,
+            max_delay_ms: 30_000,
+            backoff_ms: 1_000,
         }
     }
 }
@@ -254,6 +285,28 @@ impl Default for BudgetConfig {
 pub struct ToolsConfig {
     /// Whether the `web_fetch` tool is registered.
     pub web_fetch: bool,
+    /// How `command` is sandboxed.
+    pub sandbox: SandboxConfig,
+}
+
+/// Command sandbox settings.
+///
+/// Disabled by default. When enabled, `command` runs through bubblewrap on
+/// Linux or `sandbox-exec` on macOS: the workspace is writable, the rest of the
+/// filesystem is read-only, and the network is unavailable unless explicitly
+/// allowed. If the platform sandbox binary is missing, the command fails rather
+/// than running unsandboxed.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Whether `command` runs inside the platform sandbox.
+    pub enabled: bool,
+    /// Whether the sandboxed command may use the network.
+    pub network: bool,
+    /// Extra directories writable inside the sandbox, in addition to the
+    /// workspace. Relative paths are resolved against the workspace; paths that
+    /// do not exist are ignored.
+    pub writable: Vec<PathBuf>,
 }
 
 /// Agent Skills settings.
@@ -482,6 +535,33 @@ impl Config {
         }
         if !matches!(self.compaction.trigger.as_str(), "idle" | "eager") {
             return Err(invalid("compaction.trigger", "must be `idle` or `eager`"));
+        }
+        if self.retry.max_attempts > 10 {
+            return Err(invalid(
+                "retry.max_attempts",
+                "must be at most 10; retries are bounded on purpose",
+            ));
+        }
+        if self.retry.max_delay_ms > 600_000 {
+            return Err(invalid(
+                "retry.max_delay_ms",
+                "must be at most 600000 (ten minutes)",
+            ));
+        }
+        if self.retry.backoff_ms > 600_000 {
+            return Err(invalid(
+                "retry.backoff_ms",
+                "must be at most 600000 (ten minutes)",
+            ));
+        }
+        if self
+            .tools
+            .sandbox
+            .writable
+            .iter()
+            .any(|path| path.as_os_str().is_empty())
+        {
+            return Err(invalid("tools.sandbox.writable", "paths must not be empty"));
         }
         for (scope, budget) in [
             ("message", &self.budgets.message),
@@ -772,6 +852,43 @@ mod tests {
         let error =
             Config::from_json(r#"{"compaction":{"trigger":"always"}}"#).expect_err("trigger");
         assert!(error.to_string().contains("compaction.trigger"));
+    }
+
+    #[test]
+    fn retry_defaults_are_bounded_and_capped_by_validation() {
+        let loaded = Config::from_json("{}").expect("config");
+        assert_eq!(loaded.config.retry.max_attempts, 2);
+        assert_eq!(loaded.config.retry.max_delay_ms, 30_000);
+        assert_eq!(loaded.config.retry.backoff_ms, 1_000);
+        let zero = Config::from_json(r#"{"retry":{"max_attempts":0}}"#).expect("config");
+        assert_eq!(zero.config.retry.max_attempts, 0);
+        let error =
+            Config::from_json(r#"{"retry":{"max_attempts":11}}"#).expect_err("max_attempts");
+        assert!(error.to_string().contains("retry.max_attempts"));
+        let error =
+            Config::from_json(r#"{"retry":{"max_delay_ms":600001}}"#).expect_err("max_delay_ms");
+        assert!(error.to_string().contains("retry.max_delay_ms"));
+    }
+
+    #[test]
+    fn sandbox_is_off_without_network_and_accepts_extra_writable_paths() {
+        let loaded = Config::from_json("{}").expect("config");
+        assert!(!loaded.config.tools.sandbox.enabled);
+        assert!(!loaded.config.tools.sandbox.network);
+        assert!(loaded.config.tools.sandbox.writable.is_empty());
+        let enabled = Config::from_json(
+            r#"{"tools":{"sandbox":{"enabled":true,"network":true,"writable":["/tmp/cache"]}}}"#,
+        )
+        .expect("config");
+        assert!(enabled.config.tools.sandbox.enabled);
+        assert!(enabled.config.tools.sandbox.network);
+        assert_eq!(
+            enabled.config.tools.sandbox.writable,
+            vec![PathBuf::from("/tmp/cache")]
+        );
+        let error = Config::from_json(r#"{"tools":{"sandbox":{"writable":[""]}}}"#)
+            .expect_err("empty path");
+        assert!(error.to_string().contains("tools.sandbox.writable"));
     }
 
     #[test]

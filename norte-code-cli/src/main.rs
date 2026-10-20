@@ -116,6 +116,9 @@ struct RunArgs {
     /// The used-context fraction that triggers compaction, in (0, 1].
     #[arg(long, value_name = "FRACTION")]
     compaction_threshold: Option<f64>,
+    /// Sandbox overrides for this run.
+    #[command(flatten)]
+    sandbox: SandboxOptions,
     /// A reasoning setting: `auto`, `off`, or an effort such as `low`.
     #[arg(long, value_name = "SETTING")]
     reasoning: Option<String>,
@@ -162,6 +165,9 @@ struct ResumeArgs {
     /// The used-context fraction that triggers compaction, in (0, 1].
     #[arg(long, value_name = "FRACTION")]
     compaction_threshold: Option<f64>,
+    /// Sandbox overrides for this resume.
+    #[command(flatten)]
+    sandbox: SandboxOptions,
     /// Stop after this many model iterations; keeps the config's limit when
     /// omitted.
     #[arg(long, value_name = "N")]
@@ -178,6 +184,58 @@ struct ResumeArgs {
     /// Keep the session open and read the next message after each turn.
     #[arg(long, short = 'i')]
     interactive: bool,
+}
+
+/// Flags that override the command sandbox for one run or resume.
+#[derive(Args)]
+struct SandboxOptions {
+    /// Run commands inside the OS sandbox, overriding `tools.sandbox.enabled`.
+    #[arg(long, conflicts_with = "no_sandbox")]
+    sandbox: bool,
+    /// Run commands without the OS sandbox, overriding `tools.sandbox.enabled`.
+    #[arg(long, conflicts_with_all = ["sandbox", "sandbox_network"])]
+    no_sandbox: bool,
+    /// Let the sandbox use the network: `on` or `off`.
+    #[arg(
+        long,
+        value_name = "ON|OFF",
+        value_parser = ["on", "off"],
+        conflicts_with = "no_sandbox"
+    )]
+    sandbox_network: Option<String>,
+}
+
+impl SandboxOptions {
+    /// Applies the flags over the loaded config.
+    fn apply(&self, config: &mut Config) -> Result<(), String> {
+        if self.sandbox && self.no_sandbox {
+            return Err("--sandbox cannot be combined with --no-sandbox".to_owned());
+        }
+        if self.no_sandbox && self.sandbox_network.is_some() {
+            return Err("--sandbox-network cannot be combined with --no-sandbox".to_owned());
+        }
+        if self.sandbox {
+            config.tools.sandbox.enabled = true;
+        }
+        if self.no_sandbox {
+            config.tools.sandbox.enabled = false;
+        }
+        if let Some(network) = self.sandbox_network.as_deref() {
+            if !config.tools.sandbox.enabled {
+                return Err(
+                    "--sandbox-network needs the sandbox; pass --sandbox or set \
+                     tools.sandbox.enabled"
+                        .to_owned(),
+                );
+            }
+            config.tools.sandbox.network = match network {
+                "on" => true,
+                "off" => false,
+                other => return Err(format!("unknown sandbox network setting `{other}`")),
+            };
+        }
+        Ok(())
+    }
 }
 
 #[derive(Args)]
@@ -868,6 +926,7 @@ async fn run_prompt(
         }
         config.compaction.threshold = threshold;
     }
+    args.sandbox.apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     let reasoning = args
@@ -1056,6 +1115,7 @@ async fn resume_session(
         }
         config.compaction.threshold = threshold;
     }
+    args.sandbox.apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     if args.interactive && args.jsonl {
@@ -1517,6 +1577,7 @@ async fn ask_approval(
         tool,
         call_id,
         arguments,
+        sandbox,
         ..
     } = &event.kind
     else {
@@ -1534,6 +1595,9 @@ async fn ask_approval(
         style.tool(tool),
         style.dim(format!("#{}", short(call_id)))
     );
+    if let Some(sandbox) = sandbox {
+        eprintln!("  {}", style.green(format!("[{sandbox}] sandboxed")));
+    }
     if let Some(arguments) = arguments {
         for line in argument_preview(tool, arguments) {
             match line {
@@ -2751,6 +2815,23 @@ impl Renderer {
                 self.cancelled = false;
                 self.reasoning_placeholder = false;
             }
+            ServerEventKind::RetryScheduled {
+                attempt,
+                delay_ms,
+                reason,
+                ..
+            } => {
+                self.end_blocks();
+                if !self.quiet {
+                    eprintln!(
+                        "{} {} {}",
+                        self.style.yellow("retrying"),
+                        self.style
+                            .dim(format!("in {delay_ms} ms (attempt {attempt}):")),
+                        self.style.faint(reason)
+                    );
+                }
+            }
             ServerEventKind::Error { code, message } => {
                 self.end_blocks();
                 eprintln!(
@@ -3608,13 +3689,77 @@ fn code_name(code: ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, apply_extensions,
-        approval_request, argument_preview, budget_label, compose_selection, cost_summary,
-        parse_approval_choice, parse_reasoning_setting, parse_selection, select_system_prompt,
+        ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions,
+        apply_extensions, approval_request, argument_preview, budget_label, compose_selection,
+        cost_summary, parse_approval_choice, parse_reasoning_setting, parse_selection,
+        select_system_prompt,
     };
     use clap::Parser;
+    use norte_code_config::Config;
     use norte_code_cost::CostSummary;
     use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
+
+    #[test]
+    fn sandbox_flags_override_the_config_and_respect_the_network() {
+        let mut config = Config::default();
+        assert!(!config.tools.sandbox.enabled);
+        let enable = SandboxOptions {
+            sandbox: true,
+            no_sandbox: false,
+            sandbox_network: None,
+        };
+        enable.apply(&mut config).expect("enable");
+        assert!(config.tools.sandbox.enabled);
+
+        let networked = SandboxOptions {
+            sandbox: false,
+            no_sandbox: false,
+            sandbox_network: Some("on".to_owned()),
+        };
+        networked.apply(&mut config).expect("network on");
+        assert!(config.tools.sandbox.network);
+
+        let offline = SandboxOptions {
+            sandbox: false,
+            no_sandbox: false,
+            sandbox_network: Some("off".to_owned()),
+        };
+        offline.apply(&mut config).expect("network off");
+        assert!(!config.tools.sandbox.network);
+
+        let disable = SandboxOptions {
+            sandbox: false,
+            no_sandbox: true,
+            sandbox_network: None,
+        };
+        disable.apply(&mut config).expect("disable");
+        assert!(!config.tools.sandbox.enabled);
+    }
+
+    #[test]
+    fn sandbox_flags_reject_contradictions_and_a_network_without_a_sandbox() {
+        let mut config = Config::default();
+        let both = SandboxOptions {
+            sandbox: true,
+            no_sandbox: true,
+            sandbox_network: None,
+        };
+        assert!(both.apply(&mut config).is_err());
+
+        let denied = SandboxOptions {
+            sandbox: false,
+            no_sandbox: true,
+            sandbox_network: Some("on".to_owned()),
+        };
+        assert!(denied.apply(&mut config).is_err());
+
+        let orphan = SandboxOptions {
+            sandbox: false,
+            no_sandbox: false,
+            sandbox_network: Some("on".to_owned()),
+        };
+        assert!(orphan.apply(&mut config).is_err());
+    }
 
     #[test]
     fn the_system_prompt_prefers_the_flag_then_the_config() {

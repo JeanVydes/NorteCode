@@ -160,6 +160,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   capped at 64 KiB, and the text is treated as repository guidance that does
   not override the user's request, the approvals or the budgets. `--debug` shows
   the file and its size.
+- Bounded retries for transient provider failures (rate limits, overload,
+  server and transport errors). The wait honours the provider's `retry_after`,
+  capped by `retry.max_delay_ms`, and falls back to `retry.backoff_ms` with
+  exponential growth when the provider gives no hint. A retry resumes the same
+  session instead of resending the user's message, permanent failures (quota,
+  authentication, malformed requests) are not retried, and
+  `retry.max_attempts: 0` disables retries. Clients see a `RetryScheduled`
+  event with the attempt, the delay and the reason.
+- Optional command sandbox (`tools.sandbox`): `command` runs through bubblewrap
+  on Linux or `sandbox-exec` on macOS with the workspace writable, the rest of
+  the filesystem read-only, a private `/tmp` and no network unless enabled.
+  `--sandbox`, `--no-sandbox` and `--sandbox-network on|off` override the config
+  for one run or resume; the network option needs the sandbox and conflicts with
+  `--no-sandbox`. Approvals and the effect journal keep the original command,
+  the panel adds a `[bwrap]`/`[seatbelt]` badge, and a missing platform binary
+  fails closed instead of running unsandboxed.
 - A lost store race is reported as a conflict with a resume hint instead of a
   provider error. The session version is an optimistic-concurrency token, not a
   message count; a turn that loses the race did not commit.

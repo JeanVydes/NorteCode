@@ -21,9 +21,9 @@ use norte::{
     ApprovalId, BlobStore, CallId, Continuation, Decision, Engine, EngineBuilder, EngineConfig,
     EngineEvent, FinishReason, FnExecutor, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore,
     Layer, LayerContext, LayerStack, Message, Model, ModelRequest, ModelStream, Policy, PolicySet,
-    PolicyView, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role,
-    SessionId, ShortCircuitReason, Store, StreamDelta, ToolArgs, ToolContext, ToolDeclaration,
-    ToolKind, ToolOutput, ToolRegistry, Usage,
+    PolicyView, ProviderErrorKind, Reasoning as ReasoningCapability, ReasoningEffort,
+    ReasoningRequest, Role, SessionId, ShortCircuitReason, Store, StreamDelta, ToolArgs,
+    ToolContext, ToolDeclaration, ToolKind, ToolOutput, ToolRegistry, Usage,
 };
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord, CostSummary, summarize};
 use norte_code_skills::{
@@ -34,11 +34,11 @@ use norte_code_tools::{
     AskUserTool, DurableQuestion, GlobTool, GrepTool, ListDirTool, QuestionBroker, QuestionStore,
     TodoState, TodoTool, WebFetchTool,
 };
-use norte_tools::{CommandTool, EditTool, ReadTool, WriteTool};
+use norte_tools::{CommandRequest, CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::{Notify, mpsc};
 
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
-use norte_code_config::{ApprovalMode, BudgetConfig, Config};
+use norte_code_config::{ApprovalMode, BudgetConfig, Config, RetryConfig, SandboxConfig};
 use norte_code_protocol::{
     Budget, BudgetUnit, Delta, ErrorCode, ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo,
     ServerEvent, ServerEventKind, SessionInfo, SessionKey,
@@ -274,6 +274,287 @@ where
         }),
         approval: declaration.approval,
     }
+}
+
+/// Wraps the command tool's executor so the OS sandbox runs the same call.
+///
+/// The wrapper is deliberately inside the executor, after policies, approvals
+/// and the effect journal: the human approves and the audit records the
+/// original command, while only the process invocation gains the sandbox.
+fn sandboxed_command(
+    declaration: ToolDeclaration<CommandRequest>,
+    workspace: &Path,
+    config: &SandboxConfig,
+) -> ToolDeclaration<CommandRequest> {
+    let writable = config
+        .writable
+        .iter()
+        .filter_map(|path| {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                workspace.join(path)
+            };
+            std::fs::canonicalize(path).ok()
+        })
+        .collect();
+    ToolDeclaration {
+        name: declaration.name,
+        description: declaration.description,
+        parameters: declaration.parameters,
+        executor: Arc::new(SandboxExecutor {
+            inner: declaration.executor,
+            workspace: workspace.to_path_buf(),
+            network: config.network,
+            writable,
+        }),
+        approval: declaration.approval,
+    }
+}
+
+/// Runs the command tool's request through the platform sandbox.
+struct SandboxExecutor {
+    inner: Arc<dyn FnExecutor<CommandRequest, ToolOutput>>,
+    workspace: PathBuf,
+    network: bool,
+    writable: Vec<PathBuf>,
+}
+
+#[async_trait]
+impl FnExecutor<CommandRequest, ToolOutput> for SandboxExecutor {
+    async fn call(&self, args: CommandRequest) -> norte::Result<ToolOutput> {
+        let args = sandbox_request(&args, &self.workspace, self.network, &self.writable)
+            .map_err(norte::Error::InvalidInput)?;
+        self.inner.call(args).await
+    }
+
+    async fn call_with_context(
+        &self,
+        context: &ToolContext,
+        args: CommandRequest,
+    ) -> norte::Result<ToolOutput> {
+        let args = sandbox_request(&args, &self.workspace, self.network, &self.writable)
+            .map_err(norte::Error::InvalidInput)?;
+        self.inner.call_with_context(context, args).await
+    }
+}
+
+/// Rewrites one command request to run under the platform sandbox.
+fn sandbox_request(
+    request: &CommandRequest,
+    workspace: &Path,
+    network: bool,
+    writable: &[PathBuf],
+) -> std::result::Result<CommandRequest, String> {
+    let value = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    let value = sandboxed_arguments(&value, workspace, network, writable)?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// Replaces the request's command with the sandbox launcher and the original
+/// command. Every other field (cwd, env, stdin, limits) is kept.
+fn sandboxed_arguments(
+    arguments: &serde_json::Value,
+    workspace: &Path,
+    network: bool,
+    writable: &[PathBuf],
+) -> std::result::Result<serde_json::Value, String> {
+    let mut request = arguments
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool arguments must be a JSON object".to_owned())?;
+    let (program, args, cwd) = {
+        let command = request
+            .get("command")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "missing `command`".to_owned())?;
+        let kind = command
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing command kind".to_owned())?;
+        let (program, args) = match kind {
+            "program" => {
+                let program = command
+                    .get("program")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "missing `program`".to_owned())?
+                    .to_owned();
+                let args = match command.get("args") {
+                    None => Vec::new(),
+                    Some(serde_json::Value::Array(values)) => values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| "`args` must contain only strings".to_owned())
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                    Some(_) => return Err("`args` must be an array".to_owned()),
+                };
+                (program, args)
+            }
+            "shell" => {
+                let shell = command
+                    .get("shell")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("sh");
+                let script = command
+                    .get("script")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "missing `script`".to_owned())?;
+                (shell.to_owned(), vec!["-c".to_owned(), script.to_owned()])
+            }
+            other => return Err(format!("unknown command kind `{other}`")),
+        };
+        let cwd = match request.get("cwd") {
+            None => None,
+            Some(serde_json::Value::String(path)) => Some(PathBuf::from(path)),
+            Some(_) => return Err("`cwd` must be a string path".to_owned()),
+        };
+        (program, args, cwd)
+    };
+    let (program, args) =
+        wrap_command(program, args, cwd.as_deref(), workspace, network, writable)?;
+    request.insert(
+        "command".to_owned(),
+        serde_json::json!({
+            "kind": "program",
+            "program": program,
+            "args": args,
+        }),
+    );
+    Ok(serde_json::Value::Object(request))
+}
+
+/// The display name of the platform sandbox.
+fn sandbox_name() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "bwrap"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "seatbelt"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        "sandbox"
+    }
+}
+
+fn wrap_command(
+    program: String,
+    args: Vec<String>,
+    cwd: Option<&Path>,
+    workspace: &Path,
+    network: bool,
+    writable: &[PathBuf],
+) -> std::result::Result<(String, Vec<String>), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_wrap(program, args, cwd, workspace, network, writable)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_wrap(program, args, cwd, workspace, network, writable)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (program, args, cwd, workspace, network, writable);
+        Err("the command sandbox needs bubblewrap (Linux) or sandbox-exec (macOS)".to_owned())
+    }
+}
+
+/// Bubblewrap: a new user/mount/pid/net/ipc/uts/cgroup namespace, a read-only
+/// host root, and explicit read-write binds for the workspace and extras.
+#[cfg(target_os = "linux")]
+fn linux_wrap(
+    program: String,
+    args: Vec<String>,
+    cwd: Option<&Path>,
+    workspace: &Path,
+    network: bool,
+    writable: &[PathBuf],
+) -> std::result::Result<(String, Vec<String>), String> {
+    let workspace = workspace
+        .to_str()
+        .ok_or_else(|| "the workspace path is not UTF-8".to_owned())?;
+    let mut wrapped = vec![
+        "--die-with-parent".to_owned(),
+        "--new-session".to_owned(),
+        "--unshare-all".to_owned(),
+        "--cap-drop".to_owned(),
+        "ALL".to_owned(),
+        "--ro-bind".to_owned(),
+        "/".to_owned(),
+        "/".to_owned(),
+        "--dev".to_owned(),
+        "/dev".to_owned(),
+        "--proc".to_owned(),
+        "/proc".to_owned(),
+        "--tmpfs".to_owned(),
+        "/tmp".to_owned(),
+        "--bind".to_owned(),
+        workspace.to_owned(),
+        workspace.to_owned(),
+    ];
+    if network {
+        wrapped.push("--share-net".to_owned());
+    }
+    for path in writable {
+        let path = path
+            .to_str()
+            .ok_or_else(|| "a writable sandbox path is not UTF-8".to_owned())?;
+        if path != workspace {
+            wrapped.extend(["--bind".to_owned(), path.to_owned(), path.to_owned()]);
+        }
+    }
+    let cwd = match cwd {
+        Some(path) => path
+            .to_str()
+            .ok_or_else(|| "the command working directory is not UTF-8".to_owned())?,
+        None => workspace,
+    };
+    wrapped.extend(["--chdir".to_owned(), cwd.to_owned(), "--".to_owned()]);
+    wrapped.push(program);
+    wrapped.extend(args);
+    Ok(("bwrap".to_owned(), wrapped))
+}
+
+/// macOS seatbelt: a profile that keeps reads but denies writes outside the
+/// workspace and the usual temporary roots, and denies the network by default.
+#[cfg(target_os = "macos")]
+fn macos_wrap(
+    program: String,
+    args: Vec<String>,
+    cwd: Option<&Path>,
+    workspace: &Path,
+    network: bool,
+    writable: &[PathBuf],
+) -> std::result::Result<(String, Vec<String>), String> {
+    let _ = cwd;
+    let mut profile = String::from("(version 1)\n(allow default)\n");
+    if !network {
+        profile.push_str("(deny network*)\n");
+    }
+    profile.push_str("(deny file-write*)\n(allow file-write*\n");
+    let mut roots: Vec<&Path> = vec![workspace];
+    roots.extend(writable.iter().map(PathBuf::as_path));
+    roots.push(Path::new("/tmp"));
+    roots.push(Path::new("/private/tmp"));
+    roots.push(Path::new("/dev"));
+    for root in roots {
+        let path = root
+            .to_str()
+            .ok_or_else(|| "a sandbox path is not UTF-8".to_owned())?;
+        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+        profile.push_str(&format!("  (subpath \"{escaped}\")\n"));
+    }
+    profile.push_str(")\n");
+    let mut wrapped = vec!["-p".to_owned(), profile, "--".to_owned(), program];
+    wrapped.extend(args);
+    Ok(("sandbox-exec".to_owned(), wrapped))
 }
 
 /// The text a tool result carries, with structured output as a fallback.
@@ -763,6 +1044,11 @@ impl Service {
             .with_secrets(self.secrets.clone())
             .with_blobs(Arc::clone(&self.blobs))
             .into_declaration();
+        let command = if self.config.tools.sandbox.enabled {
+            sandboxed_command(command, &self.workspace_root, &self.config.tools.sandbox)
+        } else {
+            command
+        };
         self.register_tool(&mut tools, command)?;
         self.register_tool(
             &mut tools,
@@ -1652,6 +1938,9 @@ impl Service {
             let mut restored = Vec::new();
             for record in engine.pending_approvals(nid).await? {
                 let arguments = call_arguments(&engine, nid, record.call_id).await;
+                let sandbox = (record.tool.as_str() == "command"
+                    && self.config.tools.sandbox.enabled)
+                    .then(|| sandbox_name().to_owned());
                 restored.push(ServerEvent::new(
                     request_id,
                     Some(key.clone()),
@@ -1661,6 +1950,7 @@ impl Service {
                         call_id: record.call_id.to_string(),
                         tool: record.tool.to_string(),
                         arguments,
+                        sandbox,
                     },
                 ));
             }
@@ -1745,6 +2035,7 @@ impl Service {
         }
 
         let mut compacted_eagerly = false;
+        let mut retries = 0u32;
         loop {
             let mut turn_builder = engine.turn(current_nid).reasoning(reasoning);
             if let Some(text) = input.take() {
@@ -1798,17 +2089,22 @@ impl Service {
                                     failure = Some(COMPACTION_SAFE_POINT.to_owned());
                                     break;
                                 }
-                                if !self.handle(
-                                    &engine,
-                                    request_id,
-                                    key,
-                                    current_nid,
-                                    &event,
-                                    &mut stats,
-                                    tx,
-                                    gate.as_deref(),
-                                )
-                                .await
+                                // The engine reports a fatal error as an event and
+                                // again as the turn's result. Wait for the result:
+                                // the retry policy decides whether the client sees
+                                // an error at all.
+                                if !matches!(event, EngineEvent::Error { .. })
+                                    && !self.handle(
+                                        &engine,
+                                        request_id,
+                                        key,
+                                        current_nid,
+                                        &event,
+                                        &mut stats,
+                                        tx,
+                                        gate.as_deref(),
+                                    )
+                                    .await
                                 {
                                     return Ok(());
                                 }
@@ -1922,6 +2218,66 @@ impl Service {
                 gate = None;
                 compacted_eagerly = true;
                 continue;
+            }
+
+            // A transient failure is retried by resuming the same session with
+            // no new input, so the user's message is never appended twice. The
+            // engine left the session streaming from that message.
+            if !cancelled && !interrupted {
+                if let Err(error) = &outcome {
+                    if let Some((delay, reason)) = retry_plan(error, &self.config.retry, retries) {
+                        if let Ok(session) = engine.session(current_nid).await {
+                            self.set_phase(key, to_phase(session.phase)).await;
+                        }
+                        let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                        if !emit(
+                            tx,
+                            ServerEvent::new(
+                                request_id,
+                                Some(key.clone()),
+                                ServerEventKind::RetryScheduled {
+                                    turn,
+                                    attempt: retries + 1,
+                                    delay_ms,
+                                    reason,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
+                        let waited = tokio::select! {
+                            biased;
+                            () = notify.notified() => false,
+                            () = tokio::time::sleep(delay) => true,
+                        };
+                        if !waited {
+                            let phase = engine
+                                .session(current_nid)
+                                .await
+                                .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
+                            self.set_phase(key, phase).await;
+                            emit(
+                                tx,
+                                ServerEvent::new(
+                                    request_id,
+                                    Some(key.clone()),
+                                    ServerEventKind::TurnFinished {
+                                        turn,
+                                        phase,
+                                        committed: false,
+                                    },
+                                ),
+                            )
+                            .await;
+                            return Ok(());
+                        }
+                        retries += 1;
+                        input = None;
+                        continue;
+                    }
+                }
             }
 
             match outcome {
@@ -2101,12 +2457,15 @@ impl Service {
                 ..
             } => {
                 let arguments = call_arguments(engine, nid, *call_id).await;
+                let sandbox = (tool.as_str() == "command" && self.config.tools.sandbox.enabled)
+                    .then(|| sandbox_name().to_owned());
                 Some(ServerEventKind::ApprovalRequested {
                     turn: stats.turn,
                     approval: approval.to_string(),
                     call_id: call_id.to_string(),
                     tool: tool.to_string(),
                     arguments,
+                    sandbox,
                 })
             }
             EngineEvent::ApprovalGranted { approval, .. } => {
@@ -2128,16 +2487,6 @@ impl Service {
                     limit: status.limit,
                     action: status.action,
                 }),
-            EngineEvent::Error { message, .. } => {
-                if self.budget_stopped(key).is_some() {
-                    None
-                } else {
-                    Some(ServerEventKind::Error {
-                        code: ErrorCode::Provider,
-                        message: message.clone(),
-                    })
-                }
-            }
             EngineEvent::RequestReconstructed { .. } => {
                 return self
                     .settle(engine, request_id, key, nid, stats, tx, false, gate)
@@ -3898,6 +4247,38 @@ fn error_code(error: &norte::Error) -> ErrorCode {
     }
 }
 
+/// Plans a bounded retry for a transient provider failure.
+///
+/// The wait is the provider's `retry_after` when it gave one, and otherwise a
+/// capped exponential backoff. Permanent failures (quota, authentication,
+/// malformed requests) return `None`: retrying them only spends more.
+fn retry_plan(error: &norte::Error, config: &RetryConfig, used: u32) -> Option<(Duration, String)> {
+    if used >= config.max_attempts {
+        return None;
+    }
+    let transient = matches!(
+        error.provider_kind(),
+        Some(
+            ProviderErrorKind::RateLimited
+                | ProviderErrorKind::ModelOverloaded
+                | ProviderErrorKind::ServerError
+                | ProviderErrorKind::Transport
+        )
+    );
+    if !transient {
+        return None;
+    }
+    let cap = Duration::from_millis(config.max_delay_ms);
+    let delay = error.retry_after().map_or_else(
+        || {
+            let factor = 1u64.checked_shl(used.min(20)).unwrap_or(u64::MAX);
+            Duration::from_millis(config.backoff_ms.saturating_mul(factor)).min(cap)
+        },
+        |after| after.min(cap),
+    );
+    Some((delay, error.to_string()))
+}
+
 fn to_delta(delta: &StreamDelta) -> Option<Delta> {
     Some(match delta {
         StreamDelta::Text { index, text } => Delta::Text {
@@ -3945,7 +4326,7 @@ mod tests {
     use norte_testing::ScriptedModel;
 
     struct ScriptedFactory {
-        model: Arc<ScriptedModel>,
+        model: Arc<dyn Model>,
     }
 
     impl ModelFactory for ScriptedFactory {
@@ -3955,6 +4336,60 @@ mod tests {
             _capabilities: &Capabilities,
         ) -> Result<Arc<dyn Model>, ServiceError> {
             Ok(Arc::clone(&self.model) as Arc<dyn Model>)
+        }
+    }
+
+    /// A model that fails its first `failures` requests with a transient
+    /// provider error, then delegates to the scripted model.
+    struct FlakyModel {
+        inner: Arc<ScriptedModel>,
+        failures: std::sync::atomic::AtomicUsize,
+        retry_after: Option<Duration>,
+        kind: ProviderErrorKind,
+    }
+
+    impl FlakyModel {
+        fn new(
+            inner: Arc<ScriptedModel>,
+            failures: usize,
+            retry_after: Option<Duration>,
+            kind: ProviderErrorKind,
+        ) -> Self {
+            Self {
+                inner,
+                failures: std::sync::atomic::AtomicUsize::new(failures),
+                retry_after,
+                kind,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Model for FlakyModel {
+        fn reference(&self) -> &norte::ModelRef {
+            self.inner.reference()
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            self.inner.capabilities()
+        }
+
+        fn continuity(&self) -> &dyn norte::ContinuityAdapter {
+            self.inner.continuity()
+        }
+
+        async fn stream(&self, request: ModelRequest) -> norte::Result<ModelStream> {
+            let left = self.failures.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.failures
+                    .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                let mut error = norte::ProviderError::new(self.kind, "slow down");
+                if let Some(after) = self.retry_after {
+                    error = error.with_retry_after(after);
+                }
+                return Err(norte::Error::provider(error));
+            }
+            self.inner.stream(request).await
         }
     }
 
@@ -4091,6 +4526,245 @@ mod tests {
             events.first().map(|event| &event.kind),
             Some(ServerEventKind::TurnStarted { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_retries_the_same_session() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let scripted = Arc::new(ScriptedModel::new(reference).turn_text("after retry"));
+        let model = Arc::new(FlakyModel::new(
+            Arc::clone(&scripted),
+            1,
+            Some(Duration::from_millis(1)),
+            ProviderErrorKind::RateLimited,
+        ));
+        let mut config = config();
+        config.retry.max_attempts = 1;
+        config.retry.max_delay_ms = 10;
+        config.retry.backoff_ms = 1;
+        let (service, _store) = persistent_service_with_config(config, model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+
+        let retries: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                ServerEventKind::RetryScheduled {
+                    attempt,
+                    delay_ms,
+                    reason,
+                    ..
+                } => Some((*attempt, *delay_ms, reason.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].0, 1);
+        assert_eq!(retries[0].1, 1);
+        assert!(retries[0].2.contains("slow down"));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, ServerEventKind::Error { .. }))
+        );
+        let mut text = String::new();
+        for event in &events {
+            if let ServerEventKind::Delta {
+                delta: Delta::Text { text: chunk, .. },
+                ..
+            } = &event.kind
+            {
+                text.push_str(chunk);
+            }
+        }
+        assert_eq!(text, "after retry");
+        // The failed attempt never reached the scripted model, and the retry
+        // carried the user message exactly once.
+        let requests = scripted.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(ServerEventKind::TurnFinished {
+                committed: true,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_permanent_failure_is_not_retried() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let scripted = Arc::new(ScriptedModel::new(reference).turn_text("unused"));
+        let model = Arc::new(FlakyModel::new(
+            Arc::clone(&scripted),
+            1,
+            None,
+            ProviderErrorKind::QuotaExceeded,
+        ));
+        let mut config = config();
+        config.retry.max_attempts = 2;
+        let (service, _store) = persistent_service_with_config(config, model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, ServerEventKind::RetryScheduled { .. }))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, ServerEventKind::Error { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )));
+        assert!(scripted.requests().is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_command_sandbox_wraps_the_original_request_without_losing_it() {
+        let workspace = PathBuf::from("/work");
+        let arguments = serde_json::json!({
+            "command": {"kind": "shell", "shell": "sh", "script": "echo hi"},
+            "cwd": "/work/sub",
+            "env": {"A": "B"},
+            "timeout_ms": 1_000
+        });
+        let wrapped =
+            sandboxed_arguments(&arguments, &workspace, false, &[PathBuf::from("/cache")])
+                .expect("wrap");
+        let command = wrapped
+            .get("command")
+            .and_then(serde_json::Value::as_object)
+            .expect("command");
+        assert_eq!(command["kind"], "program");
+        assert_eq!(command["program"], "bwrap");
+        let args: Vec<&str> = command["args"]
+            .as_array()
+            .expect("args")
+            .iter()
+            .map(|value| value.as_str().expect("string"))
+            .collect();
+        assert!(args.contains(&"--unshare-all"));
+        assert!(args.contains(&"--cap-drop"));
+        assert!(!args.contains(&"--share-net"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--chdir" && pair[1] == "/work/sub")
+        );
+        assert!(
+            args.windows(3)
+                .any(|pair| pair[0] == "--bind" && pair[1] == "/cache" && pair[2] == "/cache")
+        );
+        assert_eq!(&args[args.len() - 4..], ["--", "sh", "-c", "echo hi"]);
+        assert_eq!(wrapped["cwd"], "/work/sub");
+        assert_eq!(wrapped["env"]["A"], "B");
+        assert_eq!(wrapped["timeout_ms"], 1_000);
+
+        let networked = sandboxed_arguments(&arguments, &workspace, true, &[]).expect("networked");
+        let args = networked["command"]["args"].as_array().expect("args");
+        assert!(
+            args.iter()
+                .any(|value| value.as_str() == Some("--share-net"))
+        );
+
+        let program = serde_json::json!({
+            "command": {"kind": "program", "program": "cargo", "args": ["test", "--all"]}
+        });
+        let wrapped = sandboxed_arguments(&program, &workspace, false, &[]).expect("program");
+        let args: Vec<&str> = wrapped["command"]["args"]
+            .as_array()
+            .expect("args")
+            .iter()
+            .map(|value| value.as_str().expect("string"))
+            .collect();
+        assert_eq!(&args[args.len() - 4..], ["--", "cargo", "test", "--all"]);
+
+        let request: CommandRequest = serde_json::from_value(arguments).expect("request");
+        let wrapped = sandbox_request(&request, &workspace, false, &[]).expect("request wrap");
+        let value = serde_json::to_value(&wrapped).expect("value");
+        assert_eq!(value["command"]["program"], "bwrap");
+        assert_eq!(sandbox_name(), "bwrap");
+
+        let broken = serde_json::json!({"command": {"kind": "teleport"}});
+        assert!(sandboxed_arguments(&broken, &workspace, false, &[]).is_err());
+    }
+
+    #[test]
+    fn retry_plan_uses_the_provider_hint_and_caps_the_wait() {
+        let config = RetryConfig {
+            max_attempts: 2,
+            max_delay_ms: 5_000,
+            backoff_ms: 1_000,
+        };
+
+        let hinted = norte::Error::provider(
+            norte::ProviderError::new(ProviderErrorKind::RateLimited, "wait")
+                .with_retry_after(Duration::from_secs(60)),
+        );
+        assert_eq!(
+            retry_plan(&hinted, &config, 0).map(|plan| plan.0),
+            Some(Duration::from_millis(5_000))
+        );
+        assert!(retry_plan(&hinted, &config, 2).is_none());
+
+        let unhinted = norte::Error::provider(norte::ProviderError::new(
+            ProviderErrorKind::Transport,
+            "down",
+        ));
+        assert_eq!(
+            retry_plan(&unhinted, &config, 0).map(|plan| plan.0),
+            Some(Duration::from_millis(1_000))
+        );
+        assert_eq!(
+            retry_plan(&unhinted, &config, 1).map(|plan| plan.0),
+            Some(Duration::from_millis(2_000))
+        );
+
+        let permanent = norte::Error::provider(norte::ProviderError::new(
+            ProviderErrorKind::QuotaExceeded,
+            "no credit",
+        ));
+        assert!(retry_plan(&permanent, &config, 0).is_none());
     }
 
     #[tokio::test]
@@ -4509,7 +5183,7 @@ mod tests {
 
     async fn persistent_service_with_config(
         config: Config,
-        model: Arc<ScriptedModel>,
+        model: Arc<dyn Model>,
     ) -> (Arc<Service>, Arc<SqliteStore>) {
         let store = Arc::new(SqliteStore::in_memory().expect("store"));
         let service = Service::with_directory(

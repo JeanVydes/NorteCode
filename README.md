@@ -116,6 +116,15 @@ If the summary fails, history and the active session id stay unchanged, and an
 eager turn stops at the safe point so it can be resumed. Models without a
 catalogue context limit do not compact automatically.
 
+A transient provider failure (a rate limit, an overload, a server error or a
+transport error) is retried up to `retry.max_attempts` times (default `2`). The
+wait is the provider's `retry_after` when it sent one, capped by
+`retry.max_delay_ms` (default 30 s); without a hint the first wait is
+`retry.backoff_ms` (default 1 s) and doubles on each attempt. A retry resumes
+the same session with no new input, so the user's message is never appended
+twice. Permanent failures (quota, authentication, a malformed request) fail
+immediately, and `retry.max_attempts: 0` disables retries.
+
 Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or
 `~/.local/share/norte-code/sessions.db`). A run creates a new session unless
@@ -156,6 +165,39 @@ it force-exits. The session stays resumable with `norte-code resume`.
 an answer. The approval or question stays pending, the command exits cleanly and
 prints how to resume, so a mistaken keypress never turns into a deny or an
 invented answer.
+
+## Command sandbox
+
+`tools.sandbox.enabled` (default `false`) runs every `command` inside the host
+sandbox: bubblewrap on Linux, `sandbox-exec` on macOS. The workspace is
+writable, the rest of the filesystem is read-only, `/tmp` is a private tmpfs,
+and the network is off unless `tools.sandbox.network` is `true`. Extra writable
+directories go in `tools.sandbox.writable`. The approval panel still shows the
+command the model asked for, with a `[bwrap]` or `[seatbelt]` badge; the sandbox
+flags are internal and never replace the approved arguments. The wrapper sits
+inside the command tool's executor, after policies, approvals and the effect
+journal.
+
+On `run` and `resume`, `--sandbox` and `--no-sandbox` override
+`tools.sandbox.enabled` for that invocation, and `--sandbox-network on|off`
+overrides `tools.sandbox.network`. `--sandbox-network` needs the sandbox to be
+on, so pass `--sandbox` or enable it in the config; it cannot be combined with
+`--no-sandbox`, and `--sandbox` and `--no-sandbox` are mutually exclusive.
+
+```bash
+norte-code run --sandbox --sandbox-network on \
+  "fetch the changelog and summarise it"
+```
+
+The sandbox needs the platform binary (`apt install bubblewrap`, `dnf install
+bubblewrap`, `pacman -S bubblewrap`, or the `sandbox-exec` that ships with
+macOS). If it is missing, or the platform cannot create the namespaces, the
+command fails instead of running unsandboxed. It contains writes, processes and
+(by default) the network, but it is not a VM: it can still read files the user
+can read, reach Unix sockets visible in the filesystem, consume CPU, memory or
+disk, and share the kernel. Treat it as one layer with the approval rules, not
+as a replacement for them. `skill_script` has its own switch
+(`skills.allow_scripts`) and is not covered by the command sandbox.
 
 ## Local request telemetry
 
