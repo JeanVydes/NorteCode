@@ -123,6 +123,12 @@ pub struct RequestRecord {
     /// The reasoning setting the request carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Whether the command sandbox was enabled for this request's run.
+    #[serde(default)]
+    pub sandbox: bool,
+    /// Whether that sandbox allowed network access.
+    #[serde(default)]
+    pub sandbox_network: bool,
     /// The generation parameters the request carried.
     #[serde(default)]
     pub params: Value,
@@ -558,6 +564,18 @@ impl SqliteStore {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         ensure_column(&connection, "requests", "last_token_ms", "INTEGER")?;
+        ensure_column(
+            &connection,
+            "requests",
+            "sandbox",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(
+            &connection,
+            "requests",
+            "sandbox_network",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -717,7 +735,9 @@ CREATE TABLE IF NOT EXISTS requests (
     cost_usd                REAL,
     finish_reason           TEXT,
     status                  TEXT NOT NULL,
-    error                   TEXT
+    error                   TEXT,
+    sandbox                 INTEGER NOT NULL DEFAULT 0,
+    sandbox_network         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS requests_started_at ON requests(started_at);
 CREATE INDEX IF NOT EXISTS requests_session ON requests(session);
@@ -1467,10 +1487,12 @@ impl SessionDirectory for SqliteStore {
                          duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                          reasoning_tokens, cache_read_tokens, cache_write_tokens,
                          estimated_input_tokens, cache_hit, tool_calls, reasoning,
-                         params, extensions, metadata, cost_usd, finish_reason, status, error
+                         params, extensions, metadata, cost_usd, finish_reason, status, error,
+                         sandbox, sandbox_network
                      ) VALUES (
                          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
+                         ?28
                      )
                      ON CONFLICT(id) DO UPDATE SET
                          session = excluded.session,
@@ -1497,7 +1519,9 @@ impl SessionDirectory for SqliteStore {
                          cost_usd = excluded.cost_usd,
                          finish_reason = excluded.finish_reason,
                          status = excluded.status,
-                         error = excluded.error",
+                         error = excluded.error,
+                         sandbox = excluded.sandbox,
+                         sandbox_network = excluded.sandbox_network",
                     params![
                         record.id,
                         record.session,
@@ -1525,6 +1549,8 @@ impl SessionDirectory for SqliteStore {
                         record.finish_reason,
                         record.status,
                         record.error,
+                        i64::from(record.sandbox),
+                        i64::from(record.sandbox_network),
                     ],
                 )
                 .map_err(Fault::from)?;
@@ -1562,6 +1588,8 @@ impl SessionDirectory for SqliteStore {
             Option<String>,
             String,
             Option<String>,
+            i64,
+            i64,
         )> = self
             .run(move |connection| {
                 let sql = if session.is_some() {
@@ -1569,14 +1597,16 @@ impl SessionDirectory for SqliteStore {
                             duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
-                            params, extensions, metadata, cost_usd, finish_reason, status, error
+                            params, extensions, metadata, cost_usd, finish_reason, status, error,
+                            sandbox, sandbox_network
                      FROM requests WHERE session = ?1 ORDER BY started_at, id"
                 } else {
                     "SELECT id, session, north_session, turn, provider, model, started_at,
                             duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
-                            params, extensions, metadata, cost_usd, finish_reason, status, error
+                            params, extensions, metadata, cost_usd, finish_reason, status, error,
+                            sandbox, sandbox_network
                      FROM requests ORDER BY started_at, id"
                 };
                 let mut statement = connection.prepare(sql).map_err(Fault::from)?;
@@ -1608,6 +1638,8 @@ impl SessionDirectory for SqliteStore {
                         row.get(23)?,
                         row.get(24)?,
                         row.get(25)?,
+                        row.get(26)?,
+                        row.get(27)?,
                     ))
                 };
                 let mapped = if let Some(session) = session.as_deref() {
@@ -1655,6 +1687,8 @@ impl SessionDirectory for SqliteStore {
                     finish_reason,
                     status,
                     error,
+                    sandbox,
+                    sandbox_network,
                 ) = row;
                 let token = |value: Option<i64>, what: &str| {
                     value.map(|value| rust_u64(value, what)).transpose()
@@ -1687,6 +1721,8 @@ impl SessionDirectory for SqliteStore {
                     cache_hit: cache_hit != 0,
                     tool_calls: decode(&tool_calls, "request tool calls")?,
                     reasoning,
+                    sandbox: sandbox != 0,
+                    sandbox_network: sandbox_network != 0,
                     params: decode(&params, "request params")?,
                     extensions: decode(&extensions, "request extensions")?,
                     metadata: decode(&metadata, "request metadata")?,
@@ -1899,6 +1935,47 @@ mod tests {
         assert_eq!(costs[0].output_tokens, Some(25));
         assert!(costs[0].cost_usd.is_none());
         assert!(store.costs(Some("other")).await.expect("costs").is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_rows_keep_the_sandbox_flags() {
+        let store = SqliteStore::in_memory().expect("open");
+        let record = RequestRecord {
+            id: "request".to_owned(),
+            session: "session".to_owned(),
+            north_session: SessionId::new().to_string(),
+            turn: 1,
+            provider: "provider".to_owned(),
+            model: "model".to_owned(),
+            started_at: Utc::now(),
+            duration_ms: 10,
+            first_token_ms: Some(1),
+            last_token_ms: Some(9),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            reasoning_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            estimated_input_tokens: None,
+            cache_hit: false,
+            tool_calls: vec!["command".to_owned()],
+            reasoning: None,
+            sandbox: true,
+            sandbox_network: true,
+            params: serde_json::Value::Null,
+            extensions: serde_json::Value::Null,
+            metadata: serde_json::Value::Null,
+            cost_usd: None,
+            finish_reason: None,
+            status: "ok".to_owned(),
+            error: None,
+        };
+        store.record_request(&record).await.expect("record");
+        let rows = store.requests(Some("session")).await.expect("requests");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].sandbox);
+        assert!(rows[0].sandbox_network);
+        assert_eq!(rows[0].tool_calls, ["command"]);
     }
 
     #[tokio::test]

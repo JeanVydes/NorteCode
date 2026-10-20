@@ -3191,6 +3191,26 @@ fn debug_start(
         ))
     );
     eprintln!("{}", style.dim(format!("  iterations {iterations}")));
+    let sandbox = if configuration.tools.sandbox.enabled {
+        let name = if cfg!(target_os = "linux") {
+            "bwrap"
+        } else if cfg!(target_os = "macos") {
+            "seatbelt"
+        } else {
+            "unsupported platform"
+        };
+        format!(
+            "enabled · {name} · network {}",
+            if configuration.tools.sandbox.network {
+                "on"
+            } else {
+                "off"
+            }
+        )
+    } else {
+        "disabled".to_owned()
+    };
+    eprintln!("{}", style.dim(format!("  sandbox    {sandbox}")));
     eprintln!(
         "{}",
         style.dim(format!(

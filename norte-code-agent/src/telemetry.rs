@@ -142,13 +142,25 @@ impl Observer for TelemetryObserver {
 pub struct TelemetryLayer {
     telemetry: Arc<Telemetry>,
     spec: ModelSpec,
+    sandbox: bool,
+    sandbox_network: bool,
 }
 
 impl TelemetryLayer {
     /// A layer for `spec` that records into `telemetry`.
     #[must_use]
-    pub fn new(telemetry: Arc<Telemetry>, spec: ModelSpec) -> Self {
-        Self { telemetry, spec }
+    pub fn new(
+        telemetry: Arc<Telemetry>,
+        spec: ModelSpec,
+        sandbox: bool,
+        sandbox_network: bool,
+    ) -> Self {
+        Self {
+            telemetry,
+            spec,
+            sandbox,
+            sandbox_network,
+        }
     }
 }
 
@@ -166,7 +178,8 @@ impl Layer for TelemetryLayer {
     ) -> norte::Result<ModelStream> {
         let started_at = Utc::now();
         let started = Instant::now();
-        let metadata = RequestMetadata::from_request(&request, &self.spec);
+        let metadata =
+            RequestMetadata::from_request(&request, &self.spec, self.sandbox, self.sandbox_network);
         match next.call(context, request).await {
             Ok(stream) => Ok(Box::pin(TelemetryStream {
                 inner: stream,
@@ -205,16 +218,25 @@ impl Layer for TelemetryLayer {
 
 struct RequestMetadata {
     reasoning: Option<String>,
+    sandbox: bool,
+    sandbox_network: bool,
     params: Value,
     extensions: Value,
     metadata: Value,
 }
 
 impl RequestMetadata {
-    fn from_request(request: &ModelRequest, spec: &ModelSpec) -> Self {
+    fn from_request(
+        request: &ModelRequest,
+        spec: &ModelSpec,
+        sandbox: bool,
+        sandbox_network: bool,
+    ) -> Self {
         let bytes = serde_json::to_vec(&request.messages).map_or(0, |bytes| bytes.len());
         Self {
             reasoning: Some(reasoning_label(request.reasoning)),
+            sandbox,
+            sandbox_network,
             params: serde_json::to_value(&request.params).unwrap_or(Value::Null),
             extensions: serde_json::to_value(&request.extensions).unwrap_or(Value::Null),
             metadata: json!({
@@ -260,6 +282,8 @@ impl RequestMetadata {
             cache_hit: false,
             tool_calls: Vec::new(),
             reasoning: self.reasoning.clone(),
+            sandbox: self.sandbox,
+            sandbox_network: self.sandbox_network,
             params: self.params.clone(),
             extensions: self.extensions.clone(),
             metadata: self.metadata.clone(),
@@ -454,7 +478,7 @@ mod tests {
             api_key: norte_code_config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),
         };
-        let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec);
+        let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec, true, false);
         let request = ModelRequest {
             model: norte::ModelRef::new(
                 norte::ProviderId::new("test").expect("provider"),
@@ -480,5 +504,7 @@ mod tests {
         let records = telemetry.take(context.session);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "ok");
+        assert!(records[0].sandbox);
+        assert!(!records[0].sandbox_network);
     }
 }

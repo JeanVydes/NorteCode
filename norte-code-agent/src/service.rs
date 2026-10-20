@@ -972,6 +972,8 @@ impl Service {
         layers.push(Arc::new(TelemetryLayer::new(
             Arc::clone(&self.telemetry),
             spec.clone(),
+            self.config.tools.sandbox.enabled,
+            self.config.tools.sandbox.network,
         )));
         builder = builder.layers(LayerStack::new(layers));
         Ok(builder.build()?)
@@ -2687,6 +2689,8 @@ impl Service {
             cache_hit: usage.cache_read_tokens.unwrap_or(0) > 0,
             tool_calls: Vec::new(),
             reasoning: None,
+            sandbox: self.config.tools.sandbox.enabled,
+            sandbox_network: self.config.tools.sandbox.network,
             params: serde_json::Value::Null,
             extensions: serde_json::Value::Null,
             metadata: serde_json::json!({"source": "history"}),

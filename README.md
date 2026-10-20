@@ -54,8 +54,8 @@ norte-code run --debug --verbose \
 ```
 
 `--debug` prints the session id, model, wire, approval mode, iteration limit,
-compaction threshold and trigger, workspace, config and database paths, and the
-configured extension keys. It also prints the selected model's modalities, context and
+compaction threshold and trigger, sandbox state and network access, workspace,
+config and database paths, and the configured extension keys. It also prints the selected model's modalities, context and
 output limits, tool kinds, reasoning controls, streaming, cache, features,
 structured output and catalogue metadata, the effective reasoning setting for
 the session, and where the system prompt came from (flag, config or built-in),
@@ -203,7 +203,8 @@ as a replacement for them. `skill_script` has its own switch
 
 Every provider attempt is recorded locally in the `requests` table: session,
 provider and model, prompt/output/reasoning/cache tokens, tools called, latency
-to first output and to completion, reasoning setting, reported cost, status and
+to first output and to completion, reasoning setting, whether the command
+sandbox was enabled and whether it allowed network, reported cost, status and
 response metadata. `norte-code telemetry` prints totals and averages; `--bucket
 hour|day|month|year|total` changes the grouping, `--session`, `--provider` and
 `--model` filter, and `--json` emits one object. It also lists the top

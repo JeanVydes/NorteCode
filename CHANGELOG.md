@@ -175,7 +175,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   for one run or resume; the network option needs the sandbox and conflicts with
   `--no-sandbox`. Approvals and the effect journal keep the original command,
   the panel adds a `[bwrap]`/`[seatbelt]` badge, and a missing platform binary
-  fails closed instead of running unsandboxed.
+  fails closed instead of running unsandboxed. Request telemetry rows record
+  whether the sandbox was on and whether it allowed network, and `--debug` shows
+  the effective sandbox state.
 - A lost store race is reported as a conflict with a resume hint instead of a
   provider error. The session version is an optimistic-concurrency token, not a
   message count; a turn that loses the race did not commit.
