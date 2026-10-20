@@ -656,13 +656,31 @@ fn bash_allows(pattern: &str, arguments: &serde_json::Value) -> bool {
 fn escape(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() && character != '\n' && character != '\t' {
+        if (character.is_control() && character != '\n' && character != '\t') || is_bidi(character)
+        {
             let _ = write!(output, "\\u{{{:x}}}", u32::from(character));
         } else {
             output.push(character);
         }
     }
     output
+}
+
+/// Whether a character can reorder or hide the rest of a line.
+///
+/// These are Unicode format characters, not control characters. A skill body
+/// or resource with a right-to-left override could otherwise make the model
+/// read instructions the human cannot see.
+fn is_bidi(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+    )
 }
 
 fn clip(text: &str, max_bytes: usize) -> String {
@@ -732,8 +750,8 @@ impl SkillTool {
                 let _ = write!(
                     text,
                     "\nSkipped {}: {}",
-                    warning.path.display(),
-                    warning.message
+                    escape(&warning.path.display().to_string()),
+                    escape(&warning.message)
                 );
             }
             return ToolOutput::text(text);
@@ -748,9 +766,9 @@ impl SkillTool {
             let _ = writeln!(
                 text,
                 "- {}{active}: {}\n  {}",
-                skill.name,
-                skill.description,
-                skill.root.display()
+                escape(&skill.name),
+                escape(&skill.description),
+                escape(&skill.root.display().to_string())
             );
         }
         ToolOutput::text(clip(&text, MAX_BODY_BYTES))
@@ -759,14 +777,18 @@ impl SkillTool {
     fn activate(&self, session: Option<SessionId>, name: &str) -> ToolOutput {
         match self.registry.activate(session, name) {
             Ok(skill) => {
-                let mut text = format!("# skill: {}\n\n{}", skill.name, skill.body);
+                let mut text = format!(
+                    "# skill: {}\n\n{}",
+                    escape(&skill.name),
+                    escape(&skill.body)
+                );
                 let resources = skill.resources();
                 if resources.is_empty() {
                     text.push_str("\n\n(no resources)");
                 } else {
                     text.push_str("\n\nResources (read only when needed):");
                     for resource in resources {
-                        let _ = write!(text, "\n- {resource}");
+                        let _ = write!(text, "\n- {}", escape(&resource));
                     }
                 }
                 ToolOutput::text(clip(&text, MAX_BODY_BYTES))
@@ -1107,6 +1129,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp root");
         root
+    }
+
+    #[test]
+    fn untrusted_skill_text_is_escaped() {
+        assert_eq!(escape("a\u{202e}b\x1b[2J"), "a\\u{202e}b\\u{1b}[2J");
+        assert_eq!(escape("a\n\tb"), "a\n\tb");
     }
 
     #[test]

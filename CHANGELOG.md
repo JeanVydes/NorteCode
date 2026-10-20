@@ -22,10 +22,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
-- Model answers, reasoning, tool output, approval previews and catalogue or
-  report text are escaped before they reach the terminal. ANSI escapes and
-  bidi overrides can no longer move the cursor, rewrite a line, spoof an
-  approval prompt or change the terminal title; newlines and tabs are kept.
+- Model answers, reasoning, tool output, skill bodies and resources, approval
+  previews and catalogue or report text are escaped before they reach the
+  terminal. ANSI escapes and bidi overrides can no longer move the cursor,
+  rewrite a line, spoof an approval prompt or change the terminal title;
+  newlines and tabs are kept.
 - Skill discovery refuses a `SKILL.md` that resolves outside its skill
   directory, so a project cannot point it at `/etc/passwd` or another host file.
 
