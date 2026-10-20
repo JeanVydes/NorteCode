@@ -9,19 +9,21 @@
 //! `norte-code models` lists what the catalogue knows, filtered by provider,
 //! tool calling or reasoning.
 
+mod approval;
 mod commands;
 mod input;
 mod interaction;
+mod models;
+mod prompt;
 mod render;
 mod style;
 mod text;
 
+use approval::{clip_text, compact_json};
 use commands::{apply_extensions, database_path, duration_label, run};
 use input::{InteractiveInput, Pinned};
-use interaction::{
-    clip_text, compact_json, drive_turns, echo_user_message, interactive_loop, list_models,
-    resolve_spec,
-};
+use interaction::{drive_turns, echo_user_message, interactive_loop};
+use models::{list_models, resolve_spec};
 use render::{
     Format, Renderer, approval_label, debug_model, debug_prompt_size, debug_reasoning, debug_start,
     fallback_env, find_project_config, human_tokens, parse_budget_action, parse_budget_unit,
@@ -30,12 +32,15 @@ use render::{
 };
 
 #[cfg(test)]
+use approval::{
+    ApprovalChoice, PreviewLine, approval_request, argument_preview, parse_approval_choice,
+};
+#[cfg(test)]
 use commands::cost_summary;
 #[cfg(test)]
-use interaction::{
-    ApprovalChoice, PreviewLine, approval_request, argument_preview, compose_selection,
-    parse_approval_choice, parse_approval_command, parse_selection,
-};
+use interaction::parse_approval_command;
+#[cfg(test)]
+use prompt::{compose_selection, parse_selection};
 #[cfg(test)]
 use render::budget_label;
 
