@@ -29,6 +29,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   newlines and tabs are kept.
 - Skill discovery refuses a `SKILL.md` that resolves outside its skill
   directory, so a project cannot point it at `/etc/passwd` or another host file.
+- `web_fetch` accepts only public HTTP(S) targets. Loopback, private,
+  link-local, CGNAT, benchmark, documentation and reserved IPv4/IPv6 addresses
+  (including cloud metadata endpoints) are refused, every resolved address is
+  checked and pinned for the request, proxies are bypassed, and each redirect is
+  validated before the next hop.
 
 ### Fixed
 
