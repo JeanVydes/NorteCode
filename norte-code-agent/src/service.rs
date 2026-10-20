@@ -19,9 +19,9 @@ use norte::{
     ApprovalId, BlobStore, CallId, Continuation, Decision, Engine, EngineBuilder, EngineConfig,
     EngineEvent, FinishReason, FnExecutor, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore,
     Layer, LayerContext, LayerStack, Message, Model, ModelRequest, ModelStream, Policy, PolicySet,
-    PolicyView, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
-    ShortCircuitReason, Store, StreamDelta, ToolArgs, ToolContext, ToolDeclaration, ToolKind,
-    ToolOutput, ToolRegistry, Usage,
+    PolicyView, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role,
+    SessionId, ShortCircuitReason, Store, StreamDelta, ToolArgs, ToolContext, ToolDeclaration,
+    ToolKind, ToolOutput, ToolRegistry, Usage,
 };
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord, CostSummary, summarize};
 use norte_code_skills::{
@@ -75,6 +75,11 @@ struct SessionRecord {
     denied_tools: Vec<String>,
     /// The Norte session this one was compacted from, when it was.
     compacted_from: Option<SessionId>,
+    /// Whether a compaction is running, so a concurrent turn does not repeat it.
+    compacting: bool,
+    /// The history length written by the last compaction. A session that has
+    /// not grown past it has nothing new to summarise.
+    compaction_baseline: usize,
 }
 
 /// Live counters for the turn in flight.
@@ -490,6 +495,12 @@ impl Service {
                     .and_then(|value| serde_json::from_value(value.clone()).ok()),
                 denied_tools: entry.denied_tools.clone(),
                 compacted_from: entry.compacted_from,
+                compacting: false,
+                compaction_baseline: stats
+                    .get("compaction_baseline")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(0),
             };
             records.push((key.clone(), record));
             if needs_repair {
@@ -531,6 +542,7 @@ impl Service {
                 "input_tokens": record.input_tokens,
                 "output_tokens": record.output_tokens,
                 "budget": record.budget,
+                "compaction_baseline": record.compaction_baseline,
             }),
             denied_tools: record.denied_tools.clone(),
             compacted_from: record.compacted_from,
@@ -889,9 +901,7 @@ impl Service {
                     .await
             }
             Kind::Steer { .. } => Err(ServiceError::Unsupported("steering arrives with the TUI")),
-            Kind::Compact { .. } => Err(ServiceError::Unsupported(
-                "compaction arrives in milestone 6",
-            )),
+            Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
         }
     }
 
@@ -1144,10 +1154,292 @@ impl Service {
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
             compacted_from: None,
+            compacting: false,
+            compaction_baseline: 0,
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
         Ok(key)
+    }
+
+    /// Checks whether the session has crossed the automatic compaction
+    /// threshold. Only a turn boundary is a safe point: a non-idle session may
+    /// hold an assistant tool call whose results are not committed yet.
+    #[allow(clippy::cast_precision_loss)]
+    async fn compaction_due(
+        &self,
+        key: &SessionKey,
+        spec: &ModelSpec,
+        nid: SessionId,
+    ) -> Result<bool, ServiceError> {
+        if !self.config.compaction.enabled {
+            return Ok(false);
+        }
+        if self
+            .lock_sessions()
+            .get(key)
+            .is_none_or(|record| record.compacting)
+        {
+            return Ok(false);
+        }
+        let Some(max_context) = spec.capabilities.max_context else {
+            return Ok(false);
+        };
+        let engine = self.engine(spec)?;
+        let state = engine.session(nid).await?;
+        if state.phase != norte::Phase::Idle {
+            return Ok(false);
+        }
+        let history = engine.history(nid).await?;
+        let baseline = self
+            .lock_sessions()
+            .get(key)
+            .map_or(0, |record| record.compaction_baseline);
+        if history.len() <= baseline
+            || history.len() <= self.config.compaction.keep_recent.saturating_add(1)
+        {
+            return Ok(false);
+        }
+        let used = used_context(&history);
+        Ok(used as f64 >= max_context as f64 * self.config.compaction.threshold)
+    }
+
+    /// Runs one compaction and reports its events, including a failure.
+    async fn perform_compaction(
+        &self,
+        request_id: u64,
+        key: &SessionKey,
+        reason: &str,
+    ) -> Result<Vec<ServerEvent>, ServiceError> {
+        if !self.begin_compaction(key) {
+            return Err(ServiceError::Compaction(
+                "another compaction is already running".to_owned(),
+            ));
+        }
+        let result = self.compact_core(key).await;
+        self.end_compaction(key);
+        let mut events = vec![ServerEvent::new(
+            request_id,
+            Some(key.clone()),
+            ServerEventKind::CompactionStarted {
+                reason: reason.to_owned(),
+            },
+        )];
+        match result {
+            Ok((_old, new)) => events.push(ServerEvent::new(
+                request_id,
+                Some(key.clone()),
+                ServerEventKind::CompactionFinished {
+                    compacted: true,
+                    north_session: Some(new.to_string()),
+                    error: None,
+                },
+            )),
+            Err(error) => {
+                events.push(ServerEvent::new(
+                    request_id,
+                    Some(key.clone()),
+                    ServerEventKind::CompactionFinished {
+                        compacted: false,
+                        north_session: None,
+                        error: Some(error.to_string()),
+                    },
+                ));
+            }
+        }
+        Ok(events)
+    }
+
+    fn begin_compaction(&self, key: &SessionKey) -> bool {
+        let mut sessions = self.lock_sessions();
+        let Some(record) = sessions.get_mut(key) else {
+            return false;
+        };
+        if record.compacting || record.phase != norte_code_protocol::Phase::Idle {
+            return false;
+        }
+        record.compacting = true;
+        true
+    }
+
+    fn end_compaction(&self, key: &SessionKey) {
+        if let Some(record) = self.lock_sessions().get_mut(key) {
+            record.compacting = false;
+        }
+    }
+
+    /// The client-facing manual compaction, as a stream of events.
+    async fn compact_event_stream(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<EventStream, ServiceError> {
+        self.require_record(&key)?;
+        let events = self.perform_compaction(request_id, &key, "manual").await?;
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    /// The algorithm: summarise with the old transcript as the prefix, then
+    /// seed a fresh Norte session with the summary, the todo list and the last
+    /// `keep_recent` messages. The old session is never modified.
+    async fn compact_core(&self, key: &SessionKey) -> Result<(SessionId, SessionId), ServiceError> {
+        let (old, spec, phase) = self.require_record(key)?;
+        if phase != norte_code_protocol::Phase::Idle {
+            return Err(ServiceError::Compaction(
+                "the session must be idle before it can compact".to_owned(),
+            ));
+        }
+        let engine = self.engine(&spec)?;
+        let state = engine.session(old).await?;
+        if state.phase != norte::Phase::Idle {
+            return Err(ServiceError::Compaction(
+                "the Norte session is not idle; resolve the turn first".to_owned(),
+            ));
+        }
+        let history = engine.history(old).await?;
+        let conversation: Vec<Message> = history
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .cloned()
+            .collect();
+        if conversation.is_empty() {
+            return Err(ServiceError::Compaction(
+                "there is no conversation to compact yet".to_owned(),
+            ));
+        }
+        let summary_spec = self.summary_spec(&spec)?;
+        let book = self.budget_book(key).await?;
+        let summary_engine = self.engine_with_budget(&summary_spec, Some(book))?;
+        let scratch = summary_engine.create().await?;
+        let mut request_messages = history.clone();
+        request_messages.push(Message::user(SUMMARY_PROMPT));
+        summary_engine
+            .append_history(scratch.id, request_messages)
+            .await?;
+        let reasoning = compaction_reasoning(
+            &summary_spec.capabilities.reasoning,
+            &self.config.compaction.reasoning,
+        );
+        let outcome = summary_engine
+            .turn(scratch.id)
+            .reasoning(reasoning)
+            .tools(std::iter::empty::<norte::ToolName>())
+            .start()
+            .finish()
+            .await?;
+        let message = outcome.message.ok_or_else(|| {
+            ServiceError::Compaction("the summary request committed no message".to_owned())
+        })?;
+        let summary = message.text();
+        if summary.trim().is_empty() {
+            return Err(ServiceError::Compaction(
+                "the model returned an empty summary".to_owned(),
+            ));
+        }
+        self.record_summary_usage(key, scratch.id, state.turn, &message)
+            .await?;
+
+        let start = recent_start(&conversation, self.config.compaction.keep_recent);
+        let recent = conversation[start..].to_vec();
+        let fresh = engine.create().await?;
+        let mut seed = vec![Message::system(self.system_prompt.clone())];
+        seed.push(Message::user(format!(
+            "Summary of the earlier conversation, produced by Norte Code. Treat it as \
+             context, not as a new request:\n\n{summary}"
+        )));
+        let todos = self.todo.text(Some(old));
+        if !todos.starts_with("(the task list is empty)") {
+            seed.push(Message::user(format!("Current task list:\n{todos}")));
+        }
+        seed.extend(recent);
+        engine.append_history(fresh.id, seed).await?;
+        let seeded = engine.history(fresh.id).await?.len();
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.id = fresh.id;
+            record.compacted_from = Some(old);
+            record.billed = seeded;
+            record.compaction_baseline = seeded;
+            record.phase = norte_code_protocol::Phase::Idle;
+            self.approval_rules
+                .load_session(fresh.id, &record.denied_tools);
+        }
+        self.todo.carry(old, fresh.id);
+        self.persist(key).await?;
+        Ok((old, fresh.id))
+    }
+
+    fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
+        match &self.config.compaction.model {
+            Some(reference) => {
+                ModelSpec::from_catalog(&self.config, &self.catalog(), reference, None)
+            }
+            None => Ok(session.clone()),
+        }
+    }
+
+    async fn budget_book(
+        &self,
+        key: &SessionKey,
+    ) -> Result<Arc<Mutex<norte_code_cost::BudgetBook>>, ServiceError> {
+        if let Some(book) = self.lock_budget_states().get(key).cloned() {
+            return Ok(book);
+        }
+        let message = configured_budget(self.config.budgets.message.as_ref());
+        let book = self.new_budget_book(key, message).await?;
+        self.lock_budget_states()
+            .insert(key.clone(), Arc::clone(&book));
+        Ok(book)
+    }
+
+    async fn record_summary_usage(
+        &self,
+        key: &SessionKey,
+        scratch: SessionId,
+        turn: u64,
+        message: &Message,
+    ) -> Result<(), ServiceError> {
+        let Some(origin) = &message.origin else {
+            return Ok(());
+        };
+        for record in self.telemetry_for(key, scratch) {
+            self.record_request(key, &record).await;
+        }
+        let cost = reported_cost(&origin.usage);
+        let index = {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.requests += 1;
+            record.cost += cost.unwrap_or(0.0);
+            if cost.is_none() {
+                record.unpriced += 1;
+            }
+            record.input_tokens += origin.usage.input_tokens.unwrap_or(0);
+            record.output_tokens += origin.usage.output_tokens.unwrap_or(0);
+            record.requests
+        };
+        let ledger = CostRecord {
+            session: key.to_string(),
+            turn,
+            index,
+            model: origin.model.to_string(),
+            input_tokens: origin.usage.input_tokens,
+            output_tokens: origin.usage.output_tokens,
+            reasoning_tokens: origin.usage.reasoning_tokens,
+            cache_read_tokens: origin.usage.cache_read_tokens,
+            cache_write_tokens: origin.usage.cache_write_tokens,
+            cost_usd: cost,
+            recorded_at: Utc::now(),
+        };
+        self.directory.record_cost(&ledger).await?;
+        self.budget_notices(key, &ledger, true);
+        self.persist(key).await?;
+        Ok(())
     }
 
     async fn fork_session(
@@ -1175,6 +1467,8 @@ impl Service {
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
             compacted_from: Some(source),
+            compacting: false,
+            compaction_baseline: 0,
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -1185,7 +1479,11 @@ impl Service {
     ///
     /// The outer option distinguishes a new message (which replaces the
     /// message budget) from a resume (which keeps the one already in force).
-    #[allow(clippy::option_option, clippy::too_many_arguments)]
+    #[allow(
+        clippy::option_option,
+        clippy::too_many_arguments,
+        clippy::too_many_lines
+    )]
     async fn start_turn(
         self: &Arc<Self>,
         request_id: u64,
@@ -1194,7 +1492,7 @@ impl Service {
         message_budget: Option<Option<Budget>>,
         reasoning: Option<ProtocolReasoning>,
     ) -> Result<EventStream, ServiceError> {
-        let (key, nid, spec) = if let Some(key) = session {
+        let (key, mut nid, mut spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
             (key, nid, spec)
         } else {
@@ -1202,6 +1500,21 @@ impl Service {
             let (nid, spec, _) = self.require_record(&key)?;
             (key, nid, spec)
         };
+        let mut leading = Vec::new();
+        if self.compaction_due(&key, &spec, nid).await? {
+            leading = match self.perform_compaction(request_id, &key, "threshold").await {
+                Ok(events) => events,
+                Err(error) => vec![ServerEvent::error(
+                    request_id,
+                    Some(key.clone()),
+                    ErrorCode::Conflict,
+                    error.to_string(),
+                )],
+            };
+            let (new_nid, new_spec, _) = self.require_record(&key)?;
+            nid = new_nid;
+            spec = new_spec;
+        }
         let reasoning = resolve_reasoning(
             reasoning.as_ref(),
             &self.config.reasoning.default,
@@ -1276,11 +1589,13 @@ impl Service {
             this.lock_cancels().remove(&task_key);
         });
 
-        Ok(Box::pin(futures_util::stream::iter(restored).chain(
-            futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            }),
-        )))
+        Ok(Box::pin(
+            futures_util::stream::iter(leading)
+                .chain(futures_util::stream::iter(restored))
+                .chain(futures_util::stream::unfold(rx, |mut rx| async move {
+                    rx.recv().await.map(|event| (event, rx))
+                })),
+        ))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1319,13 +1634,16 @@ impl Service {
         }
 
         let mut cancelled = false;
+        let mut interrupted = false;
         let mut failure: Option<String> = None;
+        let mut failure_code = None;
         let mut questions = self.questions.subscribe();
         loop {
             tokio::select! {
                 biased;
                 () = notify.notified() => {
                     cancelled = true;
+                    interrupted = true;
                 }
                 question = questions.recv() => {
                     if let Ok(question) = question {
@@ -1360,6 +1678,7 @@ impl Service {
                             }
                         }
                         Some(Err(error)) => {
+                            failure_code = Some(error_code(&error));
                             failure = Some(error.to_string());
                             break;
                         }
@@ -1397,9 +1716,52 @@ impl Service {
                     ),
                 )
                 .await;
+                if !interrupted
+                    && outcome.session.phase == norte::Phase::Idle
+                    && self.budget_stopped(key).is_none()
+                {
+                    if let Ok((current, spec, _)) = self.require_record(key) {
+                        if self
+                            .compaction_due(key, &spec, current)
+                            .await
+                            .unwrap_or(false)
+                        {
+                            match self.perform_compaction(request_id, key, "threshold").await {
+                                Ok(events) => {
+                                    for event in events {
+                                        if !emit(tx, event).await {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = emit(
+                                        tx,
+                                        ServerEvent::error(
+                                            request_id,
+                                            Some(key.clone()),
+                                            ErrorCode::Internal,
+                                            error.to_string(),
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Err(error) => {
+                let code = failure_code.unwrap_or_else(|| error_code(&error));
                 let message = failure.unwrap_or_else(|| error.to_string());
+                let message = if code == ErrorCode::Conflict {
+                    format!(
+                        "{message}; the session had already advanced, so this turn did not commit. \
+                         Resume the session to continue from the latest commit."
+                    )
+                } else {
+                    message
+                };
                 let phase = engine
                     .session(nid)
                     .await
@@ -1407,7 +1769,7 @@ impl Service {
                 self.set_phase(key, phase).await;
                 emit(
                     tx,
-                    ServerEvent::error(request_id, Some(key.clone()), ErrorCode::Provider, message),
+                    ServerEvent::error(request_id, Some(key.clone()), code, message),
                 )
                 .await;
                 emit(
@@ -1615,6 +1977,7 @@ impl Service {
             let telemetry = ok
                 .pop_front()
                 .unwrap_or_else(|| self.request_from_usage(key, nid, stats.turn, &origin.usage));
+            let metrics = request_metrics(&telemetry);
             self.record_request(key, &telemetry).await;
             let notices = self.budget_notices(key, &record, final_check);
             let event = ServerEvent::new(
@@ -1626,6 +1989,11 @@ impl Service {
                     usage: to_usage(&origin.usage),
                     cost_usd: cost,
                     truncated: matches!(origin.finish_reason, FinishReason::Length),
+                    duration_ms: metrics.duration_ms,
+                    first_token_ms: metrics.first_token_ms,
+                    tokens_per_second: metrics.tokens_per_second,
+                    cache_hit: metrics.cache_hit,
+                    tools: metrics.tools,
                 },
             );
             if !emit(tx, event).await {
@@ -2899,6 +3267,95 @@ fn reported_cost(usage: &Usage) -> Option<f64> {
     usage.vendor.get("cost").and_then(serde_json::Value::as_f64)
 }
 
+/// The instruction that turns the old transcript into a handoff summary.
+const SUMMARY_PROMPT: &str = "\
+Rewrite this conversation as a concise handoff summary for another assistant that \
+will continue the work. Keep the user's goal, the decisions and constraints, the \
+files touched and why, the commands run and their failures, the open todos, and \
+the user's latest request. Do not invent facts and do not call tools. Output only \
+the summary.";
+
+/// Per-request figures the telemetry layer measured.
+struct RequestMetrics {
+    duration_ms: u64,
+    first_token_ms: Option<u64>,
+    tokens_per_second: Option<f64>,
+    cache_hit: bool,
+    tools: Vec<String>,
+}
+
+fn request_metrics(record: &norte_code_store_sqlite::RequestRecord) -> RequestMetrics {
+    RequestMetrics {
+        duration_ms: record.duration_ms,
+        first_token_ms: record.first_token_ms,
+        tokens_per_second: tokens_per_second(record),
+        cache_hit: record.cache_hit,
+        tools: record.tool_calls.clone(),
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn tokens_per_second(record: &norte_code_store_sqlite::RequestRecord) -> Option<f64> {
+    let output = record.output_tokens.filter(|tokens| *tokens > 0)?;
+    let generation = record
+        .duration_ms
+        .saturating_sub(record.first_token_ms.unwrap_or(0));
+    if generation == 0 {
+        return None;
+    }
+    Some(output as f64 * 1_000.0 / generation as f64)
+}
+
+/// The context a session currently occupies, in tokens.
+///
+/// The provider's last prompt count plus its answer is authoritative. Only when
+/// no request reported usage do we fall back to a bytes/4 estimate.
+fn used_context(history: &[Message]) -> u64 {
+    if let Some(used) = history
+        .iter()
+        .rev()
+        .find_map(|message| message.origin.as_ref())
+        .map(|origin| {
+            origin.usage.input_tokens.unwrap_or(0) + origin.usage.output_tokens.unwrap_or(0)
+        })
+        .filter(|used| *used > 0)
+    {
+        return used;
+    }
+    serde_json::to_vec(history).map_or(0, |bytes| bytes.len() as u64 / 4)
+}
+
+/// Where a verbatim suffix may start without orphaning tool results.
+fn recent_start(messages: &[Message], keep: usize) -> usize {
+    let mut start = messages.len().saturating_sub(keep);
+    while start > 0 && messages[start].role == Role::Tool {
+        start -= 1;
+    }
+    start
+}
+
+/// The lowest reasoning the model allows, or `Automatic` when it has none.
+fn compaction_reasoning(reasoning: &ReasoningCapability, setting: &str) -> ReasoningRequest {
+    if !reasoning.supported {
+        return ReasoningRequest::Automatic;
+    }
+    let setting = setting.trim().to_ascii_lowercase();
+    match setting.as_str() {
+        "off" | "lowest" if reasoning.can_disable => ReasoningRequest::Disabled,
+        "lowest" => reasoning
+            .efforts
+            .iter()
+            .next()
+            .copied()
+            .map_or(ReasoningRequest::Automatic, ReasoningRequest::Effort),
+        "minimal" => ReasoningRequest::Effort(ReasoningEffort::Minimal),
+        "low" => ReasoningRequest::Effort(ReasoningEffort::Low),
+        "medium" => ReasoningRequest::Effort(ReasoningEffort::Medium),
+        "high" => ReasoningRequest::Effort(ReasoningEffort::High),
+        _ => ReasoningRequest::Automatic,
+    }
+}
+
 /// The text of a failed tool result, read from the committed history.
 async fn tool_error(
     engine: &Engine,
@@ -3084,6 +3541,19 @@ fn to_phase(phase: norte::Phase) -> norte_code_protocol::Phase {
         norte::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
         norte::Phase::AwaitingApproval => norte_code_protocol::Phase::AwaitingApproval,
         _ => norte_code_protocol::Phase::Idle,
+    }
+}
+
+/// Classifies an engine failure for the client.
+///
+/// A lost store race is not a provider error: the engine read version N, but
+/// another writer committed N+1 before this turn did. The turn did not commit,
+/// so the client should resume instead of resending its message.
+fn error_code(error: &norte::Error) -> ErrorCode {
+    match error {
+        norte::Error::StoreConflict { .. } => ErrorCode::Conflict,
+        norte::Error::InvalidInput(_) | norte::Error::InvalidId(_) => ErrorCode::InvalidRequest,
+        _ => ErrorCode::Provider,
     }
 }
 
@@ -3693,9 +4163,16 @@ mod tests {
     }
 
     async fn persistent_service(model: Arc<ScriptedModel>) -> (Arc<Service>, Arc<SqliteStore>) {
+        persistent_service_with_config(config(), model).await
+    }
+
+    async fn persistent_service_with_config(
+        config: Config,
+        model: Arc<ScriptedModel>,
+    ) -> (Arc<Service>, Arc<SqliteStore>) {
         let store = Arc::new(SqliteStore::in_memory().expect("store"));
         let service = Service::with_directory(
-            config(),
+            config,
             catalog(),
             spec("scripted"),
             Arc::new(ScriptedFactory { model }),
@@ -3707,6 +4184,271 @@ mod tests {
         .await
         .expect("service");
         (Arc::new(service), store)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn(vec![
+                    norte::StreamEvent::Usage(usage(100, 10, Some(0.01))),
+                    norte::StreamEvent::TextDelta {
+                        index: 0,
+                        text: "first".to_owned(),
+                    },
+                    norte::StreamEvent::Finish(FinishReason::Stop),
+                ])
+                .turn_text("the user asked for a first answer")
+                .turn(vec![
+                    norte::StreamEvent::Usage(usage(80, 10, Some(0.01))),
+                    norte::StreamEvent::TextDelta {
+                        index: 0,
+                        text: "second".to_owned(),
+                    },
+                    norte::StreamEvent::Finish(FinishReason::Stop),
+                ]),
+        );
+        let mut config = config();
+        config.compaction.threshold = 0.1;
+        config.compaction.keep_recent = 1;
+        let (service, store) = persistent_service_with_config(config, model).await;
+        let first = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "first".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = first
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session");
+        let mut started = false;
+        let mut finished = None;
+        for event in &first {
+            match &event.kind {
+                ServerEventKind::CompactionStarted { reason } => {
+                    assert_eq!(reason, "threshold");
+                    started = true;
+                }
+                ServerEventKind::CompactionFinished {
+                    compacted,
+                    north_session,
+                    ..
+                } => finished = Some((*compacted, north_session.clone())),
+                _ => {}
+            }
+        }
+        assert!(started);
+        let (compacted, north) = finished.expect("compaction finished");
+        assert!(compacted);
+        let north = north.expect("new session id");
+        let after_first = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        assert_eq!(after_first.north.to_string(), north);
+        let old = after_first.compacted_from.expect("compacted from");
+        assert!(store.load(old).await.is_ok());
+
+        let second = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: Some(key.clone()),
+                text: "second".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let mut text = String::new();
+        for event in &second {
+            match &event.kind {
+                ServerEventKind::CompactionStarted { .. }
+                | ServerEventKind::CompactionFinished { .. } => {
+                    panic!("the second turn did not need another compaction");
+                }
+                ServerEventKind::Delta {
+                    delta: Delta::Text { text: chunk, .. },
+                    ..
+                } => text.push_str(chunk),
+                _ => {}
+            }
+        }
+        assert_eq!(text, "second");
+        let after_second = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        assert_eq!(after_second.north, after_first.north);
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_links_the_new_session_and_keeps_the_old_one() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn(vec![
+                    norte::StreamEvent::Usage(usage(10, 2, Some(0.001))),
+                    norte::StreamEvent::TextDelta {
+                        index: 0,
+                        text: "kept".to_owned(),
+                    },
+                    norte::StreamEvent::Finish(FinishReason::Stop),
+                ])
+                .turn_text("the user wants a compacted handoff"),
+        );
+        let (service, store) = persistent_service(model).await;
+        let first = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = first
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session");
+        let before = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        let events = drain(
+            &service,
+            ClientRequestKind::Compact {
+                session: key.clone(),
+            },
+        )
+        .await;
+        let finished = events.iter().find_map(|event| match &event.kind {
+            ServerEventKind::CompactionFinished {
+                compacted,
+                north_session,
+                ..
+            } => Some((*compacted, north_session.clone())),
+            _ => None,
+        });
+        let (compacted, north) = finished.expect("finished event");
+        assert!(compacted);
+        let after = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        assert_ne!(after.north, before.north);
+        assert_eq!(after.north.to_string(), north.expect("new id"));
+        assert_eq!(after.compacted_from, Some(before.north));
+        assert!(store.load(before.north).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_failed_summary_leaves_the_session_unchanged() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let model = Arc::new(ScriptedModel::new(reference).turn(vec![
+            norte::StreamEvent::Usage(usage(10, 2, Some(0.001))),
+            norte::StreamEvent::TextDelta {
+                index: 0,
+                text: "kept".to_owned(),
+            },
+            norte::StreamEvent::Finish(FinishReason::Stop),
+        ]));
+        let (service, store) = persistent_service(model).await;
+        let first = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = first
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session");
+        let before = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        let events = drain(
+            &service,
+            ClientRequestKind::Compact {
+                session: key.clone(),
+            },
+        )
+        .await;
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::CompactionFinished {
+                compacted: false,
+                error: Some(_),
+                ..
+            }
+        )));
+        let after = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        assert_eq!(after.north, before.north);
+        assert_eq!(after.compacted_from, before.compacted_from);
+    }
+
+    #[test]
+    fn a_recent_suffix_never_orphans_tool_results() {
+        let call = CallId::new();
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![norte::Part::ToolCall(norte::ToolCallPart {
+                call_id: call,
+                name: "read".to_owned(),
+                arguments: serde_json::json!({}),
+                continuity: None,
+            })],
+        );
+        let tool = Message::tool(vec![norte::ToolResultPart::text(call, "ok")]);
+        let messages = vec![
+            Message::system("system"),
+            Message::user("go"),
+            assistant,
+            tool,
+        ];
+        assert_eq!(recent_start(&messages, 1), 2);
     }
 
     #[tokio::test]
@@ -3752,6 +4494,43 @@ mod tests {
         assert!(record.first_token_ms.is_some());
         assert!(record.metadata.get("engine_events").is_some());
         assert_eq!(record.params, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_reconstructed_request_carries_its_tools_and_timing() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn_tool_call(call, "todo", &serde_json::json!({"todos": []}))
+                .turn_text("done"),
+        );
+        let (service, _store) = persistent_service(model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let requests: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                ServerEventKind::RequestReconstructed {
+                    tools, duration_ms, ..
+                } => Some((tools.clone(), *duration_ms)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, vec!["todo".to_owned()]);
+        assert!(requests[1].0.is_empty());
     }
 
     #[tokio::test]

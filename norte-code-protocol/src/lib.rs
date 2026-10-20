@@ -325,6 +325,21 @@ pub enum ServerEventKind {
         cost_usd: Option<f64>,
         /// Whether the answer's text was truncated by the output budget.
         truncated: bool,
+        /// How long the request took, including streaming.
+        #[serde(default)]
+        duration_ms: u64,
+        /// Time to the first answer token, when one arrived.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_token_ms: Option<u64>,
+        /// Answer tokens per second of generation, when both are known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_per_second: Option<f64>,
+        /// Whether the provider served any prompt token from cache.
+        #[serde(default)]
+        cache_hit: bool,
+        /// Tools the model called while producing this message, in order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
     },
     /// A commit landed.
     Committed {
@@ -334,12 +349,22 @@ pub enum ServerEventKind {
         version: u64,
     },
     /// Compaction started.
-    CompactionStarted,
+    CompactionStarted {
+        /// Why it started: `manual` or `threshold`.
+        #[serde(default)]
+        reason: String,
+    },
     /// Compaction finished, possibly with a new Norte session behind the same
     /// logical one.
     CompactionFinished {
         /// Whether compaction happened.
         compacted: bool,
+        /// The new Norte session id, when one was created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        north_session: Option<String>,
+        /// Why it failed, when it did. History is unchanged in that case.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// A budget crossed its warning threshold.
     BudgetWarning {

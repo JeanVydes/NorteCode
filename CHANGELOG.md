@@ -139,5 +139,25 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Vendor request extensions via `--extension KEY=JSON` or the config
   `extensions` map, keyed `<wire-family>:<field>`. OpenRouter upstream routing
   works through `openai.chat:provider.order`.
+- Local request telemetry: a `requests` table in SQLite records every provider
+  attempt with session and model, prompt/output/cache tokens, tools called,
+  latency to first output and total, reasoning, reported cost, status and
+  metadata. `norte-code telemetry` rolls the rows up by hour, day, month, year
+  or total, with top providers, models and sessions. Nothing leaves the machine.
+- Compaction at a turn boundary: when the provider-reported context crosses
+  `compaction.threshold`, Norte Code summarises the old conversation and seeds a
+  fresh Norte session with the summary, the todo list and the last
+  `keep_recent` messages. Tool calls are never split from their results, the
+  old session is kept for audit, the new session id is shown, and the summary
+  request enters the cost ledger and budgets. `/compact` in the interactive
+  prompt triggers the same path on demand; a failed summary leaves history
+  unchanged.
+- A lost store race is reported as a conflict with a resume hint instead of a
+  provider error. The session version is an optimistic-concurrency token, not a
+  message count; a turn that loses the race did not commit.
+- The per-request footer now includes answer tokens per second, total duration,
+  first-token latency and the tools that request called, alongside the existing
+  input/output, cache-read share, input:output ratio and reported cost.
+  `--quiet` still hides all usage lines.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev

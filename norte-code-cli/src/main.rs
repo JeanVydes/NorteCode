@@ -1224,7 +1224,7 @@ async fn interactive_loop(
     if !renderer.quiet {
         eprintln!(
             "{}",
-            style.dim("interactive: type /exit, quit or press Ctrl-D to leave")
+            style.dim("interactive: type /compact to summarise, /exit or Ctrl-D to leave")
         );
     }
     let mut request_id = 2_u64;
@@ -1232,6 +1232,30 @@ async fn interactive_loop(
         let Some(text) = read_repl_line(input, style).await? else {
             break;
         };
+        if text == "/compact" {
+            let Some(current) = session.clone() else {
+                eprintln!(
+                    "{}",
+                    style.yellow("there is no session to compact yet; send a message first")
+                );
+                continue;
+            };
+            let stream = service
+                .submit(ClientRequest {
+                    request_id,
+                    kind: ClientRequestKind::Compact { session: current },
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            request_id = request_id.saturating_add(1);
+            let outcome = drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
+            session = outcome.session.or(session);
+            renderer.ensure_newline();
+            if outcome.parked || renderer.budget_stopped {
+                break;
+            }
+            continue;
+        }
         let stream = service
             .submit(ClientRequest {
                 request_id,
@@ -2572,12 +2596,18 @@ impl Renderer {
     }
 
     /// Renders usage for one reconstructed request and keeps the run totals.
+    #[allow(clippy::too_many_lines)]
     fn usage_event(&mut self, kind: &ServerEventKind) {
         match kind {
             ServerEventKind::RequestReconstructed {
                 usage,
                 cost_usd,
                 truncated,
+                duration_ms,
+                first_token_ms,
+                tokens_per_second,
+                cache_hit,
+                tools,
                 ..
             } => {
                 self.requests += 1;
@@ -2608,17 +2638,37 @@ impl Renderer {
                 if let Some(output) = usage.output_tokens {
                     parts.push(self.style.dim(format!("{} out", human_tokens(output))));
                 }
+                if let Some(rate) = tokens_per_second {
+                    parts.push(self.style.dim(format!("{rate:.1} tok/s")));
+                }
+                if *duration_ms > 0 {
+                    parts.push(
+                        self.style
+                            .dim(format!("took {}", duration_label(*duration_ms))),
+                    );
+                }
+                if let Some(first) = first_token_ms {
+                    parts.push(
+                        self.style
+                            .dim(format!("latency {}", duration_label(*first))),
+                    );
+                }
                 if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
                     parts.push(
                         self.style
                             .dim(format!("cache {}", percent_label(cache, input))),
                     );
+                } else if *cache_hit {
+                    parts.push(self.style.dim("cache hit".to_owned()));
                 }
                 if let (Some(input), Some(output)) = (usage.input_tokens, usage.output_tokens) {
                     parts.push(
                         self.style
                             .dim(format!("in:out {}", token_ratio(input, output))),
                     );
+                }
+                if !tools.is_empty() {
+                    parts.push(self.style.dim(format!("tools {}", Self::tool_list(tools))));
                 }
                 if self.show_cost {
                     parts.push(match cost_usd {
@@ -2656,6 +2706,47 @@ impl Renderer {
     #[allow(clippy::too_many_lines)]
     fn status_event(&mut self, kind: &ServerEventKind) {
         match kind {
+            ServerEventKind::CompactionStarted { reason } => {
+                if !self.quiet {
+                    self.end_blocks();
+                    eprintln!(
+                        "{} {}",
+                        self.style.dim("compacting context…"),
+                        self.style.faint(format!("({reason})"))
+                    );
+                }
+            }
+            ServerEventKind::CompactionFinished {
+                compacted,
+                north_session,
+                error,
+            } => {
+                self.end_blocks();
+                if *compacted {
+                    let detail = if self.quiet {
+                        String::new()
+                    } else {
+                        north_session
+                            .as_ref()
+                            .map_or_else(String::new, |id| format!(" · new session {}", short(id)))
+                    };
+                    eprintln!(
+                        "{}{}",
+                        self.style.green("✓ context compacted"),
+                        self.style.dim(detail)
+                    );
+                } else {
+                    let detail = error
+                        .as_ref()
+                        .map_or_else(String::new, |reason| format!(": {reason}"));
+                    eprintln!(
+                        "{}{}",
+                        self.style
+                            .yellow("compaction did not happen; history is unchanged"),
+                        self.style.dim(detail)
+                    );
+                }
+            }
             ServerEventKind::TurnStarted { .. } => {
                 self.cancelled = false;
                 self.reasoning_placeholder = false;
@@ -2793,6 +2884,23 @@ impl Renderer {
             }
             Delta::ToolArguments { .. } | Delta::Media { .. } => {}
         }
+    }
+
+    /// Formats the tools of one request, with counts, in first-seen order.
+    fn tool_list(tools: &[String]) -> String {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for tool in tools {
+            if let Some((_, count)) = counts.iter_mut().find(|(name, _)| *name == tool) {
+                *count += 1;
+            } else {
+                counts.push((tool, 1));
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(tool, count)| format!("{tool} ×{count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Formats how many times each tool ran, in name order.
