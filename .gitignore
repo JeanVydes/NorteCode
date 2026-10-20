@@ -1,5 +1,6 @@
 # Build output
 /target
+/guide/book
 **/*.rs.bk
 *.pdb
 

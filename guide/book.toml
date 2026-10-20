@@ -1,0 +1,17 @@
+[book]
+title = "Norte Code"
+authors = ["Jean Vides"]
+language = "en"
+src = "src"
+description = "A terminal-based agentic coding tool built on Norte."
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/JeanVydes/NorteCode"
+edit-url-template = "https://github.com/JeanVydes/NorteCode/edit/dev/guide/{path}"
+no-section-label = true
+smart-punctuation = true
+
+[output.html.search]
+enable = true

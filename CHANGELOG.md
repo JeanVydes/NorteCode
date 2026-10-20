@@ -8,6 +8,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The mdBook guide under `guide/`: concepts, task guides and reference pages for
+  the service, protocol, sessions, tools, approvals, compaction, budgets,
+  storage, skills and CLI. A Pages workflow builds it on pull requests and
+  publishes it from `dev`.
 - Initial Cargo workspace: the protocol, agent service, config, catalog, cost,
   tools, SQLite store, CLI and TUI crates, with CI, formatting and lint
   configuration.

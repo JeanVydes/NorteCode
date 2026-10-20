@@ -294,6 +294,25 @@ catalogue URL (default `https://models.dev/catalog.json`). Norte Code sends no
 telemetry; the request history and cost ledger stay in the local SQLite
 database.
 
+## Documentation
+
+- **The guide** — [the hosted guide](https://jeanvydes.github.io/NorteCode/)
+  explains the service, the protocol, sessions, tools, approvals, compaction,
+  budgets and the CLI. It is written in Markdown and built with
+  [mdBook](https://rust-lang.github.io/mdBook/); run `mdbook serve guide` to read
+  it locally, and CI publishes it to GitHub Pages from `dev`.
+- **Architecture** — [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the turn
+  lifecycle, compaction, model switching, the sandbox, retries and telemetry.
+- **Configuration** — [`CONFIG.md`](CONFIG.md) is the full schema; the guide has
+  a compact reference.
+- **Milestone report** — [`REPORT.md`](REPORT.md) records what was exercised and
+  what was not.
+- **Rustdoc** — every crate documents its public surface:
+
+  ```sh
+  cargo doc --workspace --no-deps --open
+  ```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
