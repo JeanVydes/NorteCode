@@ -56,6 +56,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - A SQLite `Store` + `BlobStore` that passes Norte's `store_conformance` suite,
   with one transaction per commit, optimistic concurrency and the host's own
   tables for logical sessions, pending questions and settings.
+- Durable logical sessions: `run` reopens the database, restores the session
+  list, and `--session <key>` continues one; `norte-code sessions` lists them.
 - Restart-resume of parked approvals and pending questions. A resumed session
   re-emits the approvals still waiting and a question is replayed by its tool
   call id, so an answer given after a restart reaches the parked tool.

@@ -35,6 +35,21 @@ cargo test
 The engine is a git dependency (`norte`, branch `dev`). `Cargo.lock` pins the
 exact revision and is committed.
 
+## Running
+
+```sh
+norte-code run "explain this repository"
+norte-code run --session <key> "continue with the tests"
+norte-code sessions
+norte-code skills list
+```
+
+Sessions live in a SQLite database under the platform data directory
+(`$XDG_DATA_HOME/norte-code/sessions.db`, or
+`~/.local/share/norte-code/sessions.db`). A run creates a new session unless
+`--session` names an existing key. Parked approvals and pending questions are
+in that database, so a session can be resumed after a restart.
+
 ## Network
 
 The only network destinations are the configured model endpoints and the model

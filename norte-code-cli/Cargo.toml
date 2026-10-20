@@ -18,9 +18,11 @@ norte-code-catalog = { path = "../norte-code-catalog" }
 norte-code-config = { path = "../norte-code-config" }
 norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-skills = { path = "../norte-code-skills" }
+norte-code-store-sqlite = { path = "../norte-code-store-sqlite" }
 
 clap = { workspace = true }
 futures-util = { workspace = true }
+norte = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 

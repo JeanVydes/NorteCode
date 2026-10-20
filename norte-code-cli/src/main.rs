@@ -23,9 +23,10 @@ use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
 use norte_code_config::{ApprovalMode, Config, user_config_path};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
-    ModelInfo, Reasoning, ReasoningInfo, ServerEvent, ServerEventKind,
+    ModelInfo, Reasoning, ReasoningInfo, ServerEvent, ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
+use norte_code_store_sqlite::{SessionDirectory, SqliteStore};
 
 #[derive(Parser)]
 #[command(
@@ -59,6 +60,8 @@ enum Command {
     Models(ModelsArgs),
     /// Inspect the installed Agent Skills.
     Skills(SkillsArgs),
+    /// List the sessions stored on disk.
+    Sessions(SessionsArgs),
 }
 
 #[derive(Args)]
@@ -86,6 +89,16 @@ struct RunArgs {
     /// Do not print reasoning, tool activity or usage.
     #[arg(long)]
     quiet: bool,
+    /// Continue an existing session by key instead of creating one.
+    #[arg(long, value_name = "KEY")]
+    session: Option<String>,
+}
+
+#[derive(Args)]
+struct SessionsArgs {
+    /// Write one JSON object per line.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -143,12 +156,16 @@ async fn run(cli: Cli) -> Result<u8, String> {
     let config = load_config(config_path)?;
     match cli.command {
         Command::Skills(args) => skills_command(&config, &args),
+        Command::Sessions(args) => sessions_command(&args).await,
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
                 Command::Run(args) => run_prompt(config, catalog, source, args, verbose).await,
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
                 Command::Skills(_) => unreachable!("skills were handled before the catalogue"),
+                Command::Sessions(_) => {
+                    unreachable!("sessions were handled before the catalogue")
+                }
             }
         }
     }
@@ -199,6 +216,58 @@ fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, String> {
             }
         }
     }
+}
+
+/// Where Norte Code keeps its database.
+fn database_path() -> PathBuf {
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(data).join("norte-code").join("sessions.db");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("norte-code")
+            .join("sessions.db");
+    }
+    PathBuf::from(".norte-code").join("sessions.db")
+}
+
+async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> {
+    let path = database_path();
+    if !path.exists() {
+        if !args.json {
+            println!("no sessions yet (the database is {})", path.display());
+        }
+        return Ok(0);
+    }
+    let store = SqliteStore::open(&path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let sessions = store
+        .sessions()
+        .await
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    for session in sessions {
+        if args.json {
+            let line = serde_json::json!({
+                "key": session.key,
+                "title": session.title,
+                "model": session.model,
+                "created_at": session.created_at.to_rfc3339(),
+                "phase": session.phase,
+            });
+            println!("{line}");
+        } else {
+            println!(
+                "{}\t{}\t{}\t{}",
+                session.key,
+                session.title.as_deref().unwrap_or("(untitled)"),
+                session.model,
+                session.phase
+            );
+        }
+    }
+    Ok(0)
 }
 
 fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
@@ -267,21 +336,36 @@ async fn run_prompt(
             approval_label(config.approval_mode)
         );
     }
+    let database = database_path();
+    let store = Arc::new(
+        SqliteStore::open(&database)
+            .map_err(|error| format!("could not open {}: {error}", database.display()))?,
+    );
+    let session_store: Arc<dyn norte::Store> = store.clone();
+    let blobs: Arc<dyn norte::BlobStore> = store.clone();
+    let directory: Arc<dyn SessionDirectory> = store;
     let service = Arc::new(
-        Service::in_memory(
+        Service::with_directory(
             config,
             Arc::new(catalog),
-            &spec,
+            spec,
             Arc::new(VendorModels),
+            session_store,
+            blobs,
+            directory,
             DEFAULT_SYSTEM_PROMPT,
         )
+        .await
         .map_err(|e| e.to_string())?,
     );
 
     let request = ClientRequest {
         request_id: 1,
         kind: ClientRequestKind::SendMessage {
-            session: None,
+            session: args
+                .session
+                .as_ref()
+                .map(|key| SessionKey::new(key.clone())),
             text: args.prompt,
             budget: args.budget.map(|limit| Budget {
                 unit: BudgetUnit::Usd,
