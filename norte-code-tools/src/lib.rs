@@ -42,7 +42,8 @@ fn cap(requested: Option<usize>, default: usize, ceiling: usize) -> usize {
 fn escape(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() && character != '\n' && character != '\t' {
+        if (character.is_control() && character != '\n' && character != '\t') || is_bidi(character)
+        {
             let _ = write!(output, "\\u{{{:x}}}", u32::from(character));
         } else {
             output.push(character);
@@ -51,15 +52,28 @@ fn escape(text: &str) -> String {
     output
 }
 
+/// Whether a character can reorder or hide the rest of a line in a terminal.
+///
+/// These are Unicode format characters, not control characters, so the control
+/// check above does not catch them. A right-to-left override inside a grep
+/// result could otherwise make the model read text the human cannot see.
+fn is_bidi(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200e}'
+            | '\u{200f}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
 fn clip_line(line: &str) -> String {
-    if line.len() <= MAX_LINE_WIDTH {
-        return escape(line);
+    match line.char_indices().nth(MAX_LINE_WIDTH) {
+        Some((end, _)) => format!("{}…", escape(&line[..end])),
+        None => escape(line),
     }
-    let mut end = MAX_LINE_WIDTH;
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", escape(&line[..end]))
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -1159,5 +1173,25 @@ mod tests {
         .expect("a replayed answer returns immediately")
         .expect("answer");
         assert_eq!(answer, "yes");
+    }
+
+    #[test]
+    fn escape_hides_bidi_overrides() {
+        let text = "safe\u{202e}txet_dexe\u{2066}safe";
+        let escaped = escape(text);
+        assert!(!escaped.chars().any(is_bidi));
+        assert!(escaped.contains("\\u{202e}"));
+        assert!(escaped.contains("\\u{2066}"));
+    }
+
+    #[test]
+    fn clip_line_counts_characters_not_bytes() {
+        let exact = "ñ".repeat(MAX_LINE_WIDTH);
+        assert_eq!(clip_line(&exact), exact);
+
+        let long = "ñ".repeat(MAX_LINE_WIDTH + 1);
+        let clipped = clip_line(&long);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(clipped.chars().count(), MAX_LINE_WIDTH + 1);
     }
 }

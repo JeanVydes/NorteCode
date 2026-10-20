@@ -220,4 +220,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   latency, and a single final burst falls back to the whole duration instead of
   dividing by a sliver.
 
+### Fixed
+
+- `grep` and `web_fetch` now escape Unicode bidi overrides and line separators
+  the way `read` does, so a crafted line cannot visually reorder or hide the
+  rest of a result. `grep` also clips its 500-character line width by
+  characters instead of bytes, matching `read` for accented text.
+
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev
