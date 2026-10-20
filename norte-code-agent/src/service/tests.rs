@@ -646,6 +646,22 @@ async fn a_session_can_switch_models_at_a_boundary() {
         panic!("expected a list");
     };
     assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
+
+    let (nid, spec, _) = service.require_record(&key).expect("record");
+    let history = service
+        .engine(&spec)
+        .expect("engine")
+        .history(nid)
+        .await
+        .expect("history");
+    let system: Vec<_> = history
+        .iter()
+        .filter(|message| message.role == norte::Role::System)
+        .collect();
+    assert_eq!(system.len(), 3);
+    assert!(system[1].text().starts_with("# Runtime awareness"));
+    assert!(system[2].text().starts_with("# Runtime update"));
+    assert!(system[2].text().contains("test/other"));
 }
 
 #[test]

@@ -78,15 +78,17 @@ from and how many characters the prompt and tool declarations contain.
 
 ### Runtime awareness
 
-A second system block is generated for every request and inserted after the
-leading instructions. It tells the model the current `provider/model`, wire,
-catalogue dates and capabilities, input/output modalities, context and output
-limits, compaction threshold and `keep_recent`, workspace, sandbox and approval
-state, budgets, retries, skills and the current config paths. It also includes a
-short command/config map so the model can help with the harness itself.
+A new session stores a second system block next to the base prompt. It tells the
+model the current `provider/model`, wire, catalogue dates and capabilities,
+input/output modalities, context and output limits, compaction threshold and
+`keep_recent`, workspace, sandbox and approval state, budgets, retries, skills
+and the current config paths. It also includes a short command/config map so the
+model can help with the harness itself.
 
-The block is rebuilt per request, so a model switch cannot leave stale facts in
-the persisted system message. It contains no API keys or endpoint URLs.
+The block is part of the session history, so the provider prompt cache sees a
+stable prefix. A model switch appends a `Runtime update` block that supersedes
+the old facts, and compaction writes a fresh block into the new session. It
+contains no API keys or endpoint URLs.
 
 ## Extensions
 

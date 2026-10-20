@@ -96,11 +96,10 @@ decision.
 
 ## Prompt and runtime awareness
 
-The persisted system message is the base prompt plus the optional `AGENTS.md`
-project instructions. On every model request, a `runtime-context` layer inserts
-a second system block after the leading instructions. That block is generated
-for the engine's current model and config, so it stays correct after a model
-switch or a config reload. It carries:
+A new session stores two leading system messages: the base prompt (plus the
+optional `AGENTS.md` project instructions) and a runtime-awareness block. The
+block is generated once from the session's model and effective config. It
+carries:
 
 - the `provider/model`, wire and catalogue display data;
 - context and output limits, input/output modalities, tool and reasoning
@@ -112,9 +111,11 @@ switch or a config reload. It carries:
 - the effective budget, iteration, retry, skill and extension settings, plus a
   short map of the CLI and configuration files for harness help.
 
-It deliberately contains no API key and no endpoint URL. The layer shifts the
-request's cache boundaries by one, so the block remains inside the leading
-system prefix and the cached prefix stays coherent. `PromptSize` includes it.
+It deliberately contains no API key and no endpoint URL. Because it is part of
+the session history, the provider prompt cache sees a stable prefix for the
+life of the session. A model switch appends a `Runtime update` system message
+that supersedes the old facts; compaction seeds the fresh session with a new
+block. `PromptSize` includes the initial block.
 
 ## Model switching
 

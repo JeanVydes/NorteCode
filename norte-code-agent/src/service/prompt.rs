@@ -1,12 +1,10 @@
 //! Prompt size accounting, the optional `AGENTS.md` project instructions and
-//! the runtime-awareness block injected into every request.
+//! the runtime-awareness block stored with each session.
 
 use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use async_trait::async_trait;
-use norte::{Continuation, Layer, LayerContext, Message, ModelRequest, ModelStream, Role};
 use norte_code_catalog::Model as CatalogModel;
 use norte_code_config::{ApprovalMode, BudgetConfig, Config};
 
@@ -117,11 +115,11 @@ pub(super) struct RuntimeFacts<'a> {
 /// Builds the short, factual block that tells the model where it is running,
 /// what it is running on, and what the host will do around it.
 ///
-/// This is deliberately generated at request time instead of being baked into
-/// the persisted system message: a session can switch models, and the model
-/// must not keep describing the old one. It contains no keys or endpoint URLs.
+/// The block is persisted with the session, so it is built once at session
+/// creation and again when the model changes. It contains no keys or endpoint
+/// URLs.
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
-pub(super) fn runtime_context(facts: &RuntimeFacts<'_>) -> String {
+pub(super) fn runtime_context(facts: &RuntimeFacts<'_>, update: bool) -> String {
     let spec = facts.spec;
     let model = facts.model;
     let config = facts.config;
@@ -130,14 +128,32 @@ pub(super) fn runtime_context(facts: &RuntimeFacts<'_>) -> String {
     let capabilities = &spec.capabilities;
     let mut out = String::new();
 
-    let _ = writeln!(out, "# Runtime awareness");
-    let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Norte Code supplies these facts at request time. They describe the host \
-         you are running in; trust them over guesses, and do not claim to be \
-         another product or infer the harness from tool names."
+        "# {}",
+        if update {
+            "Runtime update"
+        } else {
+            "Runtime awareness"
+        }
     );
+    let _ = writeln!(out);
+    if update {
+        let _ = writeln!(
+            out,
+            "The runtime changed. Ignore earlier runtime facts; these are current. \
+             They describe the host you are running in; trust them over guesses, \
+             and do not claim to be another product or infer the harness from tool \
+             names."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "Norte Code recorded these facts when the session started. They describe \
+             the host you are running in; trust them over guesses, and do not claim \
+             to be another product or infer the harness from tool names."
+        );
+    }
     let _ = writeln!(out);
 
     let _ = writeln!(out, "## Model");
@@ -363,57 +379,6 @@ pub(super) fn runtime_context(facts: &RuntimeFacts<'_>) -> String {
     out
 }
 
-/// The runtime-awareness layer. It inserts the block after the leading
-/// system/developer messages on every request, so a model switch or a changed
-/// config cannot leave stale facts in the durable history.
-pub(super) struct RuntimeContextLayer {
-    context: String,
-}
-
-impl RuntimeContextLayer {
-    pub(super) fn new(context: String) -> Self {
-        Self { context }
-    }
-}
-
-#[async_trait]
-impl Layer for RuntimeContextLayer {
-    fn name(&self) -> &'static str {
-        "runtime-context"
-    }
-
-    async fn wrap(
-        &self,
-        context: &LayerContext<'_>,
-        request: ModelRequest,
-        next: &dyn Continuation,
-    ) -> norte::Result<ModelStream> {
-        let request = inject_runtime_context(request, &self.context);
-        next.call(context, request).await
-    }
-}
-
-/// Inserts `context` after the leading instructions and shifts the cache
-/// boundaries to match. Keeping it inside the leading instruction prefix means
-/// Anthropic and Gemini still see it as system content.
-fn inject_runtime_context(mut request: ModelRequest, context: &str) -> ModelRequest {
-    if context.is_empty() {
-        return request;
-    }
-    let prefix = request
-        .messages
-        .iter()
-        .take_while(|message| matches!(message.role, Role::System | Role::Developer))
-        .count();
-    request
-        .messages
-        .insert(prefix, Message::system(context.to_owned()));
-    for boundary in &mut request.cache_boundaries {
-        *boundary = boundary.saturating_add(1);
-    }
-    request
-}
-
 fn yes(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
@@ -523,9 +488,7 @@ fn sandbox(config: &Config) -> String {
 mod tests {
     use std::path::Path;
 
-    use norte::{
-        Capabilities, Modality, ModalityCapabilities, ModelId, ModelRef, ProviderId, ToolKind,
-    };
+    use norte::{Capabilities, Modality, ModalityCapabilities, ToolKind};
 
     use super::*;
     use crate::provider::{ModelSpec, Wire};
@@ -571,14 +534,18 @@ mod tests {
     fn runtime_context_reports_the_model_and_host_without_the_key() {
         let spec = spec(capabilities());
         let config = Config::default();
-        let text = runtime_context(&RuntimeFacts {
-            spec: &spec,
-            model: Some(&model()),
-            config: &config,
-            workspace: Path::new("/workspace"),
-            user_config: Some(Path::new("/home/user/.config/norte-code/config.json")),
-        });
+        let text = runtime_context(
+            &RuntimeFacts {
+                spec: &spec,
+                model: Some(&model()),
+                config: &config,
+                workspace: Path::new("/workspace"),
+                user_config: Some(Path::new("/home/user/.config/norte-code/config.json")),
+            },
+            false,
+        );
 
+        assert!(text.starts_with("# Runtime awareness"));
         assert!(text.contains("openrouter/vendor/model"));
         assert!(text.contains("200000"));
         assert!(text.contains("180000"));
@@ -590,22 +557,22 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_lands_after_leading_instructions() {
-        let request = ModelRequest::new(
-            ModelRef::new(
-                ProviderId::new("openrouter").expect("valid provider"),
-                ModelId::new("vendor/model").expect("valid model"),
-            ),
-            vec![Message::system("base"), Message::user("hello")],
+    fn runtime_update_tells_the_model_to_ignore_earlier_facts() {
+        let spec = spec(capabilities());
+        let config = Config::default();
+        let text = runtime_context(
+            &RuntimeFacts {
+                spec: &spec,
+                model: Some(&model()),
+                config: &config,
+                workspace: Path::new("/workspace"),
+                user_config: None,
+            },
+            true,
         );
-        let request = ModelRequest {
-            cache_boundaries: vec![1, 2],
-            ..request
-        };
-        let request = inject_runtime_context(request, "runtime");
-        assert_eq!(request.messages[0].text(), "base");
-        assert_eq!(request.messages[1].text(), "runtime");
-        assert_eq!(request.messages[2].text(), "hello");
-        assert_eq!(request.cache_boundaries, vec![2, 3]);
+
+        assert!(text.starts_with("# Runtime update"));
+        assert!(text.contains("Ignore earlier runtime facts"));
+        assert!(text.contains("openrouter/vendor/model"));
     }
 }
