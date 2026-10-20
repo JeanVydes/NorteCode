@@ -11,6 +11,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The built-in system prompt now states the Norte Code identity, requires tool
   use and verification, and tells the model not to guess its harness or claim
   to be another product.
+- Terminal styling now uses 24-bit RGB when `COLORTERM` advertises truecolour,
+  with the 256-colour palette as the fallback. Themes that remap the classic
+  16-colour slots (such as a monochrome kitty theme) previously rendered every
+  label in the same foreground colour.
 - Tool calls render in blue, and a `command` call shows the command it ran even
   under `--quiet`; a long command is clipped to one line. Cancelling a turn
   before the provider reports usage now explains that the cancelled request is
