@@ -60,12 +60,12 @@ fn escape(text: &str) -> String {
 fn is_bidi(character: char) -> bool {
     matches!(
         character,
-        '\u{200e}'
-            | '\u{200f}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
     )
 }
 
@@ -1177,11 +1177,14 @@ mod tests {
 
     #[test]
     fn escape_hides_bidi_overrides() {
-        let text = "safe\u{202e}txet_dexe\u{2066}safe";
+        let text = "safe\u{202e}txet_dexe\u{2066}safe\u{061c}\u{200b}hidden\u{feff}bom";
         let escaped = escape(text);
         assert!(!escaped.chars().any(is_bidi));
         assert!(escaped.contains("\\u{202e}"));
         assert!(escaped.contains("\\u{2066}"));
+        assert!(escaped.contains("\\u{61c}"));
+        assert!(escaped.contains("\\u{200b}"));
+        assert!(escaped.contains("\\u{feff}"));
     }
 
     #[test]
