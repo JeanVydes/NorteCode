@@ -6,8 +6,9 @@
 //! parse never replaces a good cache.
 
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -366,14 +367,49 @@ fn header(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Op
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CatalogError> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes).map_err(|source| CatalogError::Write {
-        path: tmp.clone(),
-        source,
-    })?;
-    fs::rename(&tmp, path).map_err(|source| CatalogError::Write {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..16 {
+        let tmp = path.with_extension(format!(
+            "tmp.{}.{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(CatalogError::Write {
+                    path: tmp.clone(),
+                    source,
+                });
+            }
+        };
+        let write = (|| -> std::io::Result<()> {
+            let mut file = file;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, path)
+        })();
+        if let Err(source) = write {
+            let _ = fs::remove_file(&tmp);
+            return Err(CatalogError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        return Ok(());
+    }
+    Err(CatalogError::Write {
         path: path.to_path_buf(),
-        source,
+        source: std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not create a unique temporary file",
+        ),
     })
 }
 

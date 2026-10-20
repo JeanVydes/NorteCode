@@ -54,6 +54,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   events are debounced, the footer rows for the old and new sizes are cleared,
   and the scroll region is reset in one atomic write so the renderer never
   continues a line the terminal has just reflowed.
+- The catalogue cache writes a unique temporary file with `create_new` and
+  renames it, so a concurrent or interrupted write cannot replace a good cache
+  with a partial one.
 
 ### Added
 
