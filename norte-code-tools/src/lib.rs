@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -367,9 +368,18 @@ impl FnExecutor<GrepArgs, ToolOutput> for GrepTool {
             if metadata.len() > MAX_GREP_FILE_BYTES {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&file) else {
+            let Ok(source) = std::fs::File::open(&file) else {
                 continue;
             };
+            let mut bytes = Vec::new();
+            if source
+                .take(MAX_GREP_FILE_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .is_err()
+                || bytes.len() as u64 > MAX_GREP_FILE_BYTES
+            {
+                continue;
+            }
             if bytes.iter().take(8192).any(|byte| *byte == 0) {
                 continue;
             }

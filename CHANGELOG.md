@@ -45,6 +45,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   a FIFO or an endless device and hang or exhaust the host at startup.
 - The catalogue cache and download are read in bounded chunks, so a corrupt
   cache file or an oversized response is refused instead of being loaded whole.
+- `grep` reads at most its file cap even if the file grows after the size check,
+  so a changing file cannot make the tool allocate without bound.
 
 ### Fixed
 
