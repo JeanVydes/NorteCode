@@ -440,15 +440,27 @@ fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), 
     let Some(directory_name) = directory.file_name().and_then(|name| name.to_str()) else {
         return Err("the skill directory name is not UTF-8".to_owned());
     };
-    let file = directory.join("SKILL.md");
+    let root = std::fs::canonicalize(directory)
+        .map_err(|error| format!("could not resolve {}: {error}", directory.display()))?;
+    let file = root.join("SKILL.md");
     let metadata = std::fs::metadata(&file)
         .map_err(|error| format!("could not read {}: {error}", file.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a regular file", file.display()));
+    }
     if metadata.len() > MAX_SKILL_FILE_BYTES as u64 {
         return Err(format!(
             "SKILL.md is larger than {MAX_SKILL_FILE_BYTES} bytes"
         ));
     }
-    let text = std::fs::read_to_string(&file)
+    // A project can carry `SKILL.md -> /etc/passwd`. Discovery runs before the
+    // workspace policy, so check the resolved file against the skill root.
+    let canonical_file = std::fs::canonicalize(&file)
+        .map_err(|error| format!("could not resolve {}: {error}", file.display()))?;
+    if !canonical_file.starts_with(&root) {
+        return Err(format!("{} leaves the skill directory", file.display()));
+    }
+    let text = std::fs::read_to_string(&canonical_file)
         .map_err(|error| format!("could not read {}: {error}", file.display()))?;
     let parsed = parse_skill(&text, directory_name)?;
     let lines = parsed.body.lines().count();
@@ -457,7 +469,6 @@ fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), 
             "SKILL.md has {lines} lines; the specification recommends under {RECOMMENDED_LINES}, with detail in `references/`"
         )
     });
-    let root = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
     Ok((
         Skill {
             name: parsed.name,
@@ -1197,6 +1208,35 @@ mod tests {
         assert!(skill.read_resource("../secret.txt", 1024).is_err());
         assert!(skill.read_resource("/etc/passwd", 1024).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_skill_file_cannot_symlink_outside_the_skill_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("symlink");
+        let outside = temp_root("symlink-outside");
+        std::fs::write(
+            outside.join("SKILL.md"),
+            "---\nname: escaped\ndescription: Outside the root.\n---\nsecret",
+        )
+        .expect("outside skill");
+        let directory = root.join("escaped");
+        std::fs::create_dir_all(&directory).expect("skill dir");
+        symlink(outside.join("SKILL.md"), directory.join("SKILL.md")).expect("symlink");
+
+        assert!(load_skill(&directory).is_err());
+        let registry = SkillRegistry::discover(std::slice::from_ref(&root), 8);
+        assert!(registry.is_empty());
+        assert!(
+            registry
+                .warnings()
+                .iter()
+                .any(|warning| warning.message.contains("leaves the skill directory"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]
