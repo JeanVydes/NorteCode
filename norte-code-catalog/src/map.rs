@@ -162,7 +162,9 @@ pub fn reasoning(model: &Model, overrides: Option<&ReasoningOverride>) -> Reason
             match option {
                 ReasoningOption::Effort { values } => {
                     for value in values {
-                        if let Some(effort) = effort_of(value) {
+                        if matches!(value.as_str(), "none" | "off" | "disabled") {
+                            can_disable = true;
+                        } else if let Some(effort) = effort_of(value) {
                             efforts.insert(effort);
                         }
                     }

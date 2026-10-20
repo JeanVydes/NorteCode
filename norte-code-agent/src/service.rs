@@ -19,8 +19,9 @@ use norte::{
     ApprovalId, BlobStore, CallId, Continuation, Decision, Engine, EngineBuilder, EngineConfig,
     EngineEvent, FinishReason, FnExecutor, GrantId, GrantScope, InMemoryBlobStore, InMemoryStore,
     Layer, LayerContext, LayerStack, Message, Model, ModelRequest, ModelStream, Policy, PolicySet,
-    PolicyView, ReasoningEffort, SessionId, ShortCircuitReason, Store, StreamDelta, ToolArgs,
-    ToolContext, ToolDeclaration, ToolKind, ToolOutput, ToolRegistry, Usage,
+    PolicyView, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
+    ShortCircuitReason, Store, StreamDelta, ToolArgs, ToolContext, ToolDeclaration, ToolKind,
+    ToolOutput, ToolRegistry, Usage,
 };
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord, CostSummary, summarize};
 use norte_code_skills::{
@@ -37,8 +38,8 @@ use tokio::sync::{Notify, mpsc};
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::{ApprovalMode, BudgetConfig, Config};
 use norte_code_protocol::{
-    Budget, BudgetUnit, Delta, ErrorCode, ModelInfo, ReasoningInfo, ServerEvent, ServerEventKind,
-    SessionInfo, SessionKey,
+    Budget, BudgetUnit, Delta, ErrorCode, ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo,
+    ServerEvent, ServerEventKind, SessionInfo, SessionKey,
 };
 
 use crate::ServiceError;
@@ -92,6 +93,23 @@ struct CatalogSettings {
     ttl: Duration,
     offline: bool,
     cache_dir: PathBuf,
+}
+
+/// The static text a request carries before any conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PromptSize {
+    /// Characters in the system prompt.
+    pub system_chars: usize,
+    /// Characters in the serialized tool declarations.
+    pub tool_chars: usize,
+}
+
+impl PromptSize {
+    /// Characters in the system prompt plus the tool declarations.
+    #[must_use]
+    pub fn total_chars(self) -> usize {
+        self.system_chars.saturating_add(self.tool_chars)
+    }
 }
 
 /// Live arguments and results for tool calls in flight.
@@ -557,6 +575,27 @@ impl Service {
         Ok(builder.build()?)
     }
 
+    /// Measures the static prompt material: the system prompt and the tool
+    /// declarations. No token estimate is made, because only the provider
+    /// counts tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when the configured tool registry cannot be
+    /// built.
+    pub fn prompt_size(&self) -> Result<PromptSize, ServiceError> {
+        let tool_chars = self
+            .tools()?
+            .specs()
+            .iter()
+            .map(|spec| serde_json::to_string(spec).map_or(0, |json| json.chars().count()))
+            .sum();
+        Ok(PromptSize {
+            system_chars: self.system_prompt.chars().count(),
+            tool_chars,
+        })
+    }
+
     /// Registers one rich tool with the activity recorder attached.
     fn register_tool<A>(
         &self,
@@ -771,13 +810,14 @@ impl Service {
                 session,
                 text,
                 budget,
-                ..
+                reasoning,
             } => {
-                self.start_turn(request_id, session, Some(text), Some(budget))
+                self.start_turn(request_id, session, Some(text), Some(budget), reasoning)
                     .await
             }
             Kind::Resume { session } => {
-                self.start_turn(request_id, Some(session), None, None).await
+                self.start_turn(request_id, Some(session), None, None, None)
+                    .await
             }
             Kind::CancelTurn { session } => {
                 if let Some(notify) = self.lock_cancels().get(&session).cloned() {
@@ -969,7 +1009,7 @@ impl Service {
             },
         );
         let resumed = self
-            .start_turn(request_id, Some(session), None, None)
+            .start_turn(request_id, Some(session), None, None, None)
             .await?;
         Ok(Box::pin(head.chain(resumed)))
     }
@@ -1017,7 +1057,7 @@ impl Service {
             },
         );
         let resumed = self
-            .start_turn(request_id, Some(session), None, None)
+            .start_turn(request_id, Some(session), None, None, None)
             .await?;
         Ok(Box::pin(head.chain(resumed)))
     }
@@ -1126,13 +1166,14 @@ impl Service {
     ///
     /// The outer option distinguishes a new message (which replaces the
     /// message budget) from a resume (which keeps the one already in force).
-    #[allow(clippy::option_option)]
+    #[allow(clippy::option_option, clippy::too_many_arguments)]
     async fn start_turn(
         self: &Arc<Self>,
         request_id: u64,
         session: Option<SessionKey>,
         input: Option<String>,
         message_budget: Option<Option<Budget>>,
+        reasoning: Option<ProtocolReasoning>,
     ) -> Result<EventStream, ServiceError> {
         let (key, nid, spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
@@ -1142,6 +1183,11 @@ impl Service {
             let (nid, spec, _) = self.require_record(&key)?;
             (key, nid, spec)
         };
+        let reasoning = resolve_reasoning(
+            reasoning.as_ref(),
+            &self.config.reasoning.default,
+            &spec.capabilities.reasoning,
+        )?;
         let configured_message = configured_budget(self.config.budgets.message.as_ref());
         let message = message_budget.map(|budget| budget.or(configured_message.clone()));
         if let Some(budget) = message.as_ref().and_then(Option::as_ref) {
@@ -1195,7 +1241,7 @@ impl Service {
         tokio::spawn(async move {
             let result = this
                 .run_turn(
-                    &engine, request_id, &task_key, nid, turn, input, &tx, &notify,
+                    &engine, request_id, &task_key, nid, turn, input, reasoning, &tx, &notify,
                 )
                 .await;
             if let Err(error) = result {
@@ -1227,10 +1273,11 @@ impl Service {
         nid: SessionId,
         turn: u64,
         input: Option<String>,
+        reasoning: ReasoningRequest,
         tx: &mpsc::Sender<ServerEvent>,
         notify: &Notify,
     ) -> Result<(), ServiceError> {
-        let mut turn_builder = engine.turn(nid);
+        let mut turn_builder = engine.turn(nid).reasoning(reasoning);
         if let Some(text) = input {
             turn_builder = turn_builder.input(Message::user(text));
         }
@@ -2484,6 +2531,240 @@ pub fn model_list(config: &Config, catalog: &Catalog) -> Vec<ModelInfo> {
     models
 }
 
+/// Resolves the request's reasoning setting against the model's declaration.
+///
+/// An explicit setting wins over the configured default. Every setting is
+/// checked before the turn starts: an unsupported effort or budget is a typed
+/// error, never a silent downgrade.
+/// Resolves the effective reasoning setting without turning it into a Norte
+/// request.
+///
+/// This is what debug output shows: an explicit `--reasoning` wins over the
+/// configured default, and an implicit `auto` becomes medium (or the closest
+/// lower declared effort) when the model supports reasoning.
+///
+/// # Errors
+///
+/// Returns [`ServiceError::Reasoning`] when the setting is malformed, the
+/// model does not support it, or a budget exceeds the model's cap.
+pub fn effective_reasoning(
+    requested: Option<&ProtocolReasoning>,
+    configured: &serde_json::Value,
+    capabilities: &ReasoningCapability,
+) -> Result<ProtocolReasoning, ServiceError> {
+    let setting = if let Some(setting) = requested {
+        setting.clone()
+    } else {
+        let configured = parse_configured_reasoning(configured).map_err(ServiceError::Reasoning)?;
+        // The implicit default is medium: it leaves room for a useful answer
+        // without asking every model for its most expensive effort. When a
+        // model does not declare medium, prefer the closest effort below it
+        // rather than jumping to high. Models with no declared efforts keep
+        // `auto`, which is the only safe request.
+        if matches!(configured, ProtocolReasoning::Automatic) {
+            implicit_effort(capabilities).map_or(configured, |effort| ProtocolReasoning::Effort {
+                effort: effort_name(effort).to_owned(),
+            })
+        } else {
+            configured
+        }
+    };
+    validate_reasoning(&setting, capabilities)?;
+    Ok(setting)
+}
+
+/// Resolves the effective setting and maps it to the engine's request type.
+fn resolve_reasoning(
+    requested: Option<&ProtocolReasoning>,
+    configured: &serde_json::Value,
+    capabilities: &ReasoningCapability,
+) -> Result<ReasoningRequest, ServiceError> {
+    let setting = effective_reasoning(requested, configured, capabilities)?;
+    validate_reasoning(&setting, capabilities)
+}
+
+/// The effort an implicit `auto` resolves to.
+///
+/// Medium is the default. When the model does not declare it, the closest
+/// lower effort avoids the top end; high is used only when it is the sole
+/// declared effort.
+fn implicit_effort(capabilities: &ReasoningCapability) -> Option<ReasoningEffort> {
+    if !capabilities.supported {
+        return None;
+    }
+    [
+        ReasoningEffort::Medium,
+        ReasoningEffort::Low,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::High,
+    ]
+    .into_iter()
+    .find(|effort| capabilities.efforts.contains(effort))
+}
+
+/// Parses `reasoning.default` from the config.
+fn parse_configured_reasoning(value: &serde_json::Value) -> Result<ProtocolReasoning, String> {
+    match value {
+        serde_json::Value::Null => Ok(ProtocolReasoning::Automatic),
+        serde_json::Value::String(text) => parse_reasoning_name(text),
+        serde_json::Value::Number(number) => {
+            let tokens = number
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| "a reasoning budget must be a positive integer".to_owned())?;
+            Ok(ProtocolReasoning::Budget { tokens })
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(kind)) = map.get("reasoning") {
+                match kind.as_str() {
+                    "automatic" | "auto" => return Ok(ProtocolReasoning::Automatic),
+                    "disabled" | "off" => return Ok(ProtocolReasoning::Disabled),
+                    "effort" => {
+                        let effort = map
+                            .get("effort")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| "`reasoning.effort` must be a string".to_owned())?;
+                        return parse_reasoning_name(effort);
+                    }
+                    "budget" => {
+                        let tokens = map
+                            .get("tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                "`reasoning.tokens` must be a positive integer".to_owned()
+                            })?;
+                        return Ok(ProtocolReasoning::Budget { tokens });
+                    }
+                    other => {
+                        return Err(format!(
+                            "unknown reasoning setting `{other}`; use `auto`, `off`, an effort or a budget"
+                        ));
+                    }
+                }
+            }
+            if let Some(tokens) = map.get("budget").or_else(|| map.get("tokens")) {
+                let tokens = tokens
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| "`reasoning.budget` must be a positive integer".to_owned())?;
+                return Ok(ProtocolReasoning::Budget { tokens });
+            }
+            if let Some(effort) = map.get("effort").and_then(serde_json::Value::as_str) {
+                return parse_reasoning_name(effort);
+            }
+            Err("expected `auto`, `off`, an effort object or a budget object".to_owned())
+        }
+        _ => Err("expected a string, a number or an object".to_owned()),
+    }
+}
+
+/// Parses `auto`, `off` or one of Norte's four effort names.
+fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
+    let normalized = text.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" | "automatic" => Ok(ProtocolReasoning::Automatic),
+        "off" | "none" | "disabled" => Ok(ProtocolReasoning::Disabled),
+        _ => parse_reasoning_effort(text)
+            .map(|effort| ProtocolReasoning::Effort {
+                effort: effort_name(effort).to_owned(),
+            })
+            .ok_or_else(|| {
+                format!(
+                    "unknown reasoning setting `{text}`; use `auto`, `off`, `minimal`, `low`, `medium` or `high`"
+                )
+            }),
+    }
+}
+
+/// Maps an effort name to Norte's enum. The catalogue's top-end aliases map
+/// down, as they do when the catalogue is loaded.
+fn parse_reasoning_effort(name: &str) -> Option<ReasoningEffort> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" | "xhigh" | "max" => Some(ReasoningEffort::High),
+        _ => None,
+    }
+}
+
+/// Checks one setting against the model's declared reasoning capabilities.
+fn validate_reasoning(
+    setting: &ProtocolReasoning,
+    capabilities: &ReasoningCapability,
+) -> Result<ReasoningRequest, ServiceError> {
+    match setting {
+        ProtocolReasoning::Automatic => Ok(ReasoningRequest::Automatic),
+        ProtocolReasoning::Disabled => {
+            if capabilities.supported && !capabilities.can_disable {
+                return Err(ServiceError::Reasoning(
+                    "the model does not allow turning reasoning off".to_owned(),
+                ));
+            }
+            Ok(ReasoningRequest::Disabled)
+        }
+        ProtocolReasoning::Effort { effort } => {
+            if !capabilities.supported {
+                return Err(ServiceError::Reasoning(
+                    "the model does not support reasoning; omit the setting or use `auto`"
+                        .to_owned(),
+                ));
+            }
+            let Some(effort) = parse_reasoning_effort(effort) else {
+                return Err(ServiceError::Reasoning(format!(
+                    "unknown effort `{effort}`; the model supports {}",
+                    effort_choices(capabilities)
+                )));
+            };
+            if !capabilities.efforts.contains(&effort) {
+                return Err(ServiceError::Reasoning(format!(
+                    "the model does not support effort `{}`; it supports {}",
+                    effort_name(effort),
+                    effort_choices(capabilities)
+                )));
+            }
+            Ok(ReasoningRequest::Effort(effort))
+        }
+        ProtocolReasoning::Budget { tokens } => {
+            if !capabilities.supported || !capabilities.supports_budget {
+                return Err(ServiceError::Reasoning(
+                    "the model does not accept a reasoning token budget".to_owned(),
+                ));
+            }
+            if *tokens == 0 {
+                return Err(ServiceError::Reasoning(
+                    "the reasoning budget must be at least one token".to_owned(),
+                ));
+            }
+            if let Some(max) = capabilities.max_budget {
+                if *tokens > max {
+                    return Err(ServiceError::Reasoning(format!(
+                        "the model accepts at most {max} reasoning tokens"
+                    )));
+                }
+            }
+            Ok(ReasoningRequest::Budget(*tokens))
+        }
+    }
+}
+
+/// The effort names a model accepts, for an error message.
+fn effort_choices(capabilities: &ReasoningCapability) -> String {
+    if capabilities.efforts.is_empty() {
+        return "no explicit efforts (use `auto`)".to_owned();
+    }
+    capabilities
+        .efforts
+        .iter()
+        .map(|effort| format!("`{}`", effort_name(*effort)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn effort_name(effort: ReasoningEffort) -> &'static str {
     match effort {
         ReasoningEffort::Minimal => "minimal",
@@ -3186,6 +3467,112 @@ mod tests {
             .expect_err("a FIFO must be refused");
         assert!(error.contains("not a regular file"), "{error}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reasoning_settings_are_checked_against_the_model() {
+        let capabilities = ReasoningCapability {
+            supported: true,
+            can_disable: true,
+            efforts: BTreeSet::from([
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]),
+            supports_budget: true,
+            max_budget: Some(4096),
+        };
+        let automatic = serde_json::json!("auto");
+
+        assert_eq!(
+            resolve_reasoning(
+                Some(&ProtocolReasoning::Effort {
+                    effort: "medium".to_owned()
+                }),
+                &automatic,
+                &capabilities
+            )
+            .expect("medium is declared"),
+            ReasoningRequest::Effort(ReasoningEffort::Medium)
+        );
+        assert!(
+            resolve_reasoning(
+                Some(&ProtocolReasoning::Effort {
+                    effort: "x".to_owned()
+                }),
+                &automatic,
+                &capabilities
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_reasoning(
+                Some(&ProtocolReasoning::Budget { tokens: 5000 }),
+                &automatic,
+                &capabilities
+            )
+            .is_err()
+        );
+        assert_eq!(
+            resolve_reasoning(
+                Some(&ProtocolReasoning::Budget { tokens: 1024 }),
+                &automatic,
+                &capabilities
+            )
+            .expect("a budget under the cap"),
+            ReasoningRequest::Budget(1024)
+        );
+    }
+
+    #[test]
+    fn the_implicit_default_prefers_medium() {
+        let capabilities = ReasoningCapability {
+            supported: true,
+            can_disable: false,
+            efforts: BTreeSet::from([ReasoningEffort::Low, ReasoningEffort::Medium]),
+            supports_budget: false,
+            max_budget: None,
+        };
+        assert_eq!(
+            resolve_reasoning(None, &serde_json::json!("auto"), &capabilities)
+                .expect("medium is declared"),
+            ReasoningRequest::Effort(ReasoningEffort::Medium)
+        );
+
+        let without_medium = ReasoningCapability {
+            efforts: BTreeSet::from([ReasoningEffort::Low]),
+            ..capabilities
+        };
+        assert_eq!(
+            resolve_reasoning(None, &serde_json::json!("auto"), &without_medium)
+                .expect("fall back to the closest lower effort"),
+            ReasoningRequest::Effort(ReasoningEffort::Low)
+        );
+
+        let unsupported = ReasoningCapability {
+            supported: false,
+            ..without_medium
+        };
+        assert_eq!(
+            resolve_reasoning(None, &serde_json::json!("auto"), &unsupported)
+                .expect("a non-reasoning model stays automatic"),
+            ReasoningRequest::Automatic
+        );
+    }
+
+    #[test]
+    fn configured_reasoning_accepts_efforts_and_budgets() {
+        assert_eq!(
+            parse_configured_reasoning(&serde_json::json!("high")).expect("effort"),
+            ProtocolReasoning::Effort {
+                effort: "high".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_configured_reasoning(&serde_json::json!({"budget": 2048})).expect("budget"),
+            ProtocolReasoning::Budget { tokens: 2048 }
+        );
+        assert!(parse_configured_reasoning(&serde_json::json!({"budget": 0})).is_err());
     }
 
     fn usage(input: u64, output: u64, cost: Option<f64>) -> Usage {

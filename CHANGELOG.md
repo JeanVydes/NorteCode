@@ -23,6 +23,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   presets when no URL is configured.
 - The headless `norte-code run` command, with streamed text and `--jsonl`
   output, plus `--budget`, `--reasoning` and `--approval-mode`.
+- `--interactive` on `run` and `resume`: the same session stays open after each
+  turn and prints a `›` prompt for the next message. `/exit`, `quit`, Ctrl-D or
+  Ctrl-C at the prompt leave; a first prompt is optional on `run`. The prompt
+  shares stdin with approvals and questions so queued input stays in order.
 - The models.dev catalog client: tolerant schema, capability and reasoning
   mapping, ETag/TTL cache with stale and bundled fallbacks, and a live refresh
   request.
@@ -35,7 +39,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Mid-session model switching at a turn boundary, reusing the session and its
   store while rebuilding the engine for the new model.
 - Reasoning resolution per model, with effort clamping to Norte's four efforts
-  and config overrides that win over catalog data.
+  and config overrides that win over catalog data. `--reasoning` accepts
+  `auto`, `off`, `minimal`, `low`, `medium` or `high` and is checked against
+  the selected model before the turn starts; the implicit default asks for
+  `medium` when the model declares it.
 - Agent Skills: discovery from user, configured and project roots; YAML
   frontmatter validation against the Agent Skills specification; progressive
   disclosure through the `skill`, `skill_resource` and opt-in `skill_script`
@@ -91,7 +98,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   gutter instead of mixing with the answer, and the run ends with a compact
   request/token/cost summary that includes the cache-read share and the
   input:output ratio. `NO_COLOR`, `TERM=dumb`, `CLICOLOR=0`, pipes and `--jsonl`
-  all keep the output plain.
+  all keep the output plain. With `--quiet`, reasoning is redacted to a single
+  `thinking…` marker rather than disappearing entirely.
 - Interrupted sessions are repaired on startup: Norte's `streaming` phase
   describes a live process, so a session left there by a hard kill is committed
   back to `idle` instead of being listed as streaming forever.
@@ -115,9 +123,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   fenced blocks, with a visible truncation marker instead of an unbounded dump.
   The run summary also lists every tool that executed and how many times.
 - `--debug` prints startup details: session id, model and wire, approval mode,
-  iteration limit, workspace, config and database paths, and extension keys.
+  iteration limit, workspace, config and database paths, and extension keys. It
+  also prints the selected model's modalities, context and output limits,
+  tool kinds, reasoning controls, streaming, cache, features, structured output
+  and catalogue metadata, the effective reasoning setting for the session, and
+  the character length of the system prompt and tool declarations; tokens are
+  left to the provider instead of being estimated.
+- A system prompt can be set in the config (`system_prompt`) or per run or
+  resume (`--system-prompt`); the flag wins over the config, and the config wins
+  over the built-in prompt.
 - Model iterations are unlimited by default, with `--max-iterations N` to cap a
-  run or resume.
+  run or resume. The compaction threshold can be overridden for one run or
+  resume with `--compaction-threshold FRACTION`; it otherwise comes from
+  `compaction.threshold` in the config.
 - Vendor request extensions via `--extension KEY=JSON` or the config
   `extensions` map, keyed `<wire-family>:<field>`. OpenRouter upstream routing
   works through `openai.chat:provider.order`.

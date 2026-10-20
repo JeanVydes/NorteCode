@@ -39,6 +39,7 @@ exact revision and is committed.
 
 ```sh
 norte-code run "explain this repository"
+norte-code run --interactive "start here"
 norte-code run --session <key> "continue with the tests"
 norte-code resume <key> --budget 20000 --budget-unit tokens
 norte-code sessions
@@ -52,12 +53,30 @@ norte-code run --debug --verbose \
 ```
 
 `--debug` prints the session id, model, wire, approval mode, iteration limit,
-workspace, config and database paths, and the configured extension keys.
-`--verbose` prints each tool call's effective arguments and its result as fenced
-blocks; large values are shortened, and long tool output is capped before it
-crosses the wire. The final summary lists the tools that ran and their counts.
-Iterations are unlimited by default; `--max-iterations N` caps one run or
-resume.
+compaction threshold, workspace, config and database paths, and the configured
+extension keys. It also prints the selected model's modalities, context and
+output limits, tool kinds, reasoning controls, streaming, cache, features,
+structured output and catalogue metadata, the effective reasoning setting for
+the session, and where the system prompt came from (flag, config or built-in),
+plus how many characters the system prompt and tool declarations contain.
+Tokens are not estimated: only the provider counts them, and the per-request
+usage line reports the provider's number. `--verbose` prints each tool call's
+effective arguments and its result as fenced blocks; large values are shortened,
+and long tool output is capped before it crosses the wire. The final summary
+lists the tools that ran and their counts. Iterations are unlimited by default;
+`--max-iterations N` caps one run or resume. The compaction threshold lives in
+`compaction.threshold` (default `0.90`) and can be overridden for one run or
+resume with `--compaction-threshold FRACTION`. The system prompt comes from
+`--system-prompt` when given, otherwise from `system_prompt` in the config, and
+otherwise from the built-in prompt.
+
+`--interactive` keeps the same session open after each turn and prints a `›`
+prompt for the next message; `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
+leave. `run --interactive` may omit its first prompt and start at the prompt;
+`resume --interactive` reopens a parked session and then continues the
+conversation. It needs a terminal and cannot be combined with `--jsonl`. The
+interactive prompt shares stdin with approvals and questions, so input typed
+ahead is consumed in order by the next prompt that needs it.
 
 Vendor-specific request fields use Norte's extension mechanism: a key is
 `<wire-family>:<field>`, and the value is JSON. The config has the same shape
@@ -92,7 +111,9 @@ allow. Approving resumes the same turn; input is read from the terminal, never
 from the model. With no interactive terminal the session stays parked, which is
 what `--jsonl` scripts and other clients expect. Reasoning streams in dim italic
 and tool, usage and turn summaries are colourised only when the output is a
-terminal; `NO_COLOR`, `TERM=dumb` and pipes keep it plain.
+terminal; `NO_COLOR`, `TERM=dumb` and pipes keep it plain. With `--quiet`,
+reasoning is redacted to one `thinking…` marker per turn instead of disappearing
+entirely, and tool activity and usage stay hidden.
 
 `ask_user` accepts an optional `options` list and `multiple` flag. When the model
 offers choices, the terminal shows them as a numbered list plus an automatic

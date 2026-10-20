@@ -67,6 +67,9 @@ pub enum ServiceError {
     /// A budget is malformed or cannot be measured.
     #[error("budget: {0}")]
     Budget(String),
+    /// A reasoning setting is malformed or unsupported by the model.
+    #[error("reasoning: {0}")]
+    Reasoning(String),
     /// An approval rule could not be read or written.
     #[error("approval: {0}")]
     Approval(String),

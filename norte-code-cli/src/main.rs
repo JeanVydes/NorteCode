@@ -1,9 +1,10 @@
 //! The headless `norte-code` command.
 //!
 //! `norte-code run "prompt"` builds the service in memory, sends one message
-//! and streams the answer. Text goes to stdout; diagnostics, reasoning and
-//! tool activity go to stderr. `--jsonl` writes one protocol event per line on
-//! stdout instead, for scripts and tests.
+//! and streams the answer. With `--interactive` the same session stays open and
+//! reads the next message from the terminal. Text goes to stdout; diagnostics,
+//! reasoning and tool activity go to stderr. `--jsonl` writes one protocol
+//! event per line on stdout instead, for scripts and tests.
 //!
 //! `norte-code models` lists what the catalogue knows, filtered by provider,
 //! tool calling or reasoning.
@@ -19,8 +20,13 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
+use norte::{
+    CacheMode, Feature, Modality, ReasoningEffort, StreamingGranularity, StructuredOutputMode,
+    ToolKind,
+};
 use norte_code_agent::{
-    DEFAULT_SYSTEM_PROMPT, EventStream, ModelSpec, Service, ServiceError, VendorModels, model_list,
+    DEFAULT_SYSTEM_PROMPT, EventStream, ModelSpec, Service, ServiceError, VendorModels,
+    effective_reasoning, model_list,
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
 use norte_code_config::{ApprovalMode, Config, user_config_path};
@@ -56,7 +62,7 @@ struct Cli {
     /// Show tool failures and other details.
     #[arg(long, global = true)]
     verbose: bool,
-    /// Print startup details, including the session id, paths and extensions.
+    /// Print startup details, model metadata, paths and extensions.
     #[arg(long, global = true)]
     debug: bool,
     /// What to do.
@@ -82,11 +88,16 @@ enum Command {
 
 #[derive(Args)]
 struct RunArgs {
-    /// The prompt.
-    prompt: String,
+    /// The prompt. With --interactive it may be omitted, so the session starts
+    /// at the prompt.
+    #[arg(required_unless_present = "interactive")]
+    prompt: Option<String>,
     /// A `provider/model` reference (defaults to `default_model` in config).
     #[arg(long, short = 'm', value_name = "PROVIDER/MODEL")]
     model: Option<String>,
+    /// Replace the built-in system prompt for this run.
+    #[arg(long, value_name = "TEXT")]
+    system_prompt: Option<String>,
     /// A base URL override for the provider.
     #[arg(long, value_name = "URL")]
     endpoint: Option<String>,
@@ -99,8 +110,11 @@ struct RunArgs {
     /// What to do when `--budget` is exhausted.
     #[arg(long, value_name = "ACTION", value_parser = ["warn", "ask", "stop"], default_value = "stop")]
     budget_action: String,
-    /// A reasoning effort such as `low`, `medium` or `high`.
-    #[arg(long, value_name = "EFFORT")]
+    /// The used-context fraction that triggers compaction, in (0, 1].
+    #[arg(long, value_name = "FRACTION")]
+    compaction_threshold: Option<f64>,
+    /// A reasoning setting: `auto`, `off`, or an effort such as `low`.
+    #[arg(long, value_name = "SETTING")]
     reasoning: Option<String>,
     /// What needs approval: `ask` (default), `auto-edit` or `yolo`.
     #[arg(long, value_name = "MODE", value_parser = ["ask", "auto-edit", "yolo"])]
@@ -115,18 +129,24 @@ struct RunArgs {
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
-    /// Do not print reasoning, tool activity or usage.
+    /// Redact reasoning and hide tool activity and usage.
     #[arg(long)]
     quiet: bool,
     /// Continue an existing session by key instead of creating one.
     #[arg(long, value_name = "KEY")]
     session: Option<String>,
+    /// Keep the session open and read the next message after each turn.
+    #[arg(long, short = 'i')]
+    interactive: bool,
 }
 
 #[derive(Args)]
 struct ResumeArgs {
     /// The session key to continue.
     session: String,
+    /// Replace the built-in system prompt for this resume.
+    #[arg(long, value_name = "TEXT")]
+    system_prompt: Option<String>,
     /// Replace the session budget before resuming.
     #[arg(long, value_name = "LIMIT")]
     budget: Option<f64>,
@@ -136,6 +156,9 @@ struct ResumeArgs {
     /// What to do when the budget is exhausted.
     #[arg(long, value_name = "ACTION", value_parser = ["warn", "ask", "stop"], default_value = "stop")]
     budget_action: String,
+    /// The used-context fraction that triggers compaction, in (0, 1].
+    #[arg(long, value_name = "FRACTION")]
+    compaction_threshold: Option<f64>,
     /// Stop after this many model iterations; keeps the config's limit when
     /// omitted.
     #[arg(long, value_name = "N")]
@@ -146,9 +169,12 @@ struct ResumeArgs {
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
-    /// Do not print reasoning, tool activity or usage.
+    /// Redact reasoning and hide tool activity and usage.
     #[arg(long)]
     quiet: bool,
+    /// Keep the session open and read the next message after each turn.
+    #[arg(long, short = 'i')]
+    interactive: bool,
 }
 
 #[derive(Args)]
@@ -532,6 +558,33 @@ async fn run_prompt(
         }
         config.max_iterations = Some(limit);
     }
+    if let Some(threshold) = args.compaction_threshold {
+        if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
+            return Err(format!(
+                "--compaction-threshold must be a fraction in (0, 1], got {threshold}"
+            ));
+        }
+        config.compaction.threshold = threshold;
+    }
+    let (system_prompt_source, system_prompt) =
+        select_system_prompt(args.system_prompt, config.system_prompt.clone());
+    let reasoning = args
+        .reasoning
+        .as_deref()
+        .map(parse_reasoning_setting)
+        .transpose()?;
+    let effective = effective_reasoning(
+        reasoning.as_ref(),
+        &config.reasoning.default,
+        &spec.capabilities.reasoning,
+    )
+    .map_err(|error| error.to_string())?;
+    if args.interactive && args.jsonl {
+        return Err("--interactive cannot be combined with --jsonl".to_owned());
+    }
+    if args.interactive && !std::io::stdin().is_terminal() {
+        return Err("--interactive needs a terminal on stdin".to_owned());
+    }
     apply_extensions(&mut config, &args.extension)?;
     if let Some(limit) = args.budget {
         if !limit.is_finite() || limit <= 0.0 {
@@ -576,6 +629,8 @@ async fn run_prompt(
             config_path.as_deref(),
             args.session.as_deref(),
         );
+        debug_model(style, &spec, catalog.find(&spec.provider, &spec.model));
+        debug_reasoning(style, &effective);
     }
     let store = Arc::new(
         SqliteStore::open(&database)
@@ -593,26 +648,15 @@ async fn run_prompt(
             session_store,
             blobs,
             directory,
-            DEFAULT_SYSTEM_PROMPT,
+            system_prompt,
         )
         .await
         .map_err(|e| e.to_string())?,
     );
+    if debug {
+        debug_prompt_size(style, &service, system_prompt_source);
+    }
     service.set_config_path(config_path);
-
-    let request = ClientRequest {
-        request_id: 1,
-        kind: ClientRequestKind::SendMessage {
-            session: args
-                .session
-                .as_ref()
-                .map(|key| SessionKey::new(key.clone())),
-            text: args.prompt,
-            budget: message_budget,
-            reasoning: args.reasoning.map(|effort| Reasoning::Effort { effort }),
-        },
-    };
-    let stream = service.submit(request).await.map_err(|e| e.to_string())?;
 
     let mut renderer = Renderer {
         format: if args.jsonl {
@@ -628,6 +672,7 @@ async fn run_prompt(
         style,
         block: Block::None,
         reasoning_line_start: false,
+        reasoning_placeholder: false,
         last_char: None,
         failed: false,
         cancelled: false,
@@ -642,13 +687,44 @@ async fn run_prompt(
         unpriced: 0,
         tool_counts: BTreeMap::new(),
     };
-
-    drive_turns(&service, stream, &mut renderer, style).await?;
-    if matches!(renderer.format, Format::Text)
-        && renderer.last_char.is_some_and(|last| last != '\n')
-    {
-        println!();
+    let interactive = args.interactive;
+    let mut input = interactive.then(stdin_lines);
+    let mut session = args
+        .session
+        .as_ref()
+        .map(|key| SessionKey::new(key.clone()));
+    let mut parked = false;
+    if let Some(prompt) = args.prompt {
+        let request = ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::SendMessage {
+                session: session.clone(),
+                text: prompt,
+                budget: message_budget.clone(),
+                reasoning: reasoning.clone(),
+            },
+        };
+        let stream = service.submit(request).await.map_err(|e| e.to_string())?;
+        let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+        session = outcome.session.or(session);
+        parked = outcome.parked;
+        renderer.ensure_newline();
     }
+    if interactive && !parked && !renderer.budget_stopped {
+        if let Some(receiver) = input.as_mut() {
+            interactive_loop(
+                &service,
+                session,
+                &mut renderer,
+                style,
+                receiver,
+                message_budget,
+                reasoning,
+            )
+            .await?;
+        }
+    }
+    renderer.ensure_newline();
     renderer.summary();
     Ok(u8::from(renderer.failed))
 }
@@ -670,8 +746,30 @@ async fn resume_session(
         }
         config.max_iterations = Some(limit);
     }
+    if let Some(threshold) = args.compaction_threshold {
+        if !threshold.is_finite() || threshold <= 0.0 || threshold > 1.0 {
+            return Err(format!(
+                "--compaction-threshold must be a fraction in (0, 1], got {threshold}"
+            ));
+        }
+        config.compaction.threshold = threshold;
+    }
+    let (system_prompt_source, system_prompt) =
+        select_system_prompt(args.system_prompt, config.system_prompt.clone());
+    if args.interactive && args.jsonl {
+        return Err("--interactive cannot be combined with --jsonl".to_owned());
+    }
+    if args.interactive && !std::io::stdin().is_terminal() {
+        return Err("--interactive needs a terminal on stdin".to_owned());
+    }
     apply_extensions(&mut config, &args.extension)?;
     let spec = resolve_spec(&config, &catalog, None, None)?;
+    let effective = effective_reasoning(
+        None,
+        &config.reasoning.default,
+        &spec.capabilities.reasoning,
+    )
+    .map_err(|error| error.to_string())?;
     let style = if args.jsonl {
         Style::plain()
     } else {
@@ -698,6 +796,8 @@ async fn resume_session(
             config_path.as_deref(),
             Some(args.session.as_str()),
         );
+        debug_model(style, &spec, catalog.find(&spec.provider, &spec.model));
+        debug_reasoning(style, &effective);
     }
     let store = Arc::new(
         SqliteStore::open(&database)
@@ -715,11 +815,14 @@ async fn resume_session(
             session_store,
             blobs,
             directory,
-            DEFAULT_SYSTEM_PROMPT,
+            system_prompt,
         )
         .await
         .map_err(|e| e.to_string())?,
     );
+    if debug {
+        debug_prompt_size(style, &service, system_prompt_source);
+    }
     service.set_config_path(config_path);
     let mut renderer = Renderer {
         format: if args.jsonl {
@@ -735,6 +838,7 @@ async fn resume_session(
         style,
         block: Block::None,
         reasoning_line_start: false,
+        reasoning_placeholder: false,
         last_char: None,
         failed: false,
         cancelled: false,
@@ -750,6 +854,8 @@ async fn resume_session(
         tool_counts: BTreeMap::new(),
     };
     let session = SessionKey::new(args.session);
+    let interactive = args.interactive;
+    let mut input = interactive.then(stdin_lines);
     if let Some(limit) = args.budget {
         if !limit.is_finite() || limit <= 0.0 {
             return Err(format!("--budget must be a positive number, got {limit}"));
@@ -770,7 +876,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style).await?;
+        drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
     }
     let stream = service
         .submit(ClientRequest {
@@ -781,14 +887,112 @@ async fn resume_session(
         })
         .await
         .map_err(|e| e.to_string())?;
-    drive_turns(&service, stream, &mut renderer, style).await?;
-    if matches!(renderer.format, Format::Text)
-        && renderer.last_char.is_some_and(|last| last != '\n')
-    {
-        println!();
+    let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+    renderer.ensure_newline();
+    if interactive && !outcome.parked && !renderer.budget_stopped {
+        if let Some(receiver) = input.as_mut() {
+            interactive_loop(
+                &service,
+                Some(session),
+                &mut renderer,
+                style,
+                receiver,
+                None,
+                None,
+            )
+            .await?;
+        }
     }
+    renderer.ensure_newline();
     renderer.summary();
     Ok(u8::from(renderer.failed))
+}
+
+/// Reads and sends messages until the human exits, a turn parks or the budget
+/// stops the session.
+async fn interactive_loop(
+    service: &Arc<Service>,
+    mut session: Option<SessionKey>,
+    renderer: &mut Renderer,
+    style: Style,
+    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    message_budget: Option<Budget>,
+    reasoning: Option<Reasoning>,
+) -> Result<Option<SessionKey>, String> {
+    if !renderer.quiet {
+        eprintln!(
+            "{}",
+            style.dim("interactive: type /exit, quit or press Ctrl-D to leave")
+        );
+    }
+    let mut request_id = 2_u64;
+    loop {
+        let Some(text) = read_repl_line(input, style).await? else {
+            break;
+        };
+        let stream = service
+            .submit(ClientRequest {
+                request_id,
+                kind: ClientRequestKind::SendMessage {
+                    session: session.clone(),
+                    text,
+                    budget: message_budget.clone(),
+                    reasoning: reasoning.clone(),
+                },
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        request_id = request_id.saturating_add(1);
+        let outcome = drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
+        session = outcome.session.or(session);
+        renderer.ensure_newline();
+        if outcome.parked || renderer.budget_stopped {
+            break;
+        }
+    }
+    Ok(session)
+}
+
+/// Prints the interactive prompt and waits for the next message.
+///
+/// Ctrl-C, Ctrl-D, `/exit` and `quit` all leave the loop without inventing a
+/// message. Empty lines are ignored.
+async fn read_repl_line(
+    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    style: Style,
+) -> Result<Option<String>, String> {
+    loop {
+        eprint!("{} ", style.cyan("›"));
+        let _ = std::io::stderr().flush();
+        let line = tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!();
+                return Ok(None);
+            }
+            line = input.recv() => line,
+        };
+        let Some(Some(line)) = line else {
+            eprintln!();
+            return Ok(None);
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if matches!(line, "/exit" | "/quit" | "exit" | "quit") {
+            return Ok(None);
+        }
+        return Ok(Some(line.to_owned()));
+    }
+}
+
+#[derive(Debug, Default)]
+struct DriveOutcome {
+    /// The session seen on the stream, if the stream carried one.
+    session: Option<SessionKey>,
+    /// The turn stopped with an approval still waiting for a human.
+    parked: bool,
 }
 
 /// Streams the primary turn, then any turns resumed by an approval.
@@ -801,9 +1005,8 @@ async fn drive_turns(
     primary: EventStream,
     renderer: &mut Renderer,
     style: Style,
-) -> Result<(), String> {
-    let interactive = matches!(renderer.format, Format::Text) && std::io::stdin().is_terminal();
-    let mut input = interactive.then(stdin_lines);
+    mut input: Option<&mut mpsc::UnboundedReceiver<Option<String>>>,
+) -> Result<DriveOutcome, String> {
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
     let mut pending: VecDeque<(SessionKey, String, ApprovalChoice)> = VecDeque::new();
@@ -816,6 +1019,7 @@ async fn drive_turns(
         }
     });
     let mut current: Option<SessionKey> = None;
+    let mut parked = false;
     let mut cancel_requested: Option<std::time::Instant> = None;
     while let Some(mut stream) = streams.pop_front() {
         loop {
@@ -878,9 +1082,20 @@ async fn drive_turns(
             if let Some(session) = &event.session {
                 current = Some(session.clone());
             }
-            match ask_approval(&event, style, &mut input, &mut interrupt_rx).await? {
+            match &event.kind {
+                ServerEventKind::TurnStarted { .. } => parked = false,
+                ServerEventKind::TurnFinished { phase, .. } => {
+                    parked = *phase == Phase::AwaitingApproval;
+                }
+                _ => {}
+            }
+            match ask_approval(&event, style, input.as_deref_mut(), &mut interrupt_rx).await? {
                 ApprovalOutcome::Decision(decision) => pending.push_back(decision),
-                ApprovalOutcome::None => {}
+                ApprovalOutcome::None => {
+                    if matches!(&event.kind, ServerEventKind::ApprovalRequested { .. }) {
+                        parked = true;
+                    }
+                }
                 ApprovalOutcome::Cancelled => {
                     renderer.mark_cancelled();
                     eprintln!(
@@ -890,17 +1105,23 @@ async fn drive_turns(
                         )
                     );
                     signal.abort();
-                    return Ok(());
+                    return Ok(DriveOutcome {
+                        session: current,
+                        parked: true,
+                    });
                 }
             }
-            if answer_if_asked(service, &event, &mut input, &mut interrupt_rx).await? {
+            if answer_if_asked(service, &event, input.as_deref_mut(), &mut interrupt_rx).await? {
                 renderer.mark_cancelled();
                 eprintln!(
                     "{}",
                     style.yellow("question left pending; the session is saved and can be resumed")
                 );
                 signal.abort();
-                return Ok(());
+                return Ok(DriveOutcome {
+                    session: current,
+                    parked: true,
+                });
             }
             renderer.event(&event)?;
         }
@@ -921,7 +1142,10 @@ async fn drive_turns(
         }
     }
     signal.abort();
-    Ok(())
+    Ok(DriveOutcome {
+        session: current,
+        parked,
+    })
 }
 
 /// What the human chose for a parked call.
@@ -959,7 +1183,7 @@ enum ApprovalOutcome {
 async fn ask_approval(
     event: &ServerEvent,
     style: Style,
-    input: &mut Option<mpsc::UnboundedReceiver<Option<String>>>,
+    input: Option<&mut mpsc::UnboundedReceiver<Option<String>>>,
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<ApprovalOutcome, String> {
     let ServerEventKind::ApprovalRequested {
@@ -1003,7 +1227,7 @@ async fn ask_approval(
         }
     }
     eprintln!("{rule}");
-    let Some(input) = input.as_mut() else {
+    let Some(input) = input else {
         eprintln!(
             "  {}",
             style.dim(
@@ -1026,7 +1250,7 @@ async fn ask_approval(
             style.red("[ns] deny this tool for this session"),
             style.red("[ng] deny this tool always")
         );
-        match prompt_input(&format!("  {} ", style.dim("›")), input, interrupts).await? {
+        match prompt_input(&format!("  {} ", style.dim("›")), &mut *input, interrupts).await? {
             PromptInput::Line(line) => {
                 if let Some(choice) = parse_approval_choice(&line) {
                     return Ok(ApprovalOutcome::Decision((
@@ -1450,7 +1674,7 @@ fn approval_request(
 async fn answer_if_asked(
     service: &Arc<Service>,
     event: &ServerEvent,
-    input: &mut Option<mpsc::UnboundedReceiver<Option<String>>>,
+    input: Option<&mut mpsc::UnboundedReceiver<Option<String>>>,
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<bool, String> {
     let ServerEventKind::QuestionAsked {
@@ -1469,14 +1693,14 @@ async fn answer_if_asked(
         .ok_or("a question arrived without a session")?;
     let question = question.clone();
     eprintln!("? {prompt}");
-    let Some(input) = input.as_mut() else {
+    let Some(input) = input else {
         eprintln!("(no interactive client; answering with a note)");
         let answer =
             "(no interactive client is attached; continue with your best judgment)".to_owned();
         return submit_answer(service, session, question, answer).await;
     };
     let answer = if options.is_empty() {
-        match prompt_input("answer> ", input, interrupts).await? {
+        match prompt_input("answer> ", &mut *input, interrupts).await? {
             PromptInput::Line(line) => line,
             PromptInput::Eof => {
                 "(no interactive client is attached; continue with your best judgment)".to_owned()
@@ -1497,7 +1721,7 @@ async fn answer_if_asked(
             }
         );
         loop {
-            let line = match prompt_input("choice> ", input, interrupts).await? {
+            let line = match prompt_input("choice> ", &mut *input, interrupts).await? {
                 PromptInput::Line(line) => line,
                 PromptInput::Eof => {
                     break "(no interactive client is attached; continue with your best judgment)"
@@ -1510,7 +1734,7 @@ async fn answer_if_asked(
                 continue;
             };
             let extra = if other {
-                match prompt_input("something else> ", input, interrupts).await? {
+                match prompt_input("something else> ", &mut *input, interrupts).await? {
                     PromptInput::Line(text) => Some(text),
                     PromptInput::Eof => {
                         break "(no interactive client is attached; continue with your best judgment)"
@@ -1799,6 +2023,9 @@ struct Renderer {
     style: Style,
     block: Block,
     reasoning_line_start: bool,
+    /// Whether `--quiet` has already printed its one redacted reasoning marker
+    /// for this turn.
+    reasoning_placeholder: bool,
     last_char: Option<char>,
     failed: bool,
     cancelled: bool,
@@ -1847,6 +2074,14 @@ impl Renderer {
         self.cancelled = true;
     }
 
+    /// Ends the current output line before a prompt or the final summary.
+    fn ensure_newline(&mut self) {
+        if matches!(self.format, Format::Text) && self.last_char.is_some_and(|last| last != '\n') {
+            println!();
+            self.last_char = Some('\n');
+        }
+    }
+
     /// Closes a reasoning gutter, if one is open.
     fn end_reasoning(&mut self) {
         if self.block != Block::Reasoning {
@@ -1862,6 +2097,7 @@ impl Renderer {
 
     /// Finishes any streamed block and leaves one blank line.
     fn end_blocks(&mut self) {
+        self.reasoning_placeholder = false;
         self.end_reasoning();
         if self.block == Block::Answer && self.last_char != Some('\n') {
             println!();
@@ -2120,6 +2356,7 @@ impl Renderer {
         match kind {
             ServerEventKind::TurnStarted { .. } => {
                 self.cancelled = false;
+                self.reasoning_placeholder = false;
             }
             ServerEventKind::Error { code, message } => {
                 self.end_blocks();
@@ -2228,7 +2465,12 @@ impl Renderer {
         match delta {
             Delta::Text { text, .. } => self.answer_delta(text),
             Delta::Reasoning { text, .. } => {
-                if !self.quiet {
+                if self.quiet {
+                    if !self.reasoning_placeholder {
+                        self.reasoning_placeholder = true;
+                        eprintln!("  {}", self.style.dim("thinking…"));
+                    }
+                } else {
                     if self.block != Block::Reasoning {
                         if self.block == Block::Answer {
                             self.end_blocks();
@@ -2458,6 +2700,18 @@ fn debug_start(
         ))
     );
     eprintln!("{}", style.dim(format!("  iterations {iterations}")));
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  compaction {}{}",
+            configuration.compaction.threshold,
+            if configuration.compaction.enabled {
+                ""
+            } else {
+                " (disabled)"
+            }
+        ))
+    );
     eprintln!("{}", style.dim(format!("  workspace  {workspace}")));
     eprintln!("{}", style.dim(format!("  config     {config_label}")));
     eprintln!(
@@ -2482,6 +2736,330 @@ fn debug_start(
             ))
         );
     }
+}
+
+/// Prints the static prompt size in characters. Tokens are provider-reported,
+/// so no estimate is made here.
+fn debug_prompt_size(style: Style, service: &Service, source: &str) {
+    match service.prompt_size() {
+        Ok(size) => {
+            eprintln!("{}", style.dim("debug: prompt material"));
+            eprintln!("{}", style.dim(format!("  source     {source}")));
+            eprintln!(
+                "{}",
+                style.dim(format!("  system     {} chars", size.system_chars))
+            );
+            eprintln!(
+                "{}",
+                style.dim(format!("  tools      {} chars", size.tool_chars))
+            );
+            eprintln!(
+                "{}",
+                style.dim(format!("  total      {} chars", size.total_chars()))
+            );
+        }
+        Err(error) => eprintln!(
+            "{}",
+            style.yellow(format!("debug: could not measure the prompt: {error}"))
+        ),
+    }
+}
+
+/// Prints the selected model's capabilities and catalogue metadata.
+#[allow(clippy::too_many_lines)]
+fn debug_model(style: Style, spec: &ModelSpec, model: Option<&norte_code_catalog::Model>) {
+    let capabilities = &spec.capabilities;
+    eprintln!("{}", style.dim("debug: model"));
+    eprintln!("{}", style.dim(format!("  reference  {}", spec.label())));
+    if let Some(model) = model {
+        if !model.name.is_empty() {
+            eprintln!("{}", style.dim(format!("  name       {}", model.name)));
+        }
+        if let Some(family) = &model.family {
+            eprintln!("{}", style.dim(format!("  family     {family}")));
+        }
+        if let Some(description) = &model.description {
+            eprintln!("{}", style.dim(format!("  about      {description}")));
+        }
+    }
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  wire       {} · provider {}",
+            spec.wire.family(),
+            spec.provider
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  context    {}",
+            token_limit_label(capabilities.max_context)
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  output     {}",
+            token_limit_label(capabilities.max_output)
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  modalities input {} · output {}",
+            modality_set(capabilities.modalities.input.keys()),
+            modality_set(capabilities.modalities.output.iter())
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  tools      {}",
+            tool_kind_set(&capabilities.tool_kinds)
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  reasoning  {}",
+            reasoning_capabilities(&capabilities.reasoning)
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  streaming  {}",
+            capabilities
+                .streaming
+                .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned())
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!("  cache      {}", cache_name(capabilities.cache)))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  features   {}",
+            feature_set(&capabilities.features)
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  structured {}",
+            structured_set(&capabilities.structured_output)
+        ))
+    );
+    if let Some(model) = model {
+        let mut metadata = Vec::new();
+        if let Some(status) = &model.status {
+            metadata.push(format!("status {status}"));
+        }
+        if let Some(knowledge) = &model.knowledge {
+            metadata.push(format!("knowledge {knowledge}"));
+        }
+        if let Some(released) = &model.release_date {
+            metadata.push(format!("released {released}"));
+        }
+        if let Some(updated) = &model.last_updated {
+            metadata.push(format!("updated {updated}"));
+        }
+        if let Some(open_weights) = model.open_weights {
+            metadata.push(format!("open weights {}", yes_no(open_weights)));
+        }
+        if model.attachment {
+            metadata.push("attachments".to_owned());
+        }
+        if let Some(temperature) = model.temperature {
+            metadata.push(format!("temperature {}", yes_no(temperature)));
+        }
+        if !metadata.is_empty() {
+            eprintln!(
+                "{}",
+                style.dim(format!("  catalogue  {}", metadata.join(" · ")))
+            );
+        }
+    }
+}
+
+/// Prints the reasoning setting the session is actually using.
+fn debug_reasoning(style: Style, reasoning: &Reasoning) {
+    eprintln!("{}", style.dim("debug: reasoning"));
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  effective  {}",
+            reasoning_setting_label(reasoning)
+        ))
+    );
+}
+
+fn reasoning_setting_label(reasoning: &Reasoning) -> String {
+    match reasoning {
+        Reasoning::Automatic => "auto".to_owned(),
+        Reasoning::Disabled => "off".to_owned(),
+        Reasoning::Effort { effort } => effort.clone(),
+        Reasoning::Budget { tokens } => format!("budget {tokens} tokens"),
+    }
+}
+
+/// Formats a token limit without guessing an unknown value.
+fn token_limit_label(limit: Option<u64>) -> String {
+    limit.map_or_else(|| "unknown".to_owned(), |value| format!("{value} tokens"))
+}
+
+/// Formats a set of modalities.
+fn modality_set<'a>(values: impl Iterator<Item = &'a Modality>) -> String {
+    let names: Vec<_> = values.map(|value| modality_name(*value)).collect();
+    if names.is_empty() {
+        "-".to_owned()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Formats the tool kinds a model accepts.
+fn tool_kind_set(values: &std::collections::BTreeSet<ToolKind>) -> String {
+    if values.is_empty() {
+        return "-".to_owned();
+    }
+    values
+        .iter()
+        .map(|kind| tool_kind_name(*kind))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Formats the independent features a model declares.
+fn feature_set(values: &std::collections::BTreeSet<Feature>) -> String {
+    if values.is_empty() {
+        return "-".to_owned();
+    }
+    values
+        .iter()
+        .map(|feature| feature_name(*feature))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Formats the structured-output modes a model declares.
+fn structured_set(values: &std::collections::BTreeSet<StructuredOutputMode>) -> String {
+    if values.is_empty() {
+        return "-".to_owned();
+    }
+    values
+        .iter()
+        .map(|mode| structured_name(*mode))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Formats a model's reasoning controls.
+fn reasoning_capabilities(reasoning: &norte::Reasoning) -> String {
+    if !reasoning.supported {
+        return "not supported".to_owned();
+    }
+    let mut parts = Vec::new();
+    if reasoning.can_disable {
+        parts.push("off allowed".to_owned());
+    }
+    if reasoning.efforts.is_empty() {
+        parts.push("auto only".to_owned());
+    } else {
+        parts.push(format!(
+            "efforts {}",
+            reasoning
+                .efforts
+                .iter()
+                .map(|effort| effort_label(*effort))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if reasoning.supports_budget {
+        parts.push(reasoning.max_budget.map_or_else(
+            || "budget yes".to_owned(),
+            |max| format!("budget up to {max}"),
+        ));
+    }
+    parts.join(" · ")
+}
+
+/// Lower-case labels for the capability enums. They serialize as snake case;
+/// these keep the debug output readable without a serialization dependency.
+fn modality_name(modality: Modality) -> &'static str {
+    match modality {
+        Modality::Text => "text",
+        Modality::Image => "image",
+        Modality::Audio => "audio",
+        Modality::Video => "video",
+        Modality::Document => "document",
+        _ => "other",
+    }
+}
+
+fn tool_kind_name(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Function => "function",
+        ToolKind::ProviderExecuted => "provider-executed",
+        ToolKind::ProviderSchema => "provider-schema",
+        _ => "other",
+    }
+}
+
+fn feature_name(feature: Feature) -> &'static str {
+    match feature {
+        Feature::Citations => "citations",
+        Feature::ParallelToolCalls => "parallel-tool-calls",
+        Feature::ForcedToolChoice => "forced-tool-choice",
+        Feature::Batch => "batch",
+        Feature::Logprobs => "logprobs",
+        _ => "other",
+    }
+}
+
+fn structured_name(mode: StructuredOutputMode) -> &'static str {
+    match mode {
+        StructuredOutputMode::JsonObject => "json-object",
+        StructuredOutputMode::JsonSchema => "json-schema",
+        StructuredOutputMode::StrictSchema => "strict-schema",
+        _ => "other",
+    }
+}
+
+fn streaming_name(mode: StreamingGranularity) -> &'static str {
+    match mode {
+        StreamingGranularity::Delta => "delta",
+        StreamingGranularity::Part => "part",
+        StreamingGranularity::Disabled => "disabled",
+        _ => "other",
+    }
+}
+
+fn cache_name(mode: CacheMode) -> &'static str {
+    match mode {
+        CacheMode::None => "none",
+        CacheMode::Automatic => "automatic",
+        CacheMode::Explicit => "explicit",
+        _ => "other",
+    }
+}
+
+fn effort_label(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        _ => "other",
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn approval_label(mode: ApprovalMode) -> &'static str {
@@ -2545,6 +3123,44 @@ fn parse_budget_action(action: &str) -> Result<BudgetAction, String> {
     }
 }
 
+/// Selects the system prompt: flag, then config, then the built-in default.
+fn select_system_prompt(
+    flag: Option<String>,
+    configured: Option<String>,
+) -> (&'static str, String) {
+    if let Some(prompt) = flag {
+        ("flag", prompt)
+    } else if let Some(prompt) = configured {
+        ("config", prompt)
+    } else {
+        ("default", DEFAULT_SYSTEM_PROMPT.to_owned())
+    }
+}
+
+/// Parses `--reasoning`. The service still checks the setting against the
+/// selected model, so this only catches names no model could accept.
+fn parse_reasoning_setting(value: &str) -> Result<Reasoning, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" | "automatic" => Ok(Reasoning::Automatic),
+        "off" | "none" | "disabled" => Ok(Reasoning::Disabled),
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => {
+            let effort = match normalized.as_str() {
+                "minimal" => "minimal",
+                "low" => "low",
+                "medium" => "medium",
+                _ => "high",
+            };
+            Ok(Reasoning::Effort {
+                effort: effort.to_owned(),
+            })
+        }
+        _ => Err(format!(
+            "`{value}` is not a reasoning setting; use auto, off, minimal, low, medium or high"
+        )),
+    }
+}
+
 fn budget_label(budget: &Budget) -> String {
     format!(
         "{} {} ({})",
@@ -2570,12 +3186,43 @@ fn code_name(code: ErrorCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalChoice, DenyScope, GrantScope, PreviewLine, apply_extensions, approval_request,
-        argument_preview, budget_label, compose_selection, cost_summary, parse_approval_choice,
-        parse_selection,
+        ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, apply_extensions,
+        approval_request, argument_preview, budget_label, compose_selection, cost_summary,
+        parse_approval_choice, parse_reasoning_setting, parse_selection, select_system_prompt,
     };
+    use clap::Parser;
     use norte_code_cost::CostSummary;
     use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
+
+    #[test]
+    fn the_system_prompt_prefers_the_flag_then_the_config() {
+        assert_eq!(
+            select_system_prompt(Some("flag".to_owned()), Some("config".to_owned())),
+            ("flag", "flag".to_owned())
+        );
+        assert_eq!(
+            select_system_prompt(None, Some("config".to_owned())),
+            ("config", "config".to_owned())
+        );
+        let (source, prompt) = select_system_prompt(None, None);
+        assert_eq!(source, "default");
+        assert!(prompt.contains("Norte Code"));
+    }
+
+    #[test]
+    fn reasoning_names_are_parsed_and_unknown_ones_are_rejected() {
+        assert_eq!(
+            parse_reasoning_setting("off").expect("off"),
+            norte_code_protocol::Reasoning::Disabled
+        );
+        assert_eq!(
+            parse_reasoning_setting("xhigh").expect("alias"),
+            norte_code_protocol::Reasoning::Effort {
+                effort: "high".to_owned()
+            }
+        );
+        assert!(parse_reasoning_setting("x").is_err());
+    }
 
     #[test]
     fn vendor_extensions_are_parsed_into_the_config() {
@@ -2789,6 +3436,24 @@ mod tests {
             }),
             "12 requests (stop)"
         );
+    }
+
+    #[test]
+    fn an_interactive_run_can_start_without_a_prompt() {
+        let cli = Cli::try_parse_from(["norte-code", "run", "--interactive"])
+            .expect("interactive run should parse");
+        match cli.command {
+            Command::Run(args) => {
+                assert!(args.interactive);
+                assert!(args.prompt.is_none());
+            }
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn a_headless_run_still_requires_a_prompt() {
+        assert!(Cli::try_parse_from(["norte-code", "run"]).is_err());
     }
 
     #[test]

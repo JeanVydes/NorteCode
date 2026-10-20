@@ -40,6 +40,8 @@ pub struct Config {
     pub compaction: CompactionConfig,
     /// The session's default reasoning setting.
     pub reasoning: ReasoningConfig,
+    /// A system prompt override; `None` uses the built-in default.
+    pub system_prompt: Option<String>,
     /// How tool calls are approved.
     pub approval_mode: ApprovalMode,
     /// Tools always allowed or denied across sessions.
@@ -73,6 +75,7 @@ impl Default for Config {
             catalog: CatalogConfig::default(),
             compaction: CompactionConfig::default(),
             reasoning: ReasoningConfig::default(),
+            system_prompt: None,
             approval_mode: ApprovalMode::default(),
             approvals: ApprovalsConfig::default(),
             max_iterations: None,
@@ -707,6 +710,17 @@ mod tests {
         assert_eq!(loaded.config.version, CONFIG_VERSION);
         assert_eq!(loaded.config.max_iterations, None);
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_system_prompt_can_come_from_the_config() {
+        let loaded = Config::from_json(r#"{"system_prompt":"Answer tersely."}"#).expect("config");
+        assert_eq!(
+            loaded.config.system_prompt.as_deref(),
+            Some("Answer tersely.")
+        );
+        let defaults = Config::from_json("{}").expect("config");
+        assert_eq!(defaults.config.system_prompt, None);
     }
 
     #[test]
