@@ -144,14 +144,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   latency to first output and total, reasoning, reported cost, status and
   metadata. `norte-code telemetry` rolls the rows up by hour, day, month, year
   or total, with top providers, models and sessions. Nothing leaves the machine.
-- Compaction at a turn boundary: when the provider-reported context crosses
+- Compaction at a safe boundary: when the provider-reported context crosses
   `compaction.threshold`, Norte Code summarises the old conversation and seeds a
   fresh Norte session with the summary, the todo list and the last
-  `keep_recent` messages. Tool calls are never split from their results, the
-  old session is kept for audit, the new session id is shown, and the summary
-  request enters the cost ledger and budgets. `/compact` in the interactive
-  prompt triggers the same path on demand; a failed summary leaves history
-  unchanged.
+  `keep_recent` messages. `compaction.trigger` selects `idle` (the default,
+  compact at a turn boundary) or `eager` (compact at the first safe
+  model-request boundary inside a turn, after a complete tool result). Tool
+  calls are never split from their results, eager never runs while an approval
+  is pending and runs at most once per turn, the old session is kept for audit,
+  the new session id is shown, and the summary request enters the cost ledger
+  and budgets. `/compact` in the interactive prompt triggers the same path on
+  demand; a failed summary leaves history unchanged.
 - A lost store race is reported as a conflict with a resume hint instead of a
   provider error. The session version is an optimistic-concurrency token, not a
   message count; a turn that loses the race did not commit.

@@ -54,8 +54,8 @@ norte-code run --debug --verbose \
 ```
 
 `--debug` prints the session id, model, wire, approval mode, iteration limit,
-compaction threshold, workspace, config and database paths, and the configured
-extension keys. It also prints the selected model's modalities, context and
+compaction threshold and trigger, workspace, config and database paths, and the
+configured extension keys. It also prints the selected model's modalities, context and
 output limits, tool kinds, reasoning controls, streaming, cache, features,
 structured output and catalogue metadata, the effective reasoning setting for
 the session, and where the system prompt came from (flag, config or built-in),
@@ -95,18 +95,23 @@ routing is for example:
 
 A key whose wire family does not match the selected model is ignored.
 
-Compaction runs automatically after a turn when the last provider-reported
-prompt plus answer crosses `compaction.threshold` (default `0.90` of the
-model's context window), and before the next turn if a session is resumed or
-switched to a smaller model. It also runs on `/compact`. The summary is built
-from the old transcript and the new session is seeded with the summary, the
-current todo list and the last `keep_recent` messages (default `6`). A suffix
-never starts with a tool result whose call was dropped. The old Norte session
-is left untouched for audit; the logical session keeps its key but shows the
-new session id. The summary request is a normal provider request: its reported
-cost enters the ledger and counts toward budgets. If the summary fails, history
-and the active session id stay unchanged. Models without a catalogue context
-limit do not compact automatically.
+Compaction runs automatically when the last provider-reported prompt plus answer
+crosses `compaction.threshold` (default `0.90` of the model's context window).
+`compaction.trigger` selects when: `idle` (the default) waits for an idle turn
+boundary and also checks before the next turn when a session is resumed or
+switched to a smaller model; `eager` checks at the first safe model-request
+boundary inside a turn, after a complete tool result and before the next
+request. Eager still never splits a tool call from its results, never runs
+while an approval is pending, and runs at most once per turn. It also runs on
+`/compact`. The summary is built from the old transcript and the new session is
+seeded with the summary, the current todo list and the last `keep_recent`
+messages (default `6`). A suffix never starts with a tool result whose call was
+dropped. The old Norte session is left untouched for audit; the logical session
+keeps its key but shows the new session id. The summary request is a normal
+provider request: its reported cost enters the ledger and counts toward budgets.
+If the summary fails, history and the active session id stay unchanged, and an
+eager turn stops at the safe point so it can be resumed. Models without a
+catalogue context limit do not compact automatically.
 
 Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or

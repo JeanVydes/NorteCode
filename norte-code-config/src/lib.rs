@@ -131,6 +131,10 @@ pub struct CompactionConfig {
     pub enabled: bool,
     /// The used-context fraction that triggers it.
     pub threshold: f64,
+    /// When an automatic compaction may run: `idle` (the default) only at an
+    /// idle turn boundary, or `eager` at the first safe model-request boundary
+    /// inside a turn. Eager still never splits a tool call from its results.
+    pub trigger: String,
     /// How many recent messages to keep verbatim.
     pub keep_recent: usize,
     /// A model to summarise with, or the session's own.
@@ -144,6 +148,7 @@ impl Default for CompactionConfig {
         Self {
             enabled: true,
             threshold: 0.90,
+            trigger: "idle".to_owned(),
             keep_recent: 6,
             model: None,
             reasoning: "lowest".to_owned(),
@@ -475,6 +480,9 @@ impl Config {
                 "must be a fraction in (0, 1]",
             ));
         }
+        if !matches!(self.compaction.trigger.as_str(), "idle" | "eager") {
+            return Err(invalid("compaction.trigger", "must be `idle` or `eager`"));
+        }
         for (scope, budget) in [
             ("message", &self.budgets.message),
             ("session", &self.budgets.session),
@@ -753,6 +761,17 @@ mod tests {
     fn a_future_version_is_rejected() {
         let error = Config::from_json(r#"{"version":2}"#).expect_err("version");
         assert!(error.to_string().contains("version"));
+    }
+
+    #[test]
+    fn compaction_trigger_defaults_to_idle_and_rejects_unknown_modes() {
+        let loaded = Config::from_json("{}").expect("config");
+        assert_eq!(loaded.config.compaction.trigger, "idle");
+        let eager = Config::from_json(r#"{"compaction":{"trigger":"eager"}}"#).expect("config");
+        assert_eq!(eager.config.compaction.trigger, "eager");
+        let error =
+            Config::from_json(r#"{"compaction":{"trigger":"always"}}"#).expect_err("trigger");
+        assert!(error.to_string().contains("compaction.trigger"));
     }
 
     #[test]

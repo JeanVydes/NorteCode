@@ -3115,10 +3115,12 @@ fn debug_start(
         style.dim(format!(
             "  compaction {}{}",
             configuration.compaction.threshold,
-            if configuration.compaction.enabled {
-                ""
-            } else {
+            if !configuration.compaction.enabled {
                 " (disabled)"
+            } else if configuration.compaction.trigger == "eager" {
+                " (eager)"
+            } else {
+                " (idle)"
             }
         ))
     );

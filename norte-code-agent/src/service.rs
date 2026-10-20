@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
@@ -48,6 +49,11 @@ use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 
 /// A stream of events answering one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
+
+/// A layer aborts a request with this prefix when compaction must run at a
+/// safe point. The service recognises it and restarts the turn on the new
+/// session; no model request and no telemetry record is produced.
+const COMPACTION_SAFE_POINT: &str = "norte-code: compaction safe point";
 
 /// A session as the service tracks it, beyond what Norte stores.
 #[derive(Debug)]
@@ -555,14 +561,16 @@ impl Service {
 
     /// Builds an engine for one spec over the shared stores.
     fn engine(&self, spec: &ModelSpec) -> Result<Engine, ServiceError> {
-        self.engine_with_budget(spec, None)
+        self.engine_with_budget(spec, None, None)
     }
 
-    /// Builds an engine whose requests pass through the budget layer.
+    /// Builds an engine whose requests pass through the budget and telemetry
+    /// layers, plus an optional eager-compaction layer.
     fn engine_with_budget(
         &self,
         spec: &ModelSpec,
         budget: Option<Arc<Mutex<BudgetBook>>>,
+        compaction: Option<Arc<CompactionGate>>,
     ) -> Result<Engine, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
         let mut builder = EngineBuilder::new()
@@ -596,12 +604,29 @@ impl Service {
         if let Some(book) = budget {
             layers.push(Arc::new(BudgetLayer { book }));
         }
+        if let Some(gate) = compaction {
+            layers.push(Arc::new(CompactionLayer { gate }));
+        }
         layers.push(Arc::new(TelemetryLayer::new(
             Arc::clone(&self.telemetry),
             spec.clone(),
         )));
         builder = builder.layers(LayerStack::new(layers));
         Ok(builder.build()?)
+    }
+
+    /// The eager-compaction gate, when enabled and the model declares a context
+    /// window. Without a window there is no threshold to compare against.
+    fn compaction_gate(&self, spec: &ModelSpec) -> Option<Arc<CompactionGate>> {
+        if !self.config.compaction.enabled || self.config.compaction.trigger != "eager" {
+            return None;
+        }
+        let max_context = spec.capabilities.max_context?;
+        Some(Arc::new(CompactionGate::new(
+            max_context,
+            self.config.compaction.threshold,
+            self.config.compaction.keep_recent,
+        )))
     }
 
     /// Measures the static prompt material: the system prompt and the tool
@@ -1163,8 +1188,8 @@ impl Service {
     }
 
     /// Checks whether the session has crossed the automatic compaction
-    /// threshold. Only a turn boundary is a safe point: a non-idle session may
-    /// hold an assistant tool call whose results are not committed yet.
+    /// threshold at a turn boundary. Eager mode uses [`CompactionGate`] to make
+    /// the same decision before a model request inside a turn.
     #[allow(clippy::cast_precision_loss)]
     async fn compaction_due(
         &self,
@@ -1255,7 +1280,7 @@ impl Service {
         let Some(record) = sessions.get_mut(key) else {
             return false;
         };
-        if record.compacting || record.phase != norte_code_protocol::Phase::Idle {
+        if record.compacting {
             return false;
         }
         record.compacting = true;
@@ -1283,12 +1308,7 @@ impl Service {
     /// seed a fresh Norte session with the summary, the todo list and the last
     /// `keep_recent` messages. The old session is never modified.
     async fn compact_core(&self, key: &SessionKey) -> Result<(SessionId, SessionId), ServiceError> {
-        let (old, spec, phase) = self.require_record(key)?;
-        if phase != norte_code_protocol::Phase::Idle {
-            return Err(ServiceError::Compaction(
-                "the session must be idle before it can compact".to_owned(),
-            ));
-        }
+        let (old, spec, _) = self.require_record(key)?;
         let engine = self.engine(&spec)?;
         let state = engine.session(old).await?;
         if state.phase != norte::Phase::Idle {
@@ -1309,7 +1329,7 @@ impl Service {
         }
         let summary_spec = self.summary_spec(&spec)?;
         let book = self.budget_book(key).await?;
-        let summary_engine = self.engine_with_budget(&summary_spec, Some(book))?;
+        let summary_engine = self.engine_with_budget(&summary_spec, Some(book), None)?;
         let scratch = summary_engine.create().await?;
         let mut request_messages = history.clone();
         request_messages.push(Message::user(SUMMARY_PROMPT));
@@ -1539,7 +1559,8 @@ impl Service {
                 .insert(key.clone(), Arc::clone(&book));
             book
         };
-        let engine = self.engine_with_budget(&spec, Some(book))?;
+        let gate = self.compaction_gate(&spec);
+        let engine = self.engine_with_budget(&spec, Some(Arc::clone(&book)), gate.clone())?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
         // A resumable park: after a restart the engine will not re-emit the
@@ -1573,7 +1594,17 @@ impl Service {
         tokio::spawn(async move {
             let result = this
                 .run_turn(
-                    &engine, request_id, &task_key, nid, turn, input, reasoning, &tx, &notify,
+                    engine,
+                    Some(book),
+                    gate,
+                    request_id,
+                    &task_key,
+                    nid,
+                    turn,
+                    input,
+                    reasoning,
+                    &tx,
+                    &notify,
                 )
                 .await;
             if let Err(error) = result {
@@ -1601,7 +1632,9 @@ impl Service {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_turn(
         &self,
-        engine: &Engine,
+        mut engine: Engine,
+        budget: Option<Arc<Mutex<BudgetBook>>>,
+        mut gate: Option<Arc<CompactionGate>>,
         request_id: u64,
         key: &SessionKey,
         nid: SessionId,
@@ -1611,15 +1644,10 @@ impl Service {
         tx: &mpsc::Sender<ServerEvent>,
         notify: &Notify,
     ) -> Result<(), ServiceError> {
-        let mut turn_builder = engine.turn(nid).reasoning(reasoning);
-        if let Some(text) = input {
-            turn_builder = turn_builder.input(Message::user(text));
-        }
-        for (key, value) in &self.config.extensions {
-            turn_builder = turn_builder.extension(key.clone(), value.clone());
-        }
-        let mut stream = turn_builder.start();
+        let mut current_nid = nid;
+        let mut input = input;
         let mut stats = self.stats(key, turn);
+        let mut questions = self.questions.subscribe();
         if !emit(
             tx,
             ServerEvent::new(
@@ -1633,159 +1661,276 @@ impl Service {
             return Ok(());
         }
 
-        let mut cancelled = false;
-        let mut interrupted = false;
-        let mut failure: Option<String> = None;
-        let mut failure_code = None;
-        let mut questions = self.questions.subscribe();
+        let mut compacted_eagerly = false;
         loop {
-            tokio::select! {
-                biased;
-                () = notify.notified() => {
-                    cancelled = true;
-                    interrupted = true;
-                }
-                question = questions.recv() => {
-                    if let Ok(question) = question {
-                        if question.session == Some(nid) {
-                            if !emit(
-                                tx,
-                                ServerEvent::new(
+            let mut turn_builder = engine.turn(current_nid).reasoning(reasoning);
+            if let Some(text) = input.take() {
+                turn_builder = turn_builder.input(Message::user(text));
+            }
+            for (key, value) in &self.config.extensions {
+                turn_builder = turn_builder.extension(key.clone(), value.clone());
+            }
+            let mut stream = turn_builder.start();
+
+            let mut cancelled = false;
+            let mut interrupted = false;
+            let mut failure: Option<String> = None;
+            let mut failure_code = None;
+            loop {
+                tokio::select! {
+                    biased;
+                    () = notify.notified() => {
+                        cancelled = true;
+                        interrupted = true;
+                    }
+                    question = questions.recv() => {
+                        if let Ok(question) = question {
+                            if question.session == Some(current_nid) {
+                                if !emit(
+                                    tx,
+                                    ServerEvent::new(
+                                        request_id,
+                                        Some(key.clone()),
+                                        ServerEventKind::QuestionAsked {
+                                            turn,
+                                            question: question.id,
+                                            prompt: question.question,
+                                            options: question.options,
+                                            multiple: question.multiple,
+                                        },
+                                    ),
+                                )
+                                .await
+                                {
+                                    return Ok(());
+                                }
+                                self.set_phase(key, norte_code_protocol::Phase::AwaitingTool).await;
+                            }
+                        }
+                    }
+                    next = stream.next() => {
+                        match next {
+                            Some(Ok(event)) => {
+                                if is_compaction_abort(&event) {
+                                    failure = Some(COMPACTION_SAFE_POINT.to_owned());
+                                    break;
+                                }
+                                if !self.handle(
+                                    &engine,
                                     request_id,
-                                    Some(key.clone()),
-                                    ServerEventKind::QuestionAsked {
-                                        turn,
-                                        question: question.id,
-                                        prompt: question.question,
-                                        options: question.options,
-                                        multiple: question.multiple,
-                                    },
-                                ),
-                            )
-                            .await
-                            {
-                                return Ok(());
+                                    key,
+                                    current_nid,
+                                    &event,
+                                    &mut stats,
+                                    tx,
+                                    gate.as_deref(),
+                                )
+                                .await
+                                {
+                                    return Ok(());
+                                }
                             }
-                            self.set_phase(key, norte_code_protocol::Phase::AwaitingTool).await;
+                            Some(Err(error)) => {
+                                failure_code = Some(error_code(&error));
+                                failure = Some(error.to_string());
+                                break;
+                            }
+                            None => break,
                         }
                     }
                 }
-                next = stream.next() => {
-                    match next {
-                        Some(Ok(event)) => {
-                            if !self.handle(engine, request_id, key, nid, &event, &mut stats, tx).await {
-                                return Ok(());
-                            }
-                        }
-                        Some(Err(error)) => {
-                            failure_code = Some(error_code(&error));
-                            failure = Some(error.to_string());
-                            break;
-                        }
-                        None => break,
-                    }
+                if cancelled {
+                    stream.cancel();
+                    cancelled = false;
                 }
             }
-            if cancelled {
-                stream.cancel();
-                cancelled = false;
-            }
-        }
 
-        let outcome = stream.finish().await;
-        // The last request has no successor to settle it.
-        let _ = self
-            .settle(engine, request_id, key, nid, &mut stats, tx, true)
-            .await;
-        self.store_stats(key, &stats).await;
-
-        match outcome {
-            Ok(outcome) => {
-                let phase = to_phase(outcome.session.phase);
-                self.set_phase(key, phase).await;
-                emit(
+            let outcome = stream.finish().await;
+            // The last request has no successor to settle it.
+            let _ = self
+                .settle(
+                    &engine,
+                    request_id,
+                    key,
+                    current_nid,
+                    &mut stats,
                     tx,
-                    ServerEvent::new(
-                        request_id,
-                        Some(key.clone()),
-                        ServerEventKind::TurnFinished {
-                            turn,
-                            phase,
-                            committed: outcome.message.is_some(),
-                        },
-                    ),
+                    true,
+                    gate.as_deref(),
                 )
                 .await;
-                if !interrupted
-                    && outcome.session.phase == norte::Phase::Idle
-                    && self.budget_stopped(key).is_none()
-                {
-                    if let Ok((current, spec, _)) = self.require_record(key) {
-                        if self
-                            .compaction_due(key, &spec, current)
-                            .await
-                            .unwrap_or(false)
-                        {
-                            match self.perform_compaction(request_id, key, "threshold").await {
-                                Ok(events) => {
-                                    for event in events {
-                                        if !emit(tx, event).await {
-                                            break;
+            self.store_stats(key, &stats).await;
+
+            let compaction_abort = failure.as_deref().is_some_and(is_compaction_message)
+                || matches!(
+                    &outcome,
+                    Err(error) if is_compaction_message(&error.to_string())
+                );
+            if !cancelled && !interrupted && compaction_abort {
+                match self.perform_compaction(request_id, key, "threshold").await {
+                    Ok(events) => {
+                        for event in events {
+                            if !emit(tx, event).await {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let phase = norte_code_protocol::Phase::Idle;
+                        self.set_phase(key, phase).await;
+                        emit(
+                            tx,
+                            ServerEvent::error(
+                                request_id,
+                                Some(key.clone()),
+                                ErrorCode::Internal,
+                                error.to_string(),
+                            ),
+                        )
+                        .await;
+                        emit(
+                            tx,
+                            ServerEvent::new(
+                                request_id,
+                                Some(key.clone()),
+                                ServerEventKind::TurnFinished {
+                                    turn,
+                                    phase,
+                                    committed: false,
+                                },
+                            ),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+                let (new_nid, new_spec, _) = self.require_record(key)?;
+                if new_nid == current_nid {
+                    // The summary failed; the old session is still the active
+                    // one and the turn stopped at the safe point.
+                    let phase = norte_code_protocol::Phase::Idle;
+                    self.set_phase(key, phase).await;
+                    emit(
+                        tx,
+                        ServerEvent::new(
+                            request_id,
+                            Some(key.clone()),
+                            ServerEventKind::TurnFinished {
+                                turn,
+                                phase,
+                                committed: false,
+                            },
+                        ),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                if let Some(record) = self.lock_sessions().get(key) {
+                    stats.billed = record.billed;
+                    stats.requests = record.requests;
+                    stats.cost = record.cost;
+                    stats.unpriced = record.unpriced;
+                    stats.input_tokens = record.input_tokens;
+                    stats.output_tokens = record.output_tokens;
+                }
+                engine = self.engine_with_budget(&new_spec, budget.clone(), None)?;
+                current_nid = new_nid;
+                input = None;
+                gate = None;
+                compacted_eagerly = true;
+                continue;
+            }
+
+            match outcome {
+                Ok(outcome) => {
+                    let phase = to_phase(outcome.session.phase);
+                    self.set_phase(key, phase).await;
+                    emit(
+                        tx,
+                        ServerEvent::new(
+                            request_id,
+                            Some(key.clone()),
+                            ServerEventKind::TurnFinished {
+                                turn,
+                                phase,
+                                committed: outcome.message.is_some(),
+                            },
+                        ),
+                    )
+                    .await;
+                    if !compacted_eagerly
+                        && !interrupted
+                        && outcome.session.phase == norte::Phase::Idle
+                        && self.budget_stopped(key).is_none()
+                    {
+                        if let Ok((current, spec, _)) = self.require_record(key) {
+                            if self
+                                .compaction_due(key, &spec, current)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                match self.perform_compaction(request_id, key, "threshold").await {
+                                    Ok(events) => {
+                                        for event in events {
+                                            if !emit(tx, event).await {
+                                                break;
+                                            }
                                         }
                                     }
-                                }
-                                Err(error) => {
-                                    let _ = emit(
-                                        tx,
-                                        ServerEvent::error(
-                                            request_id,
-                                            Some(key.clone()),
-                                            ErrorCode::Internal,
-                                            error.to_string(),
-                                        ),
-                                    )
-                                    .await;
+                                    Err(error) => {
+                                        let _ = emit(
+                                            tx,
+                                            ServerEvent::error(
+                                                request_id,
+                                                Some(key.clone()),
+                                                ErrorCode::Internal,
+                                                error.to_string(),
+                                            ),
+                                        )
+                                        .await;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            Err(error) => {
-                let code = failure_code.unwrap_or_else(|| error_code(&error));
-                let message = failure.unwrap_or_else(|| error.to_string());
-                let message = if code == ErrorCode::Conflict {
-                    format!(
-                        "{message}; the session had already advanced, so this turn did not commit. \
-                         Resume the session to continue from the latest commit."
+                Err(error) => {
+                    let code = failure_code.unwrap_or_else(|| error_code(&error));
+                    let message = failure.unwrap_or_else(|| error.to_string());
+                    let message = if code == ErrorCode::Conflict {
+                        format!(
+                            "{message}; the session had already advanced, so this turn did not commit. \
+                             Resume the session to continue from the latest commit."
+                        )
+                    } else {
+                        message
+                    };
+                    let phase = engine
+                        .session(current_nid)
+                        .await
+                        .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
+                    self.set_phase(key, phase).await;
+                    emit(
+                        tx,
+                        ServerEvent::error(request_id, Some(key.clone()), code, message),
                     )
-                } else {
-                    message
-                };
-                let phase = engine
-                    .session(nid)
-                    .await
-                    .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
-                self.set_phase(key, phase).await;
-                emit(
-                    tx,
-                    ServerEvent::error(request_id, Some(key.clone()), code, message),
-                )
-                .await;
-                emit(
-                    tx,
-                    ServerEvent::new(
-                        request_id,
-                        Some(key.clone()),
-                        ServerEventKind::TurnFinished {
-                            turn,
-                            phase,
-                            committed: false,
-                        },
-                    ),
-                )
-                .await;
+                    .await;
+                    emit(
+                        tx,
+                        ServerEvent::new(
+                            request_id,
+                            Some(key.clone()),
+                            ServerEventKind::TurnFinished {
+                                turn,
+                                phase,
+                                committed: false,
+                            },
+                        ),
+                    )
+                    .await;
+                }
             }
+            break;
         }
         Ok(())
     }
@@ -1802,6 +1947,7 @@ impl Service {
         event: &EngineEvent,
         stats: &mut Stats,
         tx: &mpsc::Sender<ServerEvent>,
+        gate: Option<&CompactionGate>,
     ) -> bool {
         let kind = match event {
             EngineEvent::StreamDelta { delta, .. } => {
@@ -1911,7 +2057,7 @@ impl Service {
             }
             EngineEvent::RequestReconstructed { .. } => {
                 return self
-                    .settle(engine, request_id, key, nid, stats, tx, false)
+                    .settle(engine, request_id, key, nid, stats, tx, false, gate)
                     .await;
             }
             _ => None,
@@ -1933,10 +2079,14 @@ impl Service {
         stats: &mut Stats,
         tx: &mpsc::Sender<ServerEvent>,
         final_check: bool,
+        gate: Option<&CompactionGate>,
     ) -> bool {
         let Ok(history) = engine.history(nid).await else {
             return true;
         };
+        if let Some(gate) = gate {
+            gate.update(used_context(&history));
+        }
         let mut ok = std::collections::VecDeque::new();
         for record in self.telemetry_for(key, nid) {
             if record.status == "ok" {
@@ -3482,6 +3632,78 @@ fn configured_budget(budget: Option<&BudgetConfig>) -> Option<Budget> {
     })
 }
 
+/// Whether the next request is over the compaction threshold.
+///
+/// The service updates it from the provider-reported usage as each request is
+/// settled; the layer reads it just before the next request. It is shared by
+/// every engine built for the turn and dropped after an eager compaction.
+struct CompactionGate {
+    max_context: u64,
+    threshold: f64,
+    keep_recent: usize,
+    due: AtomicBool,
+}
+
+impl CompactionGate {
+    fn new(max_context: u64, threshold: f64, keep_recent: usize) -> Self {
+        Self {
+            max_context,
+            threshold,
+            keep_recent,
+            due: AtomicBool::new(false),
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn update(&self, used: u64) {
+        let due = used as f64 >= self.max_context as f64 * self.threshold;
+        self.due.store(due, Ordering::Relaxed);
+    }
+
+    fn due(&self) -> bool {
+        self.due.load(Ordering::Relaxed)
+    }
+}
+
+/// Aborts a model request at a safe point instead of sending it, so the
+/// service can compact the idle session and restart the turn on the new one.
+struct CompactionLayer {
+    gate: Arc<CompactionGate>,
+}
+
+#[async_trait]
+impl Layer for CompactionLayer {
+    fn name(&self) -> &'static str {
+        "compaction"
+    }
+
+    async fn wrap(
+        &self,
+        context: &LayerContext<'_>,
+        request: ModelRequest,
+        next: &dyn Continuation,
+    ) -> norte::Result<ModelStream> {
+        if self.gate.due() && request.messages.len() > self.gate.keep_recent.saturating_add(1) {
+            let detail = format!(
+                "used context reached the {} threshold of the model window; \
+                 compacting before the next request",
+                self.gate.threshold
+            );
+            context.short_circuit(
+                "compaction",
+                ShortCircuitReason::Custom {
+                    name: "compaction_due".to_owned(),
+                    detail: detail.clone(),
+                },
+            );
+            return Err(norte::Error::InvalidInput(format!(
+                "{COMPACTION_SAFE_POINT}: {detail}"
+            )));
+        }
+        next.call(context, request).await
+    }
+}
+
 /// Stops a model request before it is sent when a budget is exhausted.
 ///
 /// Norte has no price feed, so this is a check against the ledger's measured
@@ -3566,6 +3788,18 @@ fn to_phase(phase: norte::Phase) -> norte_code_protocol::Phase {
         norte::Phase::AwaitingApproval => norte_code_protocol::Phase::AwaitingApproval,
         _ => norte_code_protocol::Phase::Idle,
     }
+}
+
+/// Whether an engine error is the compaction layer stopping before a request.
+fn is_compaction_abort(event: &EngineEvent) -> bool {
+    matches!(
+        event,
+        EngineEvent::Error { message, .. } if is_compaction_message(message)
+    )
+}
+
+fn is_compaction_message(message: &str) -> bool {
+    message.contains(COMPACTION_SAFE_POINT)
 }
 
 /// Classifies an engine failure for the client.
@@ -4319,6 +4553,166 @@ mod tests {
             .find(|session| session.key == key.as_str())
             .expect("stored session");
         assert_eq!(after_second.north, after_first.north);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(
+            ScriptedModel::new(reference)
+                .turn(vec![
+                    norte::StreamEvent::Usage(usage(600, 10, None)),
+                    norte::StreamEvent::ToolCallStart {
+                        index: 0,
+                        call_id: call,
+                        name: "todo".to_owned(),
+                    },
+                    norte::StreamEvent::ToolCallDelta {
+                        index: 0,
+                        call_id: call,
+                        name: None,
+                        arguments: serde_json::json!({"todos": []}).to_string(),
+                    },
+                    norte::StreamEvent::Finish(FinishReason::ToolCalls),
+                ])
+                .turn_text("summary of the earlier conversation")
+                .turn_text("done"),
+        );
+        let mut config = config();
+        config.compaction.threshold = 0.5;
+        config.compaction.trigger = "eager".to_owned();
+        config.compaction.keep_recent = 1;
+        let (service, store) = persistent_service_with_config(config, model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = events
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session");
+        let mut started = 0;
+        let mut finished = None;
+        let mut text = String::new();
+        let mut turn_finished = None;
+        for event in &events {
+            match &event.kind {
+                ServerEventKind::CompactionStarted { reason } => {
+                    assert_eq!(reason, "threshold");
+                    started += 1;
+                }
+                ServerEventKind::CompactionFinished {
+                    compacted,
+                    north_session,
+                    ..
+                } => finished = Some((*compacted, north_session.clone())),
+                ServerEventKind::Delta {
+                    delta: Delta::Text { text: chunk, .. },
+                    ..
+                } => text.push_str(chunk),
+                ServerEventKind::TurnFinished {
+                    phase, committed, ..
+                } => turn_finished = Some((*phase, *committed)),
+                _ => {}
+            }
+        }
+        assert_eq!(started, 1, "{events:#?}");
+        let (compacted, north) = finished.expect("compaction finished");
+        assert!(compacted);
+        assert_eq!(text, "done");
+        assert_eq!(
+            turn_finished,
+            Some((norte_code_protocol::Phase::Idle, true))
+        );
+        let north = north.expect("new session id");
+        let stored = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        assert_eq!(stored.north.to_string(), north);
+        let old = stored.compacted_from.expect("compacted from");
+        assert!(store.load(old).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_failed_eager_summary_stops_at_the_safe_point() {
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let call = CallId::new();
+        let model = Arc::new(ScriptedModel::new(reference).turn(vec![
+            norte::StreamEvent::Usage(usage(600, 10, None)),
+            norte::StreamEvent::ToolCallStart {
+                index: 0,
+                call_id: call,
+                name: "todo".to_owned(),
+            },
+            norte::StreamEvent::ToolCallDelta {
+                index: 0,
+                call_id: call,
+                name: None,
+                arguments: serde_json::json!({"todos": []}).to_string(),
+            },
+            norte::StreamEvent::Finish(FinishReason::ToolCalls),
+        ]));
+        let mut config = config();
+        config.compaction.threshold = 0.5;
+        config.compaction.trigger = "eager".to_owned();
+        config.compaction.keep_recent = 1;
+        let (service, store) = persistent_service_with_config(config, model).await;
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        let key = events
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session");
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::CompactionFinished {
+                compacted: false,
+                error: Some(_),
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )));
+        let stored = store
+            .sessions()
+            .await
+            .expect("sessions")
+            .into_iter()
+            .find(|session| session.key == key.as_str())
+            .expect("stored session");
+        assert_eq!(stored.compacted_from, None);
+        assert!(store.load(stored.north).await.is_ok());
     }
 
     #[tokio::test]
