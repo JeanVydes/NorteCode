@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Pinned {
     inner: Mutex<PinnedInner>,
     dirty: AtomicBool,
+    resized: AtomicBool,
 }
 
 #[derive(Default)]
@@ -65,10 +66,22 @@ impl Pinned {
     fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::Relaxed)
     }
+
+    /// Notes that the terminal changed size and the renderer must forget the
+    /// column it thought it was on.
+    pub(crate) fn mark_resized(&self) {
+        self.resized.store(true, Ordering::Release);
+    }
+
+    /// Consumes the resize notice, if one is pending.
+    pub(crate) fn take_resized(&self) -> bool {
+        self.resized.swap(false, Ordering::Acquire)
+    }
 }
 
 #[cfg(unix)]
 mod unix {
+    use std::fmt::Write as _;
     use std::io::{self, IsTerminal, Write};
     use std::os::fd::AsRawFd;
     use std::sync::Arc;
@@ -318,11 +331,14 @@ mod unix {
 
         draw_input(style, cols, rows, &buffer);
         draw_footer(style, cols, rows, pinned);
+        let mut pending_resize: Option<(u16, u16)> = None;
+        let mut resize_deadline: Option<std::time::Instant> = None;
+        let mut resize_started: Option<std::time::Instant> = None;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            match event::poll(Duration::from_millis(100)) {
+            match event::poll(Duration::from_millis(50)) {
                 Ok(true) => {
                     let mut redraw = false;
                     match event::read() {
@@ -346,11 +362,14 @@ mod unix {
                             redraw = true;
                         }
                         Ok(Event::Resize(width, height)) => {
-                            cols = width;
-                            rows = height.max(FOOTER_ROWS + 1);
-                            reset_region(cols, rows);
-                            draw_footer(style, cols, rows, pinned);
-                            redraw = true;
+                            // A drag sends one event per step. Keep the latest
+                            // size and apply it once the drag pauses: resetting
+                            // the scroll region on every step is what used to
+                            // duplicate and break the transcript.
+                            let now = std::time::Instant::now();
+                            pending_resize = Some((width, height.max(FOOTER_ROWS + 1)));
+                            resize_deadline = Some(now + Duration::from_millis(80));
+                            resize_started.get_or_insert(now);
                         }
                         _ => {}
                     }
@@ -363,6 +382,26 @@ mod unix {
                     let _ = sender.send(None);
                     break;
                 }
+            }
+            let resize_due = pending_resize.is_some_and(|_| {
+                let now = std::time::Instant::now();
+                resize_deadline.is_some_and(|deadline| now >= deadline)
+                    || resize_started.is_some_and(|started| {
+                        now.duration_since(started) >= Duration::from_millis(150)
+                    })
+            });
+            if resize_due {
+                if let Some((width, height)) = pending_resize.take() {
+                    let old_rows = rows;
+                    cols = width;
+                    rows = height;
+                    resize_terminal(rows, old_rows);
+                    pinned.mark_resized();
+                    draw_footer(style, cols, rows, pinned);
+                    draw_input(style, cols, rows, &buffer);
+                }
+                resize_deadline = None;
+                resize_started = None;
             }
             if pinned.take_dirty() {
                 draw_footer(style, cols, rows, pinned);
@@ -578,9 +617,29 @@ mod unix {
         let _ = out.flush();
     }
 
-    fn reset_region(cols: u16, rows: u16) {
+    fn resize_terminal(rows: u16, old_rows: u16) {
+        let bottom = scroll_bottom(rows);
+        // One atomic write: the renderer writes to the same terminal from
+        // another thread, and a cursor move split across writes is exactly how
+        // streamed text ends up duplicated or overwritten while resizing.
+        let mut frame = String::from("\x1b[r");
+        let old_first = scroll_bottom(old_rows).saturating_add(1);
+        for row in old_first..=old_rows.max(1) {
+            if row <= rows {
+                let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+            }
+        }
+        for row in bottom.saturating_add(1)..=rows.max(1) {
+            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+        }
+        // Release the old region above, clear the rows that are footer in the
+        // old or the new size, then set the new region and scroll one fresh
+        // line at its bottom. Scrolling (rather than jumping onto the last
+        // line) preserves whatever the terminal reflowed instead of writing
+        // over it.
+        let _ = write!(frame, "\x1b[{bottom};1H\x1b[1;{bottom}r\r\n");
         let mut out = io::stderr().lock();
-        let _ = set_region(&mut out, cols, rows);
+        let _ = out.write_all(frame.as_bytes());
         let _ = out.flush();
     }
 
@@ -604,15 +663,15 @@ mod unix {
             let joined = queued.join(" · ");
             format!("{} {}", style.faint("queued"), style.faint(joined))
         };
-        let mut out = io::stderr().lock();
-        let _ = write!(
-            out,
+        let frame = format!(
             "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
             queue_row(rows),
             clip_visible(&queue_text, width),
             status_row(rows),
             clip_visible(&session, width)
         );
+        let mut out = io::stderr().lock();
+        let _ = out.write_all(frame.as_bytes());
         let _ = out.flush();
     }
 
@@ -664,14 +723,27 @@ mod unix {
             visible.push_str("\x1b[7m \x1b[27m");
         }
         let row = rows.max(1);
+        let frame = format!("\x1b7\x1b[{row};1H\x1b[2K{prompt}{visible}\x1b8");
         let mut out = io::stderr().lock();
-        let _ = write!(out, "\x1b7\x1b[{row};1H\x1b[2K{prompt}{visible}\x1b8");
+        let _ = out.write_all(frame.as_bytes());
         let _ = out.flush();
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{LineBuffer, clip_visible};
+        use super::{LineBuffer, clip_visible, queue_row, scroll_bottom, status_row};
+
+        #[test]
+        fn footer_rows_stay_below_the_scroll_region() {
+            assert_eq!(scroll_bottom(24), 21);
+            assert_eq!(status_row(24), 22);
+            assert_eq!(queue_row(24), 23);
+            // A terminal shorter than the footer still yields valid rows.
+            assert_eq!(scroll_bottom(3), 1);
+            assert_eq!(scroll_bottom(4), 1);
+            assert_eq!(status_row(4), 2);
+            assert_eq!(queue_row(4), 3);
+        }
 
         #[test]
         fn arrows_move_the_insertion_point_without_reordering_text() {

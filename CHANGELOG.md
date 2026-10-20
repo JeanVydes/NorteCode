@@ -20,6 +20,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   before the provider reports usage now explains that the cancelled request is
   still recorded in telemetry.
 
+### Fixed
+
+- Resizing the terminal no longer duplicates or breaks streamed text. Resize
+  events are debounced, the footer rows for the old and new sizes are cleared,
+  and the scroll region is reset in one atomic write so the renderer never
+  continues a line the terminal has just reflowed.
+
 ### Added
 
 - Runtime awareness stored per session: a new session gets a system block with

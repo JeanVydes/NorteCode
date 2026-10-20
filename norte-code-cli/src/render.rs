@@ -77,6 +77,14 @@ impl Renderer {
                 self.debug_session = true;
             }
         }
+        if self.pinned.take_resized() {
+            // The input thread moved the main cursor to a fresh line after the
+            // resize. Forget the column we thought we were on so the next
+            // delta starts there instead of trying to continue a line that the
+            // terminal may have reflowed.
+            self.last_char = Some('\n');
+            self.reasoning_line_start = true;
+        }
         if matches!(self.format, Format::Jsonl) {
             let line = serde_json::to_string(event).map_err(|error| error.to_string())?;
             println!("{line}");
