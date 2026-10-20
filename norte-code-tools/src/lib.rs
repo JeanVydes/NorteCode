@@ -260,6 +260,9 @@ pub struct GrepArgs {
     /// The largest number of matching lines to return.
     #[serde(default)]
     pub max_matches: Option<usize>,
+    /// Skip this many matching lines first, for paging.
+    #[serde(default)]
+    pub offset: Option<usize>,
 }
 
 /// Search a project for a regular expression.
@@ -288,6 +291,7 @@ impl GrepTool {
 
 #[async_trait]
 impl FnExecutor<GrepArgs, ToolOutput> for GrepTool {
+    #[allow(clippy::too_many_lines)]
     async fn call(&self, args: GrepArgs) -> Result<ToolOutput> {
         let pattern = match RegexBuilder::new(&args.pattern)
             .case_insensitive(args.ignore_case)
@@ -311,7 +315,9 @@ impl FnExecutor<GrepArgs, ToolOutput> for GrepTool {
         };
         let root = args.path.unwrap_or_else(|| self.root.clone());
         let limit = cap(args.max_matches, DEFAULT_MAX_RESULTS, MAX_RESULTS);
+        let offset = args.offset.unwrap_or(0);
         let mut matches = Vec::new();
+        let mut seen = 0usize;
         let mut truncated = false;
 
         let files: Box<dyn Iterator<Item = PathBuf>> = if root.is_file() {
@@ -355,6 +361,11 @@ impl FnExecutor<GrepArgs, ToolOutput> for GrepTool {
                 if !pattern.is_match(line) {
                     continue;
                 }
+                if seen < offset {
+                    seen += 1;
+                    continue;
+                }
+                seen += 1;
                 matches.push(format!(
                     "{shown}:{}: {}",
                     index + 1,
@@ -377,9 +388,10 @@ impl FnExecutor<GrepArgs, ToolOutput> for GrepTool {
         }
         let mut text = matches.join("\n");
         if truncated {
+            let next = offset + matches.len();
             let _ = write!(
                 text,
-                "\n\n[showing the first {limit} matches; narrow the pattern or the path]"
+                "\n\n[showing {limit} matches from offset {offset}; continue with offset {next}]"
             );
         }
         Ok(ToolOutput::text(text))
@@ -851,17 +863,19 @@ mod tests {
         let tool = GrepTool::new(&root);
         let output = tool
             .call(GrepArgs {
-                pattern: "fn two".to_owned(),
+                pattern: "fn ".to_owned(),
                 path: None,
                 glob: Some("**/*.rs".to_owned()),
                 ignore_case: false,
-                max_matches: None,
+                max_matches: Some(1),
+                offset: Some(1),
             })
             .await
             .expect("grep");
         let text = format!("{:?}", output.parts);
         assert!(text.contains("src/lib.rs"));
         assert!(text.contains("fn two"));
+        assert!(!text.contains("fn one"));
         let _ = std::fs::remove_dir_all(root);
     }
 
