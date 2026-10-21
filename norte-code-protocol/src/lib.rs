@@ -154,6 +154,11 @@ pub enum ClientRequestKind {
         /// The grant to revoke.
         grant: String,
     },
+    /// List the approval grants held by a session.
+    ListGrants {
+        /// The session.
+        session: SessionKey,
+    },
     /// Answer a question a running turn is waiting on.
     AnswerQuestion {
         /// The session.
@@ -424,6 +429,12 @@ pub enum ServerEventKind {
         /// The new `provider/model`.
         model: String,
     },
+    /// A model switch was accepted while the session was busy and will be
+    /// applied at the next turn boundary.
+    ModelQueued {
+        /// The requested `provider/model`.
+        model: String,
+    },
     /// The session's reasoning setting was lowered to fit the new model.
     ReasoningDowngraded {
         /// What was asked for.
@@ -461,6 +472,11 @@ pub enum ServerEventKind {
         approval: String,
         /// The grant.
         grant: String,
+    },
+    /// The approval grants held by a session.
+    GrantList {
+        /// One entry per grant, including revoked ones.
+        grants: Vec<GrantInfo>,
     },
     /// The running turn needs an answer before it can continue.
     QuestionAsked {
@@ -532,6 +548,24 @@ pub struct SessionInfo {
     pub created_at: Option<String>,
     /// Where it currently is.
     pub phase: Phase,
+}
+
+/// One approval grant, as a client sees it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantInfo {
+    /// The approval record that issued it.
+    pub approval: String,
+    /// The grant id to pass to [`ClientRequestKind::Revoke`].
+    pub grant: String,
+    /// The tool the approval covered.
+    pub tool: String,
+    /// How far the grant reaches.
+    pub scope: GrantScope,
+    /// When it was issued, as RFC 3339.
+    pub issued_at: String,
+    /// Whether it has already been revoked.
+    pub revoked: bool,
 }
 
 /// One model the catalogue knows, flattened for a picker.

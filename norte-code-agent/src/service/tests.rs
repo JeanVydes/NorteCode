@@ -2416,6 +2416,259 @@ async fn a_write_parks_for_approval_and_resumes() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_model_switch_while_parked_is_applied_at_the_next_turn_boundary() {
+    let target = std::env::current_dir()
+        .expect("working directory")
+        .join("target")
+        .join(format!(
+            "norte-code-queued-model-{}.txt",
+            std::process::id()
+        ));
+    let _ = std::fs::remove_file(&target);
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "write",
+                &serde_json::json!({
+                    "path": target.display().to_string(),
+                    "content": "written by a tool",
+                    "overwrite": true
+                }),
+            )
+            .turn_text("done")
+            .turn_text("after the switch"),
+    );
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "write it".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let session = first[0].session.clone().expect("session");
+    let approval = first
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+            _ => None,
+        })
+        .expect("approval request");
+
+    // The session is parked, so the switch is accepted but not applied.
+    let queued = drain(
+        &service,
+        ClientRequestKind::SetModel {
+            session: session.clone(),
+            model: "test/other".to_owned(),
+        },
+    )
+    .await;
+    assert!(
+        queued
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::ModelQueued { .. })),
+        "the switch should be queued while the session is busy"
+    );
+    let listed = drain(&service, ClientRequestKind::ListSessions).await;
+    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
+        panic!("expected a list");
+    };
+    assert_eq!(sessions[0].model.as_deref(), Some("test/scripted"));
+
+    // The approval continuation is not a turn boundary, so the model stays.
+    let second = drain(
+        &service,
+        ClientRequestKind::Approve {
+            session: session.clone(),
+            approval,
+            arguments: None,
+            scope: None,
+            remember: None,
+        },
+    )
+    .await;
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::ModelChanged { .. }))
+    );
+    let _ = std::fs::remove_file(&target);
+
+    // The next real turn applies the queued switch.
+    let third = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(session.clone()),
+            text: "next".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    assert!(
+        third
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::ModelChanged { .. })),
+        "the queued switch should be applied at the turn boundary"
+    );
+    let listed = drain(&service, ClientRequestKind::ListSessions).await;
+    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
+        panic!("expected a list");
+    };
+    assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn grants_are_listed_and_can_be_revoked() {
+    let target = std::env::current_dir()
+        .expect("working directory")
+        .join("target")
+        .join(format!("norte-code-grants-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&target);
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "write",
+                &serde_json::json!({
+                    "path": target.display().to_string(),
+                    "content": "written by a tool",
+                    "overwrite": true
+                }),
+            )
+            .turn_text("done"),
+    );
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "write it".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let session = first[0].session.clone().expect("session");
+    let approval = first
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+            _ => None,
+        })
+        .expect("approval request");
+
+    let listed = drain(
+        &service,
+        ClientRequestKind::ListGrants {
+            session: session.clone(),
+        },
+    )
+    .await;
+    let ServerEventKind::GrantList { grants } = &listed[0].kind else {
+        panic!("expected a grant list");
+    };
+    assert!(grants.is_empty(), "no grant exists before the approval");
+
+    drain(
+        &service,
+        ClientRequestKind::Approve {
+            session: session.clone(),
+            approval: approval.clone(),
+            arguments: None,
+            scope: Some(norte_code_protocol::GrantScope::Session),
+            remember: None,
+        },
+    )
+    .await;
+
+    let listed = drain(
+        &service,
+        ClientRequestKind::ListGrants {
+            session: session.clone(),
+        },
+    )
+    .await;
+    let ServerEventKind::GrantList { grants } = &listed[0].kind else {
+        panic!("expected a grant list");
+    };
+    assert_eq!(grants.len(), 1, "the approval issued one grant");
+    let grant = grants[0].clone();
+    assert!(!grant.revoked);
+    assert_eq!(grant.scope, norte_code_protocol::GrantScope::Session);
+    assert_eq!(grant.tool, "write");
+
+    let revoked = drain(
+        &service,
+        ClientRequestKind::Revoke {
+            session: session.clone(),
+            approval: grant.approval.clone(),
+            grant: grant.grant.clone(),
+        },
+    )
+    .await;
+    assert!(
+        revoked
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::GrantRevoked { .. }))
+    );
+
+    let listed = drain(
+        &service,
+        ClientRequestKind::ListGrants {
+            session: session.clone(),
+        },
+    )
+    .await;
+    let ServerEventKind::GrantList { grants } = &listed[0].kind else {
+        panic!("expected a grant list");
+    };
+    assert!(grants[0].revoked, "the grant should be marked as revoked");
+    let _ = std::fs::remove_file(&target);
+}
+
+#[tokio::test]
 async fn an_edit_snapshots_the_source_before_it_runs() {
     let target = std::env::current_dir()
         .expect("working directory")

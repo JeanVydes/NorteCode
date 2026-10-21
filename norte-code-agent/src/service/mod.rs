@@ -45,8 +45,9 @@ use tokio::sync::{Notify, mpsc};
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::Config;
 use norte_code_protocol::{
-    Budget, BudgetUnit, ErrorCode, ModelInfo, Reasoning as ProtocolReasoning, ReasoningScope,
-    ServerEvent, ServerEventKind, SessionInfo, SessionKey,
+    Budget, BudgetUnit, ErrorCode, GrantInfo, GrantScope as ProtocolGrantScope, ModelInfo,
+    Reasoning as ProtocolReasoning, ReasoningScope, ServerEvent, ServerEventKind, SessionInfo,
+    SessionKey,
 };
 
 use crate::ServiceError;
@@ -94,6 +95,9 @@ struct SessionRecord {
     id: SessionId,
     title: Option<String>,
     spec: ModelSpec,
+    /// A model switch accepted while the session was busy. It replaces the
+    /// current spec at the next idle turn boundary.
+    pending_model: Option<String>,
     created_at: DateTime<Utc>,
     phase: norte_code_protocol::Phase,
     /// Messages of this session already reported for usage.
@@ -461,6 +465,9 @@ impl Service {
                     .get("pending_steers")
                     .and_then(|value| serde_json::from_value(value.clone()).ok())
                     .unwrap_or_default(),
+                pending_model: stats
+                    .get("pending_model")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
             };
             records.push((key.clone(), record));
             if needs_repair {
@@ -506,6 +513,7 @@ impl Service {
                 "reasoning": record.reasoning,
                 "pending_reasoning": record.pending_reasoning,
                 "pending_steers": record.pending_steers,
+                "pending_model": record.pending_model,
             }),
             denied_tools: record.denied_tools.clone(),
             allowed_tools: record.allowed_tools.clone(),
@@ -952,6 +960,7 @@ impl Service {
                 approval,
                 grant,
             } => self.revoke(request_id, session, approval, grant).await,
+            Kind::ListGrants { session } => self.list_grants_event(request_id, session).await,
             Kind::AnswerQuestion {
                 session,
                 question,
@@ -1032,15 +1041,45 @@ impl Service {
         session: SessionKey,
         model: String,
     ) -> Result<EventStream, ServiceError> {
-        let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), &model, None)?;
-        self.ensure_model_supports_reasoning(&session, &spec)?;
-        self.ensure_model_supports_budget(&session, &spec).await?;
-        self.set_model(&session, spec).await?;
-        Ok(single(
-            request_id,
-            Some(session),
-            ServerEventKind::ModelChanged { model },
-        ))
+        let spec = self.resolve_model_switch(&session, &model).await?;
+        match self.set_model(&session, spec).await {
+            Ok(()) => Ok(single(
+                request_id,
+                Some(session),
+                ServerEventKind::ModelChanged { model },
+            )),
+            // A live turn owns the boundary. Accept the request now and keep it
+            // durable; `start_turn` applies it when the session is idle.
+            Err(ServiceError::Unsupported(_)) => {
+                {
+                    let mut sessions = self.lock_sessions();
+                    let record = sessions
+                        .get_mut(&session)
+                        .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
+                    record.pending_model = Some(model.clone());
+                }
+                self.persist(&session).await?;
+                Ok(single(
+                    request_id,
+                    Some(session),
+                    ServerEventKind::ModelQueued { model },
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolves a model reference and checks it against the stored reasoning
+    /// and budget before the switch is queued or applied.
+    async fn resolve_model_switch(
+        &self,
+        session: &SessionKey,
+        model: &str,
+    ) -> Result<ModelSpec, ServiceError> {
+        let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), model, None)?;
+        self.ensure_model_supports_reasoning(session, &spec)?;
+        self.ensure_model_supports_budget(session, &spec).await?;
+        Ok(spec)
     }
 
     async fn approve(
@@ -1180,6 +1219,39 @@ impl Service {
         ))
     }
 
+    async fn list_grants_event(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+    ) -> Result<EventStream, ServiceError> {
+        let (nid, _, _) = self.require_record(&session)?;
+        let mut grants = Vec::new();
+        for record in self.store.approvals(nid).await? {
+            for grant in record.grants {
+                grants.push(GrantInfo {
+                    approval: record.id.to_string(),
+                    grant: grant.id.to_string(),
+                    tool: record.tool.to_string(),
+                    scope: match grant.scope {
+                        GrantScope::Tool(_) => ProtocolGrantScope::Tool,
+                        GrantScope::Session(_) => ProtocolGrantScope::Session,
+                        GrantScope::Global => ProtocolGrantScope::Always,
+                        // A one-call grant and any scope Norte may add later
+                        // reach the client as the narrowest scope there is.
+                        _ => ProtocolGrantScope::Once,
+                    },
+                    issued_at: grant.issued_at.to_rfc3339(),
+                    revoked: !grant.is_active(),
+                });
+            }
+        }
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::GrantList { grants },
+        ))
+    }
+
     async fn create_session(&self, title: Option<String>) -> Result<SessionKey, ServiceError> {
         let spec = self.default_spec.clone();
         let engine = self.engine(&spec)?;
@@ -1198,6 +1270,7 @@ impl Service {
             id: session.id,
             title,
             spec,
+            pending_model: None,
             created_at: Utc::now(),
             phase: norte_code_protocol::Phase::Idle,
             billed: 0,
@@ -1519,6 +1592,7 @@ impl Service {
             id: imported.id,
             title,
             spec,
+            pending_model: None,
             created_at: Utc::now(),
             phase: norte_code_protocol::Phase::Idle,
             billed: 0,
@@ -1569,6 +1643,12 @@ impl Service {
             (key, nid, spec)
         };
         let mut leading = Vec::new();
+        if let Some(changed) = self.apply_pending_model(request_id, &key).await? {
+            leading.push(changed);
+            let (new_nid, new_spec, _) = self.require_record(&key)?;
+            nid = new_nid;
+            spec = new_spec;
+        }
         if self.compaction_due(&key, &spec, nid).await? {
             leading = match self.perform_compaction(request_id, &key, "threshold").await {
                 Ok(events) => events,
@@ -2726,8 +2806,36 @@ impl Service {
                 .get_mut(key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
             record.spec = spec;
+            record.pending_model = None;
         }
         self.persist(key).await
+    }
+
+    /// Applies a queued model switch when the session reaches an idle turn
+    /// boundary. An approval or question continuation is not a boundary, so it
+    /// leaves the request queued for the next real turn.
+    async fn apply_pending_model(
+        &self,
+        request_id: u64,
+        key: &SessionKey,
+    ) -> Result<Option<ServerEvent>, ServiceError> {
+        let Some(model) = self
+            .lock_sessions()
+            .get(key)
+            .and_then(|record| record.pending_model.clone())
+        else {
+            return Ok(None);
+        };
+        let spec = self.resolve_model_switch(key, &model).await?;
+        match self.set_model(key, spec).await {
+            Ok(()) => Ok(Some(ServerEvent::new(
+                request_id,
+                Some(key.clone()),
+                ServerEventKind::ModelChanged { model },
+            ))),
+            Err(ServiceError::Unsupported(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
