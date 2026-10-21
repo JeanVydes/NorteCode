@@ -51,6 +51,13 @@ Code's stable id, not a Norte `SessionId`.
 | `RefreshSkills` | Re-scan the skill roots. |
 | `CostReport { session }` | Report ledger totals, optionally for one session. |
 
+`SetReasoning` validates the effort or budget against the session's current model
+and persists it; `session` applies to every later turn until changed, while
+`message` applies to the next turn only. `Steer` persists a message and applies it
+when the next turn starts, before that turn's own input; it does not interrupt a
+turn already in flight. Neither request emits an event, so an empty response is
+the acknowledgement.
+
 ## Events
 
 | Event | Purpose |
@@ -65,7 +72,7 @@ Code's stable id, not a Norte `SessionId`.
 | `CompactionStarted`, `CompactionFinished` | Compaction progress and the new Norte session id. |
 | `BudgetWarning`, `BudgetExceeded`, `BudgetChanged` | Budget crossing and changes. |
 | `CostUpdated`, `CostNotReported` | Ledger totals and unpriced requests. |
-| `ModelChanged`, `ReasoningDowngraded` | Model switches and clamped reasoning. |
+| `ModelChanged`, `ReasoningDowngraded` | Model switches. The second is wire vocabulary for a host that clamps; this service refuses an incompatible setting instead. |
 | `CatalogUpdated`, `ModelList` | Catalogue refresh and model list. |
 | `SkillList`, `SkillsUpdated` | Skill discovery and refresh. |
 | `GrantRevoked` | A grant was revoked. |

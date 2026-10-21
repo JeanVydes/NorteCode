@@ -97,6 +97,11 @@ fn catalog() -> Arc<Catalog> {
                                 "scripted": {
                                     "id": "scripted",
                                     "name": "Scripted",
+                                    "reasoning": true,
+                                    "reasoning_options": [
+                                        {"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]},
+                                        {"type": "budget_tokens", "max": 4096}
+                                    ],
                                     "tool_call": true,
                                     "modalities": {"input": ["text"], "output": ["text"]},
                                     "limit": {"context": 1000, "output": 100}
@@ -158,6 +163,64 @@ fn service() -> Arc<Service> {
             Arc::new(InMemoryBlobStore::new()),
             "system",
         )
+        .expect("service"),
+    )
+}
+
+/// A service whose scripted model answers one text per queued turn.
+fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<ScriptedModel>) {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let mut model = ScriptedModel::new(reference);
+    for turn in turns {
+        model = model.turn_text(*turn);
+    }
+    let model = Arc::new(model);
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec,
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    (service, model)
+}
+
+fn user_texts(request: &ModelRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User)
+        .map(norte::Message::text)
+        .collect()
+}
+
+async fn persistent_scripted_service(
+    spec: ModelSpec,
+    model: Arc<dyn Model>,
+    store: Arc<SqliteStore>,
+) -> Arc<Service> {
+    Arc::new(
+        Service::with_directory(
+            config(),
+            catalog(),
+            spec,
+            Arc::new(ScriptedFactory { model }),
+            store.clone(),
+            store.clone(),
+            store,
+            "system",
+        )
+        .await
         .expect("service"),
     )
 }
@@ -1106,6 +1169,264 @@ fn the_implicit_default_prefers_medium() {
         resolve_reasoning(None, &serde_json::json!("auto"), &unsupported)
             .expect("a non-reasoning model stays automatic"),
         ReasoningRequest::Automatic
+    );
+}
+
+#[tokio::test]
+async fn set_reasoning_applies_to_the_session() {
+    let (service, model) = scripted_service(spec("scripted"), &["ok"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    let ack = drain(
+        &service,
+        ClientRequestKind::SetReasoning {
+            session: key.clone(),
+            scope: ReasoningScope::Session,
+            reasoning: ProtocolReasoning::Effort {
+                effort: "high".to_owned(),
+            },
+        },
+    )
+    .await;
+    assert!(ack.is_empty());
+
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "hi".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].reasoning,
+        ReasoningRequest::Effort(ReasoningEffort::High)
+    );
+}
+
+#[tokio::test]
+async fn a_message_reasoning_override_is_used_once() {
+    let (service, model) = scripted_service(spec("scripted"), &["first", "second"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    drain(
+        &service,
+        ClientRequestKind::SetReasoning {
+            session: key.clone(),
+            scope: ReasoningScope::Message,
+            reasoning: ProtocolReasoning::Effort {
+                effort: "high".to_owned(),
+            },
+        },
+    )
+    .await;
+    for text in ["one", "two"] {
+        drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: Some(key.clone()),
+                text: text.to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+    }
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].reasoning,
+        ReasoningRequest::Effort(ReasoningEffort::High)
+    );
+    assert_eq!(
+        requests[1].reasoning,
+        ReasoningRequest::Effort(ReasoningEffort::Medium)
+    );
+}
+
+#[tokio::test]
+async fn set_reasoning_rejects_an_unsupported_effort() {
+    let (service, _) = scripted_service(spec("scripted"), &[]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    let result = service
+        .submit(ClientRequest {
+            request_id: 7,
+            kind: ClientRequestKind::SetReasoning {
+                session: key,
+                scope: ReasoningScope::Session,
+                reasoning: ProtocolReasoning::Effort {
+                    effort: "minimal".to_owned(),
+                },
+            },
+        })
+        .await;
+    assert!(matches!(result, Err(ServiceError::Reasoning(_))));
+}
+
+#[tokio::test]
+async fn a_model_switch_rejects_an_incompatible_reasoning_override() {
+    let (service, _) = scripted_service(spec("scripted"), &[]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+    drain(
+        &service,
+        ClientRequestKind::SetReasoning {
+            session: key.clone(),
+            scope: ReasoningScope::Session,
+            reasoning: ProtocolReasoning::Effort {
+                effort: "high".to_owned(),
+            },
+        },
+    )
+    .await;
+
+    let result = service
+        .submit(ClientRequest {
+            request_id: 7,
+            kind: ClientRequestKind::SetModel {
+                session: key,
+                model: "test/other".to_owned(),
+            },
+        })
+        .await;
+    assert!(matches!(result, Err(ServiceError::Reasoning(_))));
+}
+
+#[tokio::test]
+async fn steer_queues_a_message_before_the_next_turn_input() {
+    let (service, model) = scripted_service(spec("scripted"), &["one", "two"]);
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "one".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+
+    let ack = drain(
+        &service,
+        ClientRequestKind::Steer {
+            session: key.clone(),
+            text: "two".to_owned(),
+        },
+    )
+    .await;
+    assert!(ack.is_empty());
+
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "three".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        user_texts(&requests[1]),
+        vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn reasoning_and_steering_survive_a_restart() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let store = Arc::new(SqliteStore::in_memory().expect("store"));
+    let first = persistent_scripted_service(
+        spec("scripted"),
+        Arc::clone(&model) as Arc<dyn Model>,
+        Arc::clone(&store),
+    )
+    .await;
+    let created = drain(&first, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+    drain(
+        &first,
+        ClientRequestKind::SetReasoning {
+            session: key.clone(),
+            scope: ReasoningScope::Session,
+            reasoning: ProtocolReasoning::Effort {
+                effort: "high".to_owned(),
+            },
+        },
+    )
+    .await;
+    drain(
+        &first,
+        ClientRequestKind::Steer {
+            session: key.clone(),
+            text: "steered".to_owned(),
+        },
+    )
+    .await;
+    drop(first);
+
+    let second = persistent_scripted_service(
+        spec("scripted"),
+        Arc::clone(&model) as Arc<dyn Model>,
+        store,
+    )
+    .await;
+    drain(
+        &second,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "hello".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].reasoning,
+        ReasoningRequest::Effort(ReasoningEffort::High)
+    );
+    assert_eq!(
+        user_texts(&requests[0]),
+        vec!["steered".to_owned(), "hello".to_owned()]
     );
 }
 

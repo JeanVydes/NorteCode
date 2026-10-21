@@ -7,8 +7,9 @@ aspires to.
 ## What is implemented
 
 - The in-process service with logical sessions, streaming, cancellation,
-  model switching, compaction, retries, approvals, questions, budgets, telemetry
-  and the SQLite directory.
+  model switching, session and one-message reasoning overrides, steering for the
+  next turn, compaction, retries, approvals, questions, budgets, telemetry and
+  the SQLite directory.
 - The CLI: `run`, `resume`, `models`, `skills`, `sessions`, `cost`, `telemetry`,
   interactive mode, JSONL, approvals, budgets and sandbox flags.
 - The host tools, Agent Skills discovery, workspace policy and the command

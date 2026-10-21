@@ -13,6 +13,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   collapsing to `high`, and validation still rejects them for a model that does
   not declare them. OpenAI serializes both, Anthropic sends
   `output_config.effort`, and Gemini uses its `HIGH` ceiling.
+- `SetReasoning` stores a session-wide override or a one-message override. Both
+  are validated against the selected model before they are saved, survive a
+  restart, and are applied by the next turn; a model switch that cannot honour
+  the stored setting is refused instead of silently lowering it.
+- `Steer` queues a message durably and applies it before the next turn input,
+  preserving arrival order. A resume with no input of its own uses the last
+  queued steer as its message and keeps the earlier ones ahead of it.
 - The interactive footer shows the session's todo list above the session
   totals: the completed count, the current item first, pending items that fit,
   and `+N` for those that do not. It updates when a `todo` call succeeds and is

@@ -45,8 +45,8 @@ use tokio::sync::{Notify, mpsc};
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::Config;
 use norte_code_protocol::{
-    Budget, BudgetUnit, ErrorCode, ModelInfo, Reasoning as ProtocolReasoning, ServerEvent,
-    ServerEventKind, SessionInfo, SessionKey,
+    Budget, BudgetUnit, ErrorCode, ModelInfo, Reasoning as ProtocolReasoning, ReasoningScope,
+    ServerEvent, ServerEventKind, SessionInfo, SessionKey,
 };
 
 use crate::ServiceError;
@@ -121,6 +121,12 @@ struct SessionRecord {
     /// The history length written by the last compaction. A session that has
     /// not grown past it has nothing new to summarise.
     compaction_baseline: usize,
+    /// The session-wide reasoning override, when one was set.
+    reasoning: Option<ProtocolReasoning>,
+    /// A reasoning override for the next turn only.
+    pending_reasoning: Option<ProtocolReasoning>,
+    /// Messages queued for the next turn boundary, in arrival order.
+    pending_steers: Vec<String>,
 }
 
 /// Live counters for the turn in flight.
@@ -445,6 +451,16 @@ impl Service {
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok())
                     .unwrap_or(0),
+                reasoning: stats
+                    .get("reasoning")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                pending_reasoning: stats
+                    .get("pending_reasoning")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                pending_steers: stats
+                    .get("pending_steers")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok())
+                    .unwrap_or_default(),
             };
             records.push((key.clone(), record));
             if needs_repair {
@@ -487,6 +503,9 @@ impl Service {
                 "output_tokens": record.output_tokens,
                 "budget": record.budget,
                 "compaction_baseline": record.compaction_baseline,
+                "reasoning": record.reasoning,
+                "pending_reasoning": record.pending_reasoning,
+                "pending_steers": record.pending_steers,
             }),
             denied_tools: record.denied_tools.clone(),
             allowed_tools: record.allowed_tools.clone(),
@@ -901,9 +920,14 @@ impl Service {
             Kind::SetBudget { session, budget } => {
                 self.set_budget(request_id, session, budget).await
             }
-            Kind::SetReasoning { .. } => Err(ServiceError::Unsupported(
-                "reasoning overrides arrive in a later milestone",
-            )),
+            Kind::SetReasoning {
+                session,
+                scope,
+                reasoning,
+            } => {
+                self.set_reasoning(request_id, session, scope, reasoning)
+                    .await
+            }
             Kind::Approve {
                 session,
                 approval,
@@ -936,7 +960,7 @@ impl Service {
                 self.answer_question(request_id, session, question, answer)
                     .await
             }
-            Kind::Steer { .. } => Err(ServiceError::Unsupported("steering arrives with the TUI")),
+            Kind::Steer { session, text } => self.steer(request_id, session, text).await,
             Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
         }
     }
@@ -1009,6 +1033,7 @@ impl Service {
         model: String,
     ) -> Result<EventStream, ServiceError> {
         let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), &model, None)?;
+        self.ensure_model_supports_reasoning(&session, &spec)?;
         self.ensure_model_supports_budget(&session, &spec).await?;
         self.set_model(&session, spec).await?;
         Ok(single(
@@ -1187,6 +1212,9 @@ impl Service {
             compacted_from: None,
             compacting: false,
             compaction_baseline: 0,
+            reasoning: None,
+            pending_reasoning: None,
+            pending_steers: Vec::new(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -1506,6 +1534,9 @@ impl Service {
             compacted_from: None,
             compacting: false,
             compaction_baseline: 0,
+            reasoning: None,
+            pending_reasoning: None,
+            pending_steers: Vec::new(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -1552,8 +1583,24 @@ impl Service {
             nid = new_nid;
             spec = new_spec;
         }
+        let (session_reasoning, pending_reasoning, pending_steers) = {
+            let sessions = self.lock_sessions();
+            let record = sessions
+                .get(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            (
+                record.reasoning.clone(),
+                record.pending_reasoning.clone(),
+                record.pending_steers.clone(),
+            )
+        };
+        // Precedence: an explicit message setting, then a one-shot override,
+        // then the session override, then the configured default.
+        let requested_reasoning = reasoning
+            .or(pending_reasoning.clone())
+            .or(session_reasoning);
         let reasoning = resolve_reasoning(
-            reasoning.as_ref(),
+            requested_reasoning.as_ref(),
             &self.config.reasoning.default,
             &spec.capabilities.reasoning,
         )?;
@@ -1580,6 +1627,21 @@ impl Service {
         let engine = self.engine_with_budget(&spec, Some(Arc::clone(&book)), gate.clone())?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
+        // Steering messages belong to the turn boundary that is starting now.
+        // Norte drains its queue in arrival order before the new input, so keep
+        // the original order when a resume has no input of its own.
+        let mut input = input;
+        let mut steers_to_queue = pending_steers.clone();
+        if input.is_none() && state.phase == norte::Phase::Idle && !steers_to_queue.is_empty() {
+            input = steers_to_queue.pop();
+        }
+        for text in &steers_to_queue {
+            engine.steer(nid, Message::user(text.clone())).await?;
+        }
+        if pending_reasoning.is_some() || !pending_steers.is_empty() {
+            self.clear_pending(&key, pending_reasoning.as_ref(), &pending_steers);
+            self.persist(&key).await?;
+        }
         // A resumable park: after a restart the engine will not re-emit the
         // pending approvals, so surface them from the store before the turn.
         let restored: Vec<ServerEvent> = if state.phase == norte::Phase::AwaitingApproval {
@@ -2498,6 +2560,52 @@ impl Service {
         ))
     }
 
+    async fn set_reasoning(
+        &self,
+        _request_id: u64,
+        key: SessionKey,
+        scope: ReasoningScope,
+        reasoning: ProtocolReasoning,
+    ) -> Result<EventStream, ServiceError> {
+        let (_, spec, _) = self.require_record(&key)?;
+        // Validate at the point the setting is chosen, not on the next turn:
+        // an effort the selected model does not declare is never downgraded.
+        resolve_reasoning(
+            Some(&reasoning),
+            &self.config.reasoning.default,
+            &spec.capabilities.reasoning,
+        )?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            match scope {
+                ReasoningScope::Session => record.reasoning = Some(reasoning),
+                ReasoningScope::Message => record.pending_reasoning = Some(reasoning),
+            }
+        }
+        self.persist(&key).await?;
+        Ok(Box::pin(futures_util::stream::empty()))
+    }
+
+    async fn steer(
+        &self,
+        _request_id: u64,
+        key: SessionKey,
+        text: String,
+    ) -> Result<EventStream, ServiceError> {
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.pending_steers.push(text);
+        }
+        self.persist(&key).await?;
+        Ok(Box::pin(futures_util::stream::empty()))
+    }
+
     /// Refuses a budget that the session's history says cannot be measured.
     async fn validate_budget(&self, key: &SessionKey, budget: &Budget) -> Result<(), ServiceError> {
         if !budget.limit.is_finite() || budget.limit <= 0.0 {
@@ -2528,6 +2636,32 @@ impl Service {
                 "`{model}` has requests with no reported cost; use a tokens or requests \
                  budget, or a provider that reports cost"
             )));
+        }
+        Ok(())
+    }
+
+    /// Blocks a switch that would make a stored reasoning setting unsupported.
+    fn ensure_model_supports_reasoning(
+        &self,
+        key: &SessionKey,
+        spec: &ModelSpec,
+    ) -> Result<(), ServiceError> {
+        let (session_reasoning, pending_reasoning) = {
+            let sessions = self.lock_sessions();
+            let record = sessions
+                .get(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            (record.reasoning.clone(), record.pending_reasoning.clone())
+        };
+        for setting in [session_reasoning.as_ref(), pending_reasoning.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            resolve_reasoning(
+                Some(setting),
+                &self.config.reasoning.default,
+                &spec.capabilities.reasoning,
+            )?;
         }
         Ok(())
     }
@@ -2627,6 +2761,29 @@ impl Service {
 
     fn lock_sessions(&self) -> MutexGuard<'_, BTreeMap<SessionKey, SessionRecord>> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Consumes the pending overrides this turn started with, without removing
+    /// entries a concurrent `SetReasoning` or `Steer` appended after the turn
+    /// read them.
+    fn clear_pending(
+        &self,
+        key: &SessionKey,
+        pending_reasoning: Option<&ProtocolReasoning>,
+        pending_steers: &[String],
+    ) {
+        let mut sessions = self.lock_sessions();
+        let Some(record) = sessions.get_mut(key) else {
+            return;
+        };
+        if let Some(pending) = pending_reasoning
+            && record.pending_reasoning.as_ref() == Some(pending)
+        {
+            record.pending_reasoning = None;
+        }
+        if !pending_steers.is_empty() && record.pending_steers.starts_with(pending_steers) {
+            record.pending_steers.drain(..pending_steers.len());
+        }
     }
 
     fn lock_budget_states(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>> {

@@ -9,6 +9,8 @@ the service keeps a `SessionRecord` with:
 - the model specification;
 - the phase, title and creation time;
 - the session budget and the session's allow/deny tool rules;
+- the session reasoning override and any one-message override or steers queued
+  for the next turn;
 - provider-reported totals and request counts;
 - the Norte session this one was compacted from, when it was.
 

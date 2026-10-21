@@ -61,14 +61,15 @@ event, a log or a child process.
 
 ## Reasoning
 
-`--reasoning` accepts `auto`, `off`, `minimal`, `low`, `medium`, `high` or a
-budget object in config. The setting is checked against the model before the
-turn starts. With `auto`, the implicit default asks for `medium` when the model
-declares it and otherwise uses the closest lower effort; a model with no declared
-efforts keeps `auto`.
+`--reasoning` accepts `auto`, `off`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max` or a budget object in config. The setting is checked against the
+model before the turn starts. With `auto`, the implicit default asks for
+`medium` when the model declares it and otherwise uses the closest lower effort;
+a model with no declared efforts keeps `auto`.
 
-`ReasoningDowngraded` is emitted when a model switch forces a lower setting than
-the one the session requested.
+`SetReasoning` stores the setting for the whole session or for one message. Both
+forms are validated immediately and are applied by the next turn. A model switch
+that cannot honour a stored setting is refused rather than silently lowering it.
 
 ## Model overrides
 
