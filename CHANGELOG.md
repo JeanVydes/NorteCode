@@ -6,6 +6,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The interactive footer shows the session's todo list above the session
+  totals: the completed count, the current item first, pending items that fit,
+  and `+N` for those that do not. It updates when a `todo` call succeeds and is
+  cleared by an empty list; model-provided content is folded onto one line and
+  escaped before it reaches the terminal. The built-in prompt and the tool
+  description now ask the model to call `todo` before multi-step work and after
+  each step.
+
 ### Changed
 
 - Depend on the Norte revision that explains a literal `\n`, `\r` or `\t` in a

@@ -10,6 +10,37 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// One item in the session's todo list, as the footer renders it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TodoItem {
+    /// What the item says, as the model wrote it.
+    pub(crate) content: String,
+    /// How far along the item is.
+    pub(crate) status: TodoStatus,
+}
+
+/// The state of one todo item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TodoStatus {
+    /// Not started.
+    Pending,
+    /// Being worked on.
+    InProgress,
+    /// Done.
+    Completed,
+}
+
+impl TodoStatus {
+    /// The marker the `todo` tool uses for this state.
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Pending => "[ ]",
+            Self::InProgress => "[~]",
+            Self::Completed => "[x]",
+        }
+    }
+}
+
 /// The pinned text above the input line.
 ///
 /// The renderer owns the session totals; the input editor owns the terminal.
@@ -26,6 +57,7 @@ pub(crate) struct Pinned {
 struct PinnedInner {
     session: String,
     queued: Vec<String>,
+    todos: Vec<TodoItem>,
 }
 
 impl Pinned {
@@ -50,6 +82,21 @@ impl Pinned {
             inner.queued = lines;
             self.dirty.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Replaces the todo widget. An empty list clears it.
+    pub(crate) fn set_todos(&self, todos: Vec<TodoItem>) {
+        let mut inner = self.lock();
+        if inner.todos != todos {
+            inner.todos = todos;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// A snapshot of the todo list, in the model's order.
+    #[cfg(test)]
+    pub(crate) fn todos(&self) -> Vec<TodoItem> {
+        self.lock().todos.clone()
     }
 
     /// Appends one message typed while a turn runs.
@@ -81,9 +128,13 @@ impl Pinned {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn snapshot(&self) -> (String, Vec<String>) {
+    fn snapshot(&self) -> (String, Vec<String>, Vec<TodoItem>) {
         let inner = self.lock();
-        (inner.session.clone(), inner.queued.clone())
+        (
+            inner.session.clone(),
+            inner.queued.clone(),
+            inner.todos.clone(),
+        )
     }
 
     fn take_dirty(&self) -> bool {
@@ -119,12 +170,12 @@ mod unix {
     };
     use tokio::sync::mpsc;
 
-    use super::Pinned;
+    use super::{Pinned, TodoItem, TodoStatus};
     use crate::style::Style;
 
-    /// Rows reserved below the scroll region: session status, queued preview
-    /// and the input line.
-    const FOOTER_ROWS: u16 = 3;
+    /// Rows reserved below the scroll region: todo widget, session status,
+    /// queued preview and the input line.
+    const FOOTER_ROWS: u16 = 4;
 
     /// How long a drag must pause before its last size is applied.
     const RESIZE_QUIET: Duration = Duration::from_millis(80);
@@ -647,6 +698,10 @@ mod unix {
         rows.saturating_sub(1).max(1)
     }
 
+    fn todo_row(rows: u16) -> u16 {
+        rows.saturating_sub(3).max(1)
+    }
+
     fn enter_terminal(cols: u16, rows: u16) -> Result<(), String> {
         let mut out = io::stderr().lock();
         write!(out, "\x1b[?25l\x1b[?2004h").map_err(|error| error.to_string())?;
@@ -722,13 +777,13 @@ mod unix {
         write!(out, "\x1b[1;{bottom}r\x1b[{bottom};1H")
     }
 
-    /// Draws the pinned session line and the queued-message preview.
+    /// Draws the pinned todo widget, session line and queued-message preview.
     ///
-    /// Both rows are below the scroll region, so streamed output never touches
+    /// All rows are below the scroll region, so streamed output never touches
     /// them. The cursor is saved and restored so the main thread's output
     /// position is preserved.
     fn draw_footer(style: Style, cols: u16, rows: u16, pinned: &Pinned) {
-        let (session, queued) = pinned.snapshot();
+        let (session, queued, todos) = pinned.snapshot();
         let width = usize::from(cols).saturating_sub(2);
         let queue_text = if queued.is_empty() {
             String::new()
@@ -742,14 +797,132 @@ mod unix {
                 style.faint(joined)
             )
         };
+        let todo_text = todo_line(style, &todos, width);
         let frame = format!(
-            "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
-            queue_row(rows),
-            clip_visible(&queue_text, width),
+            "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
+            todo_row(rows),
+            clip_visible(&todo_text, width),
             status_row(rows),
-            clip_visible(&session, width)
+            clip_visible(&session, width),
+            queue_row(rows),
+            clip_visible(&queue_text, width)
         );
         write_frame(&frame);
+    }
+
+    /// Builds the one-line todo widget: progress, the current item first, then
+    /// pending items that fit. Completed items are represented by the count,
+    /// and a `+N` says how many actionable items did not fit.
+    fn todo_line(style: Style, todos: &[TodoItem], max: usize) -> String {
+        if todos.is_empty() {
+            return style.faint("todo —");
+        }
+        let done = todos
+            .iter()
+            .filter(|todo| todo.status == TodoStatus::Completed)
+            .count();
+        let mut plain = format!("todo {done}/{}", todos.len());
+        let mut line = format!(
+            "{} {}",
+            style.faint("todo"),
+            style.cyan(format!("{done}/{}", todos.len()))
+        );
+        let active: Vec<&TodoItem> = todos
+            .iter()
+            .filter(|todo| todo.status == TodoStatus::InProgress)
+            .chain(
+                todos
+                    .iter()
+                    .filter(|todo| todo.status == TodoStatus::Pending),
+            )
+            .collect();
+        if active.is_empty() {
+            let _ = write!(line, " · {}", style.green("all done"));
+            return line;
+        }
+        let mut shown = 0;
+        for item in &active {
+            let marker = item.status.marker();
+            let remaining = active.len().saturating_sub(shown + 1);
+            let reserve = if remaining > 0 {
+                format!(" · +{remaining}").chars().count()
+            } else {
+                0
+            };
+            let prefix = format!(" · {marker} ");
+            let available = max.saturating_sub(plain.chars().count() + reserve);
+            if available <= prefix.chars().count() {
+                break;
+            }
+            let (mut content, truncated) =
+                single_line(&item.content, available - prefix.chars().count());
+            if truncated && shown > 0 {
+                break;
+            }
+            if truncated {
+                content.pop();
+                content.push('…');
+            }
+            let piece = format!("{prefix}{content}");
+            plain.push_str(&piece);
+            line.push_str(&style.faint(" · "));
+            line.push_str(&match item.status {
+                TodoStatus::Pending => style.faint(marker),
+                TodoStatus::InProgress => style.yellow(marker),
+                TodoStatus::Completed => style.green(marker),
+            });
+            line.push(' ');
+            line.push_str(&match item.status {
+                TodoStatus::InProgress => style.bold(&content),
+                _ => style.dim(&content),
+            });
+            shown += 1;
+        }
+        let hidden = active.len().saturating_sub(shown);
+        if shown == 0 {
+            let suffix = format!(" · +{hidden}");
+            if plain.chars().count() + suffix.chars().count() <= max {
+                line.push_str(&style.faint(suffix));
+            }
+        } else if hidden > 0 {
+            line.push_str(&style.faint(format!(" · +{hidden}")));
+        }
+        line
+    }
+
+    /// Folds a todo item onto one footer line, keeping at most `max`
+    /// characters and reporting whether anything was dropped.
+    ///
+    /// The content is model text, so newlines, tabs and control escapes must
+    /// not reach the terminal as layout instructions; styling escapes it, and
+    /// this collapses whitespace.
+    fn single_line(text: &str, max: usize) -> (String, bool) {
+        let mut out = String::new();
+        let mut used = 0;
+        let mut truncated = false;
+        'words: for word in text.split_whitespace() {
+            if used == max {
+                truncated = true;
+                break;
+            }
+            if used > 0 {
+                out.push(' ');
+                used += 1;
+                if used == max {
+                    truncated = true;
+                    break;
+                }
+            }
+            for character in word.chars() {
+                if used == max {
+                    truncated = true;
+                    break 'words;
+                }
+                out.push(character);
+                used += 1;
+            }
+        }
+        (out, truncated)
     }
 
     /// Clips a styled line to `max` visible columns, keeping ANSI escapes.
@@ -808,8 +981,8 @@ mod unix {
         use std::time::{Duration, Instant};
 
         use super::{
-            FOOTER_ROWS, LineBuffer, ResizeDebounce, clip_visible, queue_row, resize_frame,
-            scroll_bottom, status_row,
+            FOOTER_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus, clip_visible, queue_row,
+            resize_frame, scroll_bottom, status_row, todo_line, todo_row,
         };
 
         #[test]
@@ -855,36 +1028,36 @@ mod unix {
         fn resize_frame_clears_each_footer_row_once() {
             let frame = resize_frame(24, 24);
             assert!(frame.starts_with("\x1b[r"));
-            for row in 22..=24 {
+            for row in 21..=24 {
                 assert_eq!(
                     frame.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
                     1,
                     "row {row} should be cleared once"
                 );
             }
-            assert!(frame.ends_with("\x1b[21;1H\x1b[1;21r\r\n"));
+            assert!(frame.ends_with("\x1b[20;1H\x1b[1;20r\r\n"));
         }
 
         #[test]
         fn resize_frame_clears_old_and_new_footer_rows() {
             let grown = resize_frame(30, 24);
-            for row in [22, 23, 24, 28, 29, 30] {
+            for row in [21, 22, 23, 24, 27, 28, 29, 30] {
                 assert_eq!(
                     grown.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
                     1,
                     "row {row} should be cleared once"
                 );
             }
-            for row in 25..=27 {
+            for row in 25..=26 {
                 assert!(
                     !grown.contains(&format!("\x1b[{row};1H\x1b[2K")),
                     "scroll row {row} must be preserved"
                 );
             }
-            assert!(grown.ends_with("\x1b[27;1H\x1b[1;27r\r\n"));
+            assert!(grown.ends_with("\x1b[26;1H\x1b[1;26r\r\n"));
 
             let shrunk = resize_frame(24, 30);
-            for row in 22..=24 {
+            for row in 21..=24 {
                 assert_eq!(
                     shrunk.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
                     1,
@@ -897,19 +1070,90 @@ mod unix {
                     "rows beyond the new height must not be addressed"
                 );
             }
-            assert!(shrunk.ends_with("\x1b[21;1H\x1b[1;21r\r\n"));
+            assert!(shrunk.ends_with("\x1b[20;1H\x1b[1;20r\r\n"));
         }
 
         #[test]
         fn footer_rows_stay_below_the_scroll_region() {
-            assert_eq!(scroll_bottom(24), 21);
+            assert_eq!(scroll_bottom(24), 20);
+            assert_eq!(todo_row(24), 21);
             assert_eq!(status_row(24), 22);
             assert_eq!(queue_row(24), 23);
-            // A terminal shorter than the footer still yields valid rows.
-            assert_eq!(scroll_bottom(3), 1);
-            assert_eq!(scroll_bottom(4), 1);
-            assert_eq!(status_row(4), 2);
-            assert_eq!(queue_row(4), 3);
+            // A terminal at the minimum height still yields valid rows.
+            assert_eq!(scroll_bottom(5), 1);
+            assert_eq!(todo_row(5), 2);
+            assert_eq!(status_row(5), 3);
+            assert_eq!(queue_row(5), 4);
+        }
+
+        fn item(content: &str, status: TodoStatus) -> TodoItem {
+            TodoItem {
+                content: content.to_owned(),
+                status,
+            }
+        }
+
+        #[test]
+        fn the_todo_widget_shows_progress_and_the_current_item_first() {
+            let todos = vec![
+                item("done", TodoStatus::Completed),
+                item("later", TodoStatus::Pending),
+                item("now", TodoStatus::InProgress),
+            ];
+            assert_eq!(
+                todo_line(crate::style::Style::plain(), &todos, 80),
+                "todo 1/3 · [~] now · [ ] later"
+            );
+        }
+
+        #[test]
+        fn the_todo_widget_counts_completed_items_and_says_when_all_are_done() {
+            let todos = vec![
+                item("one", TodoStatus::Completed),
+                item("two", TodoStatus::Completed),
+            ];
+            assert_eq!(
+                todo_line(crate::style::Style::plain(), &todos, 80),
+                "todo 2/2 · all done"
+            );
+            assert_eq!(todo_line(crate::style::Style::plain(), &[], 80), "todo —");
+        }
+
+        #[test]
+        fn the_todo_widget_reports_items_that_did_not_fit() {
+            let todos = vec![
+                item("first", TodoStatus::Pending),
+                item("second", TodoStatus::Pending),
+            ];
+            assert_eq!(
+                todo_line(crate::style::Style::plain(), &todos, 30),
+                "todo 0/2 · [ ] first · +1"
+            );
+            assert_eq!(
+                todo_line(crate::style::Style::plain(), &todos, 20),
+                "todo 0/2 · +2"
+            );
+        }
+
+        #[test]
+        fn the_todo_widget_folds_untrusted_content_onto_one_line() {
+            let todos = vec![item("first\nsecond\tthird", TodoStatus::Pending)];
+            let line = todo_line(crate::style::Style::plain(), &todos, 80);
+            assert_eq!(line, "todo 0/1 · [ ] first second third");
+            assert!(!line.contains('\n'));
+            assert!(!line.contains('\t'));
+        }
+
+        #[test]
+        fn the_todo_widget_truncates_a_long_first_item_to_the_footer() {
+            let todos = vec![item(
+                "a very long item that does not fit on one line",
+                TodoStatus::Pending,
+            )];
+            let line = todo_line(crate::style::Style::plain(), &todos, 24);
+            assert!(line.starts_with("todo 0/1 · [ ] "), "{line}");
+            assert!(line.ends_with('…'), "{line}");
+            assert_eq!(line.chars().count(), 24, "{line}");
         }
 
         #[test]

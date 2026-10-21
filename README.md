@@ -125,13 +125,15 @@ input: only a regular file is read, the read is capped at 64 KiB, and the
 instructions never override the user's request, the approvals or the budgets.
 
 `--interactive` keeps the same session open after each turn. A pinned footer
-below the streamed output holds the running session totals (requests, input and
-output tokens, average cache share, total input:output ratio and reported cost),
-the messages queued for the next turn, and the input line. It is a real line
-editor: arrow keys, Home/End, Delete, Backspace, paste and the usual control
-keys work, and a reverse-video cursor marks the insertion point. What you type
-stays in that line; it never leaks into the answer. The message you send is
-echoed above the footer, so the transcript keeps both sides of the conversation.
+below the streamed output holds the todo widget (completed count, the current
+item and the pending items that fit), the running session totals (requests,
+input and output tokens, average cache share, total input:output ratio and
+reported cost), the messages queued for the next turn, and the input line. It
+is a real line editor: arrow keys, Home/End, Delete, Backspace, paste and the
+usual control keys work, and a reverse-video cursor marks the insertion
+point. What you type stays in that line; it never leaks into the answer. The
+message you send is echoed above the footer, so the transcript keeps both
+sides of the conversation.
 Lines completed while a turn is still running stay in the queued preview and are
 sent together as the next message, even after a failed or cancelled turn.
 `/help` lists the commands; `/compact` summarises the conversation on demand,

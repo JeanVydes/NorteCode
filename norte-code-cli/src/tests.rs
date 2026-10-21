@@ -87,6 +87,14 @@ fn the_system_prompt_prefers_the_flag_then_the_config() {
 }
 
 #[test]
+fn the_default_prompt_asks_for_the_todo_tool() {
+    let (_, prompt) = select_system_prompt(None, None);
+    assert!(prompt.contains("`todo`"));
+    assert!(prompt.contains("in_progress"));
+    assert!(prompt.contains("footer"));
+}
+
+#[test]
 fn reasoning_names_are_parsed_and_unknown_ones_are_rejected() {
     assert_eq!(
         parse_reasoning_setting("off").expect("off"),

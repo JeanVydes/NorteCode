@@ -2,7 +2,7 @@
 
 use norte_code_agent::DEFAULT_SYSTEM_PROMPT;
 
-use crate::input::Pinned;
+use crate::input::{Pinned, TodoItem, TodoStatus};
 
 use super::{
     ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
@@ -71,6 +71,9 @@ pub(crate) struct Renderer {
     pub(crate) cost: f64,
     pub(crate) unpriced: u64,
     pub(crate) tool_counts: BTreeMap<String, u64>,
+    /// A `todo` call whose arguments arrived but whose result has not, keyed by
+    /// call id. The footer changes only after the tool succeeds.
+    pending_todos: BTreeMap<String, Vec<TodoItem>>,
 }
 
 impl Renderer {
@@ -112,6 +115,7 @@ impl Renderer {
             cost: 0.0,
             unpriced: 0,
             tool_counts: BTreeMap::new(),
+            pending_todos: BTreeMap::new(),
         }
     }
 
@@ -314,6 +318,9 @@ impl Renderer {
                 ..
             } => {
                 *self.tool_counts.entry(tool.clone()).or_default() += 1;
+                if let Some(todos) = todo_items(arguments.as_ref()).filter(|_| tool == "todo") {
+                    self.pending_todos.insert(call_id.clone(), todos);
+                }
                 let command = Self::command_summary(arguments.as_ref());
                 let diff = if tool == "edit" {
                     edit_preview(arguments.as_ref(), source.as_deref())
@@ -369,6 +376,7 @@ impl Renderer {
             }
             ServerEventKind::ToolFinished {
                 tool,
+                call_id,
                 is_error,
                 error,
                 output,
@@ -376,6 +384,11 @@ impl Renderer {
                 duration_ms,
                 ..
             } => {
+                if let Some(todos) = self.pending_todos.remove(call_id) {
+                    if tool == "todo" && !*is_error {
+                        self.pinned.set_todos(todos);
+                    }
+                }
                 if *is_error && tool == "edit" {
                     if let Some(error) = error {
                         self.end_blocks();
@@ -763,6 +776,7 @@ impl Renderer {
                 self.cancelled = false;
                 self.reasoning_placeholder = false;
                 self.turn_requests = 0;
+                self.pending_todos.clear();
                 self.set_activity(Some("working…".to_owned()));
             }
             ServerEventKind::RetryScheduled {
@@ -845,6 +859,7 @@ impl Renderer {
                 } else {
                     None
                 };
+                self.pending_todos.clear();
                 self.set_activity(activity);
             }
             ServerEventKind::BudgetWarning {
@@ -2121,6 +2136,30 @@ pub(crate) fn approval_label(mode: ApprovalMode) -> &'static str {
     }
 }
 
+/// Reads the `todo` tool's arguments into the footer's list.
+///
+/// The model sends the complete list on every call, so this is a snapshot, not
+/// a patch. An argument shape the tool would reject is ignored rather than
+/// guessed at.
+fn todo_items(arguments: Option<&serde_json::Value>) -> Option<Vec<TodoItem>> {
+    let todos = arguments?.get("todos")?.as_array()?;
+    let mut items = Vec::with_capacity(todos.len());
+    for todo in todos {
+        let content = todo.get("content")?.as_str()?;
+        let status = match todo.get("status")?.as_str()? {
+            "pending" => TodoStatus::Pending,
+            "in_progress" => TodoStatus::InProgress,
+            "completed" => TodoStatus::Completed,
+            _ => return None,
+        };
+        items.push(TodoItem {
+            content: content.to_owned(),
+            status,
+        });
+    }
+    Some(items)
+}
+
 pub(crate) fn short(call_id: &str) -> &str {
     call_id.get(..8).unwrap_or(call_id)
 }
@@ -2236,7 +2275,172 @@ pub(crate) fn code_name(code: ErrorCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditPreview, build_edit_preview, edit_preview};
+    use std::sync::Arc;
+
+    use norte_code_protocol::{ServerEvent, ServerEventKind};
+
+    use super::{EditPreview, Format, Renderer, build_edit_preview, edit_preview, todo_items};
+    use crate::input::{Pinned, TodoItem, TodoStatus};
+    use crate::style::Style;
+
+    fn renderer(pinned: &Arc<Pinned>) -> Renderer {
+        Renderer::new(
+            Format::Text,
+            true,
+            false,
+            false,
+            true,
+            Style::plain(),
+            Arc::clone(pinned),
+        )
+    }
+
+    fn todo_started(call_id: &str, todos: &serde_json::Value) -> ServerEvent {
+        ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolStarted {
+                turn: 1,
+                call_id: call_id.to_owned(),
+                tool: "todo".to_owned(),
+                arguments: Some(serde_json::json!({ "todos": todos })),
+                source: None,
+            },
+        }
+    }
+
+    fn tool_finished(call_id: &str, tool: &str, is_error: bool) -> ServerEvent {
+        ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolFinished {
+                turn: 1,
+                call_id: call_id.to_owned(),
+                tool: tool.to_owned(),
+                is_error,
+                error: None,
+                output: None,
+                truncated: false,
+                duration_ms: 0,
+            },
+        }
+    }
+
+    fn item(content: &str, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            content: content.to_owned(),
+            status,
+        }
+    }
+
+    #[test]
+    fn a_successful_todo_call_updates_the_footer() {
+        let pinned = Pinned::new();
+        let mut renderer = renderer(&pinned);
+        renderer
+            .event(&todo_started(
+                "call-1",
+                &serde_json::json!([
+                    {"content": "inspect", "status": "completed"},
+                    {"content": "implement", "status": "in_progress"}
+                ]),
+            ))
+            .expect("started");
+        assert!(pinned.todos().is_empty());
+        renderer
+            .event(&tool_finished("call-1", "todo", false))
+            .expect("finished");
+        assert_eq!(
+            pinned.todos(),
+            vec![
+                item("inspect", TodoStatus::Completed),
+                item("implement", TodoStatus::InProgress)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_todo_call_leaves_the_footer_unchanged() {
+        let pinned = Pinned::new();
+        let mut renderer = renderer(&pinned);
+        renderer
+            .event(&todo_started(
+                "call-1",
+                &serde_json::json!([{"content": "keep", "status": "pending"}]),
+            ))
+            .expect("started");
+        renderer
+            .event(&tool_finished("call-1", "todo", false))
+            .expect("finished");
+        renderer
+            .event(&todo_started(
+                "call-2",
+                &serde_json::json!([{"content": "discard", "status": "pending"}]),
+            ))
+            .expect("started");
+        renderer
+            .event(&tool_finished("call-2", "todo", true))
+            .expect("failed");
+        assert_eq!(pinned.todos(), vec![item("keep", TodoStatus::Pending)]);
+    }
+
+    #[test]
+    fn an_empty_todo_list_clears_the_footer() {
+        let pinned = Pinned::new();
+        let mut renderer = renderer(&pinned);
+        renderer
+            .event(&todo_started(
+                "call-1",
+                &serde_json::json!([{"content": "one", "status": "pending"}]),
+            ))
+            .expect("started");
+        renderer
+            .event(&tool_finished("call-1", "todo", false))
+            .expect("finished");
+        renderer
+            .event(&todo_started("call-2", &serde_json::json!([])))
+            .expect("started");
+        renderer
+            .event(&tool_finished("call-2", "todo", false))
+            .expect("finished");
+        assert!(pinned.todos().is_empty());
+    }
+
+    #[test]
+    fn a_non_todo_call_does_not_touch_the_footer() {
+        let pinned = Pinned::new();
+        let mut renderer = renderer(&pinned);
+        renderer
+            .event(&todo_started(
+                "call-1",
+                &serde_json::json!([{"content": "not a todo", "status": "pending"}]),
+            ))
+            .expect("started");
+        renderer
+            .event(&tool_finished("call-1", "write", false))
+            .expect("finished");
+        assert!(pinned.todos().is_empty());
+    }
+
+    #[test]
+    fn malformed_todo_arguments_are_ignored() {
+        assert!(todo_items(None).is_none());
+        assert!(todo_items(Some(&serde_json::json!({}))).is_none());
+        assert!(todo_items(Some(&serde_json::json!({"todos": "nope"}))).is_none());
+        assert!(
+            todo_items(Some(
+                &serde_json::json!({"todos": [{"content": "x", "status": "unknown"}]})
+            ))
+            .is_none()
+        );
+        assert!(todo_items(Some(&serde_json::json!({"todos": [{"status": "pending"}]}))).is_none());
+        assert_eq!(
+            todo_items(Some(
+                &serde_json::json!({"todos": [{"content": "x", "status": "pending"}]})
+            )),
+            Some(vec![item("x", TodoStatus::Pending)])
+        );
+    }
 
     fn preview(source: &str, edits: &serde_json::Value) -> EditPreview {
         let arguments = serde_json::json!({ "edits": edits });

@@ -522,7 +522,7 @@ impl TodoTool {
     pub fn into_declaration(self) -> ToolDeclaration<TodoArgs> {
         ToolDeclaration::new(
             "todo",
-            "Replace the task list for this session. Send the complete list every time, with a status per item. Use it to plan multi-step work and keep the user oriented.",
+            "Replace the task list for this session. Send the complete list every time, with a status per item. Use it before multi-step work and after each step; the user sees the list in the footer.",
             Arc::new(self),
         )
     }

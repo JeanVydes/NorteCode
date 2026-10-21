@@ -23,7 +23,8 @@ aspires to.
 - Hermetic service tests cover the agent loop, compaction rollback, costs and
   budgets, retries, approvals, session rules, the effect journal and protocol
   mapping.
-- CLI tests cover command parsing, approval parsing and footer rendering.
+- CLI tests cover command parsing, approval parsing, the todo footer widget and
+  footer rendering.
 - Linux bubblewrap 0.13.0 was exercised: writes outside the workspace failed,
   `/tmp` was private and the network was loopback-only by default.
 - The macOS seatbelt profile has a unit test for network denial, writable roots
