@@ -2120,6 +2120,8 @@ pub(crate) fn effort_label(effort: ReasoningEffort) -> &'static str {
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
         ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+        ReasoningEffort::Max => "max",
         _ => "other",
     }
 }
@@ -2239,14 +2241,16 @@ pub(crate) fn parse_reasoning_setting(value: &str) -> Result<Reasoning, String> 
                 "minimal" => "minimal",
                 "low" => "low",
                 "medium" => "medium",
-                _ => "high",
+                "high" => "high",
+                "xhigh" => "xhigh",
+                _ => "max",
             };
             Ok(Reasoning::Effort {
                 effort: effort.to_owned(),
             })
         }
         _ => Err(format!(
-            "`{value}` is not a reasoning setting; use auto, off, minimal, low, medium or high"
+            "`{value}` is not a reasoning setting; use auto, off, minimal, low, medium, high, xhigh or max"
         )),
     }
 }

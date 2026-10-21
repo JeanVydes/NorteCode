@@ -8,6 +8,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `xhigh` and `max` are first-class reasoning efforts. The catalogue values map
+  to Norte's new variants, `--reasoning` and the config accept them without
+  collapsing to `high`, and validation still rejects them for a model that does
+  not declare them. OpenAI serializes both, Anthropic sends
+  `output_config.effort`, and Gemini uses its `HIGH` ceiling.
 - The interactive footer shows the session's todo list above the session
   totals: the completed count, the current item first, pending items that fit,
   and `+N` for those that do not. It updates when a `todo` call succeeds and is

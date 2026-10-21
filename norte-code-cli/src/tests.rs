@@ -101,9 +101,15 @@ fn reasoning_names_are_parsed_and_unknown_ones_are_rejected() {
         norte_code_protocol::Reasoning::Disabled
     );
     assert_eq!(
-        parse_reasoning_setting("xhigh").expect("alias"),
+        parse_reasoning_setting("xhigh").expect("xhigh"),
         norte_code_protocol::Reasoning::Effort {
-            effort: "high".to_owned()
+            effort: "xhigh".to_owned()
+        }
+    );
+    assert_eq!(
+        parse_reasoning_setting("max").expect("max"),
+        norte_code_protocol::Reasoning::Effort {
+            effort: "max".to_owned()
         }
     );
     assert!(parse_reasoning_setting("x").is_err());

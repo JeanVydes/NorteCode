@@ -162,7 +162,7 @@ no plaintext `api_key` field.
 | `trigger` | `"idle"` or `"eager"` | `"idle"` | `idle` compacts at a turn boundary; `eager` compacts at the first safe request boundary inside a turn. |
 | `keep_recent` | integer | `6` | Recent messages copied verbatim into the new session. |
 | `model` | string or `null` | `null` | Model used for the summary; `null` uses the session model. |
-| `reasoning` | string | `"lowest"` | Reasoning effort for the summary request. |
+| `reasoning` | string | `"lowest"` | Reasoning effort for the summary request: `lowest`, `off`, or an effort such as `low`, `xhigh` or `max`. |
 
 Eager compaction never splits a tool call from its result, never runs while an
 approval is pending, and runs at most once per turn. `/compact` triggers the
@@ -184,9 +184,10 @@ appended twice.
 
 ## `reasoning`
 
-`default` is `"auto"`, `"off"`, an effort name such as `"low"`, or
-`{"budget": 2048}`. `--reasoning` overrides it for one run or resume. The value
-is checked against the selected model before the turn starts.
+`default` is `"auto"`, `"off"`, an effort name such as `"low"`, `"xhigh"` or
+`"max"`, or `{"budget": 2048}`. `--reasoning` overrides it for one run or
+resume. The value is checked against the selected model before the turn starts,
+so `xhigh` and `max` are accepted only where the model declares them.
 
 ## `approval_mode` and `approvals`
 
@@ -259,7 +260,7 @@ registers the refreshed tools.
 | `max_output` | integer or `null` | `null` | Output limit override. |
 | `reasoning.supported` | boolean or `null` | `null` | Whether the model reasons. |
 | `reasoning.can_disable` | boolean or `null` | `null` | Whether reasoning may be turned off. |
-| `reasoning.efforts` | array of strings or `null` | `null` | Effort names to expose. |
+| `reasoning.efforts` | array of strings or `null` | `null` | Effort names to expose, including `xhigh` and `max`. |
 | `reasoning.supports_budget` | boolean or `null` | `null` | Whether a token budget is accepted. |
 | `reasoning.max_budget` | integer or `null` | `null` | Largest accepted budget. |
 

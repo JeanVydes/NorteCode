@@ -230,8 +230,9 @@ fn effort_of(name: &str) -> Option<ReasoningEffort> {
         "minimal" => Some(ReasoningEffort::Minimal),
         "low" => Some(ReasoningEffort::Low),
         "medium" => Some(ReasoningEffort::Medium),
-        // Norte models four efforts; the catalogue's newer top ends map down.
-        "high" | "xhigh" | "max" => Some(ReasoningEffort::High),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" => Some(ReasoningEffort::XHigh),
+        "max" => Some(ReasoningEffort::Max),
         _ => None,
     }
 }
@@ -281,6 +282,18 @@ mod tests {
                 .reasoning
                 .efforts
                 .contains(&ReasoningEffort::High)
+        );
+        assert!(
+            capabilities
+                .reasoning
+                .efforts
+                .contains(&ReasoningEffort::XHigh)
+        );
+        assert!(
+            capabilities
+                .reasoning
+                .efforts
+                .contains(&ReasoningEffort::Max)
         );
     }
 

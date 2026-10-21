@@ -69,6 +69,8 @@ pub(super) fn compaction_reasoning(
         "low" => ReasoningRequest::Effort(ReasoningEffort::Low),
         "medium" => ReasoningRequest::Effort(ReasoningEffort::Medium),
         "high" => ReasoningRequest::Effort(ReasoningEffort::High),
+        "xhigh" => ReasoningRequest::Effort(ReasoningEffort::XHigh),
+        "max" => ReasoningRequest::Effort(ReasoningEffort::Max),
         _ => ReasoningRequest::Automatic,
     }
 }

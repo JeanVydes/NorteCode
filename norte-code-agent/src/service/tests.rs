@@ -985,6 +985,8 @@ fn reasoning_settings_are_checked_against_the_model() {
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
         ]),
         supports_budget: true,
         max_budget: Some(4096),
@@ -1001,6 +1003,46 @@ fn reasoning_settings_are_checked_against_the_model() {
         )
         .expect("medium is declared"),
         ReasoningRequest::Effort(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        resolve_reasoning(
+            Some(&ProtocolReasoning::Effort {
+                effort: "xhigh".to_owned()
+            }),
+            &automatic,
+            &capabilities
+        )
+        .expect("xhigh is declared"),
+        ReasoningRequest::Effort(ReasoningEffort::XHigh)
+    );
+    assert_eq!(
+        resolve_reasoning(
+            Some(&ProtocolReasoning::Effort {
+                effort: "max".to_owned()
+            }),
+            &automatic,
+            &capabilities
+        )
+        .expect("max is declared"),
+        ReasoningRequest::Effort(ReasoningEffort::Max)
+    );
+    let without_top = ReasoningCapability {
+        efforts: BTreeSet::from([
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ]),
+        ..capabilities.clone()
+    };
+    assert!(
+        resolve_reasoning(
+            Some(&ProtocolReasoning::Effort {
+                effort: "max".to_owned()
+            }),
+            &automatic,
+            &without_top
+        )
+        .is_err()
     );
     assert!(
         resolve_reasoning(
@@ -1073,6 +1115,18 @@ fn configured_reasoning_accepts_efforts_and_budgets() {
         parse_configured_reasoning(&serde_json::json!("high")).expect("effort"),
         ProtocolReasoning::Effort {
             effort: "high".to_owned()
+        }
+    );
+    assert_eq!(
+        parse_configured_reasoning(&serde_json::json!("xhigh")).expect("xhigh"),
+        ProtocolReasoning::Effort {
+            effort: "xhigh".to_owned()
+        }
+    );
+    assert_eq!(
+        parse_configured_reasoning(&serde_json::json!("max")).expect("max"),
+        ProtocolReasoning::Effort {
+            effort: "max".to_owned()
         }
     );
     assert_eq!(

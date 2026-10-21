@@ -178,7 +178,7 @@ pub(super) fn parse_configured_reasoning(
     }
 }
 
-/// Parses `auto`, `off` or one of Norte's four effort names.
+/// Parses `auto`, `off` or one of Norte's effort names.
 fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
     let normalized = text.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -190,20 +190,21 @@ fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
             })
             .ok_or_else(|| {
                 format!(
-                    "unknown reasoning setting `{text}`; use `auto`, `off`, `minimal`, `low`, `medium` or `high`"
+                    "unknown reasoning setting `{text}`; use `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`"
                 )
             }),
     }
 }
 
-/// Maps an effort name to Norte's enum. The catalogue's top-end aliases map
-/// down, as they do when the catalogue is loaded.
+/// Maps an effort name to Norte's enum.
 fn parse_reasoning_effort(name: &str) -> Option<ReasoningEffort> {
     match name.trim().to_ascii_lowercase().as_str() {
         "minimal" => Some(ReasoningEffort::Minimal),
         "low" => Some(ReasoningEffort::Low),
         "medium" => Some(ReasoningEffort::Medium),
-        "high" | "xhigh" | "max" => Some(ReasoningEffort::High),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" => Some(ReasoningEffort::XHigh),
+        "max" => Some(ReasoningEffort::Max),
         _ => None,
     }
 }
@@ -286,7 +287,10 @@ fn effort_name(effort: ReasoningEffort) -> &'static str {
         ReasoningEffort::Minimal => "minimal",
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
-        // `High` and any future top end map to Norte's highest effort.
-        _ => "high",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+        ReasoningEffort::Max => "max",
+        // A future level has no host spelling until this crate learns it.
+        _ => "other",
     }
 }
