@@ -9,9 +9,10 @@ Norte Code merges two optional JSON files:
 2. The project overlay: `.norte-code/config.json` in the workspace or the
    nearest parent directory that has one.
 
-The merge is shallow and key-by-key: a key present in the project overlay wins,
-and missing keys keep the user value or the default. `--config PATH` replaces
-the user file path.
+The merge is deep: JSON objects are merged key by key, so the project overlay
+can override one nested field without dropping its siblings. Arrays and scalars
+replace the user value, and missing keys keep the user value or the default.
+`--config PATH` replaces the user file path.
 
 Unknown keys are kept out of the typed config and reported:
 

@@ -19,7 +19,7 @@ aspires to.
 
 - `cargo fmt --all --check`.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
-- `cargo test --workspace -- --test-threads=1` passes all workspace suites.
+- `cargo test --workspace` passes all workspace suites in parallel.
 - Hermetic service tests cover the agent loop, compaction rollback, costs and
   budgets, retries, approvals, session rules, the effect journal and protocol
   mapping.
@@ -46,11 +46,10 @@ aspires to.
 
 ## Test caveat
 
-A few service tests are sensitive to full parallel execution and have shown
-intermittent failures while the same suite passes with `--test-threads=1`. The
-failure was reproduced on the commit before the service/CLI module split, so it
-is not a regression from that refactor. The deterministic command used for
-close-out is:
+A few service tests exercise concurrent turns and can be sensitive to machine
+load. `cargo test --workspace` is the normal gate. If a failure looks timing
+related, rerun the suite single-threaded before treating it as a regression. The
+deterministic command used for close-out is:
 
 ```sh
 cargo test --workspace -- --test-threads=1

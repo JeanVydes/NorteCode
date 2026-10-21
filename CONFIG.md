@@ -8,8 +8,9 @@ Norte Code reads one JSON object from two optional files:
 2. `.norte-code/config.json` in the workspace or the nearest parent directory
    that has one. The project overlay wins key by key over the user file.
 
-Both files are merged shallowly: a key present in the project overwrites the
-same key in the user file, while missing keys keep their defaults. Unknown keys
+Both files are merged deeply: JSON objects are merged key by key, so a project
+overlay can override one nested field without dropping its siblings. Arrays and
+scalars replace the user value. Missing keys keep their defaults. Unknown keys
 are kept out of the typed config and reported as `warning: unknown config key
 \`path\``. Every field is optional unless stated otherwise.
 

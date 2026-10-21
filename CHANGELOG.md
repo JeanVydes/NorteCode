@@ -19,6 +19,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   under `--quiet`; a long command is clipped to one line. Cancelling a turn
   before the provider reports usage now explains that the cancelled request is
   still recorded in telemetry.
+- The interactive footer shows that a turn is working as soon as it is sent, and
+  shows the retry delay and attempt while a transient provider failure waits.
+  Messages typed during a turn stay visible in the footer, and `Ctrl-X` removes
+  the most recently queued one before the queue is sent.
+- A second `Ctrl-C` force-quits immediately instead of waiting five seconds, and
+  the first one now reports that the running tool is being stopped.
 
 ### Security
 
@@ -50,6 +56,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An `edit` call always renders its search/replace blocks as a diff, including
+  under `--quiet` and when `--verbose` is off. A failed edit shows its diagnostic
+  in the same modes.
+- A forked session receives a fresh engine session id, so it no longer collides
+  with its source, and it is recorded as a fork rather than a compaction.
+- `glob` and `grep` honor `.gitignore` in a workspace without a `.git` directory
+  and skip hidden files and directories.
 - Resizing the terminal no longer duplicates or breaks streamed text. Resize
   events are debounced, the footer rows for the old and new sizes are cleared,
   and the scroll region is reset in one atomic write so the renderer never
