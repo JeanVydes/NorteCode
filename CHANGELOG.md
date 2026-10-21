@@ -8,6 +8,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Depend on the Norte revision that explains a literal `\n`, `\r` or `\t` in a
+  failed `edit` search and reports an ambiguous exact match as occurrences, so
+  the model sees the escaping mistake or the real count instead of only a
+  similarity score.
 - The built-in system prompt now states the Norte Code identity, requires tool
   use and verification, and tells the model not to guess its harness or claim
   to be another product.
