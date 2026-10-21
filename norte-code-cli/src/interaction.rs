@@ -329,7 +329,7 @@ pub(crate) fn print_chat_help(style: Style) {
     );
     eprintln!(
         "{}",
-        style.dim("  text typed while a turn runs is steered into the next turn")
+        style.dim("  text typed while a turn runs is steered into that turn")
     );
     eprintln!(
         "{}",
@@ -540,7 +540,7 @@ async fn steer_text(
     match drain_request(service, ClientRequestKind::Steer { session, text }).await {
         Ok(events) => match stream_error(&events) {
             Some(message) => eprintln!("{}", style.red(format!("could not steer: {message}"))),
-            None if !quiet => eprintln!("{}", style.dim("steered into the next turn boundary")),
+            None if !quiet => eprintln!("{}", style.dim("steered into the running turn")),
             None => {}
         },
         Err(error) => eprintln!("{}", style.red(format!("could not steer: {error}"))),
@@ -919,9 +919,11 @@ pub(crate) async fn drive_turns(
     let mut current: Option<SessionKey> = None;
     let mut parked = false;
     let mut cancel_requested = false;
-    // Text the human typed while a turn was running. It waits in the service
-    // until the next turn boundary, and the loop below starts that boundary.
-    let mut steered = false;
+    // Text the human typed while a turn was running. The service applies it to
+    // the request in flight; what the turn did not reach waits for the next
+    // turn boundary, and the loop below starts that boundary.
+    let mut steered = 0usize;
+    let mut applied = 0usize;
     // Whether the last turn closed normally. A cancelled or budget-stopped
     // turn leaves the session in a state a resume cannot pick up.
     let mut committed = false;
@@ -990,7 +992,7 @@ pub(crate) async fn drive_turns(
                             None => {
                                 if let Some(session) = current.clone() {
                                     steer_text(service, session, text, style, renderer.quiet).await;
-                                    steered = true;
+                                    steered += 1;
                                 } else {
                                     eprintln!(
                                         "{}",
@@ -1021,6 +1023,7 @@ pub(crate) async fn drive_turns(
                         parked = *phase == Phase::AwaitingApproval;
                         committed = *done;
                     }
+                    ServerEventKind::SteerApplied { count } => applied += *count,
                     _ => {}
                 }
                 match ask_approval(&event, style, input.as_deref_mut(), &mut interrupt_rx).await? {
@@ -1142,11 +1145,12 @@ pub(crate) async fn drive_turns(
                 }
             }
         }
-        // The human steered text while the turn was running. The service holds
-        // it durably and applies it at the next turn boundary, so a turn has
-        // to start for it to be delivered.
-        if steered {
-            steered = false;
+        // The human steered text while the turn was running. The service
+        // applies it to the request in flight; what the turn never reached
+        // waits for the next turn boundary, so that boundary has to start.
+        if steered > applied {
+            steered = 0;
+            applied = 0;
             let Some(session) = current.clone() else {
                 break;
             };
@@ -1170,6 +1174,9 @@ pub(crate) async fn drive_turns(
                     break;
                 }
             }
+        } else {
+            steered = 0;
+            applied = 0;
         }
     }
     Ok(DriveOutcome {

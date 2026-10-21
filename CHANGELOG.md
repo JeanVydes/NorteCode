@@ -60,9 +60,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The interactive footer shows that a turn is working as soon as it is sent, and
   shows the retry delay and attempt while a transient provider failure waits.
 - The local message queue is gone. Text typed while a turn runs is steered into
-  the next turn boundary, which is durable and survives a restart, and the
-  commands that make sense during a turn are handled straight away. The footer
-  row that showed the queue now shows the command suggestion.
+  that turn: the engine appends it to the history before the next request the
+  turn makes, so the model sees it there instead of after the turn ends. The
+  message stays durable until the engine reports it applied, and whatever the
+  turn never reached waits for the next turn boundary. The commands that make
+  sense during a turn are handled straight away. The footer row that showed the
+  queue now shows the command suggestion.
 - `budget.action = "ask"` asks for a new limit in the interactive CLI. The turn
   stops uncommitted, the CLI prompts for a limit, and a new limit raises the
   budget and resumes the session. An empty answer leaves the session stopped

@@ -34,7 +34,7 @@ Code's stable id, not a Norte `SessionId`.
 | `RenameSession { session, title }` | Rename a session. |
 | `DeleteSession { session }` | Delete a session. |
 | `SendMessage { session, text, budget, reasoning }` | Start a turn; creates a session when `session` is `None`. |
-| `Steer { session, text }` | Queue a message for the next turn boundary. |
+| `Steer { session, text }` | Steer a message into the running turn. |
 | `CancelTurn { session }` | Ask the running turn to stop. |
 | `Resume { session }` | Continue a parked or interrupted session. |
 | `Approve { session, approval, arguments, scope, remember }` | Approve a parked call. |
@@ -54,16 +54,22 @@ Code's stable id, not a Norte `SessionId`.
 
 `SetReasoning` validates the effort or budget against the session's current model
 and persists it; `session` applies to every later turn until changed, while
-`message` applies to the next turn only. `Steer` persists a message and applies it
-when the next turn starts, before that turn's own input; it does not interrupt a
-turn already in flight. Neither request emits an event, so an empty response is
-the acknowledgement.
+`message` applies to the next turn only. `Steer` persists a message and hands it
+to the running turn, which appends it to the history before its next request.
+Neither request emits an event on its own, so an empty response is the
+acknowledgement.
 
 `SetModel` applies the switch right away when the session is idle and answers
 with `ModelChanged`. When the session is busy it is accepted, persisted and
 applied at the next turn boundary; the answer is `ModelQueued` and the switch
 emits `ModelChanged` when it is applied. An approval or question continuation
 is not a turn boundary.
+
+`Steer` reaches the request the session is already making. The message is
+persisted and the engine appends it to the history before the next request of
+the running turn, so the model sees it in that request. The engine reports it
+with `SteerApplied`; whatever the turn never reached waits for the next turn
+boundary, where the session's queue delivers it.
 
 ## Events
 
@@ -80,6 +86,7 @@ is not a turn boundary.
 | `BudgetWarning`, `BudgetExceeded`, `BudgetChanged` | Budget crossing and changes. |
 | `CostUpdated`, `CostNotReported` | Ledger totals and unpriced requests. |
 | `ModelChanged`, `ModelQueued`, `ReasoningDowngraded` | Model switches. `ModelQueued` says the switch is accepted and pending a turn boundary. The third is wire vocabulary for a host that clamps; this service refuses an incompatible setting instead. |
+| `SteerApplied` | The engine applied steering messages to the request already in flight. |
 | `CatalogUpdated`, `ModelList` | Catalogue refresh and model list. |
 | `SkillList`, `SkillsUpdated` | Skill discovery and refresh. |
 | `GrantRevoked` | A grant was revoked. |

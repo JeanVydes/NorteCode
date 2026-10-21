@@ -3073,6 +3073,125 @@ async fn ask_user_parks_the_turn_until_the_client_answers() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "ask_user",
+                &serde_json::json!({
+                    "question": "Which file should I edit?",
+                    "options": ["src/lib.rs", "src/main.rs"],
+                    "multiple": false
+                }),
+            )
+            .turn_text("I will wait for the answer."),
+    );
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory {
+                model: model.clone(),
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let request = ClientRequest {
+        request_id: 7,
+        kind: ClientRequestKind::SendMessage {
+            session: None,
+            text: "do the work".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    };
+    let mut stream = service.submit(request).await.expect("turn");
+    let mut session = None;
+    let mut asked = None;
+    let mut steered = false;
+    let mut finished = false;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("turn should not hang")
+    {
+        session = session.or(event.session.clone());
+        if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
+            asked = Some(question.clone());
+        }
+        if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
+            finished = true;
+            break;
+        }
+        if let Some(question) = asked.clone() {
+            // The turn is alive and parked on the question: a steer sent now
+            // reaches the request it is about to make.
+            if !steered {
+                steered = true;
+                let ack = drain(
+                    &service,
+                    ClientRequestKind::Steer {
+                        session: session.clone().expect("session"),
+                        text: "also run the tests".to_owned(),
+                    },
+                )
+                .await;
+                assert!(ack.is_empty());
+            }
+            let response = ClientRequest {
+                request_id: 8,
+                kind: ClientRequestKind::AnswerQuestion {
+                    session: session.clone().expect("session"),
+                    question,
+                    answer: "src/lib.rs".to_owned(),
+                },
+            };
+            let mut ack = service.submit(response).await.expect("answer");
+            while ack.next().await.is_some() {}
+            asked = None;
+        }
+    }
+    assert!(finished, "the turn should finish after the answer");
+    assert!(steered, "the steer should have been sent during the turn");
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "the turn made two requests");
+    assert_eq!(
+        user_texts(&requests[0]),
+        vec!["do the work".to_owned()],
+        "the first request carries nothing from the steer"
+    );
+    assert_eq!(
+        user_texts(&requests[1]),
+        vec!["do the work".to_owned(), "also run the tests".to_owned()],
+        "the steer reaches the request the turn was about to make"
+    );
+
+    // The durable copy is gone once the engine applied it.
+    let key = session.expect("session");
+    let (_, _, _) = service.require_record(&key).expect("record");
+    assert!(
+        service
+            .lock_sessions()
+            .get(&key)
+            .expect("record")
+            .pending_steers
+            .is_empty(),
+        "the applied steer leaves no pending copy"
+    );
+}
+
+#[tokio::test]
 async fn an_unknown_session_is_an_error() {
     let service = service();
     let error = service

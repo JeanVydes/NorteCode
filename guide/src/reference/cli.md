@@ -142,9 +142,9 @@ you type, and Tab accepts the suggestion.
 
 While a turn is running, the commands that make sense there are handled
 immediately (`/allow`, `/deny`, `/reasoning`, `/model`, `/revoke`, `/refresh`,
-`/help`). `/compact` and `/exit` wait for the turn to finish. Any other text
-is steered into the next turn boundary, which is durable and survives a
-restart.
+`/help`). `/compact` and `/exit` wait for the turn to finish. Any other text is
+steered into that turn: it reaches the request the turn is about to make, and
+it stays durable until the engine reports it applied.
 
 ## Exit status
 

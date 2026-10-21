@@ -424,6 +424,11 @@ pub enum ServerEventKind {
         /// How many requests so far carried no cost.
         requests: u64,
     },
+    /// The engine applied steering messages to the request already in flight.
+    SteerApplied {
+        /// How many messages reached the request.
+        count: usize,
+    },
     /// The session's model changed.
     ModelChanged {
         /// The new `provider/model`.
@@ -903,6 +908,21 @@ mod tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.session.expect("session").as_str(), "s");
+    }
+
+    #[test]
+    fn a_steer_applied_event_round_trips() {
+        let event = ServerEvent::new(
+            1,
+            Some(SessionKey::new("s")),
+            ServerEventKind::SteerApplied { count: 2 },
+        );
+        let json = serde_json::to_string(&event).expect("serialize");
+        let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            back.kind,
+            ServerEventKind::SteerApplied { count: 2 }
+        ));
     }
 
     #[test]

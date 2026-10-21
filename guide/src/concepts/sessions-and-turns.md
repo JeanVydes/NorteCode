@@ -11,6 +11,7 @@ the service keeps a `SessionRecord` with:
 - the session budget and the session's allow/deny tool rules;
 - the session reasoning override and any one-message override or steers queued
   for the next turn;
+- the steering messages a running turn has not reached yet;
 - a model switch accepted while the session was busy, applied at the next turn
   boundary;
 - provider-reported totals and request counts;

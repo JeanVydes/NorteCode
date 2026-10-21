@@ -8,7 +8,7 @@ aspires to.
 
 - The in-process service with logical sessions, streaming, cancellation,
   model switching (immediate when idle, queued for the next turn boundary when
-  busy), session and one-message reasoning overrides, steering for the next
+  busy), session and one-message reasoning overrides, steering into the running
   turn, compaction, retries, approvals, questions, budgets, telemetry and the
   SQLite directory.
 - The CLI: `run`, `resume`, `models`, `skills`, `sessions`, `cost`, `telemetry`,
@@ -16,7 +16,7 @@ aspires to.
 - The interactive commands `/help`, `/compact`, `/allow`, `/deny`,
   `/reasoning`, `/model`, `/revoke`, `/refresh` and `/exit`, with dimmed
   suggestions for the command and its arguments. Text typed while a turn runs
-  is steered into the next turn.
+  is steered into that turn and reaches the request it is about to make.
 - The host tools, Agent Skills discovery, workspace policy and the command
   sandbox wrapper.
 - The versioned protocol and the mdBook guide you are reading.
