@@ -2,9 +2,8 @@
 //! cancellation.
 
 use super::{
-    Arc, Budget, ClientRequest, ClientRequestKind, Duration, EventStream, Phase, Reasoning,
-    Renderer, ServerEvent, ServerEventKind, Service, SessionKey, StreamExt, Style, VecDeque, mpsc,
-    short,
+    Arc, Budget, ClientRequest, ClientRequestKind, EventStream, Phase, Reasoning, Renderer,
+    ServerEvent, ServerEventKind, Service, SessionKey, StreamExt, Style, VecDeque, mpsc, short,
 };
 use crate::approval::{ApprovalChoice, ApprovalOutcome, approval_request, ask_approval};
 use crate::prompt::answer_if_asked;
@@ -115,6 +114,7 @@ pub(crate) async fn interactive_loop(
                 );
                 continue;
             };
+            renderer.mark_working();
             let stream = service
                 .submit(ClientRequest {
                     request_id,
@@ -163,6 +163,7 @@ pub(crate) async fn interactive_loop(
             continue;
         }
         echo_user_message(style, &text);
+        renderer.mark_working();
         let stream = service
             .submit(ClientRequest {
                 request_id,
@@ -303,8 +304,7 @@ pub(crate) async fn drive_turns(
     }));
     let mut current: Option<SessionKey> = None;
     let mut parked = false;
-    let mut queued: Vec<String> = Vec::new();
-    let mut cancel_requested: Option<std::time::Instant> = None;
+    let mut cancel_requested = false;
     while let Some(mut stream) = streams.pop_front() {
         loop {
             let wake = if let Some(receiver) = input.as_mut() {
@@ -329,53 +329,35 @@ pub(crate) async fn drive_turns(
                     let Some(session) = current.clone() else {
                         continue;
                     };
-                    match cancel_requested {
-                        None => {
-                            cancel_requested = Some(std::time::Instant::now());
-                            renderer.mark_cancelled();
-                            eprintln!("{}", style.yellow("cancelling the running turn…"));
-                            eprintln!(
-                                "  {}",
-                                style.dim(
-                                    "the turn is saved and can be resumed; press Ctrl-C again \
-                                     after 5s to force quit"
-                                )
-                            );
-                            let request = ClientRequest {
-                                request_id: 0,
-                                kind: ClientRequestKind::CancelTurn { session },
-                            };
-                            if let Err(error) = service.submit(request).await {
-                                eprintln!(
-                                    "{}",
-                                    style.yellow(format!(
-                                        "warning: could not cancel the turn: {error}"
-                                    ))
-                                );
-                            }
-                        }
-                        Some(at) if at.elapsed() < Duration::from_secs(5) => {
-                            eprintln!("{}", style.yellow("still cancelling…"));
-                            eprintln!(
-                                "  {}",
-                                style.dim(
-                                    "a blocking tool may take a moment to stop; Ctrl-C again \
-                                     after 5s will force quit"
-                                )
-                            );
-                        }
-                        Some(_) => {
-                            eprintln!("{}", style.red("interrupted; forcing exit"));
-                            return Err("interrupted".to_owned());
-                        }
+                    if cancel_requested {
+                        eprintln!("{}", style.red("interrupted; forcing exit"));
+                        return Err("interrupted".to_owned());
+                    }
+                    cancel_requested = true;
+                    renderer.mark_cancelled();
+                    eprintln!("{}", style.yellow("cancelling the running turn…"));
+                    eprintln!(
+                        "  {}",
+                        style.dim(
+                            "the running tool is being stopped; press Ctrl-C again to force quit"
+                        )
+                    );
+                    let request = ClientRequest {
+                        request_id: 0,
+                        kind: ClientRequestKind::CancelTurn { session },
+                    };
+                    if let Err(error) = service.submit(request).await {
+                        eprintln!(
+                            "{}",
+                            style.yellow(format!("warning: could not cancel the turn: {error}"))
+                        );
                     }
                     continue;
                 }
                 Wake::Line(line) => {
                     let line = line.trim();
                     if !line.is_empty() {
-                        queued.push(line.to_owned());
-                        renderer.set_queued(queued.clone());
+                        renderer.push_queued(line.to_owned());
                     }
                     continue;
                 }
@@ -414,7 +396,7 @@ pub(crate) async fn drive_turns(
                     return Ok(DriveOutcome {
                         session: current,
                         parked: true,
-                        queued,
+                        queued: renderer.queued(),
                     });
                 }
             }
@@ -427,7 +409,7 @@ pub(crate) async fn drive_turns(
                 return Ok(DriveOutcome {
                     session: current,
                     parked: true,
-                    queued,
+                    queued: renderer.queued(),
                 });
             }
             renderer.event(&event)?;
@@ -451,7 +433,7 @@ pub(crate) async fn drive_turns(
     Ok(DriveOutcome {
         session: current,
         parked,
-        queued,
+        queued: renderer.queued(),
     })
 }
 

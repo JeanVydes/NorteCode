@@ -52,6 +52,29 @@ impl Pinned {
         }
     }
 
+    /// Appends one message typed while a turn runs.
+    pub(crate) fn push_queued(&self, line: String) {
+        if line.trim().is_empty() {
+            return;
+        }
+        self.lock().queued.push(line);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Removes and returns the most recently queued message.
+    pub(crate) fn pop_queued(&self) -> Option<String> {
+        let popped = self.lock().queued.pop();
+        if popped.is_some() {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        popped
+    }
+
+    /// A snapshot of the queued messages, oldest first.
+    pub(crate) fn queued(&self) -> Vec<String> {
+        self.lock().queued.clone()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
         self.inner
             .lock()
@@ -393,6 +416,7 @@ mod unix {
                                 &mut history,
                                 &mut history_pos,
                                 &mut draft,
+                                pinned,
                                 sender,
                             ) {
                                 KeyOutcome::Continue => redraw = true,
@@ -445,6 +469,7 @@ mod unix {
         history: &mut Vec<String>,
         history_pos: &mut Option<usize>,
         draft: &mut String,
+        pinned: &Pinned,
         sender: &mpsc::UnboundedSender<Option<String>>,
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -473,6 +498,13 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Char('c' | 'l') if control => KeyOutcome::Continue,
+            KeyCode::Char('x') if control => {
+                // Ctrl-X removes the most recent queued line. The queue lives
+                // in the pinned footer, so the editor and the turn loop see the
+                // same list without a second channel.
+                pinned.pop_queued();
+                KeyOutcome::Continue
+            }
             KeyCode::Char('a') if control => {
                 buffer.home();
                 KeyOutcome::Continue
@@ -702,7 +734,13 @@ mod unix {
             String::new()
         } else {
             let joined = queued.join(" · ");
-            format!("{} {}", style.faint("queued"), style.faint(joined))
+            format!(
+                "{} {} {} {}",
+                style.faint("queued"),
+                style.yellow(queued.len().to_string()),
+                style.faint("Ctrl-X removes last ·"),
+                style.faint(joined)
+            )
         };
         let frame = format!(
             "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
@@ -987,3 +1025,28 @@ mod fallback {
 
 #[cfg(not(unix))]
 pub(crate) use fallback::InteractiveInput;
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::Pinned;
+
+    #[test]
+    fn queued_lines_are_added_and_removed_from_the_shared_footer() {
+        let pinned = Pinned::new();
+        pinned.push_queued("first".to_owned());
+        pinned.push_queued("second".to_owned());
+        assert_eq!(pinned.queued(), vec!["first", "second"]);
+        assert_eq!(pinned.pop_queued().as_deref(), Some("second"));
+        assert_eq!(pinned.queued(), vec!["first"]);
+        assert_eq!(pinned.pop_queued().as_deref(), Some("first"));
+        assert_eq!(pinned.pop_queued(), None);
+        assert!(pinned.queued().is_empty());
+    }
+
+    #[test]
+    fn blank_queued_lines_are_ignored() {
+        let pinned = Pinned::new();
+        pinned.push_queued("   ".to_owned());
+        assert!(pinned.queued().is_empty());
+    }
+}

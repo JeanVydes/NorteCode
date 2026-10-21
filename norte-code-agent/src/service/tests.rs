@@ -301,6 +301,128 @@ async fn a_transient_failure_retries_the_same_session() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn cancelling_a_turn_stops_a_running_command() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(ScriptedModel::new(reference).turn(vec![
+        norte::StreamEvent::ToolCallStart {
+            index: 0,
+            call_id: call,
+            name: "command".to_owned(),
+        },
+        norte::StreamEvent::ToolCallDelta {
+            index: 0,
+            call_id: call,
+            name: None,
+            arguments: serde_json::json!({
+                "command": {"kind": "program", "program": "sleep", "args": ["30"]}
+            })
+            .to_string(),
+        },
+        norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
+    ]));
+    let mut config = config();
+    config.approval_mode = norte_code_config::ApprovalMode::Yolo;
+    let (service, _store) = persistent_service_with_config(config, model).await;
+    let mut events = service
+        .submit(ClientRequest {
+            request_id: 7,
+            kind: ClientRequestKind::SendMessage {
+                session: None,
+                text: "run it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        })
+        .await
+        .expect("turn");
+
+    let mut key = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.next().await {
+            if let Some(session) = event.session {
+                key = Some(session);
+            }
+            if matches!(event.kind, ServerEventKind::ToolStarted { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the command starts");
+
+    let key = key.expect("session");
+    let _ = service
+        .submit(ClientRequest {
+            request_id: 0,
+            kind: ClientRequestKind::CancelTurn { session: key },
+        })
+        .await
+        .expect("cancel");
+
+    let rest = tokio::time::timeout(Duration::from_secs(5), events.collect::<Vec<_>>())
+        .await
+        .expect("the cancelled turn settles");
+    assert!(
+        rest.iter()
+            .any(|event| matches!(event.kind, ServerEventKind::TurnFinished { .. })),
+        "a cancelled command must let the turn finish"
+    );
+}
+
+#[tokio::test]
+async fn retries_report_increasing_attempts_and_backoff() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let scripted = Arc::new(ScriptedModel::new(reference).turn_text("after retries"));
+    let model = Arc::new(FlakyModel::new(
+        Arc::clone(&scripted),
+        2,
+        None,
+        ProviderErrorKind::Transport,
+    ));
+    let mut config = config();
+    config.retry.max_attempts = 2;
+    config.retry.max_delay_ms = 10;
+    config.retry.backoff_ms = 1;
+    let (service, _store) = persistent_service_with_config(config, model).await;
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let retries: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            ServerEventKind::RetryScheduled {
+                attempt, delay_ms, ..
+            } => Some((*attempt, *delay_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries, vec![(1, 1), (2, 2)]);
+    assert!(matches!(
+        events.last().map(|event| &event.kind),
+        Some(ServerEventKind::TurnFinished {
+            committed: true,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn a_permanent_failure_is_not_retried() {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),

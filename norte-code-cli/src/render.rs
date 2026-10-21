@@ -55,6 +55,9 @@ pub(crate) struct Renderer {
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
+    /// What the turn is doing right now, shown before the session totals. It is
+    /// `None` between turns, so an idle footer is never mistaken for a hung one.
+    pub(crate) activity: Option<String>,
     pub(crate) requests: u64,
     /// Requests settled during the current turn, used to explain a cancel
     /// before the provider reported any usage.
@@ -97,6 +100,7 @@ impl Renderer {
             failed: false,
             cancelled: false,
             budget_stopped: false,
+            activity: None,
             requests: 0,
             turn_requests: 0,
             input: 0,
@@ -130,6 +134,21 @@ impl Renderer {
             println!("{line}");
             return Ok(());
         }
+        // The retry delay is over as soon as the next piece of work arrives.
+        // Without this the footer would keep counting a wait that already ended.
+        if matches!(
+            &event.kind,
+            ServerEventKind::Delta { .. }
+                | ServerEventKind::ToolStarted { .. }
+                | ServerEventKind::ToolFinished { .. }
+                | ServerEventKind::RequestReconstructed { .. }
+        ) && self
+            .activity
+            .as_deref()
+            .is_some_and(|activity| activity.starts_with("retrying"))
+        {
+            self.mark_working();
+        }
         match &event.kind {
             ServerEventKind::Delta { delta, .. } => self.delta(delta),
             ServerEventKind::ToolStarted { .. } | ServerEventKind::ToolFinished { .. } => {
@@ -148,6 +167,22 @@ impl Renderer {
     /// cancellation rather than a failure.
     pub(crate) fn mark_cancelled(&mut self) {
         self.cancelled = true;
+        self.set_activity(Some("cancelling…".to_owned()));
+    }
+
+    /// Shows that a turn is in flight, before the first server event arrives.
+    pub(crate) fn mark_working(&mut self) {
+        self.set_activity(Some("working…".to_owned()));
+    }
+
+    /// Replaces the activity label and redraws the pinned footer.
+    fn set_activity(&mut self, activity: Option<String>) {
+        if self.quiet || matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        self.activity = activity;
+        let status = self.session_status();
+        self.pinned.set_session(status);
     }
 
     /// Ends the current output line before a prompt or the final summary.
@@ -267,7 +302,7 @@ impl Renderer {
     }
 
     /// Renders tool activity: what started, and how it ended.
-    #[allow(clippy::collapsible_match)]
+    #[allow(clippy::collapsible_match, clippy::too_many_lines)]
     pub(crate) fn tool_event(&mut self, kind: &ServerEventKind) {
         match kind {
             ServerEventKind::ToolStarted {
@@ -278,6 +313,11 @@ impl Renderer {
             } => {
                 *self.tool_counts.entry(tool.clone()).or_default() += 1;
                 let command = Self::command_summary(arguments.as_ref());
+                let diff = if tool == "edit" {
+                    edit_diff(arguments.as_ref())
+                } else {
+                    None
+                };
                 if self.quiet {
                     if tool == "command" {
                         if let Some(command) = &command {
@@ -290,6 +330,11 @@ impl Renderer {
                             );
                         }
                     }
+                    if let Some(diff) = &diff {
+                        self.end_blocks();
+                        eprintln!("{} {}", self.style.blue("→"), self.style.tool(tool));
+                        self.print_edit_diff(diff);
+                    }
                 } else {
                     self.end_blocks();
                     eprintln!(
@@ -301,7 +346,10 @@ impl Renderer {
                     if let Some(command) = &command {
                         eprintln!("  {}", self.style.dim(format!("$ {command}")));
                     }
-                    if self.verbose && tool.as_str() != "ask_user" {
+                    if let Some(diff) = &diff {
+                        self.print_edit_diff(diff);
+                    }
+                    if self.verbose && tool.as_str() != "ask_user" && tool.as_str() != "edit" {
                         if let Some(arguments) = arguments {
                             let text = serde_json::to_string_pretty(arguments)
                                 .unwrap_or_else(|_| compact_json(arguments, 4_000));
@@ -326,6 +374,20 @@ impl Renderer {
                 duration_ms,
                 ..
             } => {
+                if *is_error && tool == "edit" {
+                    if let Some(error) = error {
+                        self.end_blocks();
+                        if self.quiet {
+                            for line in error.lines() {
+                                let escaped = crate::text::terminal(line);
+                                let (text, _) = clip_text(&escaped, 400);
+                                eprintln!("  {text}");
+                            }
+                        } else {
+                            self.code_block("text", error);
+                        }
+                    }
+                }
                 if !self.quiet {
                     if *is_error {
                         eprintln!(
@@ -344,8 +406,10 @@ impl Renderer {
                     }
                     if self.verbose {
                         if *is_error {
-                            if let Some(error) = error {
-                                self.code_block("text", error);
+                            if tool.as_str() != "edit" {
+                                if let Some(error) = error {
+                                    self.code_block("text", error);
+                                }
                             }
                         } else if let Some(output) = output {
                             self.code_block("text", output);
@@ -360,6 +424,32 @@ impl Renderer {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Prints an edit's search/replace blocks in diff form. This is deliberately
+    /// independent of `--quiet` and `--verbose`: changing a file is the one tool
+    /// effect a human needs to see.
+    fn print_edit_diff(&self, diff: &EditDiff) {
+        eprintln!("  {}", self.style.faint(format!("--- {}", diff.path)));
+        for line in &diff.lines {
+            let escaped = crate::text::terminal(line);
+            let (text, _) = clip_text(&escaped, 400);
+            let styled = if line.starts_with('+') {
+                self.style.green(text)
+            } else if line.starts_with('-') {
+                self.style.red(text)
+            } else {
+                self.style.faint(text)
+            };
+            eprintln!("  {styled}");
+        }
+        if diff.omitted > 0 {
+            eprintln!(
+                "  {}",
+                self.style
+                    .yellow(format!("{} diff line(s) omitted", diff.omitted))
+            );
         }
     }
 
@@ -524,6 +614,7 @@ impl Renderer {
                         self.style.faint(format!("({reason})"))
                     );
                 }
+                self.set_activity(Some("compacting context…".to_owned()));
             }
             ServerEventKind::CompactionFinished {
                 compacted,
@@ -555,11 +646,13 @@ impl Renderer {
                         self.style.dim(detail)
                     );
                 }
+                self.set_activity(None);
             }
             ServerEventKind::TurnStarted { .. } => {
                 self.cancelled = false;
                 self.reasoning_placeholder = false;
                 self.turn_requests = 0;
+                self.set_activity(Some("working…".to_owned()));
             }
             ServerEventKind::RetryScheduled {
                 attempt,
@@ -568,12 +661,13 @@ impl Renderer {
                 ..
             } => {
                 self.end_blocks();
+                let wait = duration_label(*delay_ms);
+                self.set_activity(Some(format!("retrying in {wait} (attempt {attempt})")));
                 if !self.quiet {
                     eprintln!(
                         "{} {} {}",
                         self.style.yellow("retrying"),
-                        self.style
-                            .dim(format!("in {delay_ms} ms (attempt {attempt}):")),
+                        self.style.dim(format!("in {wait} (attempt {attempt}):")),
                         self.style.faint(reason)
                     );
                 }
@@ -635,6 +729,12 @@ impl Renderer {
                 } else if *phase == Phase::AwaitingApproval && !self.quiet {
                     eprintln!("{}", self.style.yellow("paused: waiting for approval"));
                 }
+                let activity = if *phase == Phase::AwaitingApproval {
+                    Some("waiting for approval".to_owned())
+                } else {
+                    None
+                };
+                self.set_activity(activity);
             }
             ServerEventKind::BudgetWarning {
                 scope,
@@ -769,7 +869,7 @@ impl Renderer {
                 .dim(format!("in:out {}", token_ratio(self.input, self.output))),
         );
         if self.show_cost {
-            if self.unpriced == self.requests {
+            if self.requests > 0 && self.unpriced == self.requests {
                 parts.push(self.style.yellow("cost not reported"));
             } else {
                 parts.push(if self.cost > 0.0 {
@@ -782,16 +882,21 @@ impl Renderer {
                 }
             }
         }
-        format!(
-            "{} {}",
-            self.style.faint("session"),
-            parts.join(&self.style.faint(" · "))
-        )
+        let prefix = self.activity.as_ref().map_or_else(
+            || self.style.faint("session"),
+            |activity| self.style.yellow(activity.clone()),
+        );
+        format!("{} {}", prefix, parts.join(&self.style.faint(" · ")))
     }
 
-    /// Replaces the queued-message preview above the input line.
-    pub(crate) fn set_queued(&self, lines: Vec<String>) {
-        self.pinned.set_queued(lines);
+    /// Appends one message typed while the turn runs.
+    pub(crate) fn push_queued(&self, line: String) {
+        self.pinned.push_queued(line);
+    }
+
+    /// A snapshot of the queued messages, oldest first.
+    pub(crate) fn queued(&self) -> Vec<String> {
+        self.pinned.queued()
     }
 
     /// Clears the queued-message preview once the messages are sent.
@@ -843,6 +948,68 @@ impl Renderer {
             eprintln!("  {} {}", self.style.faint("tools"), self.tool_summary());
         }
     }
+}
+
+/// The lines of one edit call, in a compact diff-like form.
+struct EditDiff {
+    path: String,
+    lines: Vec<String>,
+    omitted: usize,
+}
+
+/// Builds the diff shown for an `edit` call from its search/replace blocks.
+///
+/// The tool's structured result records where an edit landed, not the text it
+/// replaced, so the request is the only source that is available before the
+/// file changes. That also makes the preview honest when the edit is refused.
+fn edit_diff(arguments: Option<&serde_json::Value>) -> Option<EditDiff> {
+    const MAX_LINES: usize = 200;
+    let arguments = arguments?;
+    let path = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("(unknown path)");
+    let edits = arguments.get("edits")?.as_array()?;
+    if edits.is_empty() {
+        return None;
+    }
+    let multiple = edits.len() > 1;
+    let mut lines = Vec::new();
+    let mut omitted = 0usize;
+    let mut push = |line: String| {
+        if lines.len() < MAX_LINES {
+            lines.push(line);
+        } else {
+            omitted += 1;
+        }
+    };
+    for (index, edit) in edits.iter().enumerate() {
+        if multiple {
+            push(format!("@@ edit {} @@", index + 1));
+        }
+        let search = edit
+            .get("search")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let replace = edit
+            .get("replace")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        for line in search.lines() {
+            push(format!("-{line}"));
+        }
+        for line in replace.lines() {
+            push(format!("+{line}"));
+        }
+        if search.is_empty() && replace.is_empty() {
+            push(" (no change)".to_owned());
+        }
+    }
+    Some(EditDiff {
+        path: path.to_owned(),
+        lines,
+        omitted,
+    })
 }
 
 /// Shortens a command to one display line without splitting a character.
@@ -1529,5 +1696,44 @@ pub(crate) fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Provider => "provider",
         ErrorCode::Internal => "internal",
         ErrorCode::Unsupported => "unsupported",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edit_diff;
+
+    #[test]
+    fn edit_diff_renders_each_search_and_replace_line() {
+        let arguments = serde_json::json!({
+            "path": "src/lib.rs",
+            "edits": [
+                {"search": "one\ntwo", "replace": "three"},
+                {"search": "four", "replace": "five\nsix"}
+            ]
+        });
+        let diff = edit_diff(Some(&arguments)).expect("diff");
+        assert_eq!(diff.path, "src/lib.rs");
+        assert_eq!(
+            diff.lines,
+            vec![
+                "@@ edit 1 @@",
+                "-one",
+                "-two",
+                "+three",
+                "@@ edit 2 @@",
+                "-four",
+                "+five",
+                "+six",
+            ]
+        );
+        assert_eq!(diff.omitted, 0);
+    }
+
+    #[test]
+    fn edit_diff_without_edits_is_not_shown() {
+        let arguments = serde_json::json!({"path": "src/lib.rs", "edits": []});
+        assert!(edit_diff(Some(&arguments)).is_none());
+        assert!(edit_diff(None).is_none());
     }
 }

@@ -547,6 +547,7 @@ async fn run_prompt(
                 reasoning: reasoning.clone(),
             },
         };
+        renderer.mark_working();
         let stream = service.submit(request).await.map_err(|e| e.to_string())?;
         let outcome = drive_turns(
             &service,
@@ -724,6 +725,7 @@ async fn resume_session(
             pending = Some(outcome.queued.join("\n"));
         }
     }
+    renderer.mark_working();
     let stream = service
         .submit(ClientRequest {
             request_id: 2,
