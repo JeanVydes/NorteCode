@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
-use ignore::WalkBuilder;
+use ignore::{Walk, WalkBuilder};
 use norte::{FnExecutor, Result, SessionId, ToolContext, ToolDeclaration, ToolOutput};
 use regex::RegexBuilder;
 use schemars::JsonSchema;
@@ -87,6 +87,15 @@ fn relative(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
+/// Walks `root` with the semantics both search tools document: `.gitignore`
+/// applies even when the workspace is not inside a git repository, and hidden
+/// files and directories are skipped.
+fn walk(root: &Path) -> Walk {
+    let mut builder = WalkBuilder::new(root);
+    builder.hidden(true).require_git(false);
+    builder.build()
+}
+
 /// Arguments for `glob`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +156,7 @@ impl FnExecutor<GlobArgs, ToolOutput> for GlobTool {
         let limit = cap(args.max_results, DEFAULT_MAX_RESULTS, MAX_RESULTS);
         let mut found = Vec::new();
         let mut truncated = false;
-        for entry in WalkBuilder::new(&root).hidden(false).build().flatten() {
+        for entry in walk(&root).flatten() {
             let path = entry.path();
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
@@ -341,18 +350,12 @@ impl FnExecutor<GrepArgs, ToolOutput> for GrepTool {
         let files: Box<dyn Iterator<Item = PathBuf>> = if root.is_file() {
             Box::new(std::iter::once(root.clone()))
         } else {
-            Box::new(
-                WalkBuilder::new(&root)
-                    .hidden(false)
-                    .build()
-                    .flatten()
-                    .filter_map(|entry| {
-                        entry
-                            .file_type()
-                            .is_some_and(|kind| kind.is_file())
-                            .then(|| entry.into_path())
-                    }),
-            )
+            Box::new(walk(&root).flatten().filter_map(|entry| {
+                entry
+                    .file_type()
+                    .is_some_and(|kind| kind.is_file())
+                    .then(|| entry.into_path())
+            }))
         };
         for file in files {
             let shown = relative(&root, &file);
@@ -1201,6 +1204,61 @@ mod tests {
         assert!(text.contains("src/lib.rs"));
         assert!(text.contains("fn two"));
         assert!(!text.contains("fn one"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn glob_skips_hidden_paths_and_honors_gitignore_without_git() {
+        let root = temp_root("glob-ignore");
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").expect("gitignore");
+        std::fs::write(root.join("ignored.txt"), "needle\n").expect("ignored");
+        std::fs::write(root.join("visible.txt"), "needle\n").expect("visible");
+        std::fs::create_dir_all(root.join(".hidden")).expect("hidden dir");
+        std::fs::write(root.join(".hidden/secret.txt"), "needle\n").expect("secret");
+        assert!(!root.join(".git").exists());
+
+        let tool = GlobTool::new(&root);
+        let output = tool
+            .call(GlobArgs {
+                pattern: "**/*.txt".to_owned(),
+                path: None,
+                max_results: None,
+            })
+            .await
+            .expect("glob");
+        let text = format!("{:?}", output.parts);
+        assert!(text.contains("visible.txt"), "{text}");
+        assert!(!text.contains("ignored.txt"), "{text}");
+        assert!(!text.contains("secret.txt"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn grep_skips_hidden_paths_and_honors_gitignore_without_git() {
+        let root = temp_root("grep-ignore");
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").expect("gitignore");
+        std::fs::write(root.join("ignored.txt"), "needle\n").expect("ignored");
+        std::fs::write(root.join("visible.txt"), "needle\n").expect("visible");
+        std::fs::create_dir_all(root.join(".hidden")).expect("hidden dir");
+        std::fs::write(root.join(".hidden/secret.txt"), "needle\n").expect("secret");
+        assert!(!root.join(".git").exists());
+
+        let tool = GrepTool::new(&root);
+        let output = tool
+            .call(GrepArgs {
+                pattern: "needle".to_owned(),
+                path: None,
+                glob: Some("**/*.txt".to_owned()),
+                ignore_case: false,
+                max_matches: None,
+                offset: None,
+            })
+            .await
+            .expect("grep");
+        let text = format!("{:?}", output.parts);
+        assert!(text.contains("visible.txt"), "{text}");
+        assert!(!text.contains("ignored.txt"), "{text}");
+        assert!(!text.contains("secret.txt"), "{text}");
         let _ = std::fs::remove_dir_all(root);
     }
 
