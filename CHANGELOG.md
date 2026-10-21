@@ -56,9 +56,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- An `edit` call always renders its search/replace blocks as a diff, including
-  under `--quiet` and when `--verbose` is off. A failed edit shows its diagnostic
-  in the same modes.
+- An `edit` call always renders each change in its own boxed, side-by-side
+  view with original and result line numbers plus two lines of surrounding
+  context, including under `--quiet` and when `--verbose` is off. The host
+  snapshots the file immediately before the edit runs, so the preview still
+  shows the original lines when the tool finishes quickly. A failed edit shows
+  its diagnostic in the same modes.
 - A forked session receives a fresh engine session id, so it no longer collides
   with its source, and it is recorded as a fork rather than a compaction.
 - `glob` and `grep` honor `.gitignore` in a workspace without a `.git` directory

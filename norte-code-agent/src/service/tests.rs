@@ -2040,6 +2040,101 @@ async fn a_write_parks_for_approval_and_resumes() {
     let _ = std::fs::remove_file(&target);
 }
 
+#[tokio::test]
+async fn an_edit_snapshots_the_source_before_it_runs() {
+    let target = std::env::current_dir()
+        .expect("working directory")
+        .join("target")
+        .join(format!(
+            "norte-code-edit-{}-{}.txt",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+    std::fs::write(&target, "one\ntwo\nthree\n").expect("editable file");
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "edit",
+                &serde_json::json!({
+                    "path": target.display().to_string(),
+                    "edits": [{"search": "two\n", "replace": "TWO\n"}]
+                }),
+            )
+            .turn_text("done"),
+    );
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "edit it".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let session = first[0].session.clone().expect("session");
+    let approval = first
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
+            _ => None,
+        })
+        .expect("approval request");
+
+    let second = drain(
+        &service,
+        ClientRequestKind::Approve {
+            session,
+            approval,
+            arguments: None,
+            scope: None,
+            remember: None,
+        },
+    )
+    .await;
+    let (arguments, source) = second
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::ToolStarted {
+                tool,
+                arguments,
+                source,
+                ..
+            } if tool == "edit" => Some((arguments.clone(), source.clone())),
+            _ => None,
+        })
+        .expect("tool start");
+    assert_eq!(
+        arguments.expect("edit arguments")["path"],
+        target.display().to_string()
+    );
+    assert_eq!(source.as_deref(), Some("one\ntwo\nthree\n"));
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("edited file"),
+        "one\nTWO\nthree\n"
+    );
+    let _ = std::fs::remove_file(&target);
+}
+
 fn write_model(call: CallId, target: &std::path::Path) -> Arc<ScriptedModel> {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),

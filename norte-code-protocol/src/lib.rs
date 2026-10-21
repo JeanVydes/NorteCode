@@ -269,6 +269,13 @@ pub enum ServerEventKind {
         /// The arguments the call runs with, when they can be recovered.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments: Option<serde_json::Value>,
+        /// The file's contents before an `edit`, when the host captured them.
+        ///
+        /// The host snapshots the target immediately before the executor runs,
+        /// so a preview can show the original lines even when the tool has
+        /// already written the file by the time the client renders the event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// A tool call finished.
     ToolFinished {

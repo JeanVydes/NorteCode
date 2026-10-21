@@ -68,7 +68,7 @@ use prompt::{compose_system_prompt, load_project_instructions};
 use questions::DirectoryQuestions;
 use sandbox::{sandbox_name, sandboxed_command};
 use skills::{collect_secrets, discover_skills};
-use tooling::{ToolActivity, output_text, recording_tool};
+use tooling::{ToolActivity, edit_source, output_text, recording_tool};
 use workspace::WorkspacePolicy;
 
 pub use models::{effective_reasoning, model_list};
@@ -556,8 +556,14 @@ impl Service {
             .tool_metadata({
                 let effects = Arc::clone(&self.effects);
                 let activity = Arc::clone(&self.activity);
+                let workspace_root = self.workspace_root.clone();
                 move |info| {
                     effects.intent(info.session, info.call_id, info.tool.as_str());
+                    if info.tool.as_str() == "edit" {
+                        if let Some(source) = edit_source(&workspace_root, &info.arguments) {
+                            activity.snapshot(info.call_id, source);
+                        }
+                    }
                     activity
                         .arguments
                         .lock()
@@ -2043,11 +2049,13 @@ impl Service {
                 } else {
                     call_arguments(engine, nid, *call_id).await
                 };
+                let source = self.activity.source(call_id);
                 Some(ServerEventKind::ToolStarted {
                     turn: stats.turn,
                     call_id: call_id.to_string(),
                     tool: tool.to_string(),
                     arguments,
+                    source,
                 })
             }
             EngineEvent::ToolCallFinished {
