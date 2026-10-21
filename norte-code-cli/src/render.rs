@@ -35,6 +35,15 @@ pub(crate) enum Block {
     Answer,
 }
 
+/// The budget that stopped a turn and may be raised interactively.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BudgetPrompt {
+    pub(crate) scope: BudgetScope,
+    pub(crate) unit: BudgetUnit,
+    pub(crate) spent: f64,
+    pub(crate) limit: f64,
+}
+
 /// Renders one server event to the terminal.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Renderer {
@@ -56,6 +65,8 @@ pub(crate) struct Renderer {
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
+    /// A pending `ask` budget stop. The CLI prompts once per stop.
+    pub(crate) budget_prompt: Option<BudgetPrompt>,
     /// What the turn is doing right now, shown before the session totals. It is
     /// `None` between turns, so an idle footer is never mistaken for a hung one.
     pub(crate) activity: Option<String>,
@@ -104,6 +115,7 @@ impl Renderer {
             failed: false,
             cancelled: false,
             budget_stopped: false,
+            budget_prompt: None,
             activity: None,
             requests: 0,
             turn_requests: 0,
@@ -166,6 +178,16 @@ impl Renderer {
             kind => self.status_event(kind),
         }
         Ok(())
+    }
+
+    /// Takes the pending `ask` budget stop, if any, so the CLI prompts once.
+    pub(crate) fn take_budget_prompt(&mut self) -> Option<BudgetPrompt> {
+        self.budget_prompt.take()
+    }
+
+    /// Whether this renderer writes human output and can therefore prompt.
+    pub(crate) fn can_prompt(&self) -> bool {
+        matches!(self.format, Format::Text)
     }
 
     /// Notes that a cancellation was requested, so the turn's end reads as a
@@ -841,12 +863,12 @@ impl Renderer {
                     }
                 } else if !*committed && self.budget_stopped {
                     if !self.quiet {
-                        eprintln!(
-                            "{}",
-                            self.style.yellow(
-                                "stopped by budget; raise it and resume the session to continue"
-                            )
-                        );
+                        let message = if self.budget_prompt.is_some() {
+                            "stopped by budget"
+                        } else {
+                            "stopped by budget; raise it and resume the session to continue"
+                        };
+                        eprintln!("{}", self.style.yellow(message));
                     }
                 } else if !*committed {
                     eprintln!("{}", self.style.red("the turn did not commit"));
@@ -890,6 +912,12 @@ impl Renderer {
                 action,
             } => {
                 self.budget_stopped = !matches!(action, BudgetAction::Warn);
+                self.budget_prompt = matches!(action, BudgetAction::Ask).then_some(BudgetPrompt {
+                    scope: *scope,
+                    unit: *unit,
+                    spent: *spent,
+                    limit: *limit,
+                });
                 eprintln!(
                     "{} {}",
                     self.style.red("budget exceeded:"),
@@ -903,14 +931,32 @@ impl Renderer {
                     ))
                 );
             }
-            ServerEventKind::BudgetChanged { budget } if !self.quiet => match budget {
-                Some(budget) => eprintln!(
+            ServerEventKind::BudgetChanged { budget } => {
+                // Raising or clearing the budget makes a stopped session
+                // resumable again; the next turn must not look stopped.
+                self.budget_stopped = false;
+                self.budget_prompt = None;
+                if !self.quiet {
+                    match budget {
+                        Some(budget) => eprintln!(
+                            "{} {}",
+                            self.style.dim("budget set:"),
+                            self.style.dim(budget_label(budget))
+                        ),
+                        None => eprintln!("{}", self.style.dim("budget cleared")),
+                    }
+                }
+            }
+            ServerEventKind::ModelQueued { model } if !self.quiet => {
+                eprintln!(
                     "{} {}",
-                    self.style.dim("budget set:"),
-                    self.style.dim(budget_label(budget))
-                ),
-                None => eprintln!("{}", self.style.dim("budget cleared")),
-            },
+                    self.style.dim("model switch queued:"),
+                    self.style.dim(model)
+                );
+            }
+            ServerEventKind::ModelChanged { model } if !self.quiet => {
+                eprintln!("{} {}", self.style.dim("model set:"), self.style.dim(model));
+            }
             _ => {}
         }
     }
@@ -1013,21 +1059,6 @@ impl Renderer {
             |activity| self.style.yellow(activity.clone()),
         );
         format!("{} {}", prefix, parts.join(&self.style.faint(" · ")))
-    }
-
-    /// Appends one message typed while the turn runs.
-    pub(crate) fn push_queued(&self, line: String) {
-        self.pinned.push_queued(line);
-    }
-
-    /// A snapshot of the queued messages, oldest first.
-    pub(crate) fn queued(&self) -> Vec<String> {
-        self.pinned.queued()
-    }
-
-    /// Clears the queued-message preview once the messages are sent.
-    pub(crate) fn clear_queued(&self) {
-        self.pinned.set_queued(Vec::new());
     }
 
     /// Writes the run's cost and tool summary, if the run made any requests.
@@ -2233,6 +2264,18 @@ pub(crate) fn select_system_prompt(
 /// selected model, so this only catches names no model could accept.
 pub(crate) fn parse_reasoning_setting(value: &str) -> Result<Reasoning, String> {
     let normalized = value.trim().to_ascii_lowercase();
+    if let Some(tokens) = normalized
+        .strip_prefix("budget:")
+        .or_else(|| normalized.strip_prefix("budget="))
+    {
+        let tokens = tokens.parse::<u32>().map_err(|_| {
+            format!("`{value}` is not a reasoning budget; use budget:<positive token count>")
+        })?;
+        if tokens == 0 {
+            return Err("the reasoning budget must be greater than zero".to_owned());
+        }
+        return Ok(Reasoning::Budget { tokens });
+    }
     match normalized.as_str() {
         "auto" | "automatic" => Ok(Reasoning::Automatic),
         "off" | "none" | "disabled" => Ok(Reasoning::Disabled),
@@ -2250,7 +2293,8 @@ pub(crate) fn parse_reasoning_setting(value: &str) -> Result<Reasoning, String> 
             })
         }
         _ => Err(format!(
-            "`{value}` is not a reasoning setting; use auto, off, minimal, low, medium, high, xhigh or max"
+            "`{value}` is not a reasoning setting; use auto, off, minimal, low, medium, high, \
+             xhigh, max or budget:<tokens>"
         )),
     }
 }

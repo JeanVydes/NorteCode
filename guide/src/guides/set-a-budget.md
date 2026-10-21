@@ -51,7 +51,26 @@ The daily scope is UTC, across all sessions in the local database.
 - `warn` emits `BudgetWarning` and keeps going.
 - `stop` emits `BudgetExceeded` and ends the turn uncommitted. The session is
   resumable.
-- `ask` is currently a resumable stop with a notice, not an approval prompt.
+- `ask` ends the turn uncommitted as well, but the interactive CLI asks for a
+  new limit before it gives up.
+
+## Asking for a new limit
+
+With `--budget-action ask` in an interactive session, the turn stops when the
+budget is exhausted and the CLI asks:
+
+```text
+budget exhausted for the session ($1.000000 of $1.000000 USD); enter a new limit, or leave it empty to stop
+new limit>
+```
+
+Type a new limit and the CLI raises the budget and resumes the same turn. The
+new limit keeps the `ask` action, so the next exhaustion asks again. Leave the
+prompt empty, press Ctrl-C or close the input to leave the session stopped; it
+stays resumable either way.
+
+Non-interactive clients see the same stop without a prompt: they receive
+`BudgetExceeded` with `action: "ask"` and decide themselves.
 
 After a stop, raise the budget and resume:
 

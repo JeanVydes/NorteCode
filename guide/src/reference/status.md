@@ -7,11 +7,16 @@ aspires to.
 ## What is implemented
 
 - The in-process service with logical sessions, streaming, cancellation,
-  model switching, session and one-message reasoning overrides, steering for the
-  next turn, compaction, retries, approvals, questions, budgets, telemetry and
-  the SQLite directory.
+  model switching (immediate when idle, queued for the next turn boundary when
+  busy), session and one-message reasoning overrides, steering for the next
+  turn, compaction, retries, approvals, questions, budgets, telemetry and the
+  SQLite directory.
 - The CLI: `run`, `resume`, `models`, `skills`, `sessions`, `cost`, `telemetry`,
   interactive mode, JSONL, approvals, budgets and sandbox flags.
+- The interactive commands `/help`, `/compact`, `/allow`, `/deny`,
+  `/reasoning`, `/model`, `/revoke`, `/refresh` and `/exit`, with dimmed
+  suggestions for the command and its arguments. Text typed while a turn runs
+  is steered into the next turn.
 - The host tools, Agent Skills discovery, workspace policy and the command
   sandbox wrapper.
 - The versioned protocol and the mdBook guide you are reading.
@@ -24,8 +29,8 @@ aspires to.
 - Hermetic service tests cover the agent loop, compaction rollback, costs and
   budgets, retries, approvals, session rules, the effect journal and protocol
   mapping.
-- CLI tests cover command parsing, approval parsing, the todo footer widget and
-  footer rendering.
+- CLI tests cover command parsing, approval parsing, the todo footer widget,
+  footer rendering and the command suggestion engine.
 - Linux bubblewrap 0.13.0 was exercised: writes outside the workspace failed,
   `/tmp` was private and the network was loopback-only by default.
 - The macOS seatbelt profile has a unit test for network denial, writable roots
@@ -41,10 +46,7 @@ aspires to.
   generator is tested, but the binary's availability and deprecation on a given
   macOS release are not.
 - The TUI (milestone 7) is still a stub.
-- `budget.action = "ask"` is a resumable stop with a notice, not an immediate
-  approval prompt.
 - `skill_script` is outside the command sandbox and remains opt-in.
-- There is no command to revoke a one-shot approval.
 
 ## Test caveat
 

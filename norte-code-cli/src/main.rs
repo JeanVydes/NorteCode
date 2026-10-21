@@ -66,8 +66,8 @@ use norte_code_config::{ApprovalMode, Config, user_config_path};
 use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
-    DenyScope, ErrorCode, GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo, ServerEvent,
-    ServerEventKind, SessionKey,
+    DenyScope, ErrorCode, GrantInfo, GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo,
+    ReasoningScope, ServerEvent, ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
 use norte_code_store_sqlite::{RequestRecord, SessionDirectory, SqliteStore};
@@ -533,7 +533,6 @@ async fn run_prompt(
         .as_ref()
         .map(|key| SessionKey::new(key.clone()));
     let mut parked = false;
-    let mut pending: Option<String> = None;
     if let Some(prompt) = args.prompt {
         if interactive {
             echo_user_message(style, &prompt);
@@ -560,11 +559,6 @@ async fn run_prompt(
         session = outcome.session.or(session);
         parked = outcome.parked;
         renderer.ensure_newline();
-        if outcome.parked || renderer.budget_stopped {
-            renderer.clear_queued();
-        } else if !outcome.queued.is_empty() {
-            pending = Some(outcome.queued.join("\n"));
-        }
     }
     if interactive && !parked && !renderer.budget_stopped {
         if let Some(receiver) = input.as_mut().map(InteractiveInput::lines) {
@@ -576,7 +570,6 @@ async fn run_prompt(
                 receiver,
                 message_budget,
                 reasoning,
-                pending,
             )
             .await?;
         }
@@ -690,7 +683,6 @@ async fn resume_session(
     } else {
         None
     };
-    let mut pending: Option<String> = None;
     if let Some(limit) = args.budget {
         if !limit.is_finite() || limit <= 0.0 {
             return Err(format!("--budget must be a positive number, got {limit}"));
@@ -711,7 +703,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        let outcome = drive_turns(
+        drive_turns(
             &service,
             stream,
             &mut renderer,
@@ -719,11 +711,6 @@ async fn resume_session(
             input.as_mut().map(InteractiveInput::lines),
         )
         .await?;
-        if outcome.parked || renderer.budget_stopped {
-            renderer.clear_queued();
-        } else if !outcome.queued.is_empty() {
-            pending = Some(outcome.queued.join("\n"));
-        }
     }
     renderer.mark_working();
     let stream = service
@@ -744,11 +731,6 @@ async fn resume_session(
     )
     .await?;
     renderer.ensure_newline();
-    if outcome.parked || renderer.budget_stopped {
-        renderer.clear_queued();
-    } else if !outcome.queued.is_empty() {
-        pending = Some(outcome.queued.join("\n"));
-    }
     if interactive && !outcome.parked && !renderer.budget_stopped {
         if let Some(receiver) = input.as_mut().map(InteractiveInput::lines) {
             interactive_loop(
@@ -759,7 +741,6 @@ async fn resume_session(
                 receiver,
                 None,
                 None,
-                pending,
             )
             .await?;
         }

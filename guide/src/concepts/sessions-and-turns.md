@@ -11,6 +11,8 @@ the service keeps a `SessionRecord` with:
 - the session budget and the session's allow/deny tool rules;
 - the session reasoning override and any one-message override or steers queued
   for the next turn;
+- a model switch accepted while the session was busy, applied at the next turn
+  boundary;
 - provider-reported totals and request counts;
 - the Norte session this one was compacted from, when it was.
 

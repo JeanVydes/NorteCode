@@ -1,11 +1,11 @@
 //! Interactive terminal input with a line editor pinned below the model output.
 //!
 //! While a turn streams, typed text stays in the input line and never leaks
-//! into the answer. Pressing Enter sends the line to the caller, which either
-//! starts a turn or queues the line for the next one. The terminal keeps a
-//! scroll region above the footer, so streamed output scrolls without touching
-//! the pinned rows: the running session totals, the queued-message preview and
-//! the input line itself.
+//! into the answer. Pressing Enter sends the line to the caller, which steers
+//! it into the next turn boundary. The terminal keeps a scroll region above the
+//! footer, so streamed output scrolls without touching the pinned rows: the
+//! running session totals, the dimmed command suggestion and the input line
+//! itself.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,7 +56,6 @@ pub(crate) struct Pinned {
 #[derive(Default)]
 struct PinnedInner {
     session: String,
-    queued: Vec<String>,
     todos: Vec<TodoItem>,
 }
 
@@ -71,15 +70,6 @@ impl Pinned {
         let mut inner = self.lock();
         if inner.session != text {
             inner.session = text;
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Replaces the queued-message preview. An empty list clears it.
-    pub(crate) fn set_queued(&self, lines: Vec<String>) {
-        let mut inner = self.lock();
-        if inner.queued != lines {
-            inner.queued = lines;
             self.dirty.store(true, Ordering::Relaxed);
         }
     }
@@ -99,42 +89,15 @@ impl Pinned {
         self.lock().todos.clone()
     }
 
-    /// Appends one message typed while a turn runs.
-    pub(crate) fn push_queued(&self, line: String) {
-        if line.trim().is_empty() {
-            return;
-        }
-        self.lock().queued.push(line);
-        self.dirty.store(true, Ordering::Relaxed);
-    }
-
-    /// Removes and returns the most recently queued message.
-    pub(crate) fn pop_queued(&self) -> Option<String> {
-        let popped = self.lock().queued.pop();
-        if popped.is_some() {
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-        popped
-    }
-
-    /// A snapshot of the queued messages, oldest first.
-    pub(crate) fn queued(&self) -> Vec<String> {
-        self.lock().queued.clone()
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn snapshot(&self) -> (String, Vec<String>, Vec<TodoItem>) {
+    fn snapshot(&self) -> (String, Vec<TodoItem>) {
         let inner = self.lock();
-        (
-            inner.session.clone(),
-            inner.queued.clone(),
-            inner.todos.clone(),
-        )
+        (inner.session.clone(), inner.todos.clone())
     }
 
     fn take_dirty(&self) -> bool {
@@ -171,10 +134,11 @@ mod unix {
     use tokio::sync::mpsc;
 
     use super::{Pinned, TodoItem, TodoStatus};
+    use crate::interaction::{CommandSuggestion, command_suggestion};
     use crate::style::Style;
 
     /// Rows reserved below the scroll region: todo widget, session status,
-    /// queued preview and the input line.
+    /// command suggestion and the input line.
     const FOOTER_ROWS: u16 = 4;
 
     /// How long a drag must pause before its last size is applied.
@@ -447,8 +411,9 @@ mod unix {
         let mut history_pos: Option<usize> = None;
         let mut draft = String::new();
 
-        draw_input(style, cols, rows, &buffer);
-        draw_footer(style, cols, rows, pinned);
+        let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
+        draw_input(style, cols, rows, &buffer, suggestion.as_ref());
+        draw_footer(style, cols, rows, pinned, suggestion.as_ref());
         let mut resize = ResizeDebounce::default();
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -467,7 +432,6 @@ mod unix {
                                 &mut history,
                                 &mut history_pos,
                                 &mut draft,
-                                pinned,
                                 sender,
                             ) {
                                 KeyOutcome::Continue => redraw = true,
@@ -484,7 +448,9 @@ mod unix {
                         _ => {}
                     }
                     if redraw {
-                        draw_input(style, cols, rows, &buffer);
+                        let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
+                        draw_input(style, cols, rows, &buffer, suggestion.as_ref());
+                        draw_footer(style, cols, rows, pinned, suggestion.as_ref());
                     }
                 }
                 Ok(false) => {}
@@ -499,11 +465,13 @@ mod unix {
                 rows = height;
                 resize_terminal(rows, old_rows);
                 pinned.mark_resized();
-                draw_footer(style, cols, rows, pinned);
-                draw_input(style, cols, rows, &buffer);
+                let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
+                draw_footer(style, cols, rows, pinned, suggestion.as_ref());
+                draw_input(style, cols, rows, &buffer, suggestion.as_ref());
             }
             if pinned.take_dirty() {
-                draw_footer(style, cols, rows, pinned);
+                let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
+                draw_footer(style, cols, rows, pinned, suggestion.as_ref());
             }
         }
     }
@@ -520,7 +488,6 @@ mod unix {
         history: &mut Vec<String>,
         history_pos: &mut Option<usize>,
         draft: &mut String,
-        pinned: &Pinned,
         sender: &mpsc::UnboundedSender<Option<String>>,
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -549,13 +516,6 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Char('c' | 'l') if control => KeyOutcome::Continue,
-            KeyCode::Char('x') if control => {
-                // Ctrl-X removes the most recent queued line. The queue lives
-                // in the pinned footer, so the editor and the turn loop see the
-                // same list without a second channel.
-                pinned.pop_queued();
-                KeyOutcome::Continue
-            }
             KeyCode::Char('a') if control => {
                 buffer.home();
                 KeyOutcome::Continue
@@ -630,8 +590,16 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Tab => {
-                for _ in 0..4 {
-                    buffer.insert(' ');
+                match command_suggestion(&buffer.text(), buffer.cursor) {
+                    Some(suggestion) if !suggestion.completion.is_empty() => {
+                        buffer.insert_text(&suggestion.completion);
+                        *history_pos = None;
+                    }
+                    _ => {
+                        for _ in 0..4 {
+                            buffer.insert(' ');
+                        }
+                    }
                 }
                 KeyOutcome::Continue
             }
@@ -694,7 +662,7 @@ mod unix {
         rows.saturating_sub(2).max(1)
     }
 
-    fn queue_row(rows: u16) -> u16 {
+    fn suggestion_row(rows: u16) -> u16 {
         rows.saturating_sub(1).max(1)
     }
 
@@ -777,26 +745,23 @@ mod unix {
         write!(out, "\x1b[1;{bottom}r\x1b[{bottom};1H")
     }
 
-    /// Draws the pinned todo widget, session line and queued-message preview.
+    /// Draws the pinned todo widget, session line and command suggestion.
     ///
     /// All rows are below the scroll region, so streamed output never touches
     /// them. The cursor is saved and restored so the main thread's output
     /// position is preserved.
-    fn draw_footer(style: Style, cols: u16, rows: u16, pinned: &Pinned) {
-        let (session, queued, todos) = pinned.snapshot();
+    fn draw_footer(
+        style: Style,
+        cols: u16,
+        rows: u16,
+        pinned: &Pinned,
+        suggestion: Option<&CommandSuggestion>,
+    ) {
+        let (session, todos) = pinned.snapshot();
         let width = usize::from(cols).saturating_sub(2);
-        let queue_text = if queued.is_empty() {
-            String::new()
-        } else {
-            let joined = queued.join(" · ");
-            format!(
-                "{} {} {} {}",
-                style.faint("queued"),
-                style.yellow(queued.len().to_string()),
-                style.faint("Ctrl-X removes last ·"),
-                style.faint(joined)
-            )
-        };
+        let suggestion_text = suggestion.map_or_else(String::new, |suggestion| {
+            style.faint(suggestion.hint.clone())
+        });
         let todo_text = todo_line(style, &todos, width);
         let frame = format!(
             "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
@@ -804,8 +769,8 @@ mod unix {
             clip_visible(&todo_text, width),
             status_row(rows),
             clip_visible(&session, width),
-            queue_row(rows),
-            clip_visible(&queue_text, width)
+            suggestion_row(rows),
+            clip_visible(&suggestion_text, width)
         );
         write_frame(&frame);
     }
@@ -952,7 +917,13 @@ mod unix {
         out
     }
 
-    fn draw_input(style: Style, cols: u16, rows: u16, buffer: &LineBuffer) {
+    fn draw_input(
+        style: Style,
+        cols: u16,
+        rows: u16,
+        buffer: &LineBuffer,
+        suggestion: Option<&CommandSuggestion>,
+    ) {
         let prompt = format!("{} ", style.cyan("›"));
         let prompt_width = 2usize;
         let available = usize::from(cols).saturating_sub(prompt_width + 1).max(1);
@@ -971,6 +942,18 @@ mod unix {
         }
         if buffer.cursor >= buffer.chars.len() {
             visible.push_str("\x1b[7m \x1b[27m");
+            if let Some(suggestion) = suggestion {
+                if !suggestion.completion.is_empty() {
+                    let typed = end.saturating_sub(offset);
+                    let room = available.saturating_sub(typed + 1);
+                    if room > 0 {
+                        visible.push_str(&clip_visible(
+                            &style.faint(suggestion.completion.clone()),
+                            room,
+                        ));
+                    }
+                }
+            }
         }
         let row = rows.max(1);
         write_frame(&format!("\x1b7\x1b[{row};1H\x1b[2K{prompt}{visible}\x1b8"));
@@ -980,9 +963,12 @@ mod unix {
     mod tests {
         use std::time::{Duration, Instant};
 
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
         use super::{
-            FOOTER_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus, clip_visible, queue_row,
-            resize_frame, scroll_bottom, status_row, todo_line, todo_row,
+            FOOTER_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus, clip_visible,
+            handle_key, resize_frame, scroll_bottom, status_row, suggestion_row, todo_line,
+            todo_row,
         };
 
         #[test]
@@ -1078,12 +1064,12 @@ mod unix {
             assert_eq!(scroll_bottom(24), 20);
             assert_eq!(todo_row(24), 21);
             assert_eq!(status_row(24), 22);
-            assert_eq!(queue_row(24), 23);
+            assert_eq!(suggestion_row(24), 23);
             // A terminal at the minimum height still yields valid rows.
             assert_eq!(scroll_bottom(5), 1);
             assert_eq!(todo_row(5), 2);
             assert_eq!(status_row(5), 3);
-            assert_eq!(queue_row(5), 4);
+            assert_eq!(suggestion_row(5), 4);
         }
 
         fn item(content: &str, status: TodoStatus) -> TodoItem {
@@ -1209,6 +1195,36 @@ mod unix {
         }
 
         #[test]
+        fn tab_accepts_command_and_argument_suggestions() {
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut history = Vec::new();
+            let mut history_pos = None;
+            let mut draft = String::new();
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("/rea");
+            handle_key(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(buffer.text(), "/reasoning");
+
+            buffer.insert_text(" ");
+            handle_key(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(buffer.text(), "/reasoning auto");
+        }
+
+        #[test]
         fn footer_clipping_counts_visible_columns_and_keeps_styles() {
             // Six visible characters plus two escape sequences.
             let text = "\x1b[2mabcdef\x1b[0m";
@@ -1272,25 +1288,19 @@ pub(crate) use fallback::InteractiveInput;
 
 #[cfg(test)]
 mod pinned_tests {
-    use super::Pinned;
+    use super::{Pinned, TodoItem, TodoStatus};
 
     #[test]
-    fn queued_lines_are_added_and_removed_from_the_shared_footer() {
+    fn the_pinned_footer_keeps_the_session_and_todos() {
         let pinned = Pinned::new();
-        pinned.push_queued("first".to_owned());
-        pinned.push_queued("second".to_owned());
-        assert_eq!(pinned.queued(), vec!["first", "second"]);
-        assert_eq!(pinned.pop_queued().as_deref(), Some("second"));
-        assert_eq!(pinned.queued(), vec!["first"]);
-        assert_eq!(pinned.pop_queued().as_deref(), Some("first"));
-        assert_eq!(pinned.pop_queued(), None);
-        assert!(pinned.queued().is_empty());
-    }
-
-    #[test]
-    fn blank_queued_lines_are_ignored() {
-        let pinned = Pinned::new();
-        pinned.push_queued("   ".to_owned());
-        assert!(pinned.queued().is_empty());
+        pinned.set_session("session".to_owned());
+        pinned.set_todos(vec![TodoItem {
+            content: "task".to_owned(),
+            status: TodoStatus::Pending,
+        }]);
+        let (session, todos) = pinned.snapshot();
+        assert_eq!(session, "session");
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].content, "task");
     }
 }

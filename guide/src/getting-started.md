@@ -87,11 +87,12 @@ norte-code run --interactive "start here"
 
 The prompt keeps the same session open. It is a line editor: the arrow keys,
 Home/End, Delete and paste work. Your message is echoed above the pinned footer;
-while a turn streams, the lines you type stay in its queued preview and are sent
-as the next message. The footer also shows the todo widget (completed count,
-current item and pending items), and the running session totals, updated after
-each request. Type `/help` to see the chat commands, `/exit` or Ctrl-D to
-leave. A first prompt is optional with `--interactive`:
+while a turn streams, the text you type is steered into the next turn, and the
+commands you type are handled straight away. The footer shows the todo widget
+(completed count, current item and pending items), the running session totals
+and a dimmed suggestion for the command or argument you are typing. Type
+`/help` to see the chat commands, `/exit` or Ctrl-D to leave. A first prompt is
+optional with `--interactive`:
 
 ```sh
 norte-code run -i

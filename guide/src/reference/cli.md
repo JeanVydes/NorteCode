@@ -32,7 +32,7 @@ norte-code run [OPTIONS] [PROMPT]
 | `--compaction-threshold FRACTION` | Override the compaction threshold in `(0, 1]`. |
 | `--sandbox` / `--no-sandbox` | Override `tools.sandbox.enabled`. |
 | `--sandbox-network on\|off` | Override sandbox networking; requires the sandbox. |
-| `--reasoning SETTING` | `auto`, `off`, `minimal`, `low`, `medium`, `high`. |
+| `--reasoning SETTING` | `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. |
 | `--approval-mode ask\|auto-edit\|yolo` | Override the approval mode. |
 | `--max-iterations N` | Cap model iterations for this run. |
 | `--extension KEY=JSON` | Add a vendor request field; repeatable. |
@@ -117,6 +117,34 @@ norte-code telemetry [OPTIONS]
 
 Telemetry is local request data: counts, tokens, cache, tools, latency and
 status. It is not the money ledger.
+
+## Chat commands
+
+`norte-code run --interactive` and `norte-code resume --interactive` read
+commands from the same line editor. A command is recognised as soon as it
+starts with `/`; anything else is a message. Commands that take arguments
+reject unknown values instead of forwarding them to the model.
+
+| Command | Meaning |
+| --- | --- |
+| `/help` | Show the command list. |
+| `/compact` | Summarise the session and continue on a new one. |
+| `/allow TOOL [session\|global]` | Allow a tool without asking. |
+| `/deny TOOL [session\|global]` | Refuse a tool without asking. |
+| `/reasoning SETTING [session\|message]` | Set the reasoning override. `SETTING` is `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. The scope defaults to `session`. |
+| `/model PROVIDER/MODEL` | Switch the model at the next turn boundary. |
+| `/revoke [GRANT-OR-TOOL]` | List the approval grants, or revoke one. |
+| `/refresh` | Re-scan the skills and their tools. |
+| `/exit`, `/quit` | Leave the chat. |
+
+The editor suggests the command names and their arguments in dimmed text as
+you type, and Tab accepts the suggestion.
+
+While a turn is running, the commands that make sense there are handled
+immediately (`/allow`, `/deny`, `/reasoning`, `/model`, `/revoke`, `/refresh`,
+`/help`). `/compact` and `/exit` wait for the turn to finish. Any other text
+is steered into the next turn boundary, which is durable and survives a
+restart.
 
 ## Exit status
 

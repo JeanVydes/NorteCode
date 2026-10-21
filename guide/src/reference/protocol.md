@@ -40,6 +40,7 @@ Code's stable id, not a Norte `SessionId`.
 | `Approve { session, approval, arguments, scope, remember }` | Approve a parked call. |
 | `Deny { session, approval, reason, scope }` | Deny a parked call. |
 | `Revoke { session, approval, grant }` | Revoke a live grant. |
+| `ListGrants { session }` | List the approval grants a session holds. |
 | `AnswerQuestion { session, question, answer }` | Answer a parked question. |
 | `SetModel { session, model }` | Switch the model at a turn boundary. |
 | `SetReasoning { session, scope, reasoning }` | Set reasoning for the session or one message. |
@@ -58,6 +59,12 @@ when the next turn starts, before that turn's own input; it does not interrupt a
 turn already in flight. Neither request emits an event, so an empty response is
 the acknowledgement.
 
+`SetModel` applies the switch right away when the session is idle and answers
+with `ModelChanged`. When the session is busy it is accepted, persisted and
+applied at the next turn boundary; the answer is `ModelQueued` and the switch
+emits `ModelChanged` when it is applied. An approval or question continuation
+is not a turn boundary.
+
 ## Events
 
 | Event | Purpose |
@@ -72,10 +79,11 @@ the acknowledgement.
 | `CompactionStarted`, `CompactionFinished` | Compaction progress and the new Norte session id. |
 | `BudgetWarning`, `BudgetExceeded`, `BudgetChanged` | Budget crossing and changes. |
 | `CostUpdated`, `CostNotReported` | Ledger totals and unpriced requests. |
-| `ModelChanged`, `ReasoningDowngraded` | Model switches. The second is wire vocabulary for a host that clamps; this service refuses an incompatible setting instead. |
+| `ModelChanged`, `ModelQueued`, `ReasoningDowngraded` | Model switches. `ModelQueued` says the switch is accepted and pending a turn boundary. The third is wire vocabulary for a host that clamps; this service refuses an incompatible setting instead. |
 | `CatalogUpdated`, `ModelList` | Catalogue refresh and model list. |
 | `SkillList`, `SkillsUpdated` | Skill discovery and refresh. |
 | `GrantRevoked` | A grant was revoked. |
+| `GrantList` | The approval grants a session holds, with their id, tool, scope and state. |
 | `QuestionAsked`, `QuestionAnswered` | A parked question and its answer. |
 | `RetryScheduled` | A transient failure will be retried on the same session. |
 | `TurnFinished` | The turn ended with a phase and a `committed` flag. |

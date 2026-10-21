@@ -70,5 +70,19 @@ default.
 
 ## One-shot grants
 
-One-shot approvals are Norte grants. There is no command to revoke a one-shot
-grant; session and global allow rules can be changed with `/allow` and `/deny`.
+One-shot approvals are Norte grants. `/revoke` lists the grants a session holds
+and revokes one of them:
+
+```text
+/revoke
+/revoke <grant-id>
+/revoke <tool>
+```
+
+Without an argument the command lists every grant with its id, its tool, its
+scope and whether it is still active. With an argument it revokes the grant
+whose id matches, or the only active grant for that tool. Session and global
+allow rules can be changed with `/allow` and `/deny`.
+
+The protocol exposes the same list through `ListGrants` and `GrantList`, so a
+client that is not the CLI can find the ids too.

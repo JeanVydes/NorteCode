@@ -20,6 +20,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - `Steer` queues a message durably and applies it before the next turn input,
   preserving arrival order. A resume with no input of its own uses the last
   queued steer as its message and keeps the earlier ones ahead of it.
+- `SetModel` is accepted while the session is busy. The switch is validated,
+  persisted and applied at the next idle turn boundary, and the request answers
+  with `ModelQueued`; `ModelChanged` is emitted when the switch is actually
+  applied. An approval or question continuation is not a turn boundary.
+- `ListGrants` returns the approval grants a session holds, with their id,
+  tool, scope and state, and `GrantList` carries them back.
+- The interactive chat accepts `/reasoning`, `/model` and `/revoke` next to the
+  commands it already had. Every command with arguments parses into a closed
+  set: an unknown setting, scope or argument is rejected instead of being sent
+  to the model as a message.
+- The input editor suggests the command names and their arguments in dimmed
+  text, and Tab accepts the suggestion.
 - The interactive footer shows the session's todo list above the session
   totals: the completed count, the current item first, pending items that fit,
   and `+N` for those that do not. It updates when a `todo` call succeeds and is
@@ -47,8 +59,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   still recorded in telemetry.
 - The interactive footer shows that a turn is working as soon as it is sent, and
   shows the retry delay and attempt while a transient provider failure waits.
-  Messages typed during a turn stay visible in the footer, and `Ctrl-X` removes
-  the most recently queued one before the queue is sent.
+- The local message queue is gone. Text typed while a turn runs is steered into
+  the next turn boundary, which is durable and survives a restart, and the
+  commands that make sense during a turn are handled straight away. The footer
+  row that showed the queue now shows the command suggestion.
+- `budget.action = "ask"` asks for a new limit in the interactive CLI. The turn
+  stops uncommitted, the CLI prompts for a limit, and a new limit raises the
+  budget and resumes the session. An empty answer leaves the session stopped
+  and resumable.
 - A second `Ctrl-C` force-quits immediately instead of waiting five seconds, and
   the first one now reports that the running tool is being stopped.
 
