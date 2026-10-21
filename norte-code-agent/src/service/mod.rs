@@ -1472,7 +1472,13 @@ impl Service {
     ) -> Result<SessionKey, ServiceError> {
         let (source, spec, _) = self.require_record(from)?;
         let engine = self.engine(&spec)?;
-        let conversation = engine.export(source).await?;
+        let mut conversation = engine.export(source).await?;
+        // Norte's import preserves the conversation's session id, which is the
+        // right default for a backup/restore and exactly wrong for a fork: the
+        // store would reject it as a conflict with the source. A fork is an
+        // explicit new id, and the engine documents that it misses the provider
+        // cache for the copied prefix.
+        conversation.session = SessionId::new();
         let imported = engine.import(conversation).await?;
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
         let record = SessionRecord {
@@ -1490,7 +1496,8 @@ impl Service {
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
-            compacted_from: Some(source),
+            // A fork is a new branch, not a compaction of the source.
+            compacted_from: None,
             compacting: false,
             compaction_baseline: 0,
         };

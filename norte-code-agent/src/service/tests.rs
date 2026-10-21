@@ -517,6 +517,71 @@ async fn sessions_are_created_listed_and_renamed() {
 }
 
 #[tokio::test]
+async fn a_fork_copies_the_history_under_a_new_engine_session() {
+    let service = service();
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("source".to_owned()),
+        },
+    )
+    .await;
+    let source_key = created[0].session.clone().expect("session");
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(source_key.clone()),
+            text: "hello".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let (source_id, source_spec, _) = service.require_record(&source_key).expect("source record");
+    let exported = service
+        .engine(&source_spec)
+        .expect("engine")
+        .export(source_id)
+        .await
+        .expect("export");
+    let source_messages = exported.messages.len();
+
+    let forked = drain(
+        &service,
+        ClientRequestKind::ForkSession {
+            session: source_key.clone(),
+            title: Some("branch".to_owned()),
+        },
+    )
+    .await;
+    assert!(matches!(
+        forked[0].kind,
+        ServerEventKind::SessionForked { .. }
+    ));
+    let fork_key = forked[0].session.clone().expect("fork session");
+    assert_ne!(fork_key, source_key);
+
+    let (fork_id, fork_spec, _) = service.require_record(&fork_key).expect("fork record");
+    assert_ne!(fork_id, source_id, "the fork needs its own engine session");
+    assert_eq!(
+        service
+            .lock_sessions()
+            .get(&fork_key)
+            .expect("fork record")
+            .compacted_from,
+        None
+    );
+    let copied = service
+        .engine(&fork_spec)
+        .expect("engine")
+        .export(fork_id)
+        .await
+        .expect("export");
+    assert_eq!(copied.messages.len(), source_messages);
+}
+
+#[tokio::test]
 async fn two_sessions_run_turns_concurrently() {
     struct FreshFactory {
         reference: ModelRef,
