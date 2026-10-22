@@ -10,6 +10,7 @@
 *.db-wal
 .sqlx/
 .cache/
+/.norte-code/cache/
 /data/
 norte-code.local.*
 *.local.toml
