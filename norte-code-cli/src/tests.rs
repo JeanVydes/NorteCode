@@ -1,10 +1,10 @@
 use super::{
-    ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions,
+    ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions, Style,
     apply_extensions, approval_request, argument_preview, budget_label, compose_selection,
     cost_summary, parse_approval_choice, parse_approval_command, parse_reasoning_setting,
     parse_selection, select_system_prompt,
 };
-use crate::commands::RequestSummary;
+use crate::commands::{RequestSummary, bucket_label, telemetry_table};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use norte_code_config::Config;
@@ -52,15 +52,19 @@ fn telemetry_record(
 }
 
 #[test]
-fn the_telemetry_line_shows_the_first_token_the_reasoning_and_the_provider() {
+fn the_telemetry_table_shows_the_first_token_the_reasoning_and_the_provider() {
     let mut summary = RequestSummary::default();
     summary.add(&telemetry_record("openai", "gpt-5", Some(300), Some(120)));
     summary.add(&telemetry_record("anthropic", "claude", Some(900), None));
 
-    let line = summary.line();
-    assert!(line.contains("ttft 600ms avg / 900ms p95"), "{line}");
-    assert!(line.contains("120 reasoning"), "{line}");
-    assert!(line.contains("2 providers"), "{line}");
+    let table = telemetry_table(Style::plain(), "by day", &[("2026-10-21", &summary)], true);
+    assert!(table.contains("ttft 600ms"), "{table}");
+    assert!(table.contains("120"), "{table}");
+    assert!(table.contains("anthropic+openai"), "{table}");
+    assert!(table.contains("2 req"), "{table}");
+    // The header names the columns, so a row of numbers says what it measures.
+    assert!(table.contains("requests"), "{table}");
+    assert!(table.contains("cache"), "{table}");
 
     let json = summary.json();
     assert_eq!(json["average_ttft_ms"], 600);
@@ -73,13 +77,53 @@ fn the_telemetry_line_shows_the_first_token_the_reasoning_and_the_provider() {
 }
 
 #[test]
-fn the_telemetry_line_of_one_provider_does_not_name_it() {
+fn the_telemetry_cache_rate_is_weighted_by_tokens() {
+    // A request that hit the cache for a thousand tokens and one that missed:
+    // counting requests would say half, counting tokens says a quarter.
+    let mut summary = RequestSummary::default();
+    let mut hit = telemetry_record("openai", "gpt-5", Some(300), None);
+    hit.input_tokens = Some(4_000);
+    hit.cache_read_tokens = Some(1_000);
+    summary.add(&hit);
+    let mut miss = telemetry_record("openai", "gpt-5", Some(300), None);
+    miss.input_tokens = Some(4_000);
+    miss.cache_read_tokens = Some(0);
+    summary.add(&miss);
+    assert_eq!(summary.cache_hit_percent(), Some(12));
+
+    let table = telemetry_table(
+        Style::plain(),
+        "by session",
+        &[("session-a", &summary)],
+        true,
+    );
+    assert!(table.contains("12%"), "{table}");
+}
+
+#[test]
+fn the_telemetry_table_of_one_provider_does_not_name_it_twice() {
     let mut summary = RequestSummary::default();
     summary.add(&telemetry_record("openai", "gpt-5", Some(300), None));
 
-    let line = summary.line();
-    assert!(line.contains("ttft 300ms avg / 300ms p95"), "{line}");
-    assert!(!line.contains("providers"), "{line}");
+    let table = telemetry_table(
+        Style::plain(),
+        "by provider",
+        &[("openai", &summary)],
+        false,
+    );
+    assert!(table.contains("ttft 300ms"), "{table}");
+    assert_eq!(table.matches("openai").count(), 1, "{table}");
+}
+
+#[test]
+fn the_telemetry_buckets_name_the_period_they_group() {
+    let at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).expect("epoch");
+    assert_eq!(bucket_label(at, "hour"), "2027-01-15 08:00");
+    assert_eq!(bucket_label(at, "day"), "2027-01-15");
+    assert_eq!(bucket_label(at, "week"), "2027-W02");
+    assert_eq!(bucket_label(at, "month"), "2027-01");
+    assert_eq!(bucket_label(at, "year"), "2027");
+    assert_eq!(bucket_label(at, "total"), "total");
 }
 
 #[test]

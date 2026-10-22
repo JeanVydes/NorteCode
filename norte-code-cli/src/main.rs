@@ -340,7 +340,7 @@ struct TelemetryArgs {
     #[arg(long, value_name = "MODEL")]
     model: Option<String>,
     /// The time bucket for the series.
-    #[arg(long, value_name = "BUCKET", value_parser = ["hour", "day", "month", "year", "total"], default_value = "day")]
+    #[arg(long, value_name = "BUCKET", value_parser = ["hour", "day", "week", "month", "year", "total"], default_value = "day")]
     bucket: String,
     /// Write one JSON object.
     #[arg(long)]

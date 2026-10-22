@@ -348,46 +348,29 @@ impl RequestSummary {
         format!("${:.6}", self.cost_usd)
     }
 
-    pub(crate) fn line(&mut self) -> String {
-        let mut parts = vec![
-            format!("{} req", self.requests),
-            format!("{} in", human_tokens(self.input_tokens)),
-            format!("{} out", human_tokens(self.output_tokens)),
-        ];
-        if self.reasoning_tokens > 0 {
-            parts.push(format!("{} reasoning", human_tokens(self.reasoning_tokens)));
+    /// The providers that served the requests of the slice.
+    fn provider_label(&self) -> String {
+        if self.providers.is_empty() {
+            return "–".to_owned();
         }
-        if self.requests > 0 && self.cache_hits > 0 {
-            parts.push(format!(
-                "cache {} hit",
-                percent_label(self.cache_hits, self.requests)
-            ));
+        self.providers.iter().cloned().collect::<Vec<_>>().join("+")
+    }
+
+    /// The tokens the slice moved: the prompt and the answer.
+    fn token_total(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// The share of the prompt tokens the provider served from its cache.
+    ///
+    /// The share is weighted by tokens, not by requests: a request that hit
+    /// the cache for a thousand tokens counts more than one that hit it for
+    /// ten.
+    pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
+        if self.input_tokens == 0 {
+            return None;
         }
-        if self.tool_calls > 0 {
-            parts.push(format!("{} tool(s)", self.tool_calls));
-        }
-        parts.push(format!(
-            "latency {} avg / {} p95",
-            duration_label(self.average_ms()),
-            duration_label(self.p95_ms())
-        ));
-        if !self.ttfts.is_empty() {
-            parts.push(format!(
-                "ttft {} avg / {} p95",
-                duration_label(self.average_ttft_ms()),
-                duration_label(self.p95_ttft_ms())
-            ));
-        }
-        parts.push(self.cost_label());
-        if self.errors + self.cancelled > 0 {
-            parts.push(format!("{} error(s)", self.errors + self.cancelled));
-        }
-        // A slice that mixes providers says so: the label of the section may
-        // not name the one that served it.
-        if self.providers.len() > 1 {
-            parts.push(format!("{} providers", self.providers.len()));
-        }
-        parts.join(" · ")
+        Some((self.cache_read_tokens.saturating_mul(100) / self.input_tokens).min(100))
     }
 
     #[allow(clippy::cast_precision_loss)]
@@ -429,6 +412,7 @@ pub(crate) fn duration_label(ms: u64) -> String {
 pub(crate) fn bucket_label(at: DateTime<Utc>, bucket: &str) -> String {
     match bucket {
         "hour" => at.format("%Y-%m-%d %H:00").to_string(),
+        "week" => at.format("%G-W%V").to_string(),
         "month" => at.format("%Y-%m").to_string(),
         "year" => at.format("%Y").to_string(),
         "total" => "total".to_owned(),
@@ -438,11 +422,12 @@ pub(crate) fn bucket_label(at: DateTime<Utc>, bucket: &str) -> String {
 
 fn top(groups: &BTreeMap<String, RequestSummary>) -> Vec<(&String, &RequestSummary)> {
     let mut top: Vec<_> = groups.iter().collect();
+    // The busiest group first, measured in tokens: that is what the bar shows.
     top.sort_by(|left, right| {
         right
             .1
-            .requests
-            .cmp(&left.1.requests)
+            .token_total()
+            .cmp(&left.1.token_total())
             .then_with(|| left.0.cmp(right.0))
     });
     top
@@ -543,37 +528,232 @@ pub(crate) async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String
         return Ok(0);
     }
     let style = Style::stdout();
-    println!("{}  {}", style.bold("total"), total.line());
-    println!();
-    println!("{}", style.bold(format!("by {}", args.bucket)));
-    for (bucket, summary) in &mut buckets {
-        println!("  {bucket:<16}  {}", summary.line());
-    }
-    if args.session.is_none() {
-        println!();
-        println!("{}", style.bold("top providers"));
-        for (provider, summary) in top(&providers).into_iter().take(10) {
-            let mut summary = summary.clone();
-            println!(
-                "  {:<16}  {}",
-                crate::text::terminal(provider),
-                summary.line()
-            );
-        }
-        println!();
-        println!("{}", style.bold("top models"));
-        for (model, summary) in top(&models).into_iter().take(10) {
-            let mut summary = summary.clone();
-            println!("  {:<40}  {}", crate::text::terminal(model), summary.line());
-        }
-        println!();
-        println!("{}", style.bold("sessions"));
-        for (session, summary) in top(&sessions).into_iter().take(20) {
-            let mut summary = summary.clone();
-            println!("  {}  {}", short(session), summary.line());
-        }
-    }
+    println!(
+        "{}",
+        telemetry_report(
+            style, args, &total, &buckets, &providers, &models, &sessions
+        )
+    );
     Ok(0)
+}
+
+/// The width of the bar that shows how many tokens a group moved.
+const BAR_WIDTH: usize = 16;
+
+/// The telemetry report, as text.
+///
+/// The numbers a human reads are the ones that cost money or time: the
+/// requests, the tokens, the time to the first token, the latency and the
+/// cost. A bar shows how the group compares with the busiest one.
+fn telemetry_report(
+    style: Style,
+    args: &TelemetryArgs,
+    total: &RequestSummary,
+    buckets: &BTreeMap<String, RequestSummary>,
+    providers: &BTreeMap<String, RequestSummary>,
+    models: &BTreeMap<String, RequestSummary>,
+    sessions: &BTreeMap<String, RequestSummary>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&style.bold("telemetry"));
+    out.push_str("  ");
+    out.push_str(&style.dim(format!(
+        "{} requests · {} in · {} out · ${:.6}",
+        total.requests,
+        human_tokens(total.input_tokens),
+        human_tokens(total.output_tokens),
+        total.cost_usd
+    )));
+    out.push_str("\n\n");
+    out.push_str(&telemetry_table(
+        style,
+        &format!("by {}", args.bucket),
+        &buckets
+            .iter()
+            .map(|(bucket, summary)| (bucket.as_str(), summary))
+            .collect::<Vec<_>>(),
+        true,
+    ));
+    if args.session.is_none() {
+        out.push_str(&telemetry_table(
+            style,
+            "by provider",
+            &top(providers)
+                .into_iter()
+                .map(|(provider, summary)| (provider.as_str(), summary))
+                .collect::<Vec<_>>(),
+            false,
+        ));
+        out.push_str(&telemetry_table(
+            style,
+            "by model",
+            &top(models)
+                .into_iter()
+                .map(|(model, summary)| (model.as_str(), summary))
+                .collect::<Vec<_>>(),
+            false,
+        ));
+    }
+    // A session that barely moved is noise in the table: below one percent of
+    // the total it is hidden, and the report says how many.
+    let threshold = total.token_total() / 100;
+    let mut visible = Vec::new();
+    let mut hidden = 0usize;
+    for (session, summary) in top(sessions) {
+        if summary.token_total() < threshold {
+            hidden += 1;
+        } else {
+            visible.push((short(session), summary));
+        }
+    }
+    out.push_str(&telemetry_table(style, "by session", &visible, true));
+    if hidden > 0 {
+        out.push_str(&style.dim(format!("{hidden} session(s) hidden: below 1% of the total")));
+        out.push_str("\n\n");
+    }
+    let mut notes = Vec::new();
+    if let Some(percent) = total.cache_hit_percent() {
+        notes.push(format!("{percent}% of the prompt from the cache"));
+    }
+    if total.tool_calls > 0 {
+        notes.push(format!("{} tool call(s)", total.tool_calls));
+    }
+    if total.errors + total.cancelled > 0 {
+        notes.push(format!(
+            "{} error(s), {} cancelled",
+            total.errors, total.cancelled
+        ));
+    }
+    if !notes.is_empty() {
+        out.push('\n');
+        out.push_str(&style.dim(notes.join(" · ")));
+        out.push('\n');
+    }
+    out
+}
+
+/// One telemetry table: a title and a row per group.
+///
+/// The rows line up in columns, so the numbers can be compared down the
+/// table instead of read one line at a time. The provider column appears in
+/// the tables that do not group by provider: there, a row can mix them.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn telemetry_table(
+    style: Style,
+    title: &str,
+    rows: &[(&str, &RequestSummary)],
+    show_provider: bool,
+) -> String {
+    let mut out = format!("{}\n", style.bold(title));
+    if rows.is_empty() {
+        return out;
+    }
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let provider_width = rows
+        .iter()
+        .map(|(_, summary)| summary.provider_label().chars().count())
+        .max()
+        .unwrap_or(0);
+    let busiest = rows
+        .iter()
+        .map(|(_, summary)| summary.token_total())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    // The header names the columns: without it, a row of numbers says
+    // nothing about what it measures. The cells are built the same way the
+    // rows are, so the two line up.
+    let mut header = vec![
+        style.faint(pad_right("", label_width)),
+        style.faint(pad_right("", BAR_WIDTH)),
+    ];
+    if show_provider {
+        header.push(style.faint(pad_right("provider", provider_width)));
+    }
+    header.push(style.faint(format!("{:>8}", "requests")));
+    header.push(style.faint(format!("{:>8}", "in")));
+    header.push(style.faint(format!("{:>8}", "out")));
+    header.push(style.faint(format!("{:>8}", "reasoning")));
+    header.push(style.faint(format!("{:>7}", "cache")));
+    header.push(style.faint(format!("{:>9}", "ttft")));
+    header.push(style.faint(format!("{:>7}", "latency")));
+    header.push(style.faint("cost"));
+    out.push_str(&header.join("  "));
+    out.push('\n');
+    for (label, summary) in rows {
+        // The bar is the volume of tokens, and its colours are the cache:
+        // green for the part the provider served from its cache, red for the
+        // part it had to read, the rest the empty room of the busiest group.
+        let volume = summary.token_total();
+        let filled = usize::try_from(volume)
+            .unwrap_or(0)
+            .saturating_mul(BAR_WIDTH)
+            / usize::try_from(busiest).unwrap_or(1);
+        let filled = filled.min(BAR_WIDTH);
+        let hits = if summary.input_tokens == 0 {
+            0
+        } else {
+            usize::try_from(summary.cache_read_tokens)
+                .unwrap_or(0)
+                .saturating_mul(filled)
+                / usize::try_from(summary.input_tokens).unwrap_or(1)
+        };
+        let hits = hits.min(filled);
+        let bar = format!(
+            "{}{}{}",
+            style.green("█".repeat(hits)),
+            style.red("█".repeat(filled - hits)),
+            style.faint("·".repeat(BAR_WIDTH - filled)),
+        );
+        let mut cost = style.green(summary.cost_label());
+        if summary.unpriced > 0 {
+            cost = style.yellow(summary.cost_label());
+        }
+        let reasoning = if summary.reasoning_tokens > 0 {
+            human_tokens(summary.reasoning_tokens)
+        } else {
+            "–".to_owned()
+        };
+        let cache = match summary.cache_hit_percent() {
+            Some(percent) => format!("{percent}%"),
+            None => "–".to_owned(),
+        };
+        let mut line = vec![style.cyan(pad_right(label, label_width)), bar];
+        if show_provider {
+            line.push(style.dim(pad_right(&summary.provider_label(), provider_width)));
+        }
+        line.push(style.dim(format!("{:>8}", format!("{} req", summary.requests))));
+        line.push(style.dim(format!(
+            "{:>8}",
+            format!("{} in", human_tokens(summary.input_tokens))
+        )));
+        line.push(style.dim(format!(
+            "{:>8}",
+            format!("{} out", human_tokens(summary.output_tokens))
+        )));
+        line.push(style.dim(format!("{reasoning:>8}")));
+        line.push(style.dim(format!("{cache:>7}")));
+        line.push(style.dim(format!(
+            "{:>9}",
+            format!("ttft {}", duration_label(summary.average_ttft_ms()))
+        )));
+        line.push(style.dim(format!("{:>7}", duration_label(summary.average_ms()))));
+        line.push(cost);
+        out.push_str(&line.join("  "));
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
+/// Pads a label to a width, counting characters and not bytes.
+fn pad_right(label: &str, width: usize) -> String {
+    let length = label.chars().count();
+    format!("{label}{}", " ".repeat(width.saturating_sub(length)))
 }
 
 pub(crate) fn load_config(path: Option<PathBuf>) -> Result<Config, String> {

@@ -112,14 +112,20 @@ norte-code telemetry [OPTIONS]
 | `--session KEY` | Only this logical session. |
 | `--provider ID` | Only this provider. |
 | `--model ID` | Only this model. |
-| `--bucket hour\|day\|month\|year\|total` | The time bucket. Default `day`. |
+| `--bucket hour\|day\|week\|month\|year\|total` | The time bucket. Default `day`. |
 | `--json` | One JSON object. |
 
 Telemetry is local request data: counts, tokens, cache, tools, latency and
-status. It is not the money ledger. The report shows the time each request
-took to reach its first token (`ttft`, average and p95), the reasoning tokens
-the provider reported, and how many providers served the slice when it mixes
-them; `--json` carries the same numbers.
+status. It is not the money ledger. The report is a table: a bar shows how
+many tokens each group moved against the busiest one, coloured by the cache —
+green for the prompt the provider served from its cache, red for the part it
+had to read — and the columns carry the requests, the tokens in and out, the
+reasoning tokens, the cache hit rate weighted by tokens, the time to the first
+token, the latency and the cost. The groups are ordered by volume, and the
+time groups are named after `--bucket` (`by day`, `by week`, `by hour`, …). A
+session that moved less than one percent of the total is left out of the
+session table, and the report says how many. `--json` carries the same
+numbers.
 
 ## Chat commands
 

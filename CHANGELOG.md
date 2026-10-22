@@ -31,9 +31,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- The telemetry report shows the time to the first token (average and p95), the
-  reasoning tokens the provider reported, and how many providers served a slice
-  that mixes them. `--json` carries the same numbers.
+- A session that moved less than one percent of the total is left out of the
+  session table, and the report says how many were left out.
+- The telemetry report is a table now: a bar shows how many tokens each group
+  moved against the busiest one, coloured by the cache — green for the prompt
+  the provider served from its cache, red for the part it had to read — and the
+  columns carry the requests, the tokens in and out, the reasoning tokens, the
+  cache hit rate weighted by tokens, the time to the first token, the latency
+  and the cost. The groups are ordered by volume and the time group is named
+  after `--bucket`.
+- `--bucket week` groups the telemetry by ISO week.
 - `Service::with_interceptor` registers an interceptor the engine consults at
   the safe points of a turn. It may add messages to the history or stop the
   turn with a reason, which the client hears as `TurnStopped`: a decision, not
