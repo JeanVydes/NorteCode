@@ -1733,16 +1733,27 @@ impl Service {
         // Steering messages belong to the turn boundary that is starting now.
         // Norte drains its queue in arrival order before the new input, so keep
         // the original order when a resume has no input of its own.
-        let mut input = input;
-        let mut steers_to_queue = pending_steers.clone();
-        if input.is_none() && state.phase == norte::Phase::Idle && !steers_to_queue.is_empty() {
-            input = steers_to_queue.pop();
+        // The steering messages belong to the turn boundary that is starting
+        // now. An idle session drains them before its own input, so they keep
+        // their arrival order; a parked one still owes a tool result, so they
+        // wait for the request that follows it and reach the turn through the
+        // interceptor.
+        let idle = state.phase == norte::Phase::Idle;
+        if idle {
+            for text in &pending_steers {
+                engine.steer(nid, Message::user(text.clone())).await?;
+            }
+        } else {
+            for text in &pending_steers {
+                inbox.push(text.clone());
+            }
         }
-        for text in &steers_to_queue {
-            engine.steer(nid, Message::user(text.clone())).await?;
-        }
-        if pending_reasoning.is_some() || !pending_steers.is_empty() {
-            self.clear_pending(&key, pending_reasoning.as_ref(), &pending_steers);
+        // The engine holds the messages it drained, so their durable copy goes;
+        // the ones waiting for the interceptor keep theirs until it applies
+        // them.
+        let drained: &[String] = if idle { &pending_steers[..] } else { &[] };
+        if pending_reasoning.is_some() || !drained.is_empty() {
+            self.clear_pending(&key, pending_reasoning.as_ref(), drained);
             self.persist(&key).await?;
         }
         // A resumable park: after a restart the engine will not re-emit the

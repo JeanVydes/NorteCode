@@ -1362,6 +1362,60 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
 }
 
 #[tokio::test]
+async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
+    let (service, model) = scripted_service(spec("scripted"), &["one", "after"]);
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "one".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+
+    // Two messages arrive while the session rests.
+    drain(
+        &service,
+        ClientRequestKind::Steer {
+            session: key.clone(),
+            text: "a".to_owned(),
+        },
+    )
+    .await;
+    drain(
+        &service,
+        ClientRequestKind::Steer {
+            session: key.clone(),
+            text: "b".to_owned(),
+        },
+    )
+    .await;
+
+    // A turn with no input of its own still takes them, in order.
+    drain(
+        &service,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "the resume made one request");
+    assert_eq!(
+        user_texts(&requests[1]),
+        vec!["one".to_owned(), "a".to_owned(), "b".to_owned()],
+        "both steers reach the turn, in arrival order"
+    );
+}
+
+#[tokio::test]
 async fn reasoning_and_steering_survive_a_restart() {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
