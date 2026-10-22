@@ -31,6 +31,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Every request can carry extra headers. `openrouter` gets the attribution
+  headers by default (`HTTP-Referer`, `X-OpenRouter-Title`,
+  `X-OpenRouter-Categories`), so the app shows up in OpenRouter's rankings,
+  and `providers.<id>.headers` in the configuration changes them or adds
+  others.
 - A session that moved less than one percent of the total is left out of the
   session table, and the report says how many were left out.
 - The telemetry report is a table now: a bar shows how many tokens each group

@@ -10,6 +10,7 @@
 //! carries no URL; every other provider uses its catalogue `api` URL through a
 //! [`VendorProfile`].
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use norte::anthropic::AnthropicMessages;
@@ -43,6 +44,41 @@ pub struct ModelSpec {
     pub api_key: ApiKey,
     /// The capability declaration the catalogue entry and config produce.
     pub capabilities: Capabilities,
+    /// The headers sent with every request to this provider.
+    pub headers: BTreeMap<String, String>,
+}
+
+/// The headers Norte Code sends to `OpenRouter` so the app is attributed in
+/// its rankings and analytics.
+///
+/// `HTTP-Referer` is the identifier `OpenRouter` gives the app, and the title
+/// is the name it shows; without both there is no app page. The category is
+/// the one `OpenRouter` lists for a terminal coding assistant.
+fn openrouter_headers() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "HTTP-Referer".to_owned(),
+            "https://norte.vyde.dev".to_owned(),
+        ),
+        ("X-OpenRouter-Title".to_owned(), "Norte Code".to_owned()),
+        ("X-OpenRouter-Categories".to_owned(), "cli-agent".to_owned()),
+    ])
+}
+
+/// The headers a provider's requests carry.
+///
+/// The built-in ones come first and the configuration overrides them, so a
+/// user can change the site URL or the app title without repeating the rest.
+fn headers_for(config: &Config, provider: &str) -> BTreeMap<String, String> {
+    let mut headers = if provider == "openrouter" {
+        openrouter_headers()
+    } else {
+        BTreeMap::new()
+    };
+    if let Some(configured) = config.providers.get(provider).map(|entry| &entry.headers) {
+        headers.extend(configured.clone());
+    }
+    headers
 }
 
 impl ModelSpec {
@@ -82,6 +118,7 @@ impl ModelSpec {
             endpoint,
             api_key,
             capabilities,
+            headers: headers_for(config, &provider.id),
         })
     }
 
@@ -151,6 +188,7 @@ impl ModelSpec {
             endpoint,
             api_key,
             capabilities: fallback_capabilities(overrides),
+            headers: headers_for(config, &provider.id),
         })
     }
 
@@ -188,6 +226,7 @@ impl ModelSpec {
             endpoint: endpoint.or(configured),
             api_key,
             capabilities: fallback_capabilities(overrides),
+            headers: headers_for(config, provider),
         })
     }
 
@@ -233,19 +272,34 @@ impl ModelFactory for VendorModels {
         let model: Arc<dyn Model> = match (spec.wire, spec.endpoint.as_deref()) {
             // No endpoint override: the native presets carry the vendor URL.
             (Wire::Responses, None) if spec.provider == "openai" => {
-                Arc::new(norte::presets::openai(&spec.model, key, capabilities)?)
+                let profile = with_headers(norte::presets::openai_profile(key)?, &spec.headers);
+                Arc::new(norte::OpenAiResponses::new(
+                    reference,
+                    profile,
+                    capabilities,
+                )?)
             }
             (Wire::Messages, None) if spec.provider == "anthropic" => {
-                Arc::new(norte::presets::anthropic(&spec.model, key, capabilities)?)
+                let profile = with_headers(norte::presets::anthropic_profile(key)?, &spec.headers);
+                Arc::new(norte::AnthropicMessages::new(
+                    reference,
+                    profile,
+                    capabilities,
+                )?)
             }
             (Wire::GenerateContent, None)
                 if matches!(spec.provider.as_str(), "google" | "gemini") =>
             {
-                Arc::new(norte::presets::gemini(&spec.model, key, capabilities)?)
+                let profile = with_headers(norte::presets::gemini_profile(key)?, &spec.headers);
+                Arc::new(norte::GeminiGenerate::new(
+                    reference,
+                    profile,
+                    capabilities,
+                )?)
             }
             // Everything else comes from the catalogue's `api` URL.
             (wire, Some(endpoint)) => {
-                let profile = profile(wire, provider, endpoint, key)?;
+                let profile = profile(wire, provider, endpoint, key, &spec.headers)?;
                 build_with_profile(wire, reference, profile, capabilities)?
             }
             (wire, None) => {
@@ -259,6 +313,15 @@ impl ModelFactory for VendorModels {
     }
 }
 
+/// Adds the headers a spec carries to a vendor profile.
+fn with_headers(profile: VendorProfile, headers: &BTreeMap<String, String>) -> VendorProfile {
+    let mut profile = profile;
+    for (name, value) in headers {
+        profile = profile.with_header(name.clone(), value.clone());
+    }
+    profile
+}
+
 /// Builds the vendor profile for a catalogue entry: wire family, base URL and
 /// the credential header the wire expects.
 fn profile(
@@ -266,15 +329,17 @@ fn profile(
     provider: ProviderId,
     endpoint: &str,
     key: String,
+    headers: &BTreeMap<String, String>,
 ) -> Result<VendorProfile, ServiceError> {
     let profile = VendorProfile::new(provider, WireFamily::new(wire.family())?, endpoint)?;
-    Ok(match wire {
+    let profile = match wire {
         Wire::Responses | Wire::Chat => profile.with_auth(AuthScheme::bearer(key)),
         Wire::Messages => profile
             .with_auth(AuthScheme::header("x-api-key", key))
             .with_header("anthropic-version", "2023-06-01"),
         Wire::GenerateContent => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
-    })
+    };
+    Ok(with_headers(profile, headers))
 }
 
 /// Builds the adapter that speaks `wire` over `profile`.
@@ -352,7 +417,49 @@ mod tests {
             endpoint: endpoint.map(str::to_owned),
             api_key: ApiKey::new("test-key"),
             capabilities: fallback_capabilities(None),
+            headers: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn openrouter_is_attributed_and_the_config_overrides_it() {
+        let config = Config::default();
+        let headers = headers_for(&config, "openrouter");
+        assert_eq!(
+            headers.get("HTTP-Referer").map(String::as_str),
+            Some("https://norte.vyde.dev")
+        );
+        assert_eq!(
+            headers.get("X-OpenRouter-Title").map(String::as_str),
+            Some("Norte Code")
+        );
+        assert_eq!(
+            headers.get("X-OpenRouter-Categories").map(String::as_str),
+            Some("cli-agent")
+        );
+
+        // Another provider has none of them: they are OpenRouter's.
+        assert!(headers_for(&config, "openai").is_empty());
+
+        // The configuration replaces the header it names and keeps the rest.
+        let mut config = Config::default();
+        let provider = norte_code_config::ProviderConfig {
+            headers: BTreeMap::from([(
+                "HTTP-Referer".to_owned(),
+                "https://example.test".to_owned(),
+            )]),
+            ..norte_code_config::ProviderConfig::default()
+        };
+        config.providers.insert("openrouter".to_owned(), provider);
+        let headers = headers_for(&config, "openrouter");
+        assert_eq!(
+            headers.get("HTTP-Referer").map(String::as_str),
+            Some("https://example.test")
+        );
+        assert_eq!(
+            headers.get("X-OpenRouter-Title").map(String::as_str),
+            Some("Norte Code")
+        );
     }
 
     #[test]

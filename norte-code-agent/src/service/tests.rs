@@ -141,6 +141,7 @@ fn spec(model: &str) -> ModelSpec {
         endpoint: Some("https://example.invalid/v1".to_owned()),
         api_key: ApiKey::new("test"),
         capabilities: norte_code_catalog::capabilities(entry, Wire::Chat, None),
+        headers: std::collections::BTreeMap::new(),
     }
 }
 

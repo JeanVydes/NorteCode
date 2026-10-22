@@ -502,6 +502,7 @@ mod tests {
             endpoint: Some("https://example.invalid/v1".to_owned()),
             api_key: ApiKey::new("secret-key"),
             capabilities,
+            headers: std::collections::BTreeMap::new(),
         }
     }
 

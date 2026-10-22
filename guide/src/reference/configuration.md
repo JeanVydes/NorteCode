@@ -42,9 +42,30 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `api_key_env` | Environment variable with the key. |
 | `api_key_file` | File containing the key. |
 | `endpoint` | Base URL override. |
+| `headers` | Extra headers sent with every request to this provider. |
 
 Resolution order: `api_key_env`, `api_key_file`, then the catalogue's `env`.
 There is no plaintext key field.
+
+The headers are added to the ones the provider already carries, and a header
+named here replaces the one of the same name. `openrouter` gets the
+attribution headers by default, so the app can appear in OpenRouter's
+rankings: `HTTP-Referer` (the site's URL, which identifies the app),
+`X-OpenRouter-Title` (the name it shows) and `X-OpenRouter-Categories` (the
+marketplace category, `cli-agent` for a terminal coding assistant).
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "openrouter": {
+      "headers": {
+        "X-OpenRouter-Categories": "cli-agent,programming-app"
+      }
+    }
+  }
+}
+```
 
 ## `catalog`
 

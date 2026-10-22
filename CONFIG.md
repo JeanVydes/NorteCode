@@ -136,12 +136,21 @@ that names the field; it is never silently replaced.
 | `api_key_env` | string or `null` | `null` | Environment variable with the API key. Wins over the catalogue's `env` names. |
 | `api_key_file` | path or `null` | `null` | File containing the API key. Used after `api_key_env`. |
 | `endpoint` | string or `null` | `null` | Base URL override for a proxy or compatible vendor. |
+| `headers` | object | `{}` | Extra headers sent with every request to this provider. |
 
 Key resolution order for a provider: `api_key_env`, `api_key_file`, then the
 `env` names the catalogue declares for that provider. Keys are held in Norte's
 redacted secret type and never enter a model event, a log or a child process.
 Prefer the environment or a file outside the repository; the config schema has
 no plaintext `api_key` field.
+
+The headers are added to the ones the provider already carries, and a header
+named in the configuration replaces the one of the same name. `openrouter`
+gets the attribution headers by default, so the app can appear in OpenRouter's
+rankings: `HTTP-Referer` (the site's URL, which identifies the app),
+`X-OpenRouter-Title` (the name it shows) and `X-OpenRouter-Categories` (the
+marketplace category; `cli-agent` is the one for a terminal coding
+assistant).
 
 ## `catalog`
 

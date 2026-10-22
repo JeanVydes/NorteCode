@@ -108,6 +108,11 @@ pub struct ProviderConfig {
     pub api_key_file: Option<PathBuf>,
     /// A base URL override, for a proxy or a compatible vendor.
     pub endpoint: Option<String>,
+    /// Extra headers sent with every request to this provider.
+    ///
+    /// They are added to the ones the provider ships with, and a header named
+    /// here replaces the built-in one of the same name.
+    pub headers: BTreeMap<String, String>,
 }
 
 /// Catalogue settings.

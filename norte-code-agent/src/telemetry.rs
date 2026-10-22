@@ -477,6 +477,7 @@ mod tests {
             endpoint: None,
             api_key: norte_code_config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),
+            headers: std::collections::BTreeMap::new(),
         };
         let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec, true, false);
         let request = ModelRequest {
@@ -536,6 +537,7 @@ mod tests {
             endpoint: None,
             api_key: norte_code_config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),
+            headers: std::collections::BTreeMap::new(),
         };
         let layer = TelemetryLayer::new(Arc::clone(&telemetry), spec, false, false);
         let request = ModelRequest {
