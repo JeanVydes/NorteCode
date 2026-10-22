@@ -61,7 +61,10 @@ fn openrouter_headers() -> BTreeMap<String, String> {
             "https://norte.vyde.dev".to_owned(),
         ),
         ("X-OpenRouter-Title".to_owned(), "Norte Code".to_owned()),
-        ("X-OpenRouter-Categories".to_owned(), "cli-agent".to_owned()),
+        (
+            "X-OpenRouter-Categories".to_owned(),
+            "cli-agent,cloud-agent".to_owned(),
+        ),
     ])
 }
 
@@ -435,7 +438,7 @@ mod tests {
         );
         assert_eq!(
             headers.get("X-OpenRouter-Categories").map(String::as_str),
-            Some("cli-agent")
+            Some("cli-agent,cloud-agent")
         );
 
         // Another provider has none of them: they are OpenRouter's.
