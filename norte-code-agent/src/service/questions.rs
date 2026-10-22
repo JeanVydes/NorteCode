@@ -3,8 +3,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use norte_code_protocol::{ServerEventKind, SessionKey};
 use norte_code_store_sqlite::{SessionDirectory, StoredQuestion};
 use norte_code_tools::{DurableQuestion, QuestionStore};
+
+use super::mapping::single;
+use super::{EventStream, Service, ServiceError};
 
 /// Bridges the question broker's durable log onto the session directory.
 pub(super) struct DirectoryQuestions {
@@ -60,5 +64,26 @@ impl QuestionStore for DirectoryQuestions {
                 false
             }
         }
+    }
+}
+
+impl Service {
+    /// Answers a question the model asked, so the tool that asked it goes on.
+    pub(super) async fn answer_question(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+        question: String,
+        answer: String,
+    ) -> Result<EventStream, ServiceError> {
+        let (nid, _, _) = self.require_record(&session)?;
+        if !self.questions.answer(Some(nid), &question, answer).await {
+            return Err(ServiceError::UnknownQuestion(question));
+        }
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::QuestionAnswered { question },
+        ))
     }
 }

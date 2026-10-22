@@ -4,10 +4,12 @@
 //! session is busy is kept until the next turn boundary, where it is applied
 //! or dropped.
 
+use std::sync::Arc;
+
 use norte::{
     Message, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind,
 };
-use norte_code_catalog::Catalog;
+use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::Config;
 use norte_code_protocol::{
     ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo, ServerEvent, ServerEventKind,
@@ -308,6 +310,43 @@ fn effort_name(effort: ReasoningEffort) -> &'static str {
 }
 
 impl Service {
+    /// The models the picker shows, as an event.
+    pub(super) fn list_models_event(&self, request_id: u64) -> EventStream {
+        single(
+            request_id,
+            None,
+            ServerEventKind::ModelList {
+                models: self.list_models(),
+            },
+        )
+    }
+
+    /// Flattens the catalogue for a picker, applying the config overrides.
+    pub(super) fn list_models(&self) -> Vec<ModelInfo> {
+        model_list(&self.config, &self.catalog())
+    }
+
+    /// Refreshes the catalogue from where it came from.
+    pub(super) async fn refresh_catalog(
+        &self,
+        request_id: u64,
+    ) -> Result<EventStream, ServiceError> {
+        let loaded = load_catalog(&LoadOptions {
+            url: &self.catalog_settings.url,
+            ttl: self.catalog_settings.ttl,
+            offline: self.catalog_settings.offline,
+            cache_dir: &self.catalog_settings.cache_dir,
+        })
+        .await?;
+        let models = loaded.catalog.model_count();
+        *self.lock_catalog_write() = Arc::new(loaded.catalog);
+        Ok(single(
+            request_id,
+            None,
+            ServerEventKind::CatalogUpdated { models },
+        ))
+    }
+
     /// Switches the session's model, or queues the switch for the next turn
     /// boundary when a live turn owns it.
     pub(super) async fn set_model_event(

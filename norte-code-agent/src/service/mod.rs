@@ -28,11 +28,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, Rw
 use std::time::Duration;
 
 use futures_core::Stream;
-use futures_util::StreamExt;
 use norte::{
-    ApprovalId, BlobStore, Engine, EngineBuilder, EngineConfig, GrantId, GrantScope,
-    InMemoryBlobStore, InMemoryStore, Layer, LayerStack, Model, PolicySet, Store, ToolArgs,
-    ToolDeclaration, ToolRegistry, TurnInterceptor,
+    BlobStore, Engine, EngineBuilder, EngineConfig, InMemoryBlobStore, InMemoryStore, Layer,
+    LayerStack, Model, PolicySet, Store, ToolArgs, ToolDeclaration, ToolRegistry, TurnInterceptor,
 };
 use norte_code_cost::{BudgetBook, CostRecord};
 use norte_code_skills::{
@@ -45,12 +43,9 @@ use norte_code_tools::{
 use norte_tools::{CommandLimits, CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::Notify;
 
-use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
+use norte_code_catalog::Catalog;
 use norte_code_config::Config;
-use norte_code_protocol::{
-    GrantInfo, GrantScope as ProtocolGrantScope, ModelInfo, ServerEvent, ServerEventKind,
-    SessionKey,
-};
+use norte_code_protocol::{ServerEvent, ServerEventKind, SessionKey};
 
 use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
@@ -787,237 +782,6 @@ impl Service {
         }
     }
 
-    fn list_models_event(&self, request_id: u64) -> EventStream {
-        single(
-            request_id,
-            None,
-            ServerEventKind::ModelList {
-                models: self.list_models(),
-            },
-        )
-    }
-
-    fn skill_list_event(&self, request_id: u64) -> EventStream {
-        let skills = self.skills();
-        let mut warnings = Vec::new();
-        let mut infos = Vec::new();
-        for skill in skills.skills() {
-            infos.push(norte_code_protocol::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                root: skill.root.display().to_string(),
-                allowed_tools: skill.allowed_tools.clone(),
-            });
-        }
-        for warning in skills.warnings() {
-            warnings.push(format!("{}: {}", warning.path.display(), warning.message));
-        }
-        single(
-            request_id,
-            None,
-            ServerEventKind::SkillList {
-                skills: infos,
-                warnings,
-            },
-        )
-    }
-
-    fn refresh_skills_event(&self, request_id: u64) -> EventStream {
-        let count = self.refresh_skills();
-        single(
-            request_id,
-            None,
-            ServerEventKind::SkillsUpdated { skills: count },
-        )
-    }
-
-    async fn refresh_catalog(&self, request_id: u64) -> Result<EventStream, ServiceError> {
-        let loaded = load_catalog(&LoadOptions {
-            url: &self.catalog_settings.url,
-            ttl: self.catalog_settings.ttl,
-            offline: self.catalog_settings.offline,
-            cache_dir: &self.catalog_settings.cache_dir,
-        })
-        .await?;
-        let models = loaded.catalog.model_count();
-        *self.lock_catalog_write() = Arc::new(loaded.catalog);
-        Ok(single(
-            request_id,
-            None,
-            ServerEventKind::CatalogUpdated { models },
-        ))
-    }
-
-    async fn approve(
-        self: &Arc<Self>,
-        request_id: u64,
-        session: SessionKey,
-        approval: String,
-        arguments: Option<serde_json::Value>,
-        scope: Option<norte_code_protocol::GrantScope>,
-        remember: Option<bool>,
-    ) -> Result<EventStream, ServiceError> {
-        if arguments.is_some() {
-            return Err(ServiceError::Unsupported(
-                "editing approval arguments is not implemented for this client",
-            ));
-        }
-        let (nid, spec, _) = self.require_record(&session)?;
-        let engine = self.engine(&spec)?;
-        let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
-        let record = engine
-            .pending_approvals(nid)
-            .await?
-            .into_iter()
-            .find(|record| record.id == id)
-            .ok_or(ServiceError::Norte(norte::Error::ApprovalNotFound(id)))?;
-        let global = matches!(scope, Some(norte_code_protocol::GrantScope::Always));
-        if global {
-            self.remember_global_rule(record.tool.as_str(), true)?;
-        }
-        let grant = match (scope, remember) {
-            (Some(norte_code_protocol::GrantScope::Always), _) => GrantScope::Global,
-            (Some(norte_code_protocol::GrantScope::Session), _) => GrantScope::Session(nid),
-            (Some(norte_code_protocol::GrantScope::Tool), _) | (_, Some(true)) => {
-                GrantScope::Tool(record.tool.clone())
-            }
-            _ => GrantScope::Call(record.call_id),
-        };
-        engine.approve(id, grant, "user").await?;
-        let head = single(
-            request_id,
-            Some(session.clone()),
-            ServerEventKind::ApprovalResolved {
-                approval: approval.clone(),
-                approved: true,
-            },
-        );
-        let resumed = self
-            .start_turn(request_id, Some(session), None, None, None)
-            .await?;
-        Ok(Box::pin(head.chain(resumed)))
-    }
-
-    async fn deny(
-        self: &Arc<Self>,
-        request_id: u64,
-        session: SessionKey,
-        approval: String,
-        reason: Option<String>,
-        scope: Option<norte_code_protocol::DenyScope>,
-    ) -> Result<EventStream, ServiceError> {
-        let (nid, spec, _) = self.require_record(&session)?;
-        let engine = self.engine(&spec)?;
-        let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
-        let record = engine
-            .pending_approvals(nid)
-            .await?
-            .into_iter()
-            .find(|record| record.id == id)
-            .ok_or(ServiceError::Norte(norte::Error::ApprovalNotFound(id)))?;
-        let tool = record.tool.as_str();
-        match scope {
-            Some(norte_code_protocol::DenyScope::ToolSession) => {
-                self.approval_rules.deny_session(nid, tool);
-                if let Some(record) = self.lock_sessions().get_mut(&session) {
-                    if !record.denied_tools.iter().any(|denied| denied == tool) {
-                        record.denied_tools.push(tool.to_owned());
-                    }
-                }
-                self.persist(&session).await?;
-            }
-            Some(norte_code_protocol::DenyScope::ToolGlobal) => {
-                self.remember_global_rule(tool, false)?;
-            }
-            Some(norte_code_protocol::DenyScope::Once) | None => {}
-        }
-        engine.deny(id, "user", reason.unwrap_or_default()).await?;
-        let head = single(
-            request_id,
-            Some(session.clone()),
-            ServerEventKind::ApprovalResolved {
-                approval: approval.clone(),
-                approved: false,
-            },
-        );
-        let resumed = self
-            .start_turn(request_id, Some(session), None, None, None)
-            .await?;
-        Ok(Box::pin(head.chain(resumed)))
-    }
-
-    async fn answer_question(
-        &self,
-        request_id: u64,
-        session: SessionKey,
-        question: String,
-        answer: String,
-    ) -> Result<EventStream, ServiceError> {
-        let (nid, _, _) = self.require_record(&session)?;
-        if !self.questions.answer(Some(nid), &question, answer).await {
-            return Err(ServiceError::UnknownQuestion(question));
-        }
-        Ok(single(
-            request_id,
-            Some(session),
-            ServerEventKind::QuestionAnswered { question },
-        ))
-    }
-
-    async fn revoke(
-        &self,
-        request_id: u64,
-        session: SessionKey,
-        approval: String,
-        grant: String,
-    ) -> Result<EventStream, ServiceError> {
-        let (nid, spec, _) = self.require_record(&session)?;
-        let engine = self.engine(&spec)?;
-        let grant: GrantId = grant.parse().map_err(ServiceError::Norte)?;
-        engine.revoke(nid, grant, "user").await?;
-        Ok(single(
-            request_id,
-            Some(session),
-            ServerEventKind::GrantRevoked {
-                approval,
-                grant: grant.to_string(),
-            },
-        ))
-    }
-
-    async fn list_grants_event(
-        &self,
-        request_id: u64,
-        session: SessionKey,
-    ) -> Result<EventStream, ServiceError> {
-        let (nid, _, _) = self.require_record(&session)?;
-        let mut grants = Vec::new();
-        for record in self.store.approvals(nid).await? {
-            for grant in record.grants {
-                grants.push(GrantInfo {
-                    approval: record.id.to_string(),
-                    grant: grant.id.to_string(),
-                    tool: record.tool.to_string(),
-                    scope: match grant.scope {
-                        GrantScope::Tool(_) => ProtocolGrantScope::Tool,
-                        GrantScope::Session(_) => ProtocolGrantScope::Session,
-                        GrantScope::Global => ProtocolGrantScope::Always,
-                        // A one-call grant and any scope Norte may add later
-                        // reach the client as the narrowest scope there is.
-                        _ => ProtocolGrantScope::Once,
-                    },
-                    issued_at: grant.issued_at.to_rfc3339(),
-                    revoked: !grant.is_active(),
-                });
-            }
-        }
-        Ok(single(
-            request_id,
-            Some(session),
-            ServerEventKind::GrantList { grants },
-        ))
-    }
-
     /// The budget decision that stopped the turn, if the layer made one.
     fn cost_report(&self, request_id: u64, session: Option<&SessionKey>) -> EventStream {
         let lock = self.lock_sessions();
@@ -1052,11 +816,6 @@ impl Service {
             ));
         }
         Box::pin(futures_util::stream::iter(events))
-    }
-
-    /// Flattens the catalogue for a picker, applying the config overrides.
-    fn list_models(&self) -> Vec<ModelInfo> {
-        model_list(&self.config, &self.catalog())
     }
 
     /// Validates and sets the session's budget.
