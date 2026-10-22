@@ -10,7 +10,7 @@ use norte::{
     ModelStream, ProviderErrorKind, ProviderId, Reasoning as ReasoningCapability, ReasoningEffort,
 };
 use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
-use norte_code_protocol::{ClientRequest, ClientRequestKind, Delta, ReasoningScope};
+use norte_code_protocol::{BudgetUnit, ClientRequest, ClientRequestKind, Delta, ReasoningScope};
 use norte_code_store_sqlite::SqliteStore;
 use norte_testing::ScriptedModel;
 use norte_tools::CommandRequest;
