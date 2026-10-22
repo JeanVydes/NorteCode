@@ -5,11 +5,13 @@ agent, read this before you touch anything.
 
 ## What this repository is
 
-Norte Code is a host built on top of the Norte agent engine. Norte is a separate
-repository and a git dependency; **never modify, vendor or fork Norte from here**.
-If you need a Norte change, stop and report it instead of patching around it.
-The API we depend on is defined by Norte's guide (`guide/src`) and its source
-(`norte-core`, `norte-tools`); those are the source of truth.
+Norte Code is a host built on top of the Norte agent engine. Norte lives in its
+own repository and is consumed as a git dependency; do not vendor or fork it
+inside Norte Code. A change that belongs to Norte is made in the Norte
+repository, with its own tests, guide and commit, and then picked up here by
+bumping the dependency. The API we depend on is defined by Norte's guide
+(`guide/src`) and its source (`norte-core`, `norte-tools`); those are the source
+of truth.
 
 ## Git workflow
 
