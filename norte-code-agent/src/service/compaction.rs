@@ -281,7 +281,7 @@ impl Service {
             recorded_at: chrono::Utc::now(),
         };
         self.directory.record_cost(&ledger).await?;
-        self.budget_notices(key, &ledger, true);
+        self.budget_notices(key, true);
         self.persist(key).await?;
         Ok(())
     }

@@ -76,7 +76,20 @@ pub struct CostSummary {
 impl CostSummary {
     /// Adds one request to the summary.
     pub fn add(&mut self, record: &CostRecord) {
+        self.count_request();
+        self.add_usage(record);
+    }
+
+    /// Counts one request, without what it cost.
+    ///
+    /// A request that reported no usage still counts: the budget measures how
+    /// much the session asked for, not only what the providers billed.
+    pub fn count_request(&mut self) {
         self.requests += 1;
+    }
+
+    /// Adds what a request cost, without counting it again.
+    pub fn add_usage(&mut self, record: &CostRecord) {
         self.input_tokens += record.input_tokens.unwrap_or(0);
         self.output_tokens += record.output_tokens.unwrap_or(0);
         self.reasoning_tokens += record.reasoning_tokens.unwrap_or(0);
@@ -306,6 +319,25 @@ impl BudgetBook {
         self.message_spent.add(record);
         self.session_spent.add(record);
         self.global_spent.add(record);
+    }
+
+    /// Counts one request in every measured scope.
+    ///
+    /// The count does not wait for the usage: a request that reported none
+    /// still counts, and the gate that measures the budget sees it before it
+    /// decides about the next request.
+    pub fn count_request(&mut self) {
+        self.message_spent.count_request();
+        self.session_spent.count_request();
+        self.global_spent.count_request();
+    }
+
+    /// Adds what a request cost to every measured scope, without counting it
+    /// again.
+    pub fn record_usage(&mut self, record: &CostRecord) {
+        self.message_spent.add_usage(record);
+        self.session_spent.add_usage(record);
+        self.global_spent.add_usage(record);
     }
 
     /// The budgets and summaries in evaluation order.

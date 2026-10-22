@@ -87,22 +87,19 @@ impl Service {
         configured_budget(self.config.budgets.session.as_ref())
     }
 
-    /// The notices the book has for the cost just recorded.
+    /// The notices the book has for the cost it recorded.
     ///
     /// A warning crosses once and an exhaustion is only reported when the turn
-    /// ends, so the client hears about each of them once.
-    pub(super) fn budget_notices(
-        &self,
-        key: &SessionKey,
-        record: &super::CostRecord,
-        final_check: bool,
-    ) -> Vec<BudgetNotice> {
+    /// ends, so the client hears about each of them once. The book is the one
+    /// that records: the budget layer writes what each request cost, in the
+    /// engine's path, so the gate knows the cost of the request it let through
+    /// before it decides about the next one.
+    pub(super) fn budget_notices(&self, key: &SessionKey, final_check: bool) -> Vec<BudgetNotice> {
         self.lock_budget_states()
             .get(key)
             .cloned()
             .map_or_else(Vec::new, |book| {
                 let mut book = book.lock().unwrap_or_else(PoisonError::into_inner);
-                book.record(record);
                 if final_check {
                     book.notices()
                 } else {

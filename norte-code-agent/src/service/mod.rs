@@ -89,7 +89,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 
 /// A session as the service tracks it, beyond what Norte stores.
 /// Live counters for the turn in flight.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 struct Stats {
     turn: u64,
     billed: usize,
@@ -98,6 +98,14 @@ struct Stats {
     unpriced: u64,
     input_tokens: u64,
     output_tokens: u64,
+    /// The request telemetry that has not been matched to a committed message
+    /// yet.
+    ///
+    /// The telemetry arrives when a provider answers and the message is
+    /// committed after that; a settle that runs in between keeps the telemetry
+    /// here instead of dropping it, so the request that follows is measured
+    /// with its own numbers.
+    pending: std::collections::VecDeque<norte_code_store_sqlite::RequestRecord>,
 }
 
 /// Where the catalogue is refreshed from.

@@ -19,6 +19,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   not a new limit, it is steered into the session and the prompt asks again.
 - A turn the host ended on purpose is reported as such instead of reading as
   a failure that committed nothing.
+- The budget no longer lets a request through that the limit should have
+  stopped. The gate measures the request it just let through, in the engine's
+  own path; before, the cost was recorded by the service, which runs while the
+  engine already asks for the next request, so the budget sometimes answered
+  late.
+- The numbers a request reports — its tools, its timing — no longer depend on
+  whether the service settled the request before or after the answer was
+  committed. The telemetry that arrives first waits for the message it belongs
+  to.
 
 ### Added
 

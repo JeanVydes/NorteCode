@@ -464,6 +464,7 @@ impl Service {
                 unpriced: 0,
                 input_tokens: 0,
                 output_tokens: 0,
+                pending: std::collections::VecDeque::new(),
             },
             |record| Stats {
                 turn,
@@ -473,6 +474,7 @@ impl Service {
                 unpriced: record.unpriced,
                 input_tokens: record.input_tokens,
                 output_tokens: record.output_tokens,
+                pending: std::collections::VecDeque::new(),
             },
         )
     }

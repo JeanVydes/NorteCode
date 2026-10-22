@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use norte::{
-    CallId, Continuation, Engine, Layer, LayerContext, ModelRequest, ModelStream,
-    ProviderErrorKind, SessionId, ShortCircuitReason, StreamDelta, Usage,
+    CallId, Continuation, Engine, Layer, LayerContext, ModelRef, ModelRequest, ModelStream,
+    ProviderErrorKind, SessionId, ShortCircuitReason, StreamDelta, StreamEvent, Usage,
 };
 use norte_code_config::{BudgetConfig, RetryConfig};
-use norte_code_cost::BudgetBook;
+use norte_code_cost::{BudgetBook, CostRecord};
 use norte_code_protocol::{
     Budget, BudgetUnit, Delta, ErrorCode, ServerEvent, ServerEventKind, SessionKey,
 };
@@ -194,8 +195,9 @@ pub(super) fn configured_budget(budget: Option<&BudgetConfig>) -> Option<Budget>
 /// Stops a model request before it is sent when a budget is exhausted.
 ///
 /// Norte has no price feed, so this is a check against the ledger's measured
-/// spend, not a worst-case estimate. A request can still overshoot by one,
-/// because the provider only reports its cost after it answers.
+/// spend, not a worst-case estimate. The layer also records what each request
+/// cost, in the engine's own path: the gate must see the cost of the request
+/// it just let through before it decides about the next one.
 pub(super) struct BudgetLayer {
     pub(super) book: Arc<Mutex<BudgetBook>>,
 }
@@ -235,8 +237,57 @@ impl Layer for BudgetLayer {
             );
             return Err(norte::Error::Other(format!("budget exceeded: {detail}")));
         }
-        next.call(context, request).await
+        let model = request.model.clone();
+        // The request counts as soon as it is let through, and what it cost
+        // when the provider reports it: the gate that measures the budget
+        // must know of both before it decides about the next request.
+        {
+            let mut book = self.book.lock().unwrap_or_else(PoisonError::into_inner);
+            book.count_request();
+        }
+        let stream = next.call(context, request).await?;
+        Ok(account_usage(
+            stream,
+            Arc::clone(&self.book),
+            context.session,
+            context.turn,
+            model,
+        ))
     }
+}
+
+/// Wraps a model stream so the budget book learns what the request cost.
+///
+/// The usage is recorded as it flows, before the answer is committed, so the
+/// gate that lets the next request through already knows what this one cost.
+fn account_usage(
+    stream: ModelStream,
+    book: Arc<Mutex<BudgetBook>>,
+    session: SessionId,
+    turn: u64,
+    model: ModelRef,
+) -> ModelStream {
+    let mut recorded = false;
+    Box::pin(futures_util::StreamExt::map(stream, move |event| {
+        if !recorded && let Ok(StreamEvent::Usage(usage)) = &event {
+            recorded = true;
+            let mut book = book.lock().unwrap_or_else(PoisonError::into_inner);
+            book.record_usage(&CostRecord {
+                session: session.to_string(),
+                turn,
+                index: 0,
+                model: model.to_string(),
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                cost_usd: reported_cost(usage),
+                recorded_at: Utc::now(),
+            });
+        }
+        event
+    }))
 }
 
 /// The arguments a pending call would run with, for showing a human what they

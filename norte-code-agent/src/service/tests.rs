@@ -1644,6 +1644,98 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
 }
 
 #[tokio::test]
+async fn the_budget_stops_the_next_request_every_time() {
+    // The gate must see the request it just let through. The cost used to be
+    // recorded in the service, which runs while the engine already asks for the
+    // next request, so the budget sometimes let that request through.
+    let mut config = config();
+    config.budgets.session = Some(BudgetConfig {
+        unit: "requests".to_owned(),
+        limit: 1.0,
+        action: "stop".to_owned(),
+    });
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let mut model = ScriptedModel::new(reference);
+    for _ in 0..10 {
+        // Each turn asks for a tool: the budget stops the request that would
+        // carry the answer, so the model never gets to the turn after it.
+        // The delay makes the service settle the request before the answer is
+        // committed, which is the race the budget used to lose.
+        let call = CallId::new();
+        model = model.turn_delayed(
+            vec![
+                norte::StreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: call,
+                    name: "todo".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 0,
+                    call_id: call,
+                    name: None,
+                    arguments: serde_json::json!({"todos": []}).to_string(),
+                },
+                norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
+            ],
+            Duration::from_millis(20),
+        );
+    }
+    let model = Arc::new(model);
+    let store = Arc::new(SqliteStore::in_memory().expect("store"));
+    let service = Arc::new(
+        Service::with_directory(
+            config,
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            "system",
+        )
+        .await
+        .expect("service"),
+    );
+
+    for _ in 0..10 {
+        let events = drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: None,
+                text: "work".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        )
+        .await;
+        eprintln!(
+            "DBG {}",
+            events
+                .iter()
+                .map(|event| format!("{:?}", event.kind))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, ServerEventKind::BudgetExceeded { .. })),
+            "the budget stops the request after the one it paid for"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )));
+    }
+}
+
+#[tokio::test]
 async fn reasoning_and_steering_survive_a_restart() {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),

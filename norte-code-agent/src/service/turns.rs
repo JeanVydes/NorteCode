@@ -29,8 +29,7 @@ use super::tooling::output_text;
 use super::{EventStream, Service, ServiceError, Stats};
 
 impl Service {
-    /// Starts a turn (or a resume) and returns the stream of its events.
-    ///
+    /// Starts a turn (or a resume) and returns the stream of its events.    ///
     /// The outer option distinguishes a new message (which replaces the
     /// message budget) from a resume (which keeps the one already in force).
     #[allow(
@@ -679,10 +678,21 @@ impl Service {
                     approved: true,
                 })
             }
-            EngineEvent::CommitSucceeded { version, .. } => Some(ServerEventKind::Committed {
-                turn: stats.turn,
-                version: *version,
-            }),
+            EngineEvent::CommitSucceeded { version, .. } => {
+                // The answer is committed, so the budget already knows what it
+                // cost: a crossing that happened there is reported now, not at
+                // the next request.
+                for notice in self.budget_notices(key, false) {
+                    let kind = budget_notice_kind(notice);
+                    if !emit(tx, ServerEvent::new(request_id, Some(key.clone()), kind)).await {
+                        return false;
+                    }
+                }
+                Some(ServerEventKind::Committed {
+                    turn: stats.turn,
+                    version: *version,
+                })
+            }
             EngineEvent::LayerShortCircuited { layer, .. } if layer == "budget" => self
                 .budget_stopped(key)
                 .map(|status| ServerEventKind::BudgetExceeded {
@@ -735,10 +745,11 @@ impl Service {
         if let Some(gate) = gate {
             gate.update(used_context(&history));
         }
-        let mut ok = std::collections::VecDeque::new();
         for record in self.telemetry_for(key, nid) {
             if record.status == "ok" {
-                ok.push_back(record);
+                // The telemetry waits for the message it belongs to: the
+                // provider answered before the message was committed.
+                stats.pending.push_back(record);
             } else {
                 self.record_request(key, &record).await;
             }
@@ -772,12 +783,13 @@ impl Service {
             if let Err(error) = self.directory.record_cost(&record).await {
                 tracing::warn!(session = %key, %error, "could not record request cost");
             }
-            let telemetry = ok
+            let telemetry = stats
+                .pending
                 .pop_front()
                 .unwrap_or_else(|| self.request_from_usage(key, nid, stats.turn, &origin.usage));
             let metrics = request_metrics(&telemetry);
             self.record_request(key, &telemetry).await;
-            let notices = self.budget_notices(key, &record, final_check);
+            let notices = self.budget_notices(key, final_check);
             let event = ServerEvent::new(
                 request_id,
                 Some(key.clone()),
@@ -799,21 +811,7 @@ impl Service {
                 return false;
             }
             for notice in notices {
-                let kind = match notice {
-                    BudgetNotice::Warning(warning) => ServerEventKind::BudgetWarning {
-                        scope: warning.scope,
-                        unit: warning.unit,
-                        spent: warning.spent,
-                        limit: warning.limit,
-                    },
-                    BudgetNotice::Exceeded(exceeded) => ServerEventKind::BudgetExceeded {
-                        scope: exceeded.scope,
-                        unit: exceeded.unit,
-                        spent: exceeded.spent,
-                        limit: exceeded.limit,
-                        action: exceeded.action,
-                    },
-                };
+                let kind = budget_notice_kind(notice);
                 if !emit(tx, ServerEvent::new(request_id, Some(key.clone()), kind)).await {
                     stats.billed = history.len();
                     return false;
@@ -821,9 +819,6 @@ impl Service {
             }
         }
         stats.billed = history.len();
-        for record in ok {
-            self.record_request(key, &record).await;
-        }
         true
     }
 
@@ -900,5 +895,24 @@ impl Service {
         self.lock_sessions()
             .get(key)
             .map_or_else(String::new, |record| record.spec.label())
+    }
+}
+
+/// The event a budget notice becomes.
+fn budget_notice_kind(notice: BudgetNotice) -> ServerEventKind {
+    match notice {
+        BudgetNotice::Warning(warning) => ServerEventKind::BudgetWarning {
+            scope: warning.scope,
+            unit: warning.unit,
+            spent: warning.spent,
+            limit: warning.limit,
+        },
+        BudgetNotice::Exceeded(exceeded) => ServerEventKind::BudgetExceeded {
+            scope: exceeded.scope,
+            unit: exceeded.unit,
+            spent: exceeded.spent,
+            limit: exceeded.limit,
+            action: exceeded.action,
+        },
     }
 }
