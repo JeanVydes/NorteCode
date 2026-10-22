@@ -2216,6 +2216,11 @@ async fn a_session_budget_stops_the_next_request() {
         },
     )
     .await;
+    let exceeded = events
+        .iter()
+        .filter(|event| matches!(event.kind, ServerEventKind::BudgetExceeded { .. }))
+        .count();
+    assert_eq!(exceeded, 1, "the stop is reported once");
     assert!(events.iter().any(|event| matches!(
         event.kind,
         ServerEventKind::BudgetExceeded {

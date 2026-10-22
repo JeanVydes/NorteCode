@@ -101,7 +101,22 @@ fn record_from(
             .unwrap_or(0),
         reasoning: stat(stats, "reasoning"),
         pending_reasoning: stat(stats, "pending_reasoning"),
-        pending_steers: stat(stats, "pending_steers").unwrap_or_default(),
+        pending_steers: stat(stats, "pending_steers")
+            .map(|steers: Vec<Steered>| {
+                // A message stored before the names existed has none, and two
+                // of them would look like the same one.
+                steers
+                    .into_iter()
+                    .map(|steered| {
+                        if steered.id.is_empty() {
+                            steered.with_id(uuid::Uuid::new_v4().to_string())
+                        } else {
+                            steered
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

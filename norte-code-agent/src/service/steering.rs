@@ -20,6 +20,11 @@ impl Steered {
     pub(super) fn new(id: String, text: String) -> Self {
         Self { id, text }
     }
+
+    /// The same message under another name.
+    pub(super) fn with_id(self, id: String) -> Self {
+        Self { id, ..self }
+    }
 }
 
 impl<'de> Deserialize<'de> for Steered {
