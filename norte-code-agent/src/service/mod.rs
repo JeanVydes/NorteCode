@@ -31,8 +31,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
     ApprovalId, BlobStore, Engine, EngineBuilder, EngineConfig, GrantId, GrantScope,
-    InMemoryBlobStore, InMemoryStore, Layer, LayerStack, Message, Model, PolicySet, Store,
-    ToolArgs, ToolDeclaration, ToolRegistry, TurnInterceptor,
+    InMemoryBlobStore, InMemoryStore, Layer, LayerStack, Model, PolicySet, Store, ToolArgs,
+    ToolDeclaration, ToolRegistry, TurnInterceptor,
 };
 use norte_code_cost::{BudgetBook, CostRecord};
 use norte_code_skills::{
@@ -840,53 +840,6 @@ impl Service {
         ))
     }
 
-    async fn set_model_event(
-        &self,
-        request_id: u64,
-        session: SessionKey,
-        model: String,
-    ) -> Result<EventStream, ServiceError> {
-        let spec = self.resolve_model_switch(&session, &model).await?;
-        match self.set_model(&session, spec).await {
-            Ok(()) => Ok(single(
-                request_id,
-                Some(session),
-                ServerEventKind::ModelChanged { model },
-            )),
-            // A live turn owns the boundary. Accept the request now and keep it
-            // durable; `start_turn` applies it when the session is idle.
-            Err(ServiceError::Unsupported(_)) => {
-                {
-                    let mut sessions = self.lock_sessions();
-                    let record = sessions
-                        .get_mut(&session)
-                        .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
-                    record.pending_model = Some(model.clone());
-                }
-                self.persist(&session).await?;
-                Ok(single(
-                    request_id,
-                    Some(session),
-                    ServerEventKind::ModelQueued { model },
-                ))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Resolves a model reference and checks it against the stored reasoning
-    /// and budget before the switch is queued or applied.
-    async fn resolve_model_switch(
-        &self,
-        session: &SessionKey,
-        model: &str,
-    ) -> Result<ModelSpec, ServiceError> {
-        let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), model, None)?;
-        self.ensure_model_supports_reasoning(session, &spec)?;
-        self.ensure_model_supports_budget(session, &spec).await?;
-        Ok(spec)
-    }
-
     async fn approve(
         self: &Arc<Self>,
         request_id: u64,
@@ -1129,117 +1082,6 @@ impl Service {
         self.persist(&key).await?;
         self.steering.push(nid, steered);
         Ok(Box::pin(futures_util::stream::empty()))
-    }
-
-    /// Refuses a budget that the session's history says cannot be measured.
-    /// Blocks a switch that would make a stored reasoning setting unsupported.
-    fn ensure_model_supports_reasoning(
-        &self,
-        key: &SessionKey,
-        spec: &ModelSpec,
-    ) -> Result<(), ServiceError> {
-        let (session_reasoning, pending_reasoning) = {
-            let sessions = self.lock_sessions();
-            let record = sessions
-                .get(key)
-                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            (record.reasoning.clone(), record.pending_reasoning.clone())
-        };
-        for setting in [session_reasoning.as_ref(), pending_reasoning.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            resolve_reasoning(
-                Some(setting),
-                &self.config.reasoning.default,
-                &spec.capabilities.reasoning,
-            )?;
-        }
-        Ok(())
-    }
-
-    async fn set_model(&self, key: &SessionKey, spec: ModelSpec) -> Result<(), ServiceError> {
-        let (nid, _, phase) = self.require_record(key)?;
-        if phase != norte_code_protocol::Phase::Idle {
-            return Err(ServiceError::Unsupported(
-                "switch the model at a turn boundary",
-            ));
-        }
-        let engine = self.engine(&spec)?;
-        if engine.session(nid).await?.phase != norte::Phase::Idle {
-            return Err(ServiceError::Unsupported(
-                "switch the model at a turn boundary",
-            ));
-        }
-        engine
-            .append_history(nid, vec![Message::system(self.runtime_update(&spec))])
-            .await?;
-        {
-            let mut lock = self.lock_sessions();
-            let record = lock
-                .get_mut(key)
-                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            record.spec = spec;
-            record.pending_model = None;
-        }
-        self.persist(key).await
-    }
-
-    /// Applies a queued model switch when the session reaches an idle turn
-    /// boundary. An approval or question continuation is not a boundary, so it
-    /// leaves the request queued for the next real turn.
-    async fn apply_pending_model(
-        &self,
-        request_id: u64,
-        key: &SessionKey,
-    ) -> Result<Option<ServerEvent>, ServiceError> {
-        let Some(model) = self
-            .lock_sessions()
-            .get(key)
-            .and_then(|record| record.pending_model.clone())
-        else {
-            return Ok(None);
-        };
-        let spec = match self.resolve_model_switch(key, &model).await {
-            Ok(spec) => spec,
-            Err(error) => {
-                // The queued switch cannot be honoured anymore: the model left
-                // the catalogue, or the session's settings refuse it. The turn
-                // goes on with the current model; failing here would break
-                // every turn of the session from now on.
-                tracing::warn!(
-                    session = %key,
-                    model = %model,
-                    %error,
-                    "dropping a queued model switch that cannot be honoured"
-                );
-                self.clear_pending_model(key).await;
-                return Ok(None);
-            }
-        };
-        match self.set_model(key, spec).await {
-            Ok(()) => Ok(Some(ServerEvent::new(
-                request_id,
-                Some(key.clone()),
-                ServerEventKind::ModelChanged { model },
-            ))),
-            Err(ServiceError::Unsupported(_)) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Forgets a queued model switch.
-    async fn clear_pending_model(&self, key: &SessionKey) {
-        {
-            let mut sessions = self.lock_sessions();
-            let Some(record) = sessions.get_mut(key) else {
-                return;
-            };
-            record.pending_model = None;
-        }
-        if let Err(error) = self.persist(key).await {
-            tracing::warn!(session = %key, %error, "could not store the dropped model switch");
-        }
     }
 
     fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<Notify>>> {

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use norte::{
     CallId, Capabilities, InMemoryBlobStore, InMemoryStore, Interception, InterceptionContext,
-    ModelId, ModelRef, ModelRequest, ModelStream, ProviderErrorKind, ProviderId,
+    Message, ModelId, ModelRef, ModelRequest, ModelStream, ProviderErrorKind, ProviderId,
     Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
     TurnInterceptor, Usage,
 };
