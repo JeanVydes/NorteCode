@@ -70,7 +70,7 @@ persisted and the engine appends it to the history before the next request of
 the running turn, so the model sees it in that request. The client may name the
 message; the engine reports it with `SteerApplied`, which carries the names it
 applied. Whatever the turn never reached waits for the next turn boundary,
-where the session's queue delivers it.
+where the service delivers it.
 
 ## Events
 

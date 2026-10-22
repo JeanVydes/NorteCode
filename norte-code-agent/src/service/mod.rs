@@ -1403,9 +1403,6 @@ impl Service {
         let engine = self.engine_with_budget(&spec, Some(Arc::clone(&book)), gate.clone())?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
-        // Steering messages belong to the turn boundary that is starting now.
-        // Norte drains its queue in arrival order before the new input, so keep
-        // the original order when a resume has no input of its own.
         // The steering messages belong to the turn boundary that is starting
         // now. The interceptor takes them before the turn's input, so they keep
         // their arrival order; a message the engine already holds is not

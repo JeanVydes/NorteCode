@@ -17,9 +17,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   are validated against the selected model before they are saved, survive a
   restart, and are applied by the next turn; a model switch that cannot honour
   the stored setting is refused instead of silently lowering it.
-- `Steer` queues a message durably and applies it before the next turn input,
-  preserving arrival order. A resume with no input of its own uses the last
-  queued steer as its message and keeps the earlier ones ahead of it.
+- `Steer` hands a message to the running turn: the engine appends it to the
+  history before the next request, so the model sees it there. The message
+  stays durable until the engine reports it applied, and whatever the turn
+  never reached waits for the next turn boundary.
 - `SetModel` is accepted while the session is busy. The switch is validated,
   persisted and applied at the next idle turn boundary, and the request answers
   with `ModelQueued`; `ModelChanged` is emitted when the switch is actually

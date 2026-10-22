@@ -1903,7 +1903,6 @@ impl SessionDirectory for SqliteStore {
 mod tests {
     use super::*;
     use norte::{CallId, Message, Phase, ToolName};
-    use std::collections::VecDeque;
 
     #[tokio::test]
     async fn passes_nortes_store_conformance() {
@@ -2053,7 +2052,6 @@ mod tests {
                     head: None,
                     phase: Phase::Idle,
                     turn: 0,
-                    queue: VecDeque::new(),
                     grants: Vec::new(),
                     metadata: None,
                 })
@@ -2068,7 +2066,6 @@ mod tests {
                     head: Some(node.id),
                     phase: Phase::Idle,
                     turn: 1,
-                    queue: VecDeque::new(),
                     grants: Vec::new(),
                     metadata: None,
                 })

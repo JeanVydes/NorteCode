@@ -193,7 +193,6 @@ impl Service {
                     head: session.head,
                     phase: norte::Phase::Idle,
                     turn: session.turn,
-                    queue: session.queue.clone(),
                     grants: session.grants.clone(),
                     metadata: Some(session.metadata.clone()),
                 };
