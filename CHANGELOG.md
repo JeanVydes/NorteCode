@@ -6,6 +6,20 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A queued model switch that could not be honoured no longer breaks the
+  session. The model may have left the catalogue, or the session's own
+  settings may refuse the switch; either way the turn goes on with the current
+  model instead of failing, and every turn after it failed too.
+- A model switch and a compaction at the same turn boundary are both reported
+  now. The compaction replaced the events of the boundary and the switch was
+  lost.
+- Text typed while the budget stopped the turn is not thrown away: if it is
+  not a new limit, it is steered into the session and the prompt asks again.
+- A turn the host ended on purpose is reported as such instead of reading as
+  a failure that committed nothing.
+
 ### Added
 
 - `xhigh` and `max` are first-class reasoning efforts. The catalogue values map

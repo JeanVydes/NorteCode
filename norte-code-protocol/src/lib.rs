@@ -429,6 +429,11 @@ pub enum ServerEventKind {
         /// How many requests so far carried no cost.
         requests: u64,
     },
+    /// The host ended the turn on purpose.
+    TurnStopped {
+        /// Why the turn ended.
+        reason: String,
+    },
     /// The engine applied a steering message to the request already in flight.
     SteerApplied {
         /// The names of the messages that reached the request.

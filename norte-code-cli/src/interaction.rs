@@ -639,7 +639,13 @@ async fn handle_live_command(
     }
 }
 
+/// Asks for a new limit after the budget stopped the turn.
+///
+/// A line that is not a limit is not thrown away: it is steered into the
+/// session, because the human may have been typing when the budget ran out.
 async fn prompt_budget_limit(
+    service: &Arc<Service>,
+    session: &SessionKey,
     input: &mut mpsc::UnboundedReceiver<Option<String>>,
     interrupts: &mut mpsc::Receiver<()>,
     style: Style,
@@ -666,7 +672,14 @@ async fn prompt_budget_limit(
                 }
                 match parse_budget_limit(prompt.unit, line) {
                     Ok(limit) => return Ok(Some(limit)),
-                    Err(error) => eprintln!("{}", style.yellow(error)),
+                    Err(error) => {
+                        eprintln!("{}", style.yellow(error));
+                        eprintln!(
+                            "{}",
+                            style.dim("that is not a limit; it is steered into the session")
+                        );
+                        steer_text(service, session.clone(), line.to_owned(), style, true).await;
+                    }
                 }
             }
             PromptInput::Eof | PromptInput::Cancelled => return Ok(None),
@@ -1099,9 +1112,15 @@ pub(crate) async fn drive_turns(
                             if let (Some(receiver), Some(session)) =
                                 (input.as_deref_mut(), current.clone())
                             {
-                                if let Some(limit) =
-                                    prompt_budget_limit(receiver, &mut interrupt_rx, style, prompt)
-                                        .await?
+                                if let Some(limit) = prompt_budget_limit(
+                                    service,
+                                    &session,
+                                    receiver,
+                                    &mut interrupt_rx,
+                                    style,
+                                    prompt,
+                                )
+                                .await?
                                 {
                                     let budget = Budget {
                                         unit: prompt.unit,

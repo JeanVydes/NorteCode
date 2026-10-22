@@ -1346,7 +1346,9 @@ impl Service {
             spec = new_spec;
         }
         if self.compaction_due(&key, &spec, nid).await? {
-            leading = match self.perform_compaction(request_id, &key, "threshold").await {
+            // The compaction joins what the boundary already reported: a model
+            // switch that landed first must not be dropped.
+            let events = match self.perform_compaction(request_id, &key, "threshold").await {
                 Ok(events) => events,
                 Err(error) => vec![ServerEvent::error(
                     request_id,
@@ -1355,6 +1357,7 @@ impl Service {
                     error.to_string(),
                 )],
             };
+            leading.extend(events);
             let (new_nid, new_spec, _) = self.require_record(&key)?;
             nid = new_nid;
             spec = new_spec;
@@ -1978,6 +1981,9 @@ impl Service {
                     .settle(engine, request_id, key, nid, stats, tx, false, gate)
                     .await;
             }
+            EngineEvent::TurnStopped { reason, .. } => Some(ServerEventKind::TurnStopped {
+                reason: reason.clone(),
+            }),
             EngineEvent::InterceptionApplied { messages, .. } => {
                 // The engine applied the steering messages, so the durable copy
                 // in the session is no longer pending.
@@ -2452,7 +2458,23 @@ impl Service {
         else {
             return Ok(None);
         };
-        let spec = self.resolve_model_switch(key, &model).await?;
+        let spec = match self.resolve_model_switch(key, &model).await {
+            Ok(spec) => spec,
+            Err(error) => {
+                // The queued switch cannot be honoured anymore: the model left
+                // the catalogue, or the session's settings refuse it. The turn
+                // goes on with the current model; failing here would break
+                // every turn of the session from now on.
+                tracing::warn!(
+                    session = %key,
+                    model = %model,
+                    %error,
+                    "dropping a queued model switch that cannot be honoured"
+                );
+                self.clear_pending_model(key).await;
+                return Ok(None);
+            }
+        };
         match self.set_model(key, spec).await {
             Ok(()) => Ok(Some(ServerEvent::new(
                 request_id,
@@ -2461,6 +2483,20 @@ impl Service {
             ))),
             Err(ServiceError::Unsupported(_)) => Ok(None),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Forgets a queued model switch.
+    async fn clear_pending_model(&self, key: &SessionKey) {
+        {
+            let mut sessions = self.lock_sessions();
+            let Some(record) = sessions.get_mut(key) else {
+                return;
+            };
+            record.pending_model = None;
+        }
+        if let Err(error) = self.persist(key).await {
+            tracing::warn!(session = %key, %error, "could not store the dropped model switch");
         }
     }
 

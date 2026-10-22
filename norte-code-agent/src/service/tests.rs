@@ -1419,6 +1419,140 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
 }
 
 #[tokio::test]
+async fn a_queued_model_that_cannot_be_honoured_does_not_break_the_session() {
+    let (service, model) = scripted_service(spec("scripted"), &["one", "two"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+
+    // A switch to a model that does not reason, queued while the session asks
+    // for one, cannot be honoured at the boundary.
+    {
+        let mut sessions = service.lock_sessions();
+        let record = sessions.get_mut(&key).expect("record");
+        record.pending_model = Some("test/other".to_owned());
+        record.reasoning = Some(ProtocolReasoning::Effort {
+            effort: "high".to_owned(),
+        });
+    }
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "work".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::Error { .. })),
+        "the turn must not fail because of a switch it cannot apply"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: true,
+                ..
+            }
+        )),
+        "and the turn commits"
+    );
+    assert!(
+        service
+            .lock_sessions()
+            .get(&key)
+            .expect("record")
+            .pending_model
+            .is_none(),
+        "the switch that cannot be honoured is forgotten"
+    );
+    assert_eq!(model.requests().len(), 1, "the turn made one request");
+}
+
+#[tokio::test]
+async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(100, 10, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "first".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn_text("the user asked for a first answer"),
+    );
+    let mut config = config();
+    config.compaction.threshold = 0.1;
+    config.compaction.keep_recent = 1;
+    let (service, _store) = persistent_service_with_config(config, model).await;
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "first".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+
+    // The second turn grows the history past the threshold. Its compaction at
+    // the end of the turn cannot summarise, so the history stays long and the
+    // next boundary compacts.
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "second".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    // The next boundary applies a queued switch and compacts.
+    {
+        let mut sessions = service.lock_sessions();
+        let record = sessions.get_mut(&key).expect("record");
+        record.pending_model = Some("test/other".to_owned());
+    }
+    let second = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "third".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let changed = second
+        .iter()
+        .any(|event| matches!(event.kind, ServerEventKind::ModelChanged { .. }));
+    let compacted = second
+        .iter()
+        .any(|event| matches!(event.kind, ServerEventKind::CompactionStarted { .. }));
+    assert!(compacted, "the boundary compacted");
+    assert!(changed, "and the queued switch was reported too");
+}
+
+#[tokio::test]
 async fn reasoning_and_steering_survive_a_restart() {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),

@@ -67,6 +67,8 @@ pub(crate) struct Renderer {
     pub(crate) budget_stopped: bool,
     /// A pending `ask` budget stop. The CLI prompts once per stop.
     pub(crate) budget_prompt: Option<BudgetPrompt>,
+    /// Why the host ended the turn on purpose, when it did.
+    pub(crate) stopped: Option<String>,
     /// What the turn is doing right now, shown before the session totals. It is
     /// `None` between turns, so an idle footer is never mistaken for a hung one.
     pub(crate) activity: Option<String>,
@@ -116,6 +118,7 @@ impl Renderer {
             cancelled: false,
             budget_stopped: false,
             budget_prompt: None,
+            stopped: None,
             activity: None,
             requests: 0,
             turn_requests: 0,
@@ -871,8 +874,17 @@ impl Renderer {
                         eprintln!("{}", self.style.yellow(message));
                     }
                 } else if !*committed {
-                    eprintln!("{}", self.style.red("the turn did not commit"));
-                    self.failed = true;
+                    if let Some(reason) = self.stopped.take() {
+                        // The host ended the turn on purpose; that is not a
+                        // failure.
+                        eprintln!(
+                            "{}",
+                            self.style.yellow(format!("the turn was stopped: {reason}"))
+                        );
+                    } else {
+                        eprintln!("{}", self.style.red("the turn did not commit"));
+                        self.failed = true;
+                    }
                 } else if *phase == Phase::AwaitingApproval && !self.quiet {
                     eprintln!("{}", self.style.yellow("paused: waiting for approval"));
                 }
@@ -956,6 +968,15 @@ impl Renderer {
             }
             ServerEventKind::ModelChanged { model } if !self.quiet => {
                 eprintln!("{} {}", self.style.dim("model set:"), self.style.dim(model));
+            }
+            ServerEventKind::TurnStopped { reason } => {
+                self.stopped = Some(reason.clone());
+                if !self.quiet {
+                    eprintln!(
+                        "{}",
+                        self.style.yellow(format!("the turn was stopped: {reason}"))
+                    );
+                }
             }
             _ => {}
         }

@@ -88,6 +88,7 @@ where the service delivers it.
 | `CostUpdated`, `CostNotReported` | Ledger totals and unpriced requests. |
 | `ModelChanged`, `ModelQueued`, `ReasoningDowngraded` | Model switches. `ModelQueued` says the switch is accepted and pending a turn boundary. The third is wire vocabulary for a host that clamps; this service refuses an incompatible setting instead. |
 | `SteerApplied` | The engine applied steering messages to the request already in flight, naming the ones it applied. |
+| `TurnStopped` | The host ended the turn on purpose, with a reason. |
 | `CatalogUpdated`, `ModelList` | Catalogue refresh and model list. |
 | `SkillList`, `SkillsUpdated` | Skill discovery and refresh. |
 | `GrantRevoked` | A grant was revoked. |
