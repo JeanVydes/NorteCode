@@ -13,6 +13,7 @@ mod models;
 mod prompt;
 mod questions;
 mod sandbox;
+mod sessions;
 mod skills;
 mod steering;
 mod tooling;
@@ -24,7 +25,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use norte::{
@@ -47,14 +48,14 @@ use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::Config;
 use norte_code_protocol::{
     Budget, BudgetUnit, ErrorCode, GrantInfo, GrantScope as ProtocolGrantScope, ModelInfo,
-    Reasoning as ProtocolReasoning, ReasoningScope, ServerEvent, ServerEventKind, SessionInfo,
-    SessionKey,
+    Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind, SessionKey,
 };
 
 use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 
+use self::sessions::SessionRecord;
 use self::steering::{Steered, Steering, SteeringInterceptor};
 use approvals::{ApprovalModePolicy, ApprovalRules};
 use compaction::{
@@ -93,49 +94,6 @@ use workspace::{PathKind, check_path_kind, transform_path};
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 
 /// A session as the service tracks it, beyond what Norte stores.
-#[derive(Debug)]
-struct SessionRecord {
-    id: SessionId,
-    title: Option<String>,
-    spec: ModelSpec,
-    /// A model switch accepted while the session was busy. It replaces the
-    /// current spec at the next idle turn boundary.
-    pending_model: Option<String>,
-    created_at: DateTime<Utc>,
-    phase: norte_code_protocol::Phase,
-    /// Messages of this session already reported for usage.
-    billed: usize,
-    /// Model requests reported for usage.
-    requests: u64,
-    /// Provider-reported cost, summed.
-    cost: f64,
-    /// Requests that carried no cost.
-    unpriced: u64,
-    /// Input tokens, summed over reported requests.
-    input_tokens: u64,
-    /// Output tokens, summed over reported requests.
-    output_tokens: u64,
-    /// The session budget, when one was set.
-    budget: Option<Budget>,
-    /// Tools this session refuses without asking again.
-    denied_tools: Vec<String>,
-    /// Tools this session allows without asking again.
-    allowed_tools: Vec<String>,
-    /// The Norte session this one was compacted from, when it was.
-    compacted_from: Option<SessionId>,
-    /// Whether a compaction is running, so a concurrent turn does not repeat it.
-    compacting: bool,
-    /// The history length written by the last compaction. A session that has
-    /// not grown past it has nothing new to summarise.
-    compaction_baseline: usize,
-    /// The session-wide reasoning override, when one was set.
-    reasoning: Option<ProtocolReasoning>,
-    /// A reasoning override for the next turn only.
-    pending_reasoning: Option<ProtocolReasoning>,
-    /// Messages queued for the next turn boundary, in arrival order.
-    pending_steers: Vec<Steered>,
-}
-
 /// Live counters for the turn in flight.
 #[derive(Debug, Clone, Copy)]
 struct Stats {
@@ -347,190 +305,6 @@ impl Service {
 
     /// Rebuilds the in-memory session map from the durable directory.
     #[allow(clippy::too_many_lines)]
-    async fn load_sessions(&self) -> Result<(), ServiceError> {
-        let stored = self.directory.sessions().await?;
-        let catalog = self.catalog();
-        let mut records = Vec::with_capacity(stored.len());
-        let mut repaired = Vec::new();
-        for entry in stored {
-            let key = SessionKey::new(entry.key.clone());
-            let stored_phase = entry.phase.clone();
-            let spec = match ModelSpec::from_catalog(&self.config, &catalog, &entry.model, None) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    tracing::warn!(
-                        session = %entry.key,
-                        model = %entry.model,
-                        %error,
-                        "stored session model is unavailable; using the default"
-                    );
-                    self.default_spec.clone()
-                }
-            };
-            // Norte's store is the authority on phase: a parked tool or
-            // approval committed it, while the directory snapshot may predate
-            // the park. `streaming` is the exception: no process is streaming
-            // a session it just loaded, so a hard kill left it behind. Put the
-            // store back to idle and rewrite the directory row.
-            let mut needs_repair = stored_phase == "streaming";
-            let phase = match self.store.load(entry.north).await {
-                Ok(session) if session.phase == norte::Phase::Streaming => {
-                    needs_repair = true;
-                    let commit = norte::Commit {
-                        session_id: entry.north,
-                        expected_version: Some(session.version),
-                        nodes: Vec::new(),
-                        head: session.head,
-                        phase: norte::Phase::Idle,
-                        turn: session.turn,
-                        queue: session.queue.clone(),
-                        grants: session.grants.clone(),
-                        metadata: Some(session.metadata.clone()),
-                    };
-                    if let Err(error) = self.store.commit(commit).await {
-                        tracing::warn!(
-                            session = %entry.key,
-                            %error,
-                            "could not mark an interrupted session idle"
-                        );
-                    }
-                    norte_code_protocol::Phase::Idle
-                }
-                Ok(session) => to_phase(session.phase),
-                Err(error) => {
-                    tracing::warn!(
-                        session = %entry.key,
-                        %error,
-                        "could not read the session phase; using the directory copy"
-                    );
-                    match stored_phase.as_str() {
-                        "awaiting_tool" => norte_code_protocol::Phase::AwaitingTool,
-                        "awaiting_approval" => norte_code_protocol::Phase::AwaitingApproval,
-                        // `streaming` cannot survive a process; everything
-                        // else starts idle.
-                        _ => norte_code_protocol::Phase::Idle,
-                    }
-                }
-            };
-            self.approval_rules.load_session(
-                entry.north,
-                &entry.denied_tools,
-                &entry.allowed_tools,
-            );
-            let stats = &entry.stats;
-            let record = SessionRecord {
-                id: entry.north,
-                title: entry.title,
-                spec,
-                created_at: entry.created_at,
-                phase,
-                billed: stats
-                    .get("billed")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or(0),
-                requests: stats
-                    .get("requests")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                cost: stats
-                    .get("cost")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0),
-                unpriced: stats
-                    .get("unpriced")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                input_tokens: stats
-                    .get("input_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                output_tokens: stats
-                    .get("output_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                budget: stats
-                    .get("budget")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                denied_tools: entry.denied_tools.clone(),
-                allowed_tools: entry.allowed_tools.clone(),
-                compacted_from: entry.compacted_from,
-                compacting: false,
-                compaction_baseline: stats
-                    .get("compaction_baseline")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or(0),
-                reasoning: stats
-                    .get("reasoning")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                pending_reasoning: stats
-                    .get("pending_reasoning")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                pending_steers: stats
-                    .get("pending_steers")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok())
-                    .unwrap_or_default(),
-                pending_model: stats
-                    .get("pending_model")
-                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
-            };
-            records.push((key.clone(), record));
-            if needs_repair {
-                repaired.push(key);
-            }
-        }
-        {
-            let mut sessions = self.lock_sessions();
-            for (key, record) in records {
-                sessions.insert(key, record);
-            }
-        }
-        for key in &repaired {
-            self.persist(key).await?;
-        }
-        Ok(())
-    }
-
-    /// Writes one session back to the directory.
-    async fn persist(&self, key: &SessionKey) -> Result<(), ServiceError> {
-        let stored = self.lock_sessions().get(key).map(|record| StoredSession {
-            key: key.to_string(),
-            north: record.id,
-            title: record.title.clone(),
-            model: format!("{}/{}", record.spec.provider, record.spec.model),
-            created_at: record.created_at,
-            phase: match record.phase {
-                norte_code_protocol::Phase::Idle => "idle",
-                norte_code_protocol::Phase::Streaming => "streaming",
-                norte_code_protocol::Phase::AwaitingTool => "awaiting_tool",
-                norte_code_protocol::Phase::AwaitingApproval => "awaiting_approval",
-            }
-            .to_owned(),
-            stats: serde_json::json!({
-                "billed": record.billed,
-                "requests": record.requests,
-                "cost": record.cost,
-                "unpriced": record.unpriced,
-                "input_tokens": record.input_tokens,
-                "output_tokens": record.output_tokens,
-                "budget": record.budget,
-                "compaction_baseline": record.compaction_baseline,
-                "reasoning": record.reasoning,
-                "pending_reasoning": record.pending_reasoning,
-                "pending_steers": record.pending_steers,
-                "pending_model": record.pending_model,
-            }),
-            denied_tools: record.denied_tools.clone(),
-            allowed_tools: record.allowed_tools.clone(),
-            compacted_from: record.compacted_from,
-        });
-        if let Some(stored) = stored {
-            self.directory.save_session(&stored).await?;
-        }
-        Ok(())
-    }
-
     /// Builds an engine for one spec over the shared stores.
     fn engine(&self, spec: &ModelSpec) -> Result<Engine, ServiceError> {
         self.engine_with_budget(spec, None, None)
@@ -1261,48 +1035,6 @@ impl Service {
         ))
     }
 
-    async fn create_session(&self, title: Option<String>) -> Result<SessionKey, ServiceError> {
-        let spec = self.default_spec.clone();
-        let engine = self.engine(&spec)?;
-        let session = engine.create().await?;
-        engine
-            .append_history(
-                session.id,
-                vec![
-                    Message::system(self.system_prompt.clone()),
-                    Message::system(self.runtime_context(&spec)),
-                ],
-            )
-            .await?;
-        let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
-        let record = SessionRecord {
-            id: session.id,
-            title,
-            spec,
-            pending_model: None,
-            created_at: Utc::now(),
-            phase: norte_code_protocol::Phase::Idle,
-            billed: 0,
-            requests: 0,
-            cost: 0.0,
-            unpriced: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            budget: self.configured_session_budget(),
-            denied_tools: Vec::new(),
-            allowed_tools: Vec::new(),
-            compacted_from: None,
-            compacting: false,
-            compaction_baseline: 0,
-            reasoning: None,
-            pending_reasoning: None,
-            pending_steers: Vec::new(),
-        };
-        self.lock_sessions().insert(key.clone(), record);
-        self.persist(&key).await?;
-        Ok(key)
-    }
-
     /// Checks whether the session has crossed the automatic compaction
     /// threshold at a turn boundary. Eager mode uses [`CompactionGate`] to make
     /// the same decision before a model request inside a turn.
@@ -1579,51 +1311,6 @@ impl Service {
         self.budget_notices(key, &ledger, true);
         self.persist(key).await?;
         Ok(())
-    }
-
-    async fn fork_session(
-        &self,
-        from: &SessionKey,
-        title: Option<String>,
-    ) -> Result<SessionKey, ServiceError> {
-        let (source, spec, _) = self.require_record(from)?;
-        let engine = self.engine(&spec)?;
-        let mut conversation = engine.export(source).await?;
-        // Norte's import preserves the conversation's session id, which is the
-        // right default for a backup/restore and exactly wrong for a fork: the
-        // store would reject it as a conflict with the source. A fork is an
-        // explicit new id, and the engine documents that it misses the provider
-        // cache for the copied prefix.
-        conversation.session = SessionId::new();
-        let imported = engine.import(conversation).await?;
-        let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
-        let record = SessionRecord {
-            id: imported.id,
-            title,
-            spec,
-            pending_model: None,
-            created_at: Utc::now(),
-            phase: norte_code_protocol::Phase::Idle,
-            billed: 0,
-            requests: 0,
-            cost: 0.0,
-            unpriced: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            budget: self.configured_session_budget(),
-            denied_tools: Vec::new(),
-            allowed_tools: Vec::new(),
-            // A fork is a new branch, not a compaction of the source.
-            compacted_from: None,
-            compacting: false,
-            compaction_baseline: 0,
-            reasoning: None,
-            pending_reasoning: None,
-            pending_steers: Vec::new(),
-        };
-        self.lock_sessions().insert(key.clone(), record);
-        self.persist(&key).await?;
-        Ok(key)
     }
 
     /// Starts a turn (or a resume) and returns the stream of its events.
@@ -2561,68 +2248,9 @@ impl Service {
         Box::pin(futures_util::stream::iter(events))
     }
 
-    fn list_sessions(&self) -> Vec<SessionInfo> {
-        self.lock_sessions()
-            .iter()
-            .map(|(key, record)| SessionInfo {
-                session: key.clone(),
-                title: record.title.clone(),
-                model: Some(record.spec.label()),
-                created_at: Some(record.created_at.to_rfc3339()),
-                phase: record.phase,
-            })
-            .collect()
-    }
-
     /// Flattens the catalogue for a picker, applying the config overrides.
     fn list_models(&self) -> Vec<ModelInfo> {
         model_list(&self.config, &self.catalog())
-    }
-
-    fn stats(&self, key: &SessionKey, turn: u64) -> Stats {
-        self.lock_sessions().get(key).map_or(
-            Stats {
-                turn,
-                billed: 0,
-                requests: 0,
-                cost: 0.0,
-                unpriced: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-            },
-            |record| Stats {
-                turn,
-                billed: record.billed,
-                requests: record.requests,
-                cost: record.cost,
-                unpriced: record.unpriced,
-                input_tokens: record.input_tokens,
-                output_tokens: record.output_tokens,
-            },
-        )
-    }
-
-    async fn store_stats(&self, key: &SessionKey, stats: &Stats) {
-        if let Some(record) = self.lock_sessions().get_mut(key) {
-            record.billed = stats.billed;
-            record.requests = stats.requests;
-            record.cost = stats.cost;
-            record.unpriced = stats.unpriced;
-            record.input_tokens = stats.input_tokens;
-            record.output_tokens = stats.output_tokens;
-        }
-        if let Err(error) = self.persist(key).await {
-            tracing::warn!(session = %key, %error, "could not persist session counters");
-        }
-    }
-
-    async fn set_phase(&self, key: &SessionKey, phase: norte_code_protocol::Phase) {
-        if let Some(record) = self.lock_sessions().get_mut(key) {
-            record.phase = phase;
-        }
-        if let Err(error) = self.persist(key).await {
-            tracing::warn!(session = %key, %error, "could not persist session phase");
-        }
     }
 
     /// Validates and sets the session's budget.
@@ -2656,35 +2284,6 @@ impl Service {
                 budget: Some(budget),
             },
         ))
-    }
-
-    async fn set_reasoning(
-        &self,
-        _request_id: u64,
-        key: SessionKey,
-        scope: ReasoningScope,
-        reasoning: ProtocolReasoning,
-    ) -> Result<EventStream, ServiceError> {
-        let (_, spec, _) = self.require_record(&key)?;
-        // Validate at the point the setting is chosen, not on the next turn:
-        // an effort the selected model does not declare is never downgraded.
-        resolve_reasoning(
-            Some(&reasoning),
-            &self.config.reasoning.default,
-            &spec.capabilities.reasoning,
-        )?;
-        {
-            let mut sessions = self.lock_sessions();
-            let record = sessions
-                .get_mut(&key)
-                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            match scope {
-                ReasoningScope::Session => record.reasoning = Some(reasoning),
-                ReasoningScope::Message => record.pending_reasoning = Some(reasoning),
-            }
-        }
-        self.persist(&key).await?;
-        Ok(Box::pin(futures_util::stream::empty()))
     }
 
     async fn steer(
@@ -2865,86 +2464,6 @@ impl Service {
             ))),
             Err(ServiceError::Unsupported(_)) => Ok(None),
             Err(error) => Err(error),
-        }
-    }
-
-    async fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
-        {
-            let mut lock = self.lock_sessions();
-            let record = lock
-                .get_mut(key)
-                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            record.title = Some(title.to_owned());
-        }
-        self.persist(key).await
-    }
-
-    async fn delete(&self, key: &SessionKey) -> Result<(), ServiceError> {
-        self.lock_sessions()
-            .remove(key)
-            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-        self.directory.delete_session(key.as_str()).await?;
-        Ok(())
-    }
-
-    fn require_record(
-        &self,
-        key: &SessionKey,
-    ) -> Result<(SessionId, ModelSpec, norte_code_protocol::Phase), ServiceError> {
-        self.lock_sessions()
-            .get(key)
-            .map(|record| (record.id, record.spec.clone(), record.phase))
-            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))
-    }
-
-    fn lock_sessions(&self) -> MutexGuard<'_, BTreeMap<SessionKey, SessionRecord>> {
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Consumes the pending overrides this turn started with, without removing
-    /// entries a concurrent `SetReasoning` or `Steer` appended after the turn
-    /// read them.
-    fn clear_pending(
-        &self,
-        key: &SessionKey,
-        pending_reasoning: Option<&ProtocolReasoning>,
-        pending_steers: &[Steered],
-    ) {
-        let mut sessions = self.lock_sessions();
-        let Some(record) = sessions.get_mut(key) else {
-            return;
-        };
-        if let Some(pending) = pending_reasoning
-            && record.pending_reasoning.as_ref() == Some(pending)
-        {
-            record.pending_reasoning = None;
-        }
-        if !pending_steers.is_empty() && record.pending_steers.starts_with(pending_steers) {
-            record.pending_steers.drain(..pending_steers.len());
-        }
-    }
-
-    /// Drops the durable copy of the steering messages the engine applied.
-    ///
-    /// The messages are named, so the copy that goes is the one that was
-    /// applied and not a message that arrived after it.
-    async fn clear_applied_steers(&self, key: &SessionKey, applied: &[Steered]) {
-        if applied.is_empty() {
-            return;
-        }
-        {
-            let mut sessions = self.lock_sessions();
-            let Some(record) = sessions.get_mut(key) else {
-                return;
-            };
-            record.pending_steers.retain(|steered| {
-                !applied
-                    .iter()
-                    .any(|done| done.id == steered.id && done.text == steered.text)
-            });
-        }
-        if let Err(error) = self.persist(key).await {
-            tracing::warn!(%error, "could not store the applied steering messages");
         }
     }
 
