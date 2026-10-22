@@ -31,6 +31,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `scripts/install.sh` installs the CLI from the latest release: it picks the
+  binary for the system, checks its checksum and puts it in `$PREFIX/bin`.
+  The release workflow publishes a binary per platform and the checksums that
+  go with them.
 - Every request can carry extra headers. `openrouter` gets the attribution
   headers by default (`HTTP-Referer`, `X-OpenRouter-Title`,
   `X-OpenRouter-Categories`), so the app shows up in OpenRouter's rankings,
