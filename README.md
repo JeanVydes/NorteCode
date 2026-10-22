@@ -71,6 +71,16 @@ The full schema also covers the catalogue cache, compaction, retries,
 reasoning, approval rules, budgets, the command sandbox, skills and per-model
 capability overrides.
 
+## Installing
+
+```sh
+curl -fsSL https://norte.vyde.dev/install.sh | sh
+```
+
+The installer picks the binary for the system, checks its checksum and puts it
+in `$PREFIX/bin` (`$HOME/.local` by default). `NORTE_VERSION` picks a
+release, `PREFIX` and `NORTE_INSTALL` pick where it lands.
+
 ## Building
 
 ```sh
