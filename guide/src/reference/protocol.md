@@ -72,6 +72,10 @@ message; the engine reports it with `SteerApplied`, which carries the names it
 applied. Whatever the turn never reached waits for the next turn boundary,
 where the service delivers it.
 
+A host that registers its own interceptor may end a turn on purpose. The engine
+reports it with `TurnStopped`, which carries the reason; the turn ends without
+committing and the client reads it as a decision, not as a failure.
+
 ## Events
 
 | Event | Purpose |

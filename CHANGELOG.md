@@ -31,6 +31,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Service::with_interceptor` registers an interceptor the engine consults at
+  the safe points of a turn. It may add messages to the history or stop the
+  turn with a reason, which the client hears as `TurnStopped`: a decision, not
+  a failure.
 - `xhigh` and `max` are first-class reasoning efforts. The catalogue values map
   to Norte's new variants, `--reasoning` and the config accept them without
   collapsing to `high`, and validation still rejects them for a model that does

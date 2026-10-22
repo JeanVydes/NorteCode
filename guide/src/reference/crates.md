@@ -35,6 +35,9 @@ norte-code-cli ──► norte-code-agent ──► norte
 ## Public entry points
 
 - `norte_code_agent::Service`
+  - `with_interceptor` registers a host interceptor: the engine consults it at
+    the safe points of a turn, and it may add messages to the history or stop
+    the turn with a reason, which the client hears as `TurnStopped`.
 - `norte_code_agent::EventStream`
 - `norte_code_agent::ModelFactory`, `ModelSpec`, `VendorModels`, `Wire`
 - `norte_code_agent::effective_reasoning`, `model_list`, `PromptSize`
