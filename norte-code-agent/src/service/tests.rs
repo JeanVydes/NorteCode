@@ -1,6 +1,8 @@
 use super::compaction::recent_start;
+use super::mapping::retry_plan;
+use super::sandbox::sandbox_name;
 use super::*;
-use norte::Role;
+use norte::{FinishReason, Role};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -8,11 +10,16 @@ use crate::provider::Wire;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use norte::{
-    CallId, Capabilities, InMemoryBlobStore, InMemoryStore, ModelId, ModelRef, ModelRequest,
-    ModelStream, ProviderErrorKind, ProviderId, Reasoning as ReasoningCapability, ReasoningEffort,
+    CallId, Capabilities, InMemoryBlobStore, InMemoryStore, Interception, InterceptionContext,
+    ModelId, ModelRef, ModelRequest, ModelStream, ProviderErrorKind, ProviderId,
+    Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
+    TurnInterceptor, Usage,
 };
 use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
-use norte_code_protocol::{BudgetUnit, ClientRequest, ClientRequestKind, Delta, ReasoningScope};
+use norte_code_protocol::{
+    Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, Reasoning as ProtocolReasoning,
+    ReasoningScope,
+};
 use norte_code_store_sqlite::SqliteStore;
 use norte_testing::ScriptedModel;
 use norte_tools::CommandRequest;
@@ -1552,6 +1559,88 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
         .any(|event| matches!(event.kind, ServerEventKind::CompactionStarted { .. }));
     assert!(compacted, "the boundary compacted");
     assert!(changed, "and the queued switch was reported too");
+}
+
+/// An interceptor that stops the turn, the way a host's own policy would.
+struct Stopper {
+    reason: String,
+}
+
+#[async_trait]
+impl TurnInterceptor for Stopper {
+    fn name(&self) -> &'static str {
+        "stopper"
+    }
+
+    async fn intercept(&self, _context: &InterceptionContext<'_>) -> norte::Result<Interception> {
+        Ok(Interception::Stop {
+            reason: self.reason.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("never"));
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service")
+        .with_interceptor(Arc::new(Stopper {
+            reason: "the host said no".to_owned(),
+        })),
+    );
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let stopped = events.iter().find_map(|event| match &event.kind {
+        ServerEventKind::TurnStopped { reason } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        stopped.as_deref(),
+        Some("the host said no"),
+        "the client hears why the turn ended"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )),
+        "and the turn ends with nothing committed"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::Error { .. })),
+        "a deliberate stop is not a failure"
+    );
+    assert_eq!(model.request_count(), 0, "the turn made no request");
 }
 
 #[tokio::test]
