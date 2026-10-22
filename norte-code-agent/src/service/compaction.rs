@@ -1,4 +1,7 @@
 //! Compaction trigger, layer and history helpers.
+//!
+//! A compaction rewrites a long transcript as a handoff summary and seeds a
+//! fresh Norte session with it, so the context keeps fitting the window.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +11,281 @@ use norte::{
     Continuation, EngineEvent, Layer, LayerContext, Message, ModelRequest, ModelStream,
     Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role, ShortCircuitReason,
 };
+use norte_code_protocol::{ServerEvent, ServerEventKind, SessionKey};
+
+use super::mapping::reported_cost;
+use super::{CostRecord, ModelSpec, Service, ServiceError};
+
+impl Service {
+    /// Checks whether the session has crossed the automatic compaction
+    /// threshold at a turn boundary. Eager mode uses [`CompactionGate`] to make
+    /// the same decision before a model request inside a turn.
+    #[allow(clippy::cast_precision_loss)]
+    pub(super) async fn compaction_due(
+        &self,
+        key: &SessionKey,
+        spec: &ModelSpec,
+        nid: norte::SessionId,
+    ) -> Result<bool, ServiceError> {
+        if !self.config.compaction.enabled {
+            return Ok(false);
+        }
+        if self
+            .lock_sessions()
+            .get(key)
+            .is_none_or(|record| record.compacting)
+        {
+            return Ok(false);
+        }
+        let Some(max_context) = spec.capabilities.max_context else {
+            return Ok(false);
+        };
+        let engine = self.engine(spec)?;
+        let state = engine.session(nid).await?;
+        if state.phase != norte::Phase::Idle {
+            return Ok(false);
+        }
+        let history = engine.history(nid).await?;
+        let baseline = self
+            .lock_sessions()
+            .get(key)
+            .map_or(0, |record| record.compaction_baseline);
+        if history.len() <= baseline
+            || history.len() <= self.config.compaction.keep_recent.saturating_add(1)
+        {
+            return Ok(false);
+        }
+        let used = used_context(&history);
+        Ok(used as f64 >= max_context as f64 * self.config.compaction.threshold)
+    }
+
+    /// Runs one compaction and reports its events, including a failure.
+    pub(super) async fn perform_compaction(
+        &self,
+        request_id: u64,
+        key: &SessionKey,
+        reason: &str,
+    ) -> Result<Vec<ServerEvent>, ServiceError> {
+        if !self.begin_compaction(key) {
+            return Err(ServiceError::Compaction(
+                "another compaction is already running".to_owned(),
+            ));
+        }
+        let result = self.compact_core(key).await;
+        self.end_compaction(key);
+        let mut events = vec![ServerEvent::new(
+            request_id,
+            Some(key.clone()),
+            ServerEventKind::CompactionStarted {
+                reason: reason.to_owned(),
+            },
+        )];
+        match result {
+            Ok((_old, new)) => events.push(ServerEvent::new(
+                request_id,
+                Some(key.clone()),
+                ServerEventKind::CompactionFinished {
+                    compacted: true,
+                    north_session: Some(new.to_string()),
+                    error: None,
+                },
+            )),
+            Err(error) => {
+                events.push(ServerEvent::new(
+                    request_id,
+                    Some(key.clone()),
+                    ServerEventKind::CompactionFinished {
+                        compacted: false,
+                        north_session: None,
+                        error: Some(error.to_string()),
+                    },
+                ));
+            }
+        }
+        Ok(events)
+    }
+
+    fn begin_compaction(&self, key: &SessionKey) -> bool {
+        let mut sessions = self.lock_sessions();
+        let Some(record) = sessions.get_mut(key) else {
+            return false;
+        };
+        if record.compacting {
+            return false;
+        }
+        record.compacting = true;
+        true
+    }
+
+    fn end_compaction(&self, key: &SessionKey) {
+        if let Some(record) = self.lock_sessions().get_mut(key) {
+            record.compacting = false;
+        }
+    }
+}
+
+impl Service {
+    /// The client-facing manual compaction, as a stream of events.
+    pub(super) async fn compact_event_stream(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        let events = self.perform_compaction(request_id, &key, "manual").await?;
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    /// The algorithm: summarise with the old transcript as the prefix, then
+    /// seed a fresh Norte session with the summary, the todo list and the last
+    /// `keep_recent` messages. The old session is never modified.
+    pub(super) async fn compact_core(
+        &self,
+        key: &SessionKey,
+    ) -> Result<(norte::SessionId, norte::SessionId), ServiceError> {
+        let (old, spec, _) = self.require_record(key)?;
+        let engine = self.engine(&spec)?;
+        let state = engine.session(old).await?;
+        if state.phase != norte::Phase::Idle {
+            return Err(ServiceError::Compaction(
+                "the Norte session is not idle; resolve the turn first".to_owned(),
+            ));
+        }
+        let history = engine.history(old).await?;
+        let conversation: Vec<Message> = history
+            .iter()
+            .filter(|message| message.role != Role::System)
+            .cloned()
+            .collect();
+        if conversation.is_empty() {
+            return Err(ServiceError::Compaction(
+                "there is no conversation to compact yet".to_owned(),
+            ));
+        }
+        let summary_spec = self.summary_spec(&spec)?;
+        let book = self.budget_book(key).await?;
+        let summary_engine = self.engine_with_budget(&summary_spec, Some(book), None)?;
+        let scratch = summary_engine.create().await?;
+        let mut request_messages = history.clone();
+        request_messages.push(Message::user(SUMMARY_PROMPT));
+        summary_engine
+            .append_history(scratch.id, request_messages)
+            .await?;
+        let reasoning = compaction_reasoning(
+            &summary_spec.capabilities.reasoning,
+            &self.config.compaction.reasoning,
+        );
+        let outcome = summary_engine
+            .turn(scratch.id)
+            .reasoning(reasoning)
+            .tools(std::iter::empty::<norte::ToolName>())
+            .start()
+            .finish()
+            .await?;
+        let message = outcome.message.ok_or_else(|| {
+            ServiceError::Compaction("the summary request committed no message".to_owned())
+        })?;
+        let summary = message.text();
+        if summary.trim().is_empty() {
+            return Err(ServiceError::Compaction(
+                "the model returned an empty summary".to_owned(),
+            ));
+        }
+        self.record_summary_usage(key, scratch.id, state.turn, &message)
+            .await?;
+        let start = recent_start(&conversation, self.config.compaction.keep_recent);
+        let recent = conversation[start..].to_vec();
+        let fresh = engine.create().await?;
+        let mut seed = vec![
+            Message::system(self.system_prompt.clone()),
+            Message::system(self.runtime_context(&spec)),
+        ];
+        seed.push(Message::user(format!(
+            "Summary of the earlier conversation, produced by Norte Code. Treat it as \
+             context, not as a new request:\n\n{summary}"
+        )));
+        let todos = self.todo.text(Some(old));
+        if !todos.starts_with("(the task list is empty)") {
+            seed.push(Message::user(format!("Current task list:\n{todos}")));
+        }
+        seed.extend(recent);
+        engine.append_history(fresh.id, seed).await?;
+        let seeded = engine.history(fresh.id).await?.len();
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.id = fresh.id;
+            record.compacted_from = Some(old);
+            record.billed = seeded;
+            record.compaction_baseline = seeded;
+            record.phase = norte_code_protocol::Phase::Idle;
+            self.approval_rules
+                .load_session(fresh.id, &record.denied_tools, &record.allowed_tools);
+        }
+        self.todo.carry(old, fresh.id);
+        self.persist(key).await?;
+        Ok((old, fresh.id))
+    }
+
+    fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
+        match &self.config.compaction.model {
+            Some(reference) => {
+                ModelSpec::from_catalog(&self.config, &self.catalog(), reference, None)
+            }
+            None => Ok(session.clone()),
+        }
+    }
+
+    /// The cost the summary of a compaction reported.
+    pub(super) async fn record_summary_usage(
+        &self,
+        key: &SessionKey,
+        scratch: norte::SessionId,
+        turn: u64,
+        message: &Message,
+    ) -> Result<(), ServiceError> {
+        let Some(origin) = &message.origin else {
+            return Ok(());
+        };
+        for record in self.telemetry_for(key, scratch) {
+            self.record_request(key, &record).await;
+        }
+        let cost = reported_cost(&origin.usage);
+        let index = {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.requests += 1;
+            record.cost += cost.unwrap_or(0.0);
+            if cost.is_none() {
+                record.unpriced += 1;
+            }
+            record.input_tokens += origin.usage.input_tokens.unwrap_or(0);
+            record.output_tokens += origin.usage.output_tokens.unwrap_or(0);
+            record.requests
+        };
+        let ledger = CostRecord {
+            session: key.to_string(),
+            turn,
+            index,
+            model: origin.model.to_string(),
+            input_tokens: origin.usage.input_tokens,
+            output_tokens: origin.usage.output_tokens,
+            reasoning_tokens: origin.usage.reasoning_tokens,
+            cache_read_tokens: origin.usage.cache_read_tokens,
+            cache_write_tokens: origin.usage.cache_write_tokens,
+            cost_usd: cost,
+            recorded_at: chrono::Utc::now(),
+        };
+        self.directory.record_cost(&ledger).await?;
+        self.budget_notices(key, &ledger, true);
+        self.persist(key).await?;
+        Ok(())
+    }
+}
 
 /// The instruction that turns the old transcript into a handoff summary.
 pub(super) const SUMMARY_PROMPT: &str = "\
