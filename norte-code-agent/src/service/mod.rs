@@ -55,7 +55,7 @@ use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 
-use self::steering::{SteerInbox, SteeringInterceptor};
+use self::steering::{Steered, Steering, SteeringInterceptor};
 use approvals::{ApprovalModePolicy, ApprovalRules};
 use compaction::{
     COMPACTION_SAFE_POINT, CompactionGate, CompactionLayer, SUMMARY_PROMPT, compaction_reasoning,
@@ -133,7 +133,7 @@ struct SessionRecord {
     /// A reasoning override for the next turn only.
     pending_reasoning: Option<ProtocolReasoning>,
     /// Messages queued for the next turn boundary, in arrival order.
-    pending_steers: Vec<String>,
+    pending_steers: Vec<Steered>,
 }
 
 /// Live counters for the turn in flight.
@@ -179,9 +179,8 @@ pub struct Service {
     activity: Arc<ToolActivity>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
-    /// The inbox of every running turn, so a steering message reaches the
-    /// request already in flight.
-    steers: Mutex<BTreeMap<SessionKey, Arc<SteerInbox>>>,
+    /// The steering messages the running turns have not reached.
+    steering: Arc<Steering>,
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
@@ -311,7 +310,7 @@ impl Service {
             activity,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
-            steers: Mutex::new(BTreeMap::new()),
+            steering: Arc::new(Steering::default()),
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
             config_path: Mutex::new(norte_code_config::user_config_path()),
@@ -534,7 +533,7 @@ impl Service {
 
     /// Builds an engine for one spec over the shared stores.
     fn engine(&self, spec: &ModelSpec) -> Result<Engine, ServiceError> {
-        self.engine_with_budget(spec, None, None, Arc::new(SteerInbox::default()))
+        self.engine_with_budget(spec, None, None)
     }
 
     /// The runtime-awareness block stored when a session starts.
@@ -575,7 +574,6 @@ impl Service {
         spec: &ModelSpec,
         budget: Option<Arc<Mutex<BudgetBook>>>,
         compaction: Option<Arc<CompactionGate>>,
-        steering: Arc<SteerInbox>,
     ) -> Result<Engine, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
         let mut builder = EngineBuilder::new()
@@ -611,7 +609,9 @@ impl Service {
                 Arc::new(TelemetryObserver::new(Arc::clone(&self.telemetry)))
                     as Arc<dyn norte::Observer>,
             ])
-            .interceptors(vec![Arc::new(SteeringInterceptor::new(steering))]);
+            .interceptors(vec![Arc::new(SteeringInterceptor::new(Arc::clone(
+                &self.steering,
+            )))]);
         let mut layers: Vec<Arc<dyn Layer>> = Vec::new();
         if let Some(book) = budget {
             layers.push(Arc::new(BudgetLayer { book }));
@@ -978,7 +978,7 @@ impl Service {
                 self.answer_question(request_id, session, question, answer)
                     .await
             }
-            Kind::Steer { session, text } => self.steer(request_id, session, text).await,
+            Kind::Steer { session, text, id } => self.steer(request_id, session, text, id).await,
             Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
         }
     }
@@ -1445,12 +1445,7 @@ impl Service {
         }
         let summary_spec = self.summary_spec(&spec)?;
         let book = self.budget_book(key).await?;
-        let summary_engine = self.engine_with_budget(
-            &summary_spec,
-            Some(book),
-            None,
-            Arc::new(SteerInbox::default()),
-        )?;
+        let summary_engine = self.engine_with_budget(&summary_spec, Some(book), None)?;
         let scratch = summary_engine.create().await?;
         let mut request_messages = history.clone();
         request_messages.push(Message::user(SUMMARY_PROMPT));
@@ -1718,42 +1713,23 @@ impl Service {
             book
         };
         let gate = self.compaction_gate(&spec);
-        // The running turn reads the messages that reach the request in flight
-        // from this inbox; the service keeps the durable copy until the engine
-        // says it applied them.
-        let inbox = Arc::new(SteerInbox::default());
-        let engine = self.engine_with_budget(
-            &spec,
-            Some(Arc::clone(&book)),
-            gate.clone(),
-            Arc::clone(&inbox),
-        )?;
+        let engine = self.engine_with_budget(&spec, Some(Arc::clone(&book)), gate.clone())?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
         // Steering messages belong to the turn boundary that is starting now.
         // Norte drains its queue in arrival order before the new input, so keep
         // the original order when a resume has no input of its own.
         // The steering messages belong to the turn boundary that is starting
-        // now. An idle session drains them before its own input, so they keep
-        // their arrival order; a parked one still owes a tool result, so they
-        // wait for the request that follows it and reach the turn through the
-        // interceptor.
-        let idle = state.phase == norte::Phase::Idle;
-        if idle {
-            for text in &pending_steers {
-                engine.steer(nid, Message::user(text.clone())).await?;
-            }
-        } else {
-            for text in &pending_steers {
-                inbox.push(text.clone());
+        // now. The interceptor takes them before the turn's input, so they keep
+        // their arrival order; a message the engine already holds is not
+        // queued twice.
+        for steered in &pending_steers {
+            if !self.steering.is_pending(nid, &steered.id) {
+                self.steering.push(nid, steered.clone());
             }
         }
-        // The engine holds the messages it drained, so their durable copy goes;
-        // the ones waiting for the interceptor keep theirs until it applies
-        // them.
-        let drained: &[String] = if idle { &pending_steers[..] } else { &[] };
-        if pending_reasoning.is_some() || !drained.is_empty() {
-            self.clear_pending(&key, pending_reasoning.as_ref(), drained);
+        if pending_reasoning.is_some() {
+            self.clear_pending(&key, pending_reasoning.as_ref(), &[]);
             self.persist(&key).await?;
         }
         // A resumable park: after a restart the engine will not re-emit the
@@ -1785,11 +1761,9 @@ impl Service {
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
         let notify = Arc::new(Notify::new());
         self.lock_cancels().insert(key.clone(), notify.clone());
-        self.lock_steers().insert(key.clone(), Arc::clone(&inbox));
 
         let this = Arc::clone(self);
         let task_key = key.clone();
-        let task_inbox = Arc::clone(&inbox);
         tokio::spawn(async move {
             let result = this
                 .run_turn(
@@ -1817,15 +1791,6 @@ impl Service {
                     .await;
             }
             this.lock_cancels().remove(&task_key);
-            // Only drop the inbox when it is still this turn's: a resumed turn
-            // installs its own.
-            let mut steers = this.lock_steers();
-            if steers
-                .get(&task_key)
-                .is_some_and(|current| Arc::ptr_eq(current, &task_inbox))
-            {
-                steers.remove(&task_key);
-            }
         });
 
         Ok(Box::pin(
@@ -2047,12 +2012,7 @@ impl Service {
                     stats.input_tokens = record.input_tokens;
                     stats.output_tokens = record.output_tokens;
                 }
-                engine = self.engine_with_budget(
-                    &new_spec,
-                    budget.clone(),
-                    None,
-                    Arc::new(SteerInbox::default()),
-                )?;
+                engine = self.engine_with_budget(&new_spec, budget.clone(), None)?;
                 current_nid = new_nid;
                 input = None;
                 gate = None;
@@ -2337,8 +2297,10 @@ impl Service {
             EngineEvent::InterceptionApplied { messages, .. } => {
                 // The engine applied the steering messages, so the durable copy
                 // in the session is no longer pending.
-                self.clear_applied_steers(key, *messages).await;
-                Some(ServerEventKind::SteerApplied { count: *messages })
+                let applied = self.steering.applied(nid, *messages);
+                let ids: Vec<String> = applied.iter().map(|steered| steered.id.clone()).collect();
+                self.clear_applied_steers(key, &applied).await;
+                Some(ServerEventKind::SteerApplied { ids })
             }
             _ => None,
         };
@@ -2730,22 +2692,27 @@ impl Service {
         _request_id: u64,
         key: SessionKey,
         text: String,
+        id: String,
     ) -> Result<EventStream, ServiceError> {
-        // A running turn takes the message into the request already in flight.
-        // The durable copy stays in the session until the engine reports that
-        // it applied it, so a crash cannot lose it.
-        let live = self.lock_steers().get(&key).cloned();
+        // The message takes the request already in flight. The durable copy
+        // stays in the session until the engine reports that it applied it, so
+        // a crash cannot lose it.
+        let (nid, _, _) = self.require_record(&key)?;
+        let id = if id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            id
+        };
+        let steered = Steered::new(id.clone(), text);
         {
             let mut sessions = self.lock_sessions();
             let record = sessions
                 .get_mut(&key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            record.pending_steers.push(text.clone());
+            record.pending_steers.push(steered.clone());
         }
         self.persist(&key).await?;
-        if let Some(inbox) = live {
-            inbox.push(text);
-        }
+        self.steering.push(nid, steered);
         Ok(Box::pin(futures_util::stream::empty()))
     }
 
@@ -2941,7 +2908,7 @@ impl Service {
         &self,
         key: &SessionKey,
         pending_reasoning: Option<&ProtocolReasoning>,
-        pending_steers: &[String],
+        pending_steers: &[Steered],
     ) {
         let mut sessions = self.lock_sessions();
         let Some(record) = sessions.get_mut(key) else {
@@ -2959,11 +2926,10 @@ impl Service {
 
     /// Drops the durable copy of the steering messages the engine applied.
     ///
-    /// The messages the interceptor handed over are the oldest ones the
-    /// session still holds, so they go first. A message that arrived after
-    /// them stays pending for the next turn.
-    async fn clear_applied_steers(&self, key: &SessionKey, applied: usize) {
-        if applied == 0 {
+    /// The messages are named, so the copy that goes is the one that was
+    /// applied and not a message that arrived after it.
+    async fn clear_applied_steers(&self, key: &SessionKey, applied: &[Steered]) {
+        if applied.is_empty() {
             return;
         }
         {
@@ -2971,9 +2937,11 @@ impl Service {
             let Some(record) = sessions.get_mut(key) else {
                 return;
             };
-            record
-                .pending_steers
-                .drain(..applied.min(record.pending_steers.len()));
+            record.pending_steers.retain(|steered| {
+                !applied
+                    .iter()
+                    .any(|done| done.id == steered.id && done.text == steered.text)
+            });
         }
         if let Err(error) = self.persist(key).await {
             tracing::warn!(%error, "could not store the applied steering messages");
@@ -2984,10 +2952,6 @@ impl Service {
         self.budget_states
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn lock_steers(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<SteerInbox>>> {
-        self.steers.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Builds the budget state for a turn from the session and the day's ledger.

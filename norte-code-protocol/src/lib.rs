@@ -110,6 +110,11 @@ pub enum ClientRequestKind {
         session: SessionKey,
         /// The message.
         text: String,
+        /// A name for the message, so the client can tell it apart when the
+        /// engine reports it applied. An empty name is fine: the service names
+        /// it then.
+        #[serde(default)]
+        id: String,
     },
     /// Ask the running turn to stop.
     CancelTurn {
@@ -424,10 +429,10 @@ pub enum ServerEventKind {
         /// How many requests so far carried no cost.
         requests: u64,
     },
-    /// The engine applied steering messages to the request already in flight.
+    /// The engine applied a steering message to the request already in flight.
     SteerApplied {
-        /// How many messages reached the request.
-        count: usize,
+        /// The names of the messages that reached the request.
+        ids: Vec<String>,
     },
     /// The session's model changed.
     ModelChanged {
@@ -915,13 +920,15 @@ mod tests {
         let event = ServerEvent::new(
             1,
             Some(SessionKey::new("s")),
-            ServerEventKind::SteerApplied { count: 2 },
+            ServerEventKind::SteerApplied {
+                ids: vec!["one".to_owned()],
+            },
         );
         let json = serde_json::to_string(&event).expect("serialize");
         let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(
             back.kind,
-            ServerEventKind::SteerApplied { count: 2 }
+            ServerEventKind::SteerApplied { ids } if ids == ["one"]
         ));
     }
 

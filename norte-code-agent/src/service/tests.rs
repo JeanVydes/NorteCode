@@ -1337,6 +1337,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
         ClientRequestKind::Steer {
             session: key.clone(),
             text: "two".to_owned(),
+            id: String::new(),
         },
     )
     .await;
@@ -1385,6 +1386,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
         ClientRequestKind::Steer {
             session: key.clone(),
             text: "a".to_owned(),
+            id: String::new(),
         },
     )
     .await;
@@ -1393,6 +1395,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
         ClientRequestKind::Steer {
             session: key.clone(),
             text: "b".to_owned(),
+            id: String::new(),
         },
     )
     .await;
@@ -1450,6 +1453,7 @@ async fn reasoning_and_steering_survive_a_restart() {
         ClientRequestKind::Steer {
             session: key.clone(),
             text: "steered".to_owned(),
+            id: String::new(),
         },
     )
     .await;
@@ -3174,6 +3178,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
     let mut session = None;
     let mut asked = None;
     let mut steered = false;
+    let mut applied: Option<Vec<String>> = None;
     let mut finished = false;
     while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -3182,6 +3187,9 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
         session = session.or(event.session.clone());
         if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
             asked = Some(question.clone());
+        }
+        if let ServerEventKind::SteerApplied { ids } = &event.kind {
+            applied = Some(ids.clone());
         }
         if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
             finished = true;
@@ -3197,6 +3205,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
                     ClientRequestKind::Steer {
                         session: session.clone().expect("session"),
                         text: "also run the tests".to_owned(),
+                        id: "steer-1".to_owned(),
                     },
                 )
                 .await;
@@ -3217,6 +3226,11 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
     }
     assert!(finished, "the turn should finish after the answer");
     assert!(steered, "the steer should have been sent during the turn");
+    assert_eq!(
+        applied.as_deref(),
+        Some(&["steer-1".to_owned()][..]),
+        "the engine reports the message it applied, by name"
+    );
 
     let requests = model.requests();
     assert_eq!(requests.len(), 2, "the turn made two requests");

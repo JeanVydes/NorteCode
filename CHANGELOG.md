@@ -66,6 +66,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   turn never reached waits for the next turn boundary. The commands that make
   sense during a turn are handled straight away. The footer row that showed the
   queue now shows the command suggestion.
+- A steering message carries a name. The client may name it, the engine reports
+  the ones it applied with `SteerApplied`, and the service drops the durable
+  copy of exactly those. The client no longer counts messages to know whether
+  one of them landed.
 - `budget.action = "ask"` asks for a new limit in the interactive CLI. The turn
   stops uncommitted, the CLI prompts for a limit, and a new limit raises the
   budget and resumes the session. An empty answer leaves the session stopped

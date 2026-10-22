@@ -34,7 +34,7 @@ Code's stable id, not a Norte `SessionId`.
 | `RenameSession { session, title }` | Rename a session. |
 | `DeleteSession { session }` | Delete a session. |
 | `SendMessage { session, text, budget, reasoning }` | Start a turn; creates a session when `session` is `None`. |
-| `Steer { session, text }` | Steer a message into the running turn. |
+| `Steer { session, text, id }` | Steer a message into the running turn. The name is optional. |
 | `CancelTurn { session }` | Ask the running turn to stop. |
 | `Resume { session }` | Continue a parked or interrupted session. |
 | `Approve { session, approval, arguments, scope, remember }` | Approve a parked call. |
@@ -67,9 +67,10 @@ is not a turn boundary.
 
 `Steer` reaches the request the session is already making. The message is
 persisted and the engine appends it to the history before the next request of
-the running turn, so the model sees it in that request. The engine reports it
-with `SteerApplied`; whatever the turn never reached waits for the next turn
-boundary, where the session's queue delivers it.
+the running turn, so the model sees it in that request. The client may name the
+message; the engine reports it with `SteerApplied`, which carries the names it
+applied. Whatever the turn never reached waits for the next turn boundary,
+where the session's queue delivers it.
 
 ## Events
 
@@ -86,7 +87,7 @@ boundary, where the session's queue delivers it.
 | `BudgetWarning`, `BudgetExceeded`, `BudgetChanged` | Budget crossing and changes. |
 | `CostUpdated`, `CostNotReported` | Ledger totals and unpriced requests. |
 | `ModelChanged`, `ModelQueued`, `ReasoningDowngraded` | Model switches. `ModelQueued` says the switch is accepted and pending a turn boundary. The third is wire vocabulary for a host that clamps; this service refuses an incompatible setting instead. |
-| `SteerApplied` | The engine applied steering messages to the request already in flight. |
+| `SteerApplied` | The engine applied steering messages to the request already in flight, naming the ones it applied. |
 | `CatalogUpdated`, `ModelList` | Catalogue refresh and model list. |
 | `SkillList`, `SkillsUpdated` | Skill discovery and refresh. |
 | `GrantRevoked` | A grant was revoked. |

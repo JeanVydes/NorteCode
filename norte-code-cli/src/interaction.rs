@@ -530,20 +530,40 @@ async fn run_reasoning(
     }
 }
 
+/// Steers a message into the running turn and names it, so the client can
+/// tell it apart when the engine reports it applied.
 async fn steer_text(
     service: &Arc<Service>,
     session: SessionKey,
     text: String,
     style: Style,
     quiet: bool,
-) {
-    match drain_request(service, ClientRequestKind::Steer { session, text }).await {
-        Ok(events) => match stream_error(&events) {
-            Some(message) => eprintln!("{}", style.red(format!("could not steer: {message}"))),
-            None if !quiet => eprintln!("{}", style.dim("steered into the running turn")),
-            None => {}
+) -> Option<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let outcome = drain_request(
+        service,
+        ClientRequestKind::Steer {
+            session,
+            text,
+            id: id.clone(),
         },
-        Err(error) => eprintln!("{}", style.red(format!("could not steer: {error}"))),
+    )
+    .await;
+    match outcome {
+        Ok(events) => {
+            if let Some(message) = stream_error(&events) {
+                eprintln!("{}", style.red(format!("could not steer: {message}")));
+                return None;
+            }
+            if !quiet {
+                eprintln!("{}", style.dim("steered into the running turn"));
+            }
+            Some(id)
+        }
+        Err(error) => {
+            eprintln!("{}", style.red(format!("could not steer: {error}")));
+            None
+        }
     }
 }
 
@@ -919,11 +939,10 @@ pub(crate) async fn drive_turns(
     let mut current: Option<SessionKey> = None;
     let mut parked = false;
     let mut cancel_requested = false;
-    // Text the human typed while a turn was running. The service applies it to
-    // the request in flight; what the turn did not reach waits for the next
-    // turn boundary, and the loop below starts that boundary.
-    let mut steered = 0usize;
-    let mut applied = 0usize;
+    // The steering messages the human sent while the turn was running. The
+    // service applies them to the request in flight and names them when it
+    // does; the ones still waiting need the next turn to start.
+    let mut steered: Vec<String> = Vec::new();
     // Whether the last turn closed normally. A cancelled or budget-stopped
     // turn leaves the session in a state a resume cannot pick up.
     let mut committed = false;
@@ -991,8 +1010,12 @@ pub(crate) async fn drive_turns(
                             Some(Err(message)) => eprintln!("{}", style.yellow(message)),
                             None => {
                                 if let Some(session) = current.clone() {
-                                    steer_text(service, session, text, style, renderer.quiet).await;
-                                    steered += 1;
+                                    if let Some(id) =
+                                        steer_text(service, session, text, style, renderer.quiet)
+                                            .await
+                                    {
+                                        steered.push(id);
+                                    }
                                 } else {
                                     eprintln!(
                                         "{}",
@@ -1023,7 +1046,9 @@ pub(crate) async fn drive_turns(
                         parked = *phase == Phase::AwaitingApproval;
                         committed = *done;
                     }
-                    ServerEventKind::SteerApplied { count } => applied += *count,
+                    ServerEventKind::SteerApplied { ids } => {
+                        steered.retain(|id| !ids.contains(id));
+                    }
                     _ => {}
                 }
                 match ask_approval(&event, style, input.as_deref_mut(), &mut interrupt_rx).await? {
@@ -1148,35 +1173,32 @@ pub(crate) async fn drive_turns(
         // The human steered text while the turn was running. The service
         // applies it to the request in flight; what the turn never reached
         // waits for the next turn boundary, so that boundary has to start.
-        if steered > applied {
-            steered = 0;
-            applied = 0;
-            let Some(session) = current.clone() else {
-                break;
-            };
-            if parked || renderer.budget_stopped || !committed {
+        if steered.is_empty() {
+            continue;
+        }
+        let Some(session) = current.clone() else {
+            break;
+        };
+        if parked || renderer.budget_stopped || !committed {
+            break;
+        }
+        steered.clear();
+        let request = ClientRequest {
+            request_id: 0,
+            kind: ClientRequestKind::Resume { session },
+        };
+        match service.submit(request).await {
+            Ok(next) => {
+                renderer.mark_working();
+                streams.push_back(next);
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    style.yellow(format!("warning: could not apply the steer: {error}"))
+                );
                 break;
             }
-            let request = ClientRequest {
-                request_id: 0,
-                kind: ClientRequestKind::Resume { session },
-            };
-            match service.submit(request).await {
-                Ok(next) => {
-                    renderer.mark_working();
-                    streams.push_back(next);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "{}",
-                        style.yellow(format!("warning: could not apply the steer: {error}"))
-                    );
-                    break;
-                }
-            }
-        } else {
-            steered = 0;
-            applied = 0;
         }
     }
     Ok(DriveOutcome {

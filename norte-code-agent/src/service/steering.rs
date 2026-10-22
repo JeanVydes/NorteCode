@@ -1,35 +1,107 @@
 //! Live steering: a message that reaches the request already in flight.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use norte::{InterceptionContext, Message, Result, TurnInterceptor};
+use norte::{Interception, InterceptionContext, Message, Result, SessionId, TurnInterceptor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// The inbox a running turn reads its steering messages from.
-///
-/// The queue of the session is a durable field, so a message written to it
-/// while a turn runs cannot be committed without racing that turn. This inbox
-/// is the other half: the running turn takes the message from here and commits
-/// it itself, and the service keeps the durable copy until the engine says it
-/// applied it.
-#[derive(Debug, Default)]
-pub(super) struct SteerInbox {
-    messages: Mutex<VecDeque<String>>,
+/// A steering message on its way to the model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct Steered {
+    /// The name the client gave the message, or the one the service made.
+    pub(super) id: String,
+    /// The text the model reads.
+    pub(super) text: String,
 }
 
-impl SteerInbox {
-    /// Queues a message for the next request of the running turn.
-    pub(super) fn push(&self, text: String) {
-        self.lock().push_back(text);
+impl Steered {
+    /// A message with a name.
+    pub(super) fn new(id: String, text: String) -> Self {
+        Self { id, text }
+    }
+}
+
+impl<'de> Deserialize<'de> for Steered {
+    /// Reads a message, accepting the older shape where it was only text.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Shape {
+            Named { id: String, text: String },
+            Text(String),
+        }
+        Ok(match Shape::deserialize(deserializer)? {
+            Shape::Named { id, text } => Self { id, text },
+            Shape::Text(text) => Self {
+                id: String::new(),
+                text,
+            },
+        })
+    }
+}
+
+/// The steering messages the running turns of the sessions have not reached.
+///
+/// The interceptor owns this state: the service hands it the messages and the
+/// engine takes them at the safe points of a turn. Nothing else has to know
+/// whether a turn is running.
+#[derive(Debug, Default)]
+pub(super) struct Steering {
+    /// Waiting for the engine to take them.
+    pending: Mutex<BTreeMap<SessionId, VecDeque<Steered>>>,
+    /// Handed to the engine, waiting for the report that they were applied.
+    applied: Mutex<BTreeMap<SessionId, VecDeque<Steered>>>,
+}
+
+impl Steering {
+    /// Queues a message for the session. The next turn of that session takes
+    /// it, before its own input.
+    pub(super) fn push(&self, session: SessionId, message: Steered) {
+        self.pending()
+            .entry(session)
+            .or_default()
+            .push_back(message);
     }
 
-    /// Takes the queued messages, oldest first.
-    pub(super) fn take(&self) -> Vec<String> {
-        self.lock().drain(..).collect()
+    /// Whether the session is already waiting for this message.
+    pub(super) fn is_pending(&self, session: SessionId, id: &str) -> bool {
+        self.pending()
+            .get(&session)
+            .is_some_and(|queue| queue.iter().any(|message| message.id == id))
     }
 
-    fn lock(&self) -> MutexGuard<'_, VecDeque<String>> {
-        self.messages.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Takes the messages the engine has not reached, oldest first.
+    pub(super) fn take(&self, session: SessionId) -> Vec<Steered> {
+        let taken: VecDeque<Steered> = self.pending().remove(&session).unwrap_or_default();
+        if !taken.is_empty() {
+            self.applied_queue()
+                .entry(session)
+                .or_default()
+                .extend(taken.iter().cloned());
+        }
+        taken.into_iter().collect()
+    }
+
+    /// The messages the engine reported as applied, oldest first.
+    pub(super) fn applied(&self, session: SessionId, count: usize) -> Vec<Steered> {
+        let mut applied = self.applied_queue();
+        let Some(queue) = applied.get_mut(&session) else {
+            return Vec::new();
+        };
+        let count = count.min(queue.len());
+        queue.drain(..count).collect()
+    }
+
+    fn pending(&self) -> MutexGuard<'_, BTreeMap<SessionId, VecDeque<Steered>>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn applied_queue(&self) -> MutexGuard<'_, BTreeMap<SessionId, VecDeque<Steered>>> {
+        self.applied.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -39,13 +111,13 @@ impl SteerInbox {
 /// in the request digest and in what the policies read, and it reaches the
 /// request that is already in flight instead of waiting for the next turn.
 pub(super) struct SteeringInterceptor {
-    inbox: Arc<SteerInbox>,
+    steering: Arc<Steering>,
 }
 
 impl SteeringInterceptor {
-    /// Builds an interceptor that reads the given inbox.
-    pub(super) fn new(inbox: Arc<SteerInbox>) -> Self {
-        Self { inbox }
+    /// Builds an interceptor that reads the given steering state.
+    pub(super) fn new(steering: Arc<Steering>) -> Self {
+        Self { steering }
     }
 }
 
@@ -55,7 +127,17 @@ impl TurnInterceptor for SteeringInterceptor {
         "steering"
     }
 
-    async fn intercept(&self, _context: &InterceptionContext<'_>) -> Result<Vec<Message>> {
-        Ok(self.inbox.take().into_iter().map(Message::user).collect())
+    async fn intercept(&self, context: &InterceptionContext<'_>) -> Result<Interception> {
+        let messages: Vec<Message> = self
+            .steering
+            .take(context.session)
+            .into_iter()
+            .map(|steered| Message::user(steered.text))
+            .collect();
+        if messages.is_empty() {
+            Ok(Interception::Continue)
+        } else {
+            Ok(Interception::Inject(messages))
+        }
     }
 }
