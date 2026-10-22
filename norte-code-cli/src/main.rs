@@ -44,7 +44,7 @@ use prompt::{compose_selection, parse_selection};
 #[cfg(test)]
 use render::budget_label;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

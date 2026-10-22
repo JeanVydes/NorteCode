@@ -31,6 +31,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The telemetry report shows the time to the first token (average and p95), the
+  reasoning tokens the provider reported, and how many providers served a slice
+  that mixes them. `--json` carries the same numbers.
 - `Service::with_interceptor` registers an interceptor the engine consults at
   the safe points of a turn. It may add messages to the history or stop the
   turn with a reason, which the client hears as `TurnStopped`: a decision, not

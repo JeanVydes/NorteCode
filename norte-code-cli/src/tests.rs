@@ -4,10 +4,83 @@ use super::{
     cost_summary, parse_approval_choice, parse_approval_command, parse_reasoning_setting,
     parse_selection, select_system_prompt,
 };
+use crate::commands::RequestSummary;
+use chrono::{DateTime, Utc};
 use clap::Parser;
 use norte_code_config::Config;
 use norte_code_cost::CostSummary;
 use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
+use norte_code_store_sqlite::RequestRecord;
+
+/// A request row for the telemetry tests.
+fn telemetry_record(
+    provider: &str,
+    model: &str,
+    first_token_ms: Option<u64>,
+    reasoning_tokens: Option<u64>,
+) -> RequestRecord {
+    RequestRecord {
+        id: "id".to_owned(),
+        session: "session".to_owned(),
+        north_session: "north".to_owned(),
+        turn: 1,
+        provider: provider.to_owned(),
+        model: model.to_owned(),
+        started_at: DateTime::<Utc>::from_timestamp(0, 0).expect("epoch"),
+        duration_ms: 1_000,
+        first_token_ms,
+        last_token_ms: None,
+        input_tokens: Some(100),
+        output_tokens: Some(10),
+        reasoning_tokens,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
+        estimated_input_tokens: None,
+        cache_hit: false,
+        tool_calls: Vec::new(),
+        reasoning: None,
+        params: serde_json::Value::Null,
+        extensions: serde_json::Value::Null,
+        metadata: serde_json::Value::Null,
+        cost_usd: Some(0.01),
+        finish_reason: None,
+        status: "ok".to_owned(),
+        error: None,
+        sandbox: false,
+        sandbox_network: false,
+    }
+}
+
+#[test]
+fn the_telemetry_line_shows_the_first_token_the_reasoning_and_the_provider() {
+    let mut summary = RequestSummary::default();
+    summary.add(&telemetry_record("openai", "gpt-5", Some(300), Some(120)));
+    summary.add(&telemetry_record("anthropic", "claude", Some(900), None));
+
+    let line = summary.line();
+    assert!(line.contains("ttft 600ms avg / 900ms p95"), "{line}");
+    assert!(line.contains("120 reasoning"), "{line}");
+    assert!(line.contains("2 providers"), "{line}");
+
+    let json = summary.json();
+    assert_eq!(json["average_ttft_ms"], 600);
+    assert_eq!(json["p95_ttft_ms"], 900);
+    assert_eq!(json["reasoning_tokens"], 120);
+    assert_eq!(
+        json["providers"],
+        serde_json::json!(["anthropic", "openai"])
+    );
+}
+
+#[test]
+fn the_telemetry_line_of_one_provider_does_not_name_it() {
+    let mut summary = RequestSummary::default();
+    summary.add(&telemetry_record("openai", "gpt-5", Some(300), None));
+
+    let line = summary.line();
+    assert!(line.contains("ttft 300ms avg / 300ms p95"), "{line}");
+    assert!(!line.contains("providers"), "{line}");
+}
 
 #[test]
 fn sandbox_flags_override_the_config_and_respect_the_network() {

@@ -116,7 +116,10 @@ norte-code telemetry [OPTIONS]
 | `--json` | One JSON object. |
 
 Telemetry is local request data: counts, tokens, cache, tools, latency and
-status. It is not the money ledger.
+status. It is not the money ledger. The report shows the time each request
+took to reach its first token (`ttft`, average and p95), the reasoning tokens
+the provider reported, and how many providers served the slice when it mixes
+them; `--json` carries the same numbers.
 
 ## Chat commands
 

@@ -1,7 +1,7 @@
 //! Non-interactive subcommands and shared configuration loading.
 
 use super::{
-    BTreeMap, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
+    BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
     LoadOptions, PathBuf, RequestRecord, SessionDirectory, SessionsArgs, SkillRegistry, SkillsArgs,
     SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session, by_turn,
     cache_dir, discovery_roots, find_project_config, human_tokens, list_models, load_catalog,
@@ -252,7 +252,7 @@ pub(crate) fn cost_summary(summary: &CostSummary) -> String {
 
 /// Counts and sums one slice of the request telemetry.
 #[derive(Default, Clone)]
-struct RequestSummary {
+pub(crate) struct RequestSummary {
     requests: u64,
     input_tokens: u64,
     output_tokens: u64,
@@ -266,10 +266,15 @@ struct RequestSummary {
     errors: u64,
     cancelled: u64,
     durations: Vec<u64>,
+    /// The time each request took to reach its first token.
+    ttfts: Vec<u64>,
+    /// The providers that served the requests, so a slice that mixes them says
+    /// so.
+    providers: BTreeSet<String>,
 }
 
 impl RequestSummary {
-    fn add(&mut self, record: &RequestRecord) {
+    pub(crate) fn add(&mut self, record: &RequestRecord) {
         self.requests += 1;
         self.input_tokens += record.input_tokens.unwrap_or(0);
         self.output_tokens += record.output_tokens.unwrap_or(0);
@@ -289,6 +294,10 @@ impl RequestSummary {
             _ => self.errors += 1,
         }
         self.durations.push(record.duration_ms);
+        if let Some(first_token) = record.first_token_ms {
+            self.ttfts.push(first_token);
+        }
+        self.providers.insert(record.provider.clone());
     }
 
     fn average_ms(&self) -> u64 {
@@ -307,6 +316,25 @@ impl RequestSummary {
         self.durations[index]
     }
 
+    /// The average time the requests took to reach their first token.
+    fn average_ttft_ms(&self) -> u64 {
+        if self.ttfts.is_empty() {
+            return 0;
+        }
+        let count = u64::try_from(self.ttfts.len()).unwrap_or(u64::MAX);
+        self.ttfts.iter().sum::<u64>() / count
+    }
+
+    /// The slowest first token of the slice, at the ninety-fifth percentile.
+    fn p95_ttft_ms(&mut self) -> u64 {
+        if self.ttfts.is_empty() {
+            return 0;
+        }
+        self.ttfts.sort_unstable();
+        let index = (self.ttfts.len() * 95 / 100).min(self.ttfts.len() - 1);
+        self.ttfts[index]
+    }
+
     fn cost_label(&self) -> String {
         if self.requests == 0 {
             return "no requests".to_owned();
@@ -320,12 +348,15 @@ impl RequestSummary {
         format!("${:.6}", self.cost_usd)
     }
 
-    fn line(&mut self) -> String {
+    pub(crate) fn line(&mut self) -> String {
         let mut parts = vec![
             format!("{} req", self.requests),
             format!("{} in", human_tokens(self.input_tokens)),
             format!("{} out", human_tokens(self.output_tokens)),
         ];
+        if self.reasoning_tokens > 0 {
+            parts.push(format!("{} reasoning", human_tokens(self.reasoning_tokens)));
+        }
         if self.requests > 0 && self.cache_hits > 0 {
             parts.push(format!(
                 "cache {} hit",
@@ -340,15 +371,27 @@ impl RequestSummary {
             duration_label(self.average_ms()),
             duration_label(self.p95_ms())
         ));
+        if !self.ttfts.is_empty() {
+            parts.push(format!(
+                "ttft {} avg / {} p95",
+                duration_label(self.average_ttft_ms()),
+                duration_label(self.p95_ttft_ms())
+            ));
+        }
         parts.push(self.cost_label());
         if self.errors + self.cancelled > 0 {
             parts.push(format!("{} error(s)", self.errors + self.cancelled));
+        }
+        // A slice that mixes providers says so: the label of the section may
+        // not name the one that served it.
+        if self.providers.len() > 1 {
+            parts.push(format!("{} providers", self.providers.len()));
         }
         parts.join(" · ")
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn json(&mut self) -> serde_json::Value {
+    pub(crate) fn json(&mut self) -> serde_json::Value {
         serde_json::json!({
             "requests": self.requests,
             "input_tokens": self.input_tokens,
@@ -365,6 +408,9 @@ impl RequestSummary {
             "cancelled": self.cancelled,
             "average_ms": self.average_ms(),
             "p95_ms": self.p95_ms(),
+            "average_ttft_ms": self.average_ttft_ms(),
+            "p95_ttft_ms": self.p95_ttft_ms(),
+            "providers": self.providers.iter().cloned().collect::<Vec<_>>(),
         })
     }
 }
