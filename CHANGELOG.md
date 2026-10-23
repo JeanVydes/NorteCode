@@ -8,6 +8,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Anthropic thinking follows the model instead of using one shape for every
+  generation. Claude 4.6 and later take adaptive thinking with
+  `output_config.effort`; 4.5 keeps the token budget. An explicit request asks
+  for a visible summary, thinking tokens are counted in usage, and cache
+  breakpoints never land on a thinking block, which cannot carry one.
 - `--reasoning off` is offered on Anthropic 4.5 through 4.8 and Opus 5,
   which accept `thinking: {type: "disabled"}` even though models.dev has no
   toggle for them. Sonnet 5.5 and Opus 5.5 keep refusing it, as the API does.
