@@ -28,6 +28,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   whether the service settled the request before or after the answer was
   committed. The telemetry that arrives first waits for the message it belongs
   to.
+- The interactive prompt reads again after a turn. When no steered message was
+  left to apply, the turn loop restarted with nothing to wait for and never
+  returned, so the next line was read by the terminal and never reached the
+  service.
 
 ### Added
 

@@ -1192,8 +1192,10 @@ pub(crate) async fn drive_turns(
         // The human steered text while the turn was running. The service
         // applies it to the request in flight; what the turn never reached
         // waits for the next turn boundary, so that boundary has to start.
+        // With nothing left to apply, the turn loop is done: returning here is
+        // what hands the terminal back to the input line.
         if steered.is_empty() {
-            continue;
+            break;
         }
         let Some(session) = current.clone() else {
             break;
