@@ -35,6 +35,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - A message typed while a turn runs is echoed into the transcript when it is
   steered. Before, the line was lost from the transcript, so the model's next
   answer read as if it came from nowhere.
+- A retry says when the wait is over. The service reports the attempt as it
+  starts and the prompt prints `retrying now (attempt N)`, so the last
+  `retrying in ...` line no longer stands while the model is already thinking.
 
 ### Added
 

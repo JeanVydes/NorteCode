@@ -540,6 +540,13 @@ pub enum ServerEventKind {
         /// Why the request failed, written for the person reading it.
         reason: String,
     },
+    /// The wait before a retry is over and the request is running again.
+    RetryStarted {
+        /// The turn.
+        turn: u64,
+        /// The retry that is starting, counting from one.
+        attempt: u32,
+    },
     /// A request failed.
     Error {
         /// A machine-readable category.
@@ -964,6 +971,28 @@ mod tests {
             }
             other => panic!("expected a retry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_retry_start_round_trips() {
+        let event = ServerEvent::new(
+            1,
+            Some(SessionKey::new("s")),
+            ServerEventKind::RetryStarted {
+                turn: 3,
+                attempt: 2,
+            },
+        );
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains("\"event\":\"retry_started\""));
+        let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            back.kind,
+            ServerEventKind::RetryStarted {
+                turn: 3,
+                attempt: 2
+            }
+        ));
     }
 
     #[test]

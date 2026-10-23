@@ -336,6 +336,14 @@ async fn a_transient_failure_retries_the_same_session() {
     assert_eq!(retries[0].0, 1);
     assert_eq!(retries[0].1, 1);
     assert!(retries[0].2.contains("slow down"));
+    let started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            ServerEventKind::RetryStarted { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![1]);
     assert!(
         !events
             .iter()
@@ -486,6 +494,14 @@ async fn retries_report_increasing_attempts_and_backoff() {
         })
         .collect();
     assert_eq!(retries, vec![(1, 1), (2, 2)]);
+    let started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            ServerEventKind::RetryStarted { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, vec![1, 2]);
     assert!(matches!(
         events.last().map(|event| &event.kind),
         Some(ServerEventKind::TurnFinished {

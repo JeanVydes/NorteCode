@@ -822,6 +822,16 @@ impl Renderer {
                     );
                 }
             }
+            ServerEventKind::RetryStarted { attempt, .. } => {
+                self.end_blocks();
+                self.set_activity(Some("working…".to_owned()));
+                if !self.quiet {
+                    eprintln!(
+                        "{}",
+                        self.style.dim(format!("retrying now (attempt {attempt})"))
+                    );
+                }
+            }
             ServerEventKind::Error { code, message } => {
                 self.end_blocks();
                 eprintln!(

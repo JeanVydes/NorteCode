@@ -476,6 +476,21 @@ impl Service {
                             return Ok(());
                         }
                         retries += 1;
+                        if !emit(
+                            tx,
+                            ServerEvent::new(
+                                request_id,
+                                Some(key.clone()),
+                                ServerEventKind::RetryStarted {
+                                    turn,
+                                    attempt: retries,
+                                },
+                            ),
+                        )
+                        .await
+                        {
+                            return Ok(());
+                        }
                         input = None;
                         continue;
                     }
