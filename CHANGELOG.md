@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--reasoning off` is offered on Anthropic 4.5 through 4.8 and Opus 5,
+  which accept `thinking: {type: "disabled"}` even though models.dev has no
+  toggle for them. Sonnet 5.5 and Opus 5.5 keep refusing it, as the API does.
 - Every request now sends the model's catalogue output limit as its max
   output. The adapters fell back to 4096, which capped long answers and made
   an Anthropic reasoning budget of 4096 fail because `max_tokens` must be

@@ -100,13 +100,26 @@ impl Wire {
 /// refuse for that model with a visible warning instead of guessing.
 #[must_use]
 pub fn capabilities(model: &Model, wire: Wire, overrides: Option<&ModelOverride>) -> Capabilities {
+    let mut declared = reasoning(
+        model,
+        overrides.and_then(|overrides| overrides.reasoning.as_ref()),
+    );
+    // models.dev exposes a `toggle` for a visible off switch, but several
+    // Anthropic models accept `thinking: {type: "disabled"}` without one. Add
+    // the API fact unless the host has an explicit override.
+    if wire == Wire::Messages
+        && overrides
+            .and_then(|overrides| overrides.reasoning.as_ref())
+            .and_then(|overrides| overrides.can_disable)
+            .is_none()
+        && anthropic_can_disable(&model.id)
+    {
+        declared.can_disable = true;
+    }
     let mut builder = Capabilities::builder()
         .streaming(StreamingGranularity::Delta)
         .cache(wire.cache_mode())
-        .reasoning(reasoning(
-            model,
-            overrides.and_then(|overrides| overrides.reasoning.as_ref()),
-        ));
+        .reasoning(declared);
 
     let mut has_input = false;
     for name in &model.modalities.input {
@@ -247,6 +260,28 @@ fn effort_of(name: &str) -> Option<ReasoningEffort> {
     }
 }
 
+/// Whether the Anthropic generation accepts `thinking: {type: "disabled"}`.
+///
+/// The Anthropic thinking table is the source: 4.5 through 4.8 and Opus 5
+/// accept it; Opus 5.5 and Sonnet 5.5 reject it (Sonnet 5.5's lowest setting is
+/// `between_tools`, which the neutral request does not express), and Fable,
+/// Mythos and the 5.5 Opus/Sonnet models cannot turn thinking off. `toggle`
+/// already covers Sonnet 5 and Haiku 5.5.
+fn anthropic_can_disable(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    if !id.contains("claude") || id.contains("fable") || id.contains("mythos") {
+        return false;
+    }
+    if id.contains("opus-5-5") || id.contains("sonnet-5-5") {
+        return false;
+    }
+    id.contains("opus-5")
+        || id.contains("4-5")
+        || id.contains("4-6")
+        || id.contains("4-7")
+        || id.contains("4-8")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +348,27 @@ mod tests {
                 .efforts
                 .contains(&ReasoningEffort::Max)
         );
+    }
+
+    #[test]
+    fn anthropic_models_that_accept_disabled_say_so() {
+        let catalog = Catalog::bundled();
+        for id in [
+            "claude-opus-4-5",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+        ] {
+            let model = catalog.find("anthropic", id).expect(id);
+            let capabilities = capabilities(model, Wire::Messages, None);
+            assert!(capabilities.reasoning.can_disable, "{id}");
+        }
+        for id in ["claude-opus-5-5", "claude-sonnet-5-5"] {
+            let model = catalog.find("anthropic", id).expect(id);
+            let capabilities = capabilities(model, Wire::Messages, None);
+            assert!(!capabilities.reasoning.can_disable, "{id}");
+        }
     }
 
     #[test]
