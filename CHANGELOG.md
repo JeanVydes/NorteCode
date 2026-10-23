@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An Anthropic overload or API failure that arrives as a stream event is now
+  retried like the same HTTP status instead of ending the turn as an unknown
+  error, and a response stopped by the context window shows as truncated.
 - Anthropic thinking follows the model instead of using one shape for every
   generation. Claude 4.6 and later take adaptive thinking with
   `output_config.effort`; 4.5 keeps the token budget. An explicit request asks
