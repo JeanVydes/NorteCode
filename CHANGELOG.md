@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A rate limit that says how long to wait is obeyed. Gemini sends the delay
+  in the error body instead of a `Retry-After` header, so the CLI used to burn
+  its retries and fail while the quota window was still closed.
 - Anthropic and Google never report cost, so their live lines no longer say
   it is missing. A USD budget on either warns at startup that it cannot be
   measured and points at tokens or requests instead.
