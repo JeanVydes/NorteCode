@@ -394,6 +394,28 @@ async fn main() -> ExitCode {
     }
 }
 
+/// A warning when a USD budget cannot be measured because the provider never
+/// reports cost.
+fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Option<String> {
+    if !matches!(provider, "anthropic" | "google") {
+        return None;
+    }
+    let configured = [
+        &config.budgets.message,
+        &config.budgets.session,
+        &config.budgets.global_daily,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|budget| budget.unit.eq_ignore_ascii_case("usd"));
+    (budget_is_usd || configured).then(|| {
+        format!(
+            "warning: {provider} does not report cost, so a USD budget cannot be measured; \
+             use --budget-unit tokens or requests"
+        )
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_prompt(
     config: Config,
@@ -405,6 +427,7 @@ async fn run_prompt(
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let spec = resolve_spec(&config, &catalog, args.model.clone(), args.endpoint.clone())?;
+    let provider = spec.provider.clone();
     let mut config = config;
     if let Some(mode) = args.approval_mode.as_deref() {
         config.approval_mode = match mode {
@@ -467,6 +490,14 @@ async fn run_prompt(
             ))
         );
     }
+    let budget_is_usd = message_budget
+        .as_ref()
+        .is_some_and(|budget| budget.unit == BudgetUnit::Usd);
+    if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
+        if !args.quiet && !args.jsonl {
+            eprintln!("{}", style.red(warning));
+        }
+    }
     let show_cost = config.cost.show;
     let database = database_path();
     if debug {
@@ -522,6 +553,7 @@ async fn run_prompt(
         style,
         Arc::clone(&pinned),
     );
+    renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
@@ -602,6 +634,7 @@ async fn resume_session(
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     let spec = resolve_spec(&config, &catalog, None, None)?;
+    let provider = spec.provider.clone();
     let effective = effective_reasoning(
         None,
         &config.reasoning.default,
@@ -621,6 +654,12 @@ async fn resume_session(
             style.dim("·"),
             style.dim(format!("catalogue from {}", source_label(source)))
         );
+    }
+    let budget_is_usd = args.budget.is_some() && args.budget_unit.eq_ignore_ascii_case("usd");
+    if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
+        if !args.quiet && !args.jsonl {
+            eprintln!("{}", style.red(warning));
+        }
     }
     let show_cost = config.cost.show;
     let database = database_path();
@@ -676,6 +715,7 @@ async fn resume_session(
         style,
         Arc::clone(&pinned),
     );
+    renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
     let mut input = if interactive {

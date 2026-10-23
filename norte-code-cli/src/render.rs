@@ -53,6 +53,9 @@ pub(crate) struct Renderer {
     pub(crate) debug: bool,
     pub(crate) debug_session: bool,
     pub(crate) show_cost: bool,
+    /// The provider never reports cost, so a missing figure is the expected
+    /// state and is not printed as if it were missing.
+    pub(crate) cost_silent: bool,
     pub(crate) style: Style,
     /// The pinned footer text shared with the input editor.
     pub(crate) pinned: Arc<Pinned>,
@@ -108,6 +111,7 @@ impl Renderer {
             debug,
             debug_session: false,
             show_cost,
+            cost_silent: false,
             style,
             pinned,
             block: Block::None,
@@ -198,6 +202,11 @@ impl Renderer {
     pub(crate) fn mark_cancelled(&mut self) {
         self.cancelled = true;
         self.set_activity(Some("cancelling…".to_owned()));
+    }
+
+    /// Hides the missing-cost note for a provider that never reports one.
+    pub(crate) fn set_cost_silent(&mut self, silent: bool) {
+        self.cost_silent = silent;
     }
 
     /// Shows that a turn is in flight, before the first server event arrives.
@@ -719,11 +728,16 @@ impl Renderer {
                     parts.push(self.style.dim(format!("tools {}", Self::tool_list(tools))));
                 }
                 if self.show_cost {
-                    parts.push(match cost_usd {
-                        Some(cost) if *cost > 0.0 => self.style.green(format!("${cost:.6}")),
-                        Some(cost) => self.style.faint(format!("${cost:.6}")),
-                        None => self.style.yellow("cost not reported".to_owned()),
-                    });
+                    match cost_usd {
+                        Some(cost) if *cost > 0.0 => {
+                            parts.push(self.style.green(format!("${cost:.6}")));
+                        }
+                        Some(cost) => parts.push(self.style.faint(format!("${cost:.6}"))),
+                        None if !self.cost_silent => {
+                            parts.push(self.style.yellow("cost not reported".to_owned()));
+                        }
+                        None => {}
+                    }
                 }
                 eprintln!(
                     "  {} {}",
@@ -1073,14 +1087,16 @@ impl Renderer {
         );
         if self.show_cost {
             if self.requests > 0 && self.unpriced == self.requests {
-                parts.push(self.style.yellow("cost not reported"));
+                if !self.cost_silent {
+                    parts.push(self.style.yellow("cost not reported"));
+                }
             } else {
                 parts.push(if self.cost > 0.0 {
                     self.style.green(format!("${:.6}", self.cost))
                 } else {
                     self.style.faint(format!("${:.6}", self.cost))
                 });
-                if self.unpriced > 0 {
+                if self.unpriced > 0 && !self.cost_silent {
                     parts.push(self.style.yellow(format!("{} not reported", self.unpriced)));
                 }
             }
@@ -1114,14 +1130,16 @@ impl Renderer {
         );
         if self.show_cost {
             if self.unpriced == self.requests {
-                parts.push(self.style.yellow("cost not reported"));
+                if !self.cost_silent {
+                    parts.push(self.style.yellow("cost not reported"));
+                }
             } else {
                 parts.push(if self.cost > 0.0 {
                     self.style.green(format!("${:.6}", self.cost))
                 } else {
                     self.style.faint(format!("${:.6}", self.cost))
                 });
-                if self.unpriced > 0 {
+                if self.unpriced > 0 && !self.cost_silent {
                     parts.push(self.style.yellow(format!("{} not reported", self.unpriced)));
                 }
             }
@@ -2410,6 +2428,17 @@ mod tests {
             content: content.to_owned(),
             status,
         }
+    }
+
+    #[test]
+    fn a_cost_silent_provider_hides_the_missing_cost() {
+        let pinned = Pinned::new();
+        let mut renderer = renderer(&pinned);
+        renderer.requests = 1;
+        renderer.unpriced = 1;
+        assert!(renderer.session_status().contains("cost not reported"));
+        renderer.set_cost_silent(true);
+        assert!(!renderer.session_status().contains("not reported"));
     }
 
     #[test]

@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Anthropic and Google never report cost, so their live lines no longer say
+  it is missing. A USD budget on either warns at startup that it cannot be
+  measured and points at tokens or requests instead.
 - A queued model switch that could not be honoured no longer breaks the
   session. The model may have left the catalogue, or the session's own
   settings may refuse the switch; either way the turn goes on with the current

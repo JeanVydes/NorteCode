@@ -1,13 +1,13 @@
 use super::{
     ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions, Style,
-    apply_extensions, approval_request, argument_preview, budget_label, compose_selection,
-    cost_summary, parse_approval_choice, parse_approval_command, parse_reasoning_setting,
-    parse_selection, select_system_prompt,
+    apply_extensions, approval_request, argument_preview, budget_label, budget_warning,
+    compose_selection, cost_summary, parse_approval_choice, parse_approval_command,
+    parse_reasoning_setting, parse_selection, select_system_prompt,
 };
 use crate::commands::{RequestSummary, bucket_label, telemetry_table};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use norte_code_config::Config;
+use norte_code_config::{BudgetConfig, Config};
 use norte_code_cost::CostSummary;
 use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
 use norte_code_store_sqlite::RequestRecord;
@@ -49,6 +49,23 @@ fn telemetry_record(
         sandbox: false,
         sandbox_network: false,
     }
+}
+
+#[test]
+fn a_usd_budget_on_a_cost_silent_provider_is_flagged() {
+    let config = Config::default();
+    assert!(budget_warning("google", &config, true).is_some());
+    assert!(budget_warning("anthropic", &config, true).is_some());
+    assert!(budget_warning("openrouter", &config, true).is_none());
+    assert!(budget_warning("google", &config, false).is_none());
+
+    let mut config = Config::default();
+    config.budgets.session = Some(BudgetConfig {
+        unit: "usd".to_owned(),
+        limit: 1.0,
+        action: "stop".to_owned(),
+    });
+    assert!(budget_warning("google", &config, false).is_some());
 }
 
 #[test]
