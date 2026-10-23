@@ -551,6 +551,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_provider_needs_only_a_key_and_an_endpoint() {
+        let key_file = std::env::temp_dir().join(format!(
+            "norte-code-provider-{}-fallback-key",
+            std::process::id()
+        ));
+        std::fs::write(&key_file, "test-key\n").expect("key file");
+        let config = Config::from_json(&format!(
+            r#"{{"providers":{{"my-provider":{{"api_key_file":"{}","endpoint":"https://api.example.test/v1","wire":"chat"}}}}}}"#,
+            key_file.display()
+        ))
+        .expect("config")
+        .config;
+        let spec = ModelSpec::resolve(&config, "my-provider/deepseek-ai/DeepSeek-V3", None, &[])
+            .expect("spec");
+        assert_eq!(spec.provider, "my-provider");
+        assert_eq!(spec.model, "deepseek-ai/DeepSeek-V3");
+        assert_eq!(spec.wire, Wire::Chat);
+        assert_eq!(
+            spec.endpoint.as_deref(),
+            Some("https://api.example.test/v1")
+        );
+        assert_eq!(spec.capabilities.max_context, None);
+        assert_eq!(spec.capabilities.max_output, None);
+        assert!(spec.capabilities.tool_kinds.contains(&ToolKind::Function));
+        let _ = std::fs::remove_file(key_file);
+    }
+
+    #[test]
     fn a_provider_can_override_the_wire_and_the_credential_scheme() {
         let catalog = Catalog::parse(
             br#"{
