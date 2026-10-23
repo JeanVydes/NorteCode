@@ -691,6 +691,28 @@ fn retry_plan_uses_the_provider_hint_and_caps_the_wait() {
     assert!(retry_plan(&permanent, &config, 0).is_none());
 }
 
+#[test]
+fn the_default_retry_schedule_waits_out_a_rate_limit_window() {
+    let config = RetryConfig::default();
+    let limited = norte::Error::provider(norte::ProviderError::new(
+        ProviderErrorKind::RateLimited,
+        "wait",
+    ));
+    let delays: Vec<Duration> = (0..4)
+        .filter_map(|used| retry_plan(&limited, &config, used).map(|plan| plan.0))
+        .collect();
+    assert_eq!(
+        delays,
+        vec![
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+            Duration::from_secs(40),
+        ]
+    );
+    assert!(retry_plan(&limited, &config, 4).is_none());
+}
+
 #[tokio::test]
 async fn sessions_are_created_listed_and_renamed() {
     let service = service();
