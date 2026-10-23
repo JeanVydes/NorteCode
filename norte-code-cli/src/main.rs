@@ -62,7 +62,7 @@ use norte_code_agent::{
     EventStream, ModelSpec, Service, ServiceError, VendorModels, effective_reasoning, model_list,
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
-use norte_code_config::{ApprovalMode, Config, user_config_path};
+use norte_code_config::{ApprovalMode, AuthKind, Config, WireKind, user_config_path};
 use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
@@ -136,6 +136,12 @@ struct RunArgs {
     /// A base URL override for the provider.
     #[arg(long, value_name = "URL")]
     endpoint: Option<String>,
+    /// The wire to speak, overriding the catalogue and the config.
+    #[arg(long, value_name = "WIRE", value_parser = parse_wire)]
+    wire: Option<WireKind>,
+    /// The credential scheme, overriding the wire's default.
+    #[arg(long, value_name = "AUTH", value_parser = parse_auth)]
+    auth: Option<AuthKind>,
     /// A limit for this message.
     #[arg(long, value_name = "LIMIT")]
     budget: Option<f64>,
@@ -394,6 +400,31 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Parses `--wire`, the wire a run speaks.
+fn parse_wire(value: &str) -> Result<WireKind, String> {
+    match value {
+        "responses" => Ok(WireKind::Responses),
+        "chat" => Ok(WireKind::Chat),
+        "messages" => Ok(WireKind::Messages),
+        "generate-content" => Ok(WireKind::GenerateContent),
+        other => Err(format!(
+            "unknown wire `{other}`; expected responses, chat, messages or generate-content"
+        )),
+    }
+}
+
+/// Parses `--auth`, the credential scheme a run uses.
+fn parse_auth(value: &str) -> Result<AuthKind, String> {
+    match value {
+        "bearer" => Ok(AuthKind::Bearer),
+        "x-api-key" => Ok(AuthKind::XApiKey),
+        "x-goog-api-key" => Ok(AuthKind::XGoogApiKey),
+        other => Err(format!(
+            "unknown auth `{other}`; expected bearer, x-api-key or x-goog-api-key"
+        )),
+    }
+}
+
 /// A warning when a USD budget cannot be measured because the provider never
 /// reports cost.
 fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Option<String> {
@@ -426,7 +457,14 @@ async fn run_prompt(
     debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
-    let spec = resolve_spec(&config, &catalog, args.model.clone(), args.endpoint.clone())?;
+    let spec = resolve_spec(
+        &config,
+        &catalog,
+        args.model.clone(),
+        args.endpoint.clone(),
+        args.wire,
+        args.auth,
+    )?;
     let provider = spec.provider.clone();
     let mut config = config;
     if let Some(mode) = args.approval_mode.as_deref() {
@@ -633,7 +671,7 @@ async fn resume_session(
     .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
-    let spec = resolve_spec(&config, &catalog, None, None)?;
+    let spec = resolve_spec(&config, &catalog, None, None, None, None)?;
     let provider = spec.provider.clone();
     let effective = effective_reasoning(
         None,

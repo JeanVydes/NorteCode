@@ -99,6 +99,15 @@ OPENROUTER_API_KEY=... norte-code --config ./openrouter-messages.json run \
   "Reply with exactly: ok"
 ```
 
+The same override can stay out of the config for one run:
+
+```sh
+OPENROUTER_API_KEY=... norte-code run \
+  --model openrouter/anthropic/claude-sonnet-4.5 \
+  --wire messages --auth bearer \
+  "Reply with exactly: ok"
+```
+
 The catalogue supplies the base URL (`https://openrouter.ai/api/v1`), and the
 Messages adapter appends `messages`. If you pass `--endpoint`, pass that base,
 not the full `/messages` URL. `auth` is needed because OpenRouter authenticates

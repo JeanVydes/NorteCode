@@ -7,7 +7,7 @@ use super::{
 use crate::commands::{RequestSummary, bucket_label, telemetry_table};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use norte_code_config::{BudgetConfig, Config};
+use norte_code_config::{AuthKind, BudgetConfig, Config, WireKind};
 use norte_code_cost::CostSummary;
 use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
 use norte_code_store_sqlite::RequestRecord;
@@ -522,6 +522,28 @@ fn budget_labels_say_what_is_measured_and_what_happens() {
         }),
         "12 requests (stop)"
     );
+}
+
+#[test]
+fn wire_and_auth_flags_are_parsed_and_validated() {
+    let cli = Cli::try_parse_from([
+        "norte-code",
+        "run",
+        "--wire",
+        "messages",
+        "--auth",
+        "bearer",
+        "hi",
+    ])
+    .expect("parse");
+    let Command::Run(args) = cli.command else {
+        panic!("expected run");
+    };
+    assert_eq!(args.wire, Some(WireKind::Messages));
+    assert_eq!(args.auth, Some(AuthKind::Bearer));
+
+    assert!(Cli::try_parse_from(["norte-code", "run", "--wire", "telepathy", "hi"]).is_err());
+    assert!(Cli::try_parse_from(["norte-code", "run", "--auth", "none", "hi"]).is_err());
 }
 
 #[test]

@@ -51,7 +51,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `providers.<id>.wire = "messages"` sends that provider's models through the
   Anthropic adapter and `auth = "bearer"` authenticates a gateway that expects
   `Authorization`; together they let OpenRouter's `/api/v1/messages` endpoint
-  exercise the Messages wire without an Anthropic key.
+  exercise the Messages wire without an Anthropic key. `--wire` and `--auth`
+  do the same for one run.
 - `scripts/install.sh` installs the CLI from the latest release: it picks the
   binary for the system, checks its checksum and puts it in `$PREFIX/bin`.
   The release workflow publishes a binary per platform and the checksums that
