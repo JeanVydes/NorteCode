@@ -98,9 +98,9 @@ marketplace category, `cli-agent` for a terminal coding assistant).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `max_attempts` | `2` | Retries after the first failure; `0` disables. |
-| `max_delay_ms` | `30000` | Upper bound for one wait. |
-| `backoff_ms` | `1000` | First fallback wait; doubles. |
+| `max_attempts` | `4` | Retries after the first failure; `0` disables. |
+| `max_delay_ms` | `60000` | Upper bound for one wait. |
+| `backoff_ms` | `5000` | First fallback wait; doubles. |
 
 Only rate limits, overload, server errors and transport errors are retried.
 

@@ -223,9 +223,9 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 2,
-            max_delay_ms: 30_000,
-            backoff_ms: 1_000,
+            max_attempts: 4,
+            max_delay_ms: 60_000,
+            backoff_ms: 5_000,
         }
     }
 }
@@ -1113,9 +1113,9 @@ mod tests {
     #[test]
     fn retry_defaults_are_bounded_and_capped_by_validation() {
         let loaded = Config::from_json("{}").expect("config");
-        assert_eq!(loaded.config.retry.max_attempts, 2);
-        assert_eq!(loaded.config.retry.max_delay_ms, 30_000);
-        assert_eq!(loaded.config.retry.backoff_ms, 1_000);
+        assert_eq!(loaded.config.retry.max_attempts, 4);
+        assert_eq!(loaded.config.retry.max_delay_ms, 60_000);
+        assert_eq!(loaded.config.retry.backoff_ms, 5_000);
         let zero = Config::from_json(r#"{"retry":{"max_attempts":0}}"#).expect("config");
         assert_eq!(zero.config.retry.max_attempts, 0);
         let error =

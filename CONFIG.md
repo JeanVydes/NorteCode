@@ -44,9 +44,9 @@ that names the field; it is never silently replaced.
     "reasoning": "lowest"
   },
   "retry": {
-    "max_attempts": 2,
-    "max_delay_ms": 30000,
-    "backoff_ms": 1000
+    "max_attempts": 4,
+    "max_delay_ms": 60000,
+    "backoff_ms": 5000
   },
   "reasoning": {
     "default": "auto"
@@ -182,9 +182,9 @@ unchanged.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `max_attempts` | integer `0..=10` | `2` | Retries after the first failure. `0` disables retries. |
-| `max_delay_ms` | integer `0..=600000` | `30000` | Upper bound for one wait. |
-| `backoff_ms` | integer `0..=600000` | `1000` | First fallback wait; doubles on each attempt. |
+| `max_attempts` | integer `0..=10` | `4` | Retries after the first failure. `0` disables retries. |
+| `max_delay_ms` | integer `0..=600000` | `60000` | Upper bound for one wait. |
+| `backoff_ms` | integer `0..=600000` | `5000` | First fallback wait; doubles on each attempt. |
 
 Only rate limits, provider overload, server errors and transport errors are
 retried. Quota, authentication and malformed requests fail immediately. A retry

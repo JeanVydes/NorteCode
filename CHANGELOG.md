@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A rate-limited free tier is no longer given up on in three seconds. The
+  default retry schedule waits 5, 10, 20 and 40 seconds (four retries) under a
+  60-second cap, so a per-minute window can reopen before the turn fails.
 - A rate limit that says how long to wait is obeyed. Gemini sends the delay
   in the error body instead of a `Retry-After` header, so the CLI used to burn
   its retries and fail while the quota window was still closed.

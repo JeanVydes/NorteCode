@@ -190,13 +190,14 @@ eager turn stops at the safe point so it can be resumed. Models without a
 catalogue context limit do not compact automatically.
 
 A transient provider failure (a rate limit, an overload, a server error or a
-transport error) is retried up to `retry.max_attempts` times (default `2`). The
+transport error) is retried up to `retry.max_attempts` times (default `4`). The
 wait is the provider's `retry_after` when it sent one, capped by
-`retry.max_delay_ms` (default 30 s); without a hint the first wait is
-`retry.backoff_ms` (default 1 s) and doubles on each attempt. A retry resumes
-the same session with no new input, so the user's message is never appended
-twice. Permanent failures (quota, authentication, a malformed request) fail
-immediately, and `retry.max_attempts: 0` disables retries.
+`retry.max_delay_ms` (default 60 s); without a hint the first wait is
+`retry.backoff_ms` (default 5 s) and doubles on each attempt: 5, 10, 20 and 40
+seconds. A retry resumes the same session with no new input, so the user's
+message is never appended twice. Permanent failures (quota, authentication, a
+malformed request) fail immediately, and `retry.max_attempts: 0` disables
+retries.
 
 Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or
