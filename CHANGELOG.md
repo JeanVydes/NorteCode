@@ -32,6 +32,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   left to apply, the turn loop restarted with nothing to wait for and never
   returned, so the next line was read by the terminal and never reached the
   service.
+- A message typed while a turn runs is echoed into the transcript when it is
+  steered. Before, the line was lost from the transcript, so the model's next
+  answer read as if it came from nowhere.
 
 ### Added
 

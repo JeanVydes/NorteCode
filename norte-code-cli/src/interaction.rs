@@ -1023,6 +1023,7 @@ pub(crate) async fn drive_turns(
                             Some(Err(message)) => eprintln!("{}", style.yellow(message)),
                             None => {
                                 if let Some(session) = current.clone() {
+                                    echo_user_message(style, &text);
                                     if let Some(id) =
                                         steer_text(service, session, text, style, renderer.quiet)
                                             .await
