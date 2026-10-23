@@ -140,6 +140,7 @@ fn spec(model: &str) -> ModelSpec {
         wire: Wire::Chat,
         endpoint: Some("https://example.invalid/v1".to_owned()),
         api_key: ApiKey::new("test"),
+        auth: None,
         capabilities: norte_code_catalog::capabilities(entry, Wire::Chat, None),
         headers: std::collections::BTreeMap::new(),
     }

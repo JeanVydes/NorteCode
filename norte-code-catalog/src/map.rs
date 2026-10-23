@@ -11,7 +11,7 @@ use norte::{
     CacheMode, Capabilities, Modality, Reasoning, ReasoningEffort, StreamingGranularity,
     StructuredOutputMode, ToolKind,
 };
-use norte_code_config::{ModelOverride, ReasoningOverride};
+use norte_code_config::{ModelOverride, ReasoningOverride, WireKind};
 
 use crate::schema::{Model, ReasoningOption};
 
@@ -28,9 +28,19 @@ pub enum Wire {
     GenerateContent,
 }
 
+impl From<WireKind> for Wire {
+    fn from(kind: WireKind) -> Self {
+        match kind {
+            WireKind::Responses => Self::Responses,
+            WireKind::Chat => Self::Chat,
+            WireKind::Messages => Self::Messages,
+            WireKind::GenerateContent => Self::GenerateContent,
+        }
+    }
+}
+
 impl Wire {
-    /// Maps a models.dev `npm` package to a wire.
-    ///
+    /// Maps a models.dev `npm` package to a wire.    ///
     /// `openai-compatible` means the chat wire, `anthropic` the Messages wire,
     /// `google` the `generateContent` wire, and `@ai-sdk/openai` the Responses
     /// wire. Everything else is assumed OpenAI-compatible, which is what most
@@ -249,6 +259,14 @@ mod tests {
         assert_eq!(Wire::from_npm("@ai-sdk/google"), Wire::GenerateContent);
         assert_eq!(Wire::from_npm("@ai-sdk/openai"), Wire::Responses);
         assert_eq!(Wire::from_npm("@ai-sdk/groq"), Wire::Chat);
+    }
+
+    #[test]
+    fn a_configured_wire_maps_to_its_kind() {
+        assert_eq!(Wire::from(WireKind::Messages), Wire::Messages);
+        assert_eq!(Wire::from(WireKind::Chat), Wire::Chat);
+        assert_eq!(Wire::from(WireKind::Responses), Wire::Responses);
+        assert_eq!(Wire::from(WireKind::GenerateContent), Wire::GenerateContent);
     }
 
     #[test]

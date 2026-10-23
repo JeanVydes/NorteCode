@@ -476,6 +476,7 @@ mod tests {
             wire: crate::provider::Wire::Chat,
             endpoint: None,
             api_key: norte_code_config::ApiKey::new("test"),
+            auth: None,
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };
@@ -536,6 +537,7 @@ mod tests {
             wire: crate::provider::Wire::Chat,
             endpoint: None,
             api_key: norte_code_config::ApiKey::new("test"),
+            auth: None,
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };

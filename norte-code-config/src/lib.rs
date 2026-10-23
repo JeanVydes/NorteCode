@@ -98,6 +98,34 @@ impl Default for Config {
     }
 }
 
+/// The wire a provider speaks, when the configuration overrides the
+/// catalogue's `npm`-derived choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireKind {
+    /// `OpenAI` Responses.
+    Responses,
+    /// `OpenAI` chat completions.
+    Chat,
+    /// Anthropic Messages.
+    Messages,
+    /// Google `generateContent`.
+    GenerateContent,
+}
+
+/// The credential a provider's requests carry, when it is not the wire's
+/// default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthKind {
+    /// `Authorization: Bearer <key>`.
+    Bearer,
+    /// `x-api-key: <key>`.
+    XApiKey,
+    /// `x-goog-api-key: <key>`.
+    XGoogApiKey,
+}
+
 /// One provider's settings.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -108,6 +136,10 @@ pub struct ProviderConfig {
     pub api_key_file: Option<PathBuf>,
     /// A base URL override, for a proxy or a compatible vendor.
     pub endpoint: Option<String>,
+    /// The wire to speak, replacing the one the catalogue's `npm` selects.
+    pub wire: Option<WireKind>,
+    /// The credential scheme to use, replacing the wire's default.
+    pub auth: Option<AuthKind>,
     /// Extra headers sent with every request to this provider.
     ///
     /// They are added to the ones the provider ships with, and a header named
@@ -955,6 +987,57 @@ mod tests {
         assert_eq!(loaded.config.version, CONFIG_VERSION);
         assert_eq!(loaded.config.max_iterations, None);
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_provider_can_override_the_wire_and_the_credential_scheme() {
+        let loaded = Config::from_json(
+            r#"{
+                "providers": {
+                    "openrouter": {
+                        "wire": "messages",
+                        "auth": "bearer"
+                    }
+                }
+            }"#,
+        )
+        .expect("config");
+        let provider = loaded.config.providers.get("openrouter").expect("provider");
+        assert_eq!(provider.wire, Some(WireKind::Messages));
+        assert_eq!(provider.auth, Some(AuthKind::Bearer));
+    }
+
+    #[test]
+    fn the_wire_and_auth_names_are_the_documented_ones() {
+        let loaded = Config::from_json(
+            r#"{
+                "providers": {
+                    "google": {"wire": "generate-content", "auth": "x-goog-api-key"},
+                    "anthropic": {"wire": "responses", "auth": "x-api-key"}
+                }
+            }"#,
+        )
+        .expect("config");
+        assert_eq!(
+            loaded.config.providers["google"].wire,
+            Some(WireKind::GenerateContent)
+        );
+        assert_eq!(
+            loaded.config.providers["google"].auth,
+            Some(AuthKind::XGoogApiKey)
+        );
+        assert_eq!(
+            loaded.config.providers["anthropic"].auth,
+            Some(AuthKind::XApiKey)
+        );
+    }
+
+    #[test]
+    fn an_unknown_wire_is_rejected_by_name() {
+        let error = Config::from_json(r#"{"providers":{"openrouter":{"wire":"telepathy"}}}"#)
+            .expect_err("unknown wire");
+        assert!(error.to_string().contains("telepathy"), "{error}");
+        assert!(error.to_string().contains("messages"), "{error}");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use norte::{
 
 pub use norte_code_catalog::Wire;
 use norte_code_catalog::{Catalog, Model as CatalogModel, Provider as CatalogProvider};
-use norte_code_config::{ApiKey, Config, ModelOverride};
+use norte_code_config::{ApiKey, AuthKind, Config, ModelOverride};
 
 use crate::ServiceError;
 
@@ -42,6 +42,9 @@ pub struct ModelSpec {
     pub endpoint: Option<String>,
     /// The API key. Its `Debug` output is redacted.
     pub api_key: ApiKey,
+    /// The credential scheme to use, when the configuration overrides the
+    /// wire's default.
+    pub auth: Option<AuthKind>,
     /// The capability declaration the catalogue entry and config produce.
     pub capabilities: Capabilities,
     /// The headers sent with every request to this provider.
@@ -84,6 +87,20 @@ fn headers_for(config: &Config, provider: &str) -> BTreeMap<String, String> {
     headers
 }
 
+/// The wire the configuration names, or the catalogue's `npm` choice.
+fn wire_for(config: &Config, provider: &str, npm: &str) -> Wire {
+    config
+        .providers
+        .get(provider)
+        .and_then(|entry| entry.wire)
+        .map_or_else(|| Wire::from_npm(npm), Wire::from)
+}
+
+/// The credential scheme the configuration names, if any.
+fn auth_for(config: &Config, provider: &str) -> Option<AuthKind> {
+    config.providers.get(provider).and_then(|entry| entry.auth)
+}
+
 impl ModelSpec {
     /// Builds a spec from a catalogue provider and model entry.
     ///
@@ -106,7 +123,11 @@ impl ModelSpec {
             .providers
             .get(&provider.id)
             .and_then(|entry| entry.endpoint.clone());
-        let wire = Wire::from_npm(provider.npm.as_deref().unwrap_or_default());
+        let wire = wire_for(
+            config,
+            &provider.id,
+            provider.npm.as_deref().unwrap_or_default(),
+        );
         let endpoint = endpoint_override
             .or(configured)
             .or(expand_endpoint(provider)?);
@@ -120,6 +141,7 @@ impl ModelSpec {
             wire,
             endpoint,
             api_key,
+            auth: auth_for(config, &provider.id),
             capabilities,
             headers: headers_for(config, &provider.id),
         })
@@ -179,7 +201,11 @@ impl ModelSpec {
             .providers
             .get(&provider.id)
             .and_then(|entry| entry.endpoint.clone());
-        let wire = Wire::from_npm(provider.npm.as_deref().unwrap_or_default());
+        let wire = wire_for(
+            config,
+            &provider.id,
+            provider.npm.as_deref().unwrap_or_default(),
+        );
         let endpoint = endpoint_override
             .or(configured)
             .or(expand_endpoint(provider)?);
@@ -190,6 +216,7 @@ impl ModelSpec {
             wire,
             endpoint,
             api_key,
+            auth: auth_for(config, &provider.id),
             capabilities: fallback_capabilities(overrides),
             headers: headers_for(config, &provider.id),
         })
@@ -220,7 +247,11 @@ impl ModelSpec {
             .providers
             .get(provider)
             .and_then(|entry| entry.endpoint.clone());
-        let wire = Wire::for_provider(provider);
+        let wire = config
+            .providers
+            .get(provider)
+            .and_then(|entry| entry.wire)
+            .map_or_else(|| Wire::for_provider(provider), Wire::from);
         let overrides = config.model_overrides.get(reference);
         Ok(Self {
             provider: provider.to_owned(),
@@ -228,6 +259,7 @@ impl ModelSpec {
             wire,
             endpoint: endpoint.or(configured),
             api_key,
+            auth: auth_for(config, provider),
             capabilities: fallback_capabilities(overrides),
             headers: headers_for(config, provider),
         })
@@ -276,6 +308,7 @@ impl ModelFactory for VendorModels {
             // No endpoint override: the native presets carry the vendor URL.
             (Wire::Responses, None) if spec.provider == "openai" => {
                 let profile = with_headers(norte::presets::openai_profile(key)?, &spec.headers);
+                let profile = with_configured_auth(profile, spec.auth, spec.api_key.expose());
                 Arc::new(norte::OpenAiResponses::new(
                     reference,
                     profile,
@@ -284,6 +317,7 @@ impl ModelFactory for VendorModels {
             }
             (Wire::Messages, None) if spec.provider == "anthropic" => {
                 let profile = with_headers(norte::presets::anthropic_profile(key)?, &spec.headers);
+                let profile = with_configured_auth(profile, spec.auth, spec.api_key.expose());
                 Arc::new(norte::AnthropicMessages::new(
                     reference,
                     profile,
@@ -294,6 +328,7 @@ impl ModelFactory for VendorModels {
                 if matches!(spec.provider.as_str(), "google" | "gemini") =>
             {
                 let profile = with_headers(norte::presets::gemini_profile(key)?, &spec.headers);
+                let profile = with_configured_auth(profile, spec.auth, spec.api_key.expose());
                 Arc::new(norte::GeminiGenerate::new(
                     reference,
                     profile,
@@ -302,7 +337,7 @@ impl ModelFactory for VendorModels {
             }
             // Everything else comes from the catalogue's `api` URL.
             (wire, Some(endpoint)) => {
-                let profile = profile(wire, provider, endpoint, key, &spec.headers)?;
+                let profile = profile(wire, provider, endpoint, key, &spec.headers, spec.auth)?;
                 build_with_profile(wire, reference, profile, capabilities)?
             }
             (wire, None) => {
@@ -325,6 +360,20 @@ fn with_headers(profile: VendorProfile, headers: &BTreeMap<String, String>) -> V
     profile
 }
 
+/// Replaces the credential scheme when the configuration names one.
+fn with_configured_auth(
+    profile: VendorProfile,
+    auth: Option<AuthKind>,
+    key: &str,
+) -> VendorProfile {
+    match auth {
+        Some(AuthKind::Bearer) => profile.with_auth(AuthScheme::bearer(key)),
+        Some(AuthKind::XApiKey) => profile.with_auth(AuthScheme::header("x-api-key", key)),
+        Some(AuthKind::XGoogApiKey) => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+        None => profile,
+    }
+}
+
 /// Builds the vendor profile for a catalogue entry: wire family, base URL and
 /// the credential header the wire expects.
 fn profile(
@@ -333,14 +382,21 @@ fn profile(
     endpoint: &str,
     key: String,
     headers: &BTreeMap<String, String>,
+    auth: Option<AuthKind>,
 ) -> Result<VendorProfile, ServiceError> {
     let profile = VendorProfile::new(provider, WireFamily::new(wire.family())?, endpoint)?;
-    let profile = match wire {
-        Wire::Responses | Wire::Chat => profile.with_auth(AuthScheme::bearer(key)),
-        Wire::Messages => profile
-            .with_auth(AuthScheme::header("x-api-key", key))
-            .with_header("anthropic-version", "2023-06-01"),
-        Wire::GenerateContent => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+    let profile = match auth {
+        Some(auth) => with_configured_auth(profile, Some(auth), &key),
+        None => match wire {
+            Wire::Responses | Wire::Chat => profile.with_auth(AuthScheme::bearer(key)),
+            Wire::Messages => profile.with_auth(AuthScheme::header("x-api-key", key)),
+            Wire::GenerateContent => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+        },
+    };
+    let profile = if wire == Wire::Messages {
+        profile.with_header("anthropic-version", "2023-06-01")
+    } else {
+        profile
     };
     Ok(with_headers(profile, headers))
 }
@@ -419,6 +475,7 @@ mod tests {
             wire,
             endpoint: endpoint.map(str::to_owned),
             api_key: ApiKey::new("test-key"),
+            auth: None,
             capabilities: fallback_capabilities(None),
             headers: BTreeMap::new(),
         }
@@ -491,6 +548,68 @@ mod tests {
             .err()
             .expect("an error");
         assert!(matches!(error, ServiceError::MissingEndpoint { .. }));
+    }
+
+    #[test]
+    fn a_provider_can_override_the_wire_and_the_credential_scheme() {
+        let catalog = Catalog::parse(
+            br#"{
+                "providers": {
+                    "openrouter": {
+                        "id": "openrouter",
+                        "env": ["OPENROUTER_API_KEY"],
+                        "npm": "@openrouter/ai-sdk-provider",
+                        "api": "https://openrouter.ai/api/v1",
+                        "models": {
+                            "anthropic/claude-sonnet-4.5": {
+                                "id": "anthropic/claude-sonnet-4.5",
+                                "name": "Claude Sonnet 4.5",
+                                "tool_call": true,
+                                "modalities": {"input": ["text"], "output": ["text"]},
+                                "limit": {"context": 200000, "output": 64000}
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("catalog");
+        let key_file = std::env::temp_dir().join(format!(
+            "norte-code-provider-{}-openrouter-key",
+            std::process::id()
+        ));
+        std::fs::write(&key_file, "sk-or-test\n").expect("key file");
+        let provider = catalog.provider("openrouter").expect("provider");
+        let model = catalog
+            .find("openrouter", "anthropic/claude-sonnet-4.5")
+            .expect("model");
+
+        let config = Config::from_json(&format!(
+            r#"{{"providers":{{"openrouter":{{"api_key_file":"{}"}}}}}}"#,
+            key_file.display()
+        ))
+        .expect("config")
+        .config;
+        let spec = ModelSpec::from_entry(&config, provider, model, None).expect("spec");
+        assert_eq!(spec.wire, Wire::Chat);
+        assert_eq!(spec.auth, None);
+
+        let config = Config::from_json(&format!(
+            r#"{{"providers":{{"openrouter":{{"api_key_file":"{}","wire":"messages","auth":"bearer"}}}}}}"#,
+            key_file.display()
+        ))
+        .expect("config")
+        .config;
+        let spec = ModelSpec::from_entry(&config, provider, model, None).expect("spec");
+        assert_eq!(spec.wire, Wire::Messages);
+        assert_eq!(spec.auth, Some(AuthKind::Bearer));
+        assert_eq!(
+            spec.endpoint.as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        let built = VendorModels.build(&spec, &spec.capabilities);
+        assert!(built.is_ok(), "did not build: {:?}", built.err());
+        let _ = std::fs::remove_file(key_file);
     }
 
     #[test]

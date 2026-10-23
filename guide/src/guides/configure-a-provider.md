@@ -76,6 +76,37 @@ The config form is:
 
 A key whose wire family does not match the active model is ignored.
 
+### Test the Messages wire
+
+OpenRouter also serves an Anthropic-compatible endpoint at
+`https://openrouter.ai/api/v1/messages`. Point a separate config at it:
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "openrouter": {
+      "wire": "messages",
+      "auth": "bearer"
+    }
+  }
+}
+```
+
+```sh
+OPENROUTER_API_KEY=... norte-code --config ./openrouter-messages.json run \
+  --model openrouter/anthropic/claude-sonnet-4.5 \
+  "Reply with exactly: ok"
+```
+
+The catalogue supplies the base URL (`https://openrouter.ai/api/v1`), and the
+Messages adapter appends `messages`. If you pass `--endpoint`, pass that base,
+not the full `/messages` URL. `auth` is needed because OpenRouter authenticates
+gateways with `Authorization: Bearer`; the Messages wire defaults to `x-api-key`.
+`wire` applies to the whole provider, so every OpenRouter model uses the
+Messages wire while that file is active; remove the override to go back to the
+chat wire. `--debug` prints the effective wire.
+
 ## Any OpenAI-compatible endpoint
 
 Point the provider at the endpoint and keep the catalogue entry's model id:

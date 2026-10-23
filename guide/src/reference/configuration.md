@@ -42,10 +42,16 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `api_key_env` | Environment variable with the key. |
 | `api_key_file` | File containing the key. |
 | `endpoint` | Base URL override. |
+| `wire` | Wire to speak: `responses`, `chat`, `messages` or `generate-content`; overrides the catalogue's choice. |
+| `auth` | Credential scheme: `bearer`, `x-api-key` or `x-goog-api-key`; overrides the wire's default. |
 | `headers` | Extra headers sent with every request to this provider. |
 
 Resolution order: `api_key_env`, `api_key_file`, then the catalogue's `env`.
 There is no plaintext key field.
+
+The catalogue's `npm` selects the wire and the key is sent the way that wire
+expects. `wire` and `auth` are escape hatches for a compatible gateway: changing
+the wire without `auth` keeps that wire's credential scheme.
 
 The headers are added to the ones the provider already carries, and a header
 named here replaces the one of the same name. `openrouter` gets the
