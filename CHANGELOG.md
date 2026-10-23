@@ -8,6 +8,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A shell `command` no longer has to name its interpreter (`shell` defaults
+  to `sh`), and `write` no longer has to send `overwrite` (it defaults to
+  false). The schema required both, so a natural call failed and the model
+  spent turns guessing.
+- A native Anthropic request that asks for a reasoning token budget now sends
+  it as `thinking` instead of dropping it. Models whose catalogue entry only
+  offers `budget_tokens`, such as Claude Haiku 4.5, now think when asked.
 - Approving a parked tool with `y` no longer closes the interactive session.
   The approval submitted the resumed stream and the turn loop returned before
   driving it, so the session looked parked even though the tool had run.
