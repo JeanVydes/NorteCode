@@ -8,6 +8,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A provider that reports cache reads separately, like Anthropic and the
+  OpenRouter Messages endpoint, no longer shows a cache share above 100%.
+  Input tokens now include the cached and cache-creation tokens, so the
+  percentage is a share of the whole prompt.
 - A rate-limited free tier is no longer given up on in three seconds. The
   default retry schedule waits 5, 10, 20 and 40 seconds (four retries) under a
   60-second cap, so a per-minute window can reopen before the turn fails.
