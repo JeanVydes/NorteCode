@@ -1167,6 +1167,7 @@ dependencies = [
  "norte-code-protocol",
  "norte-code-skills",
  "norte-code-store-sqlite",
+ "norte-testing",
  "serde_json",
  "termios",
  "tokio",

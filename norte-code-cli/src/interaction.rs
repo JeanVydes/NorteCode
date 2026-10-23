@@ -1190,6 +1190,12 @@ pub(crate) async fn drive_turns(
                 }
             }
         }
+        // An approval submits a new stream that continues the parked turn.
+        // Drive it before deciding the loop is done, or the decision is lost
+        // and the caller sees a parked session that is already approved.
+        if !streams.is_empty() {
+            continue;
+        }
         // The human steered text while the turn was running. The service
         // applies it to the request in flight; what the turn never reached
         // waits for the next turn boundary, so that boundary has to start.

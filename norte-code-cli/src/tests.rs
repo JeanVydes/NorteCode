@@ -605,3 +605,182 @@ fn approval_scopes_are_explicit_in_the_request() {
         other => panic!("expected a denial, got {other:?}"),
     }
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use futures_util::StreamExt;
+    use norte::{
+        CallId, Capabilities, InMemoryBlobStore, InMemoryStore, Model, ModelId, ModelRef,
+        ProviderId,
+    };
+    use norte_code_agent::{EventStream, ModelFactory, ModelSpec, Service, ServiceError, Wire};
+    use norte_code_catalog::{Catalog, capabilities};
+    use norte_code_config::ApiKey;
+    use norte_code_protocol::{ClientRequest, ServerEventKind};
+    use norte_testing::ScriptedModel;
+    use tokio::sync::mpsc;
+
+    use crate::input::Pinned;
+    use crate::interaction::drive_turns;
+    use crate::render::{Format, Renderer};
+    use crate::style::Style;
+
+    struct ScriptedFactory {
+        model: Arc<dyn Model>,
+    }
+
+    impl ModelFactory for ScriptedFactory {
+        fn build(
+            &self,
+            _spec: &ModelSpec,
+            _capabilities: &Capabilities,
+        ) -> Result<Arc<dyn Model>, ServiceError> {
+            Ok(Arc::clone(&self.model))
+        }
+    }
+
+    let target = std::env::current_dir()
+        .expect("working directory")
+        .join("target")
+        .join(format!(
+            "norte-code-cli-approval-{}.txt",
+            std::process::id()
+        ));
+    let _ = std::fs::remove_file(&target);
+
+    let catalog = Arc::new(
+        Catalog::parse(
+            br#"{
+                "providers": {
+                    "test": {
+                        "id": "test",
+                        "env": ["TEST_API_KEY"],
+                        "npm": "@ai-sdk/openai-compatible",
+                        "api": "https://example.invalid/v1",
+                        "models": {
+                            "scripted": {
+                                "id": "scripted",
+                                "name": "Scripted",
+                                "tool_call": true,
+                                "modalities": {"input": ["text"], "output": ["text"]},
+                                "limit": {"context": 1000, "output": 100}
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("catalog"),
+    );
+    let key_file = std::env::temp_dir().join(format!(
+        "norte-code-cli-approval-{}-key",
+        std::process::id()
+    ));
+    std::fs::write(&key_file, "sk-test\n").expect("key file");
+    let config = Config::from_json(&format!(
+        r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
+        key_file.display()
+    ))
+    .expect("config")
+    .config;
+    let entry = catalog.find("test", "scripted").expect("model");
+    let spec = ModelSpec {
+        provider: "test".to_owned(),
+        model: "scripted".to_owned(),
+        wire: Wire::Chat,
+        endpoint: Some("https://example.invalid/v1".to_owned()),
+        api_key: ApiKey::new("test"),
+        auth: None,
+        capabilities: capabilities(entry, Wire::Chat, None),
+        headers: BTreeMap::new(),
+    };
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                CallId::new(),
+                "write",
+                &serde_json::json!({
+                    "path": target.display().to_string(),
+                    "content": "written after approval",
+                    "overwrite": true
+                }),
+            )
+            .turn_text("done"),
+    );
+    let service = Arc::new(
+        Service::new(
+            config,
+            catalog,
+            spec,
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+
+    let primary = service
+        .submit(ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::SendMessage {
+                session: None,
+                text: "write it".to_owned(),
+                budget: None,
+                reasoning: None,
+            },
+        })
+        .await
+        .expect("stream");
+
+    let (approval_tx, mut approval_rx) = mpsc::unbounded_channel();
+    let primary: EventStream = Box::pin(primary.inspect(move |event| {
+        if matches!(&event.kind, ServerEventKind::ApprovalRequested { .. }) {
+            let _ = approval_tx.send(());
+        }
+    }));
+    let (input_tx, mut input) = mpsc::unbounded_channel();
+    let responder = tokio::spawn(async move {
+        approval_rx.recv().await.expect("approval event");
+        input_tx.send(Some("y".to_owned())).expect("approval input");
+    });
+
+    let mut renderer = Renderer::new(
+        Format::Text,
+        true,
+        false,
+        false,
+        false,
+        Style::plain(),
+        Pinned::new(),
+    );
+    let outcome = drive_turns(
+        &service,
+        primary,
+        &mut renderer,
+        Style::plain(),
+        Some(&mut input),
+    )
+    .await
+    .expect("drive");
+    responder.await.expect("responder");
+
+    assert!(!outcome.parked, "an approved turn must not stay parked");
+    assert_eq!(model.remaining_turns(), 0, "the resumed turn must run");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("written file"),
+        "written after approval"
+    );
+    let _ = std::fs::remove_file(&target);
+    let _ = std::fs::remove_file(&key_file);
+}

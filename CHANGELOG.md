@@ -8,6 +8,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Approving a parked tool with `y` no longer closes the interactive session.
+  The approval submitted the resumed stream and the turn loop returned before
+  driving it, so the session looked parked even though the tool had run.
 - A provider that reports cache reads separately, like Anthropic and the
   OpenRouter Messages endpoint, no longer shows a cache share above 100%.
   Input tokens now include the cached and cache-creation tokens, so the
