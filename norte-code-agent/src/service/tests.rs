@@ -2373,7 +2373,7 @@ async fn the_request_table_records_usage_latency_and_metadata() {
     assert_eq!(record.status, "ok");
     assert!(record.first_token_ms.is_some());
     assert!(record.metadata.get("engine_events").is_some());
-    assert_eq!(record.params, serde_json::json!({}));
+    assert_eq!(record.params, serde_json::json!({"max_output_tokens": 100}));
 }
 
 #[test]

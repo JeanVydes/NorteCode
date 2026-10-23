@@ -178,6 +178,7 @@ impl Service {
                     turn,
                     input,
                     reasoning,
+                    spec.capabilities.max_output,
                     &tx,
                     &notify,
                 )
@@ -216,6 +217,7 @@ impl Service {
         turn: u64,
         input: Option<String>,
         reasoning: ReasoningRequest,
+        max_output: Option<u64>,
         tx: &mpsc::Sender<ServerEvent>,
         notify: &Notify,
     ) -> Result<(), ServiceError> {
@@ -240,6 +242,9 @@ impl Service {
         let mut retries = 0u32;
         loop {
             let mut turn_builder = engine.turn(current_nid).reasoning(reasoning);
+            if let Some(max_output) = max_output {
+                turn_builder = turn_builder.max_output_tokens(max_output);
+            }
             if let Some(text) = input.take() {
                 turn_builder = turn_builder.input(Message::user(text));
             }

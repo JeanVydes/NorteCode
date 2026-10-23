@@ -8,6 +8,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Every request now sends the model's catalogue output limit as its max
+  output. The adapters fell back to 4096, which capped long answers and made
+  an Anthropic reasoning budget of 4096 fail because `max_tokens` must be
+  larger than the budget.
 - A shell `command` no longer has to name its interpreter (`shell` defaults
   to `sh`), and `write` no longer has to send `overwrite` (it defaults to
   false). The schema required both, so a natural call failed and the model
