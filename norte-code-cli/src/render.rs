@@ -1890,11 +1890,14 @@ pub(crate) fn debug_start(
             iterations
         ))
     );
+    let compaction_pct = (configuration.compaction.threshold * 100.0) as u64;
+    let compaction_tokens = spec.capabilities.max_context.map(|c| (c as f64 * configuration.compaction.threshold) as u64);
     eprintln!(
         "{}",
         style.dim(format!(
-            "  │ compaction   │ {}{}",
-            configuration.compaction.threshold,
+            "  │ compaction   │ {}%{}{}",
+            compaction_pct,
+            compaction_tokens.map(|t| format!(" (~{} tokens)", t)).unwrap_or_default(),
             if !configuration.compaction.enabled {
                 " (disabled)"
             } else if configuration.compaction.trigger == "eager" {
@@ -2019,7 +2022,7 @@ pub(crate) fn debug_model(
             eprintln!("{}", style.dim(format!("  about      {description}")));
         }
     } else {
-        eprintln!("{}", style.dim("  catalogue  not found; using fallback capabilities (256k context, 32k output)"));
+        eprintln!("{}", style.dim("  catalogue  not found; using fallback capabilities (200k context, 32k output)"));
     }
     eprintln!(
         "{}",

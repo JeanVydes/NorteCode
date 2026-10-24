@@ -536,7 +536,7 @@ fn fallback_capabilities(overrides: Option<&ModelOverride>) -> Capabilities {
         .output(Modality::Text)
         .streaming(StreamingGranularity::Delta)
         .tool_kind(ToolKind::Function)
-        .max_context(256_000)
+        .max_context(200_000)
         .max_output(32_000);
     if let Some(overrides) = overrides {
         if let Some(max_context) = overrides.max_context {
@@ -689,7 +689,7 @@ mod tests {
             spec.endpoint.as_deref(),
             Some("https://api.example.test/v1")
         );
-        assert_eq!(spec.capabilities.max_context, Some(256_000));
+        assert_eq!(spec.capabilities.max_context, Some(200_000));
         assert_eq!(spec.capabilities.max_output, Some(32_000));
         assert!(spec.capabilities.tool_kinds.contains(&ToolKind::Function));
         let _ = std::fs::remove_file(key_file);
