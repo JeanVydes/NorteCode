@@ -71,6 +71,7 @@ pub(crate) fn print_model(model: &ModelInfo) {
 pub(crate) fn resolve_spec(
     config: &Config,
     catalog: &Catalog,
+    provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
     wire: Option<WireKind>,
@@ -78,34 +79,73 @@ pub(crate) fn resolve_spec(
     api_key_env: Option<String>,
     disable_prompt_cache_key: bool,
 ) -> Result<ModelSpec, String> {
-    let reference = model
-        .or_else(|| config.default_model.clone())
-        .ok_or_else(|| {
-            "no model selected: pass `--model provider/model` or set `default_model` in the config"
-                .to_owned()
+    // Build the reference. The provider comes from --provider or config; the
+    // model name is used as-is and may contain slashes (e.g. nvidia/nemotron).
+    let (provider, model_name) = if let Some(provider) = provider {
+        let model = model.or_else(|| {
+            config.default_model.as_ref().and_then(|d| {
+                d.split_once('/').map(|(_, name)| name.to_owned())
+            })
+        });
+        let model = model.ok_or_else(|| {
+            "no model selected: pass --model or set default_model".to_owned()
         })?;
-    let config =
-        if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
-            let mut config = config.clone();
-            if let Some((provider, _)) = reference.split_once('/') {
-                let entry = config.providers.entry(provider.to_owned()).or_default();
-                if wire.is_some() {
-                    entry.wire = wire;
-                }
-                if auth.is_some() {
-                    entry.auth = auth;
-                }
-                if api_key_env.is_some() {
-                    entry.api_key_env = api_key_env;
-                }
-                if disable_prompt_cache_key {
-                    entry.prompt_cache_key = Some(false);
-                }
-            }
-            Cow::Owned(config)
+        (provider, model)
+    } else if let Some(model) = model {
+        // No --provider: use the default provider from config, but do NOT split
+        // the model name on '/'. The model name is taken verbatim.
+        let default_provider = config
+            .default_model
+            .as_ref()
+            .and_then(|d| d.split_once('/').map(|(p, _)| p.to_owned()))
+            .unwrap_or_else(|| "openai".to_owned());
+        (default_provider, model)
+    } else if let Some(default) = &config.default_model {
+        if let Some((p, m)) = default.split_once('/') {
+            (p.to_owned(), m.to_owned())
         } else {
-            Cow::Borrowed(config)
-        };
+            return Err("no model selected: pass --model or set default_model".to_owned());
+        }
+    } else {
+        return Err("no model selected: pass --model or set default_model".to_owned());
+    };
+
+    let reference = format!("{}/{}", provider, model_name);
+
+    // When provider is "disabled", it's a non-persistent custom provider:
+    // require explicit wire, endpoint, and api_key_env.
+    let is_disabled = provider == "disabled";
+    if is_disabled {
+        if wire.is_none() {
+            return Err("--provider disabled requires --wire".to_owned());
+        }
+        if endpoint.is_none() && config.providers.get("disabled").and_then(|e| e.endpoint.clone()).is_none() {
+            return Err("--provider disabled requires --endpoint".to_owned());
+        }
+        if api_key_env.is_none() && config.providers.get("disabled").and_then(|e| e.api_key_env.clone()).is_none() {
+            return Err("--provider disabled requires --api-key-env".to_owned());
+        }
+    }
+
+    let config = if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
+        let mut config = config.clone();
+        let entry = config.providers.entry(provider.clone()).or_default();
+        if wire.is_some() {
+            entry.wire = wire;
+        }
+        if auth.is_some() {
+            entry.auth = auth;
+        }
+        if api_key_env.is_some() {
+            entry.api_key_env = api_key_env;
+        }
+        if disable_prompt_cache_key {
+            entry.prompt_cache_key = Some(false);
+        }
+        Cow::Owned(config)
+    } else {
+        Cow::Borrowed(config)
+    };
     let config = config.as_ref();
     match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
         Ok(spec) => Ok(spec),
@@ -118,14 +158,14 @@ pub(crate) fn resolve_spec(
                 .map_err(|error| error.to_string())
         }
         Err(ServiceError::UnknownProvider(_)) => {
-            eprintln!(
-                "note: `{}` names a provider the catalogue does not list; using the fallback",
-                crate::text::terminal(&reference)
-            );
-            let provider = reference
-                .split_once('/')
-                .map_or("", |(provider, _)| provider);
-            ModelSpec::resolve(config, &reference, endpoint, &fallback_env(provider))
+            if !is_disabled {
+                eprintln!(
+                    "note: `{}` names a provider the catalogue does not list; using the fallback",
+                    crate::text::terminal(&reference)
+                );
+            }
+            let fallback_provider = if is_disabled { "disabled" } else { &provider };
+            ModelSpec::resolve(config, &reference, endpoint, &fallback_env(fallback_provider))
                 .map_err(|error| error.to_string())
         }
         Err(error) => Err(error.to_string()),
@@ -178,7 +218,8 @@ mod tests {
         let plain = resolve_spec(
             &config,
             &catalog,
-            Some("openrouter/anthropic/claude-sonnet-4.5".to_owned()),
+            Some("openrouter".to_owned()),
+            Some("anthropic/claude-sonnet-4.5".to_owned()),
             None,
             None,
             None,
@@ -192,7 +233,8 @@ mod tests {
         let overridden = resolve_spec(
             &config,
             &catalog,
-            Some("openrouter/anthropic/claude-sonnet-4.5".to_owned()),
+            Some("openrouter".to_owned()),
+            Some("anthropic/claude-sonnet-4.5".to_owned()),
             None,
             Some(WireKind::Messages),
             Some(AuthKind::Bearer),

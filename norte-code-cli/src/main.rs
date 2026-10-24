@@ -469,27 +469,11 @@ async fn run_prompt(
     debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
-    let model_ref = match (&args.provider, &args.model) {
-        (Some(provider), Some(model)) => format!("{}/{}", provider, model),
-        (Some(provider), None) => {
-            // Provider given without model: try to use default model's name
-            if let Some(default) = &config.default_model {
-                if let Some((_, name)) = default.split_once('/') {
-                    format!("{}/{}", provider, name)
-                } else {
-                    return Err("no model selected: pass --model or set default_model".to_owned());
-                }
-            } else {
-                return Err("no model selected: pass --model or set default_model".to_owned());
-            }
-        }
-        (None, Some(model)) => model.clone(),
-        (None, None) => config.default_model.clone().unwrap_or_default(),
-    };
     let spec = resolve_spec(
         &config,
         &catalog,
-        Some(model_ref),
+        args.provider.clone(),
+        args.model.clone(),
         args.endpoint.clone(),
         args.wire,
         args.auth,
@@ -702,7 +686,7 @@ async fn resume_session(
     .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
-    let spec = resolve_spec(&config, &catalog, None, None, None, None, None, false)?;
+    let spec = resolve_spec(&config, &catalog, None, None, None, None, None, None, false)?;
     let provider = spec.provider.clone();
     let effective = effective_reasoning(
         None,
