@@ -160,12 +160,15 @@ pub(crate) fn resolve_spec(
     match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
         Ok(spec) => Ok(spec),
         Err(ServiceError::UnknownModel { .. }) => {
-            eprintln!(
-                "note: `{}` is not in the catalogue; using its provider's facts",
-                crate::text::terminal(&reference)
-            );
-            ModelSpec::from_provider(config, catalog, &reference, endpoint)
-                .map_err(|error| error.to_string())
+            // The provider exists in the catalogue but the model does not.
+            // Do not silently fall back: the user should pick a listed model
+            // or use --provider disabled for a custom one.
+            Err(format!(
+                "model `{}` is not in the catalogue for provider `{}`. \
+                 Run `norte-code models --provider {}` to see available models, \
+                 or use --provider disabled for a custom endpoint.",
+                model_name, provider, provider
+            ))
         }
         Err(ServiceError::UnknownProvider(_)) => {
             if !is_disabled {
