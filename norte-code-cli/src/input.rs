@@ -683,7 +683,13 @@ mod unix {
 
     fn enter_terminal(cols: u16, rows: u16) -> Result<(), String> {
         let mut out = io::stderr().lock();
-        write!(out, "\x1b[?25l\x1b[?2004h").map_err(|error| error.to_string())?;
+        // Hide the cursor, enable bracketed paste, and push the keyboard
+        // protocol. The last one is what makes a modified Enter distinguishable:
+        // a terminal that does not report it sends the same carriage return for
+        // Enter and Shift+Enter, so the newline branch never fires. A terminal
+        // that does not support the sequence ignores it, and the pop on the way
+        // out is then a no-op.
+        write!(out, "\x1b[?25l\x1b[?2004h\x1b[>1u").map_err(|error| error.to_string())?;
         // The startup and `--debug` blocks are printed before this point. Reset
         // the scroll region, drop to the last row and scroll the footer height
         // so those rows are blank; otherwise the first streamed lines would
@@ -698,7 +704,7 @@ mod unix {
 
     fn leave_terminal(rows: u16) {
         let mut out = io::stderr().lock();
-        let _ = write!(out, "\x1b[?2004l\x1b[r");
+        let _ = write!(out, "\x1b[<u\x1b[?2004l\x1b[r");
         // Only the footer rows: the region still holds the final summary.
         for row in scroll_bottom(rows).saturating_add(1)..=rows.max(1) {
             let _ = write!(out, "\x1b[{row};1H\x1b[2K");
@@ -1203,6 +1209,52 @@ mod unix {
             let mut buffer = LineBuffer::default();
             buffer.insert_text("one\r\ntwo\tthree");
             assert_eq!(buffer.text(), "one\ntwo    three");
+        }
+
+        #[test]
+        fn shift_enter_breaks_the_line_and_enter_submits() {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut history = Vec::new();
+            let mut history_pos = None;
+            let mut draft = String::new();
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("first");
+
+            // Shift+Enter must insert a newline, not send: the terminal only
+            // reports the modifier when the keyboard protocol is pushed, which
+            // is why this branch used to be unreachable.
+            handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(buffer.text(), "first\n");
+            assert!(
+                receiver.try_recv().is_err(),
+                "shift+enter must not submit the message"
+            );
+
+            buffer.insert_text("second");
+            handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(buffer.text(), "", "a plain enter clears the buffer");
+            assert_eq!(
+                receiver
+                    .try_recv()
+                    .expect("the message was sent")
+                    .as_deref(),
+                Some("first\nsecond"),
+                "a plain enter submits the whole multi-line message"
+            );
         }
 
         #[test]
