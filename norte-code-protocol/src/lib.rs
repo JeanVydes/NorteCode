@@ -370,6 +370,17 @@ pub enum ServerEventKind {
         /// The session version the commit reached.
         version: u64,
     },
+    /// One past message of a session, sent when it is resumed so the client can
+    /// show where the conversation was. Only the most recent messages are sent,
+    /// and never across a compaction boundary.
+    MessageReplayed {
+        /// A monotonic index in the replay, starting at 1.
+        index: u64,
+        /// Who spoke: `user`, `assistant`, `tool`, `system` or `developer`.
+        role: String,
+        /// The message's text, with each part on its own line.
+        text: String,
+    },
     /// Compaction started.
     CompactionStarted {
         /// Why it started: `manual` or `threshold`.
