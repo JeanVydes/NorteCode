@@ -125,6 +125,16 @@ pub(crate) fn resolve_spec(
         if api_key_env.is_none() && config.providers.get("disabled").and_then(|e| e.api_key_env.clone()).is_none() {
             return Err("--provider disabled requires --api-key-env".to_owned());
         }
+    } else {
+        // Validate that the provider exists in the catalogue or config.
+        let in_catalogue = catalog.provider(&provider).is_some();
+        let in_config = config.providers.contains_key(&provider);
+        if !in_catalogue && !in_config {
+            return Err(format!(
+                "unknown provider `{}`; use a catalogue provider, a configured provider, or --provider disabled",
+                provider
+            ));
+        }
     }
 
     let config = if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
