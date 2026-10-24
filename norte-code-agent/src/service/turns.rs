@@ -10,7 +10,9 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use tokio::sync::{Notify, mpsc};
 
-use norte::{Engine, EngineEvent, FinishReason, Message, ReasoningRequest, SessionId, Usage};
+use norte::{
+    Engine, EngineEvent, FinishReason, Message, Part, ReasoningRequest, Role, SessionId, Usage,
+};
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
     Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind, SessionKey,
@@ -160,6 +162,15 @@ impl Service {
         } else {
             Vec::new()
         };
+        // A resume shows where the conversation was: the client starts blank, so
+        // it gets the recent messages before the turn's own output. `input` is
+        // `None` exactly for a resume, so a normal message never repeats history.
+        let replay = if input.is_none() {
+            replay_events(request_id, &key, &engine, nid).await
+        } else {
+            Vec::new()
+        };
+        leading.extend(replay);
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
         let notify = Arc::new(Notify::new());
         self.lock_cancels().insert(key.clone(), notify.clone());
@@ -916,6 +927,88 @@ impl Service {
             .get(key)
             .map_or_else(String::new, |record| record.spec.label())
     }
+}
+
+/// The most recent messages a resume replays, so a client that starts blank can
+/// show where the conversation was.
+const REPLAY_MESSAGES: usize = 100;
+
+/// The recent messages of a session, as replay events for a client that is
+/// starting blank.
+///
+/// The live Norte session already begins at the last compaction boundary, so its
+/// history cannot cross one; only the most recent [`REPLAY_MESSAGES`] are sent,
+/// oldest first.
+async fn replay_events(
+    request_id: u64,
+    key: &SessionKey,
+    engine: &Engine,
+    nid: SessionId,
+) -> Vec<ServerEvent> {
+    let Ok(history) = engine.history(nid).await else {
+        return Vec::new();
+    };
+    let start = history.len().saturating_sub(REPLAY_MESSAGES);
+    history[start..]
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, message)| {
+            let text = replay_text(message);
+            if text.is_empty() {
+                return None;
+            }
+            Some(ServerEvent::new(
+                request_id,
+                Some(key.clone()),
+                ServerEventKind::MessageReplayed {
+                    index: u64::try_from(offset + 1).unwrap_or(u64::MAX),
+                    role: role_name(message.role).to_owned(),
+                    text,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The wire name of a message's role.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::Developer => "developer",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        _ => "unknown",
+    }
+}
+
+/// The text of a message for the replay: each text, reasoning, tool call and
+/// tool result part on its own line, so a tool turn still reads.
+fn replay_text(message: &Message) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for part in &message.parts {
+        match part {
+            Part::Text(text) => lines.push(text.text.clone()),
+            Part::Reasoning(reasoning) => lines.push(reasoning.text.clone()),
+            Part::Refusal(refusal) => lines.push(refusal.text.clone()),
+            Part::ToolCall(call) => lines.push(format!("$ {}", call.name)),
+            Part::ToolResult(result) => {
+                let text = result
+                    .parts
+                    .iter()
+                    .filter_map(Part::as_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                lines.push(if text.is_empty() {
+                    "(tool result)".to_owned()
+                } else {
+                    text
+                });
+            }
+            _ => {}
+        }
+    }
+    lines.join("\n")
 }
 
 /// The event a budget notice becomes.

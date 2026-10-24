@@ -4085,3 +4085,68 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
     let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The replay events of a stream, as `(role, text)` pairs.
+fn replays(events: &[ServerEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            ServerEventKind::MessageReplayed { role, text, .. } => {
+                Some((role.clone(), text.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_resume_replays_the_recent_messages() {
+    let (service, _model) = scripted_service(spec("scripted"), &["hello there"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "hi".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+
+    let resumed = drain(
+        &service,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+    let replay = replays(&resumed);
+    assert!(
+        replay.contains(&("user".to_owned(), "hi".to_owned())),
+        "the user message comes back: {replay:?}"
+    );
+    assert!(
+        replay.contains(&("assistant".to_owned(), "hello there".to_owned())),
+        "the answer comes back: {replay:?}"
+    );
+
+    // A normal message must not repeat history: only the resume shows it.
+    let sent = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "again".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    assert!(
+        replays(&sent).is_empty(),
+        "a message does not replay the conversation: {:?}",
+        replays(&sent)
+    );
+}
