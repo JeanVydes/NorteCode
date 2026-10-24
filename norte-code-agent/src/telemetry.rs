@@ -477,6 +477,8 @@ mod tests {
             endpoint: None,
             api_key: norte_code_config::ApiKey::new("test"),
             auth: None,
+            no_prompt_cache_key: false,
+            api_key_env: None,
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };
@@ -538,6 +540,8 @@ mod tests {
             endpoint: None,
             api_key: norte_code_config::ApiKey::new("test"),
             auth: None,
+            no_prompt_cache_key: false,
+            api_key_env: None,
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };

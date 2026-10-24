@@ -40,7 +40,7 @@ use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredSession
 use norte_code_tools::{
     AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
 };
-use norte_tools::{CommandLimits, CommandTool, EditTool, ReadTool, WriteTool};
+use norte_tools::{BrowserTool, CommandLimits, CommandTool, EditTool, ReadTool, WriteTool};
 use tokio::sync::Notify;
 
 use norte_code_catalog::Catalog;
@@ -328,37 +328,6 @@ impl Service {
         self.engine_with_budget(spec, None, None)
     }
 
-    /// The runtime-awareness block stored when a session starts.
-    fn runtime_context(&self, spec: &ModelSpec) -> String {
-        self.runtime_context_with(spec, false)
-    }
-
-    /// The block appended when the session switches to `spec`.
-    fn runtime_update(&self, spec: &ModelSpec) -> String {
-        self.runtime_context_with(spec, true)
-    }
-
-    fn runtime_context_with(&self, spec: &ModelSpec, update: bool) -> String {
-        let catalog = self.catalog();
-        let model = catalog.find(&spec.provider, &spec.model);
-        let config_path = self
-            .config_path
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let user_config = config_path.or_else(norte_code_config::user_config_path);
-        prompt::runtime_context(
-            &prompt::RuntimeFacts {
-                spec,
-                model,
-                config: &self.config,
-                workspace: &self.workspace_root,
-                user_config: user_config.as_deref(),
-            },
-            update,
-        )
-    }
-
     /// Builds an engine whose requests pass through the budget and telemetry
     /// layers, plus an optional eager-compaction layer.
     fn engine_with_budget(
@@ -458,11 +427,7 @@ impl Service {
             .map(|spec| serde_json::to_string(spec).map_or(0, |json| json.chars().count()))
             .sum();
         Ok(PromptSize {
-            system_chars: self
-                .system_prompt
-                .chars()
-                .count()
-                .saturating_add(self.runtime_context(&self.default_spec).chars().count()),
+            system_chars: self.system_prompt.chars().count(),
             tool_chars,
             project_chars: self.project_chars,
             project_path: self.project_path.clone(),
@@ -489,6 +454,7 @@ impl Service {
         self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
         self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
         self.register_tool(&mut tools, EditTool::new().into_declaration())?;
+        self.register_tool(&mut tools, BrowserTool::new().into_declaration())?;
 
         let mut env = BTreeMap::new();
         if let Ok(path) = std::env::var("PATH") {

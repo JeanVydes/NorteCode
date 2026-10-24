@@ -27,7 +27,7 @@ norte-code run [OPTIONS] [PROMPT]
 | `--system-prompt TEXT` | Replace the base system prompt for this run. |
 | `--endpoint URL` | Override the provider endpoint. |
 | `--wire WIRE` | Override the provider wire: `responses`, `chat`, `messages` or `generate-content`. |
-| `--auth AUTH` | Override the credential scheme: `bearer`, `x-api-key` or `x-goog-api-key`. |
+| `--auth AUTH` | Override the credential scheme: `bearer`, `x-api-key`, `x-goog-api-key` or `disabled`. |
 | `--budget LIMIT` | A limit for this message. |
 | `--budget-unit usd\|tokens\|requests` | What the limit measures. Default `usd`. |
 | `--budget-action warn\|ask\|stop` | What to do at the limit. Default `stop` for `--budget`. |

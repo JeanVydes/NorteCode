@@ -274,10 +274,7 @@ impl Service {
         engine
             .append_history(
                 session.id,
-                vec![
-                    norte::Message::system(self.system_prompt.clone()),
-                    norte::Message::system(self.runtime_context(&spec)),
-                ],
+                vec![norte::Message::system(self.system_prompt.clone())],
             )
             .await?;
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());

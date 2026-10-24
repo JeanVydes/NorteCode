@@ -67,6 +67,7 @@ pub(crate) fn print_model(model: &ModelInfo) {
     println!("{reference:<54} {context:>8}  {tools:<5}  {reasoning:<18} {name}");
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_spec(
     config: &Config,
     catalog: &Catalog,
@@ -74,6 +75,8 @@ pub(crate) fn resolve_spec(
     endpoint: Option<String>,
     wire: Option<WireKind>,
     auth: Option<AuthKind>,
+    api_key_env: Option<String>,
+    disable_prompt_cache_key: bool,
 ) -> Result<ModelSpec, String> {
     let reference = model
         .or_else(|| config.default_model.clone())
@@ -81,21 +84,28 @@ pub(crate) fn resolve_spec(
             "no model selected: pass `--model provider/model` or set `default_model` in the config"
                 .to_owned()
         })?;
-    let config = if wire.is_some() || auth.is_some() {
-        let mut config = config.clone();
-        if let Some((provider, _)) = reference.split_once('/') {
-            let entry = config.providers.entry(provider.to_owned()).or_default();
-            if wire.is_some() {
-                entry.wire = wire;
+    let config =
+        if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
+            let mut config = config.clone();
+            if let Some((provider, _)) = reference.split_once('/') {
+                let entry = config.providers.entry(provider.to_owned()).or_default();
+                if wire.is_some() {
+                    entry.wire = wire;
+                }
+                if auth.is_some() {
+                    entry.auth = auth;
+                }
+                if api_key_env.is_some() {
+                    entry.api_key_env = api_key_env;
+                }
+                if disable_prompt_cache_key {
+                    entry.prompt_cache_key = Some(false);
+                }
             }
-            if auth.is_some() {
-                entry.auth = auth;
-            }
-        }
-        Cow::Owned(config)
-    } else {
-        Cow::Borrowed(config)
-    };
+            Cow::Owned(config)
+        } else {
+            Cow::Borrowed(config)
+        };
     let config = config.as_ref();
     match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
         Ok(spec) => Ok(spec),
@@ -172,6 +182,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("spec");
         assert_eq!(plain.wire, Wire::Chat);
@@ -184,6 +196,8 @@ mod tests {
             None,
             Some(WireKind::Messages),
             Some(AuthKind::Bearer),
+            None,
+            false,
         )
         .expect("spec");
         assert_eq!(overridden.wire, Wire::Messages);

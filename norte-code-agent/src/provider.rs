@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use norte::anthropic::AnthropicMessages;
 use norte::gemini::GeminiGenerate;
-use norte::http::{AuthScheme, VendorProfile};
+use norte::http::{AuthScheme, Quirk, VendorProfile};
 use norte::openai::{OpenAiChat, OpenAiResponses};
 use norte::{
     Capabilities, Modality, Model, ModelId, ModelRef, ProviderId, StreamingGranularity, ToolKind,
@@ -45,6 +45,10 @@ pub struct ModelSpec {
     /// The credential scheme to use, when the configuration overrides the
     /// wire's default.
     pub auth: Option<AuthKind>,
+    /// Whether to omit the session-derived `prompt_cache_key`.
+    pub no_prompt_cache_key: bool,
+    /// The environment variable override for the API key, from CLI `--api-key-env`.
+    pub api_key_env: Option<String>,
     /// The capability declaration the catalogue entry and config produce.
     pub capabilities: Capabilities,
     /// The headers sent with every request to this provider.
@@ -101,6 +105,14 @@ fn auth_for(config: &Config, provider: &str) -> Option<AuthKind> {
     config.providers.get(provider).and_then(|entry| entry.auth)
 }
 
+fn no_prompt_cache_key(config: &Config, provider: &str) -> bool {
+    config
+        .providers
+        .get(provider)
+        .and_then(|entry| entry.prompt_cache_key)
+        == Some(false)
+}
+
 impl ModelSpec {
     /// Builds a spec from a catalogue provider and model entry.
     ///
@@ -118,7 +130,12 @@ impl ModelSpec {
         model: &CatalogModel,
         endpoint_override: Option<String>,
     ) -> Result<Self, ServiceError> {
-        let api_key = config.resolve_api_key(&provider.id, &provider.env)?;
+        let auth = auth_for(config, &provider.id);
+        let api_key_env = config
+            .providers
+            .get(&provider.id)
+            .and_then(|entry| entry.api_key_env.as_ref());
+        let api_key = api_key_for(config, &provider.id, &provider.env, auth, api_key_env)?;
         let configured = config
             .providers
             .get(&provider.id)
@@ -141,7 +158,12 @@ impl ModelSpec {
             wire,
             endpoint,
             api_key,
-            auth: auth_for(config, &provider.id),
+            auth,
+            no_prompt_cache_key: no_prompt_cache_key(config, &provider.id),
+            api_key_env: config
+                .providers
+                .get(&provider.id)
+                .and_then(|entry| entry.api_key_env.clone()),
             capabilities,
             headers: headers_for(config, &provider.id),
         })
@@ -196,7 +218,12 @@ impl ModelSpec {
         let provider = catalog
             .provider(provider_id)
             .ok_or_else(|| ServiceError::UnknownProvider(provider_id.to_owned()))?;
-        let api_key = config.resolve_api_key(&provider.id, &provider.env)?;
+        let auth = auth_for(config, &provider.id);
+        let api_key_env = config
+            .providers
+            .get(&provider.id)
+            .and_then(|entry| entry.api_key_env.as_ref());
+        let api_key = api_key_for(config, &provider.id, &provider.env, auth, api_key_env)?;
         let configured = config
             .providers
             .get(&provider.id)
@@ -216,7 +243,12 @@ impl ModelSpec {
             wire,
             endpoint,
             api_key,
-            auth: auth_for(config, &provider.id),
+            auth,
+            no_prompt_cache_key: no_prompt_cache_key(config, &provider.id),
+            api_key_env: config
+                .providers
+                .get(&provider.id)
+                .and_then(|entry| entry.api_key_env.clone()),
             capabilities: fallback_capabilities(overrides),
             headers: headers_for(config, &provider.id),
         })
@@ -242,7 +274,12 @@ impl ModelSpec {
         let (provider, model) = reference
             .split_once('/')
             .ok_or_else(|| ServiceError::ModelReference(reference.to_owned()))?;
-        let api_key = config.resolve_api_key(provider, default_env)?;
+        let auth = auth_for(config, provider);
+        let api_key_env = config
+            .providers
+            .get(provider)
+            .and_then(|entry| entry.api_key_env.as_ref());
+        let api_key = api_key_for(config, provider, default_env, auth, api_key_env)?;
         let configured = config
             .providers
             .get(provider)
@@ -259,7 +296,12 @@ impl ModelSpec {
             wire,
             endpoint: endpoint.or(configured),
             api_key,
-            auth: auth_for(config, provider),
+            auth,
+            no_prompt_cache_key: no_prompt_cache_key(config, provider),
+            api_key_env: config
+                .providers
+                .get(provider)
+                .and_then(|entry| entry.api_key_env.clone()),
             capabilities: fallback_capabilities(overrides),
             headers: headers_for(config, provider),
         })
@@ -307,7 +349,10 @@ impl ModelFactory for VendorModels {
         let model: Arc<dyn Model> = match (spec.wire, spec.endpoint.as_deref()) {
             // No endpoint override: the native presets carry the vendor URL.
             (Wire::Responses, None) if spec.provider == "openai" => {
-                let profile = with_headers(norte::presets::openai_profile(key)?, &spec.headers);
+                let mut profile = with_headers(norte::presets::openai_profile(key)?, &spec.headers);
+                if spec.no_prompt_cache_key {
+                    profile = profile.with_quirk(Quirk::NoPromptCacheKey);
+                }
                 let profile = with_configured_auth(profile, spec.auth, spec.api_key.expose());
                 Arc::new(norte::OpenAiResponses::new(
                     reference,
@@ -337,7 +382,10 @@ impl ModelFactory for VendorModels {
             }
             // Everything else comes from the catalogue's `api` URL.
             (wire, Some(endpoint)) => {
-                let profile = profile(wire, provider, endpoint, key, &spec.headers, spec.auth)?;
+                let mut profile = profile(wire, provider, endpoint, key, &spec.headers, spec.auth)?;
+                if spec.no_prompt_cache_key {
+                    profile = profile.with_quirk(Quirk::NoPromptCacheKey);
+                }
                 build_with_profile(wire, reference, profile, capabilities)?
             }
             (wire, None) => {
@@ -370,8 +418,40 @@ fn with_configured_auth(
         Some(AuthKind::Bearer) => profile.with_auth(AuthScheme::bearer(key)),
         Some(AuthKind::XApiKey) => profile.with_auth(AuthScheme::header("x-api-key", key)),
         Some(AuthKind::XGoogApiKey) => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+        Some(AuthKind::Disabled) => profile.with_auth(AuthScheme::None),
         None => profile,
     }
+}
+
+/// Resolves the key a spec needs, or an empty placeholder when the provider
+/// sends no credential.
+///
+/// A local endpoint with `auth: "disabled"` must not require a dummy key in the
+/// environment just to start.
+/// Resolves the key a spec needs, or an empty placeholder when the provider
+/// sends no credential.
+///
+/// A local endpoint with `auth: "disabled"` must not require a dummy key in the
+/// environment just to start. An explicit `api_key_env` override lets the CLI
+/// point at a different variable without touching the config file.
+fn api_key_for(
+    config: &Config,
+    provider: &str,
+    default_env: &[String],
+    auth: Option<AuthKind>,
+    api_key_env: Option<&String>,
+) -> Result<ApiKey, ServiceError> {
+    if auth == Some(AuthKind::Disabled) {
+        return Ok(ApiKey::new(String::new()));
+    }
+    if let Some(override_env) = api_key_env {
+        if let Ok(value) = std::env::var(override_env) {
+            if !value.trim().is_empty() {
+                return Ok(ApiKey::new(value.trim().to_owned()));
+            }
+        }
+    }
+    Ok(config.resolve_api_key(provider, default_env)?)
 }
 
 /// Builds the vendor profile for a catalogue entry: wire family, base URL and
@@ -476,6 +556,8 @@ mod tests {
             endpoint: endpoint.map(str::to_owned),
             api_key: ApiKey::new("test-key"),
             auth: None,
+            no_prompt_cache_key: false,
+            api_key_env: None,
             capabilities: fallback_capabilities(None),
             headers: BTreeMap::new(),
         }
@@ -638,6 +720,28 @@ mod tests {
         let built = VendorModels.build(&spec, &spec.capabilities);
         assert!(built.is_ok(), "did not build: {:?}", built.err());
         let _ = std::fs::remove_file(key_file);
+    }
+
+    #[test]
+    fn disabled_auth_needs_no_key_and_sends_no_credential() {
+        let config = Config::from_json(
+            r#"{"providers":{"local":{"endpoint":"http://127.0.0.1:1234/v1","wire":"chat","auth":"disabled"}}}"#,
+        )
+        .expect("config")
+        .config;
+        let spec = ModelSpec::resolve(&config, "local/qwen3", None, &[]).expect("spec");
+        assert_eq!(spec.auth, Some(AuthKind::Disabled));
+        assert!(spec.api_key.expose().is_empty());
+        let profile = profile(
+            spec.wire,
+            ProviderId::new("local").expect("provider"),
+            spec.endpoint.as_deref().expect("endpoint"),
+            spec.api_key.expose().to_owned(),
+            &spec.headers,
+            spec.auth,
+        )
+        .expect("profile");
+        assert!(profile.auth.headers().expect("headers").is_empty());
     }
 
     #[test]

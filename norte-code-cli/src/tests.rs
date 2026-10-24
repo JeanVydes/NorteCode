@@ -542,6 +542,13 @@ fn wire_and_auth_flags_are_parsed_and_validated() {
     assert_eq!(args.wire, Some(WireKind::Messages));
     assert_eq!(args.auth, Some(AuthKind::Bearer));
 
+    let cli = Cli::try_parse_from(["norte-code", "run", "--auth", "disabled", "hi"])
+        .expect("parse disabled auth");
+    let Command::Run(args) = cli.command else {
+        panic!("expected run");
+    };
+    assert_eq!(args.auth, Some(AuthKind::Disabled));
+
     assert!(Cli::try_parse_from(["norte-code", "run", "--wire", "telepathy", "hi"]).is_err());
     assert!(Cli::try_parse_from(["norte-code", "run", "--auth", "none", "hi"]).is_err());
 }
@@ -695,6 +702,8 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
         endpoint: Some("https://example.invalid/v1".to_owned()),
         api_key: ApiKey::new("test"),
         auth: None,
+        no_prompt_cache_key: false,
+        api_key_env: None,
         capabilities: capabilities(entry, Wire::Chat, None),
         headers: BTreeMap::new(),
     };

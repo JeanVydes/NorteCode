@@ -439,9 +439,6 @@ impl Service {
                 "switch the model at a turn boundary",
             ));
         }
-        engine
-            .append_history(nid, vec![Message::system(self.runtime_update(&spec))])
-            .await?;
         {
             let mut lock = self.lock_sessions();
             let record = lock

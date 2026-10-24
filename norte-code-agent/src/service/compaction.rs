@@ -196,10 +196,7 @@ impl Service {
         let start = recent_start(&conversation, self.config.compaction.keep_recent);
         let recent = conversation[start..].to_vec();
         let fresh = engine.create().await?;
-        let mut seed = vec![
-            Message::system(self.system_prompt.clone()),
-            Message::system(self.runtime_context(&spec)),
-        ];
+        let mut seed = vec![Message::system(self.system_prompt.clone())];
         seed.push(Message::user(format!(
             "Summary of the earlier conversation, produced by Norte Code. Treat it as \
              context, not as a new request:\n\n{summary}"

@@ -125,15 +125,18 @@ Point the provider at the endpoint and keep the catalogue entry's model id:
   "default_model": "local/my-model",
   "providers": {
     "local": {
-      "api_key_env": "LOCAL_API_KEY",
-      "endpoint": "http://127.0.0.1:8080/v1"
+      "endpoint": "http://127.0.0.1:8080/v1",
+      "wire": "chat",
+      "auth": "disabled"
     }
   }
 }
 ```
 
-The provider must exist in the catalogue, or the host cannot resolve its wire and
-capabilities. Use `model_overrides` when the catalogue's limits are wrong.
+`auth: "disabled"` sends no credential and needs no API key, which is what a
+local server usually expects. A provider the catalogue does not list gets
+conservative fallback capabilities; `model_overrides` can set its context and
+output limits.
 
 ## Why did it fail?
 

@@ -141,6 +141,8 @@ fn spec(model: &str) -> ModelSpec {
         endpoint: Some("https://example.invalid/v1".to_owned()),
         api_key: ApiKey::new("test"),
         auth: None,
+        no_prompt_cache_key: false,
+        api_key_env: None,
         capabilities: norte_code_catalog::capabilities(entry, Wire::Chat, None),
         headers: std::collections::BTreeMap::new(),
     }
@@ -957,10 +959,7 @@ async fn a_session_can_switch_models_at_a_boundary() {
         .iter()
         .filter(|message| message.role == norte::Role::System)
         .collect();
-    assert_eq!(system.len(), 3);
-    assert!(system[1].text().starts_with("# Runtime awareness"));
-    assert!(system[2].text().starts_with("# Runtime update"));
-    assert!(system[2].text().contains("test/other"));
+    assert_eq!(system.len(), 1);
 }
 
 #[test]

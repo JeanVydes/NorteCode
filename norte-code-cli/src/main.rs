@@ -142,6 +142,12 @@ struct RunArgs {
     /// The credential scheme, overriding the wire's default.
     #[arg(long, value_name = "AUTH", value_parser = parse_auth)]
     auth: Option<AuthKind>,
+    /// Read the key from this environment variable instead of the configured one.
+    #[arg(long, value_name = "VAR")]
+    api_key_env: Option<String>,
+    /// Omit `prompt_cache_key` for providers that reject it.
+    #[arg(long)]
+    disable_prompt_cache_key: bool,
     /// A limit for this message.
     #[arg(long, value_name = "LIMIT")]
     budget: Option<f64>,
@@ -419,8 +425,9 @@ fn parse_auth(value: &str) -> Result<AuthKind, String> {
         "bearer" => Ok(AuthKind::Bearer),
         "x-api-key" => Ok(AuthKind::XApiKey),
         "x-goog-api-key" => Ok(AuthKind::XGoogApiKey),
+        "disabled" => Ok(AuthKind::Disabled),
         other => Err(format!(
-            "unknown auth `{other}`; expected bearer, x-api-key or x-goog-api-key"
+            "unknown auth `{other}`; expected bearer, x-api-key, x-goog-api-key or disabled"
         )),
     }
 }
@@ -464,6 +471,8 @@ async fn run_prompt(
         args.endpoint.clone(),
         args.wire,
         args.auth,
+        args.api_key_env.clone(),
+        args.disable_prompt_cache_key,
     )?;
     let provider = spec.provider.clone();
     let mut config = config;
@@ -671,7 +680,7 @@ async fn resume_session(
     .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
-    let spec = resolve_spec(&config, &catalog, None, None, None, None)?;
+    let spec = resolve_spec(&config, &catalog, None, None, None, None, None, false)?;
     let provider = spec.provider.clone();
     let effective = effective_reasoning(
         None,

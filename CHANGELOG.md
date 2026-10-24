@@ -6,8 +6,30 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--auth disabled`, and `providers.<id>.auth: "disabled"` in the config, sends
+  no credential and needs no API key. A local OpenAI-compatible server can be
+  used without exporting a dummy key.
+- `--api-key-env VAR` reads the API key from `VAR` instead of the configured
+  `api_key_env` or the catalogue's `env` names, without touching the config
+  file.
+- `--disable-prompt-cache-key` (and `providers.<id>.prompt_cache_key: false`)
+  omits the session-derived `prompt_cache_key` field that OpenAI wires send.
+  A gateway that rejects unknown fields can now be used.
+
+### Removed
+
+- The runtime-awareness system block is no longer injected at session start, on
+  a model switch or after compaction. The model sees the base prompt and
+  `AGENTS.md` only. The block was a second system message, which local chat
+  templates often reject, and it was not worth its prompt cost.
+
 ### Fixed
 
+- OpenAI Responses now honors the host's `no_prompt_cache_key` quirk and the
+  `--disable-prompt-cache-key` flag. It sent `prompt_cache_key`
+  unconditionally, so a gateway that rejects the field could not be used.
 - An Anthropic overload or API failure that arrives as a stream event is now
   retried like the same HTTP status instead of ending the turn as an unknown
   error, and a response stopped by the context window shows as truncated.

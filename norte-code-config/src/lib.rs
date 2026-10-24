@@ -124,6 +124,8 @@ pub enum AuthKind {
     XApiKey,
     /// `x-goog-api-key: <key>`.
     XGoogApiKey,
+    /// Send no credential, for a local or otherwise open endpoint.
+    Disabled,
 }
 
 /// One provider's settings.
@@ -140,6 +142,11 @@ pub struct ProviderConfig {
     pub wire: Option<WireKind>,
     /// The credential scheme to use, replacing the wire's default.
     pub auth: Option<AuthKind>,
+    /// Whether `OpenAI` wires may send the session id as `prompt_cache_key`.
+    ///
+    /// `None` keeps the wire default, which sends it; `Some(false)` omits it for
+    /// a gateway that rejects the field.
+    pub prompt_cache_key: Option<bool>,
     /// Extra headers sent with every request to this provider.
     ///
     /// They are added to the ones the provider ships with, and a header named
@@ -1013,7 +1020,8 @@ mod tests {
             r#"{
                 "providers": {
                     "google": {"wire": "generate-content", "auth": "x-goog-api-key"},
-                    "anthropic": {"wire": "responses", "auth": "x-api-key"}
+                    "anthropic": {"wire": "responses", "auth": "x-api-key"},
+                    "local": {"wire": "chat", "auth": "disabled"}
                 }
             }"#,
         )
@@ -1029,6 +1037,10 @@ mod tests {
         assert_eq!(
             loaded.config.providers["anthropic"].auth,
             Some(AuthKind::XApiKey)
+        );
+        assert_eq!(
+            loaded.config.providers["local"].auth,
+            Some(AuthKind::Disabled)
         );
     }
 

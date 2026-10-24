@@ -43,7 +43,7 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `api_key_file` | File containing the key. |
 | `endpoint` | Base URL override. |
 | `wire` | Wire to speak: `responses`, `chat`, `messages` or `generate-content`; overrides the catalogue's choice. |
-| `auth` | Credential scheme: `bearer`, `x-api-key` or `x-goog-api-key`; overrides the wire's default. |
+| `auth` | Credential scheme: `bearer`, `x-api-key`, `x-goog-api-key` or `disabled`; overrides the wire's default. `disabled` sends no credential and needs no key. |
 | `headers` | Extra headers sent with every request to this provider. |
 
 Resolution order: `api_key_env`, `api_key_file`, then the catalogue's `env`.

@@ -94,28 +94,16 @@ too. Approvals and questions are durable protocol objects, not terminal-only
 state. A non-interactive client leaves the session parked instead of guessing a
 decision.
 
-## Prompt and runtime awareness
+## System prompt
 
-A new session stores two leading system messages: the base prompt (plus the
-optional `AGENTS.md` project instructions) and a runtime-awareness block. The
-block is generated once from the session's model and effective config. It
-carries:
+A new session stores one leading system message: the base prompt plus the
+optional `AGENTS.md` project instructions. Nothing else is injected into the
+history. Model facts, limits, sandbox state and config paths are available to
+the human through `--debug` and the protocol, not as prompt text.
 
-- the `provider/model`, wire and catalogue display data;
-- context and output limits, input/output modalities, tool and reasoning
-  capabilities, attachments, temperature and structured output;
-- catalogue release and update dates, status, open weights and knowledge cutoff;
-- the compaction trigger, threshold, retained `keep_recent` messages and summary
-  model;
-- the workspace root, platform, command sandbox state and approval mode;
-- the effective budget, iteration, retry, skill and extension settings, plus a
-  short map of the CLI and configuration files for harness help.
-
-It deliberately contains no API key and no endpoint URL. Because it is part of
-the session history, the provider prompt cache sees a stable prefix for the
-life of the session. A model switch appends a `Runtime update` system message
-that supersedes the old facts; compaction seeds the fresh session with a new
-block. `PromptSize` includes the initial block.
+Compaction seeds the fresh session with the same base prompt, and a model switch
+leaves the existing history unchanged. `PromptSize` counts the base prompt and
+the tool declarations.
 
 ## Model switching
 
