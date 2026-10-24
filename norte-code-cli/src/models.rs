@@ -92,13 +92,16 @@ pub(crate) fn resolve_spec(
         })?;
         (provider, model)
     } else if let Some(model) = model {
-        // No --provider: use the default provider from config, but do NOT split
-        // the model name on '/'. The model name is taken verbatim.
+        // No --provider: use the default provider from config. Do NOT split
+        // the model name on '/'. If there is no default, error out instead of
+        // silently assuming openai.
         let default_provider = config
             .default_model
             .as_ref()
             .and_then(|d| d.split_once('/').map(|(p, _)| p.to_owned()))
-            .unwrap_or_else(|| "openai".to_owned());
+            .ok_or_else(|| {
+                "no provider specified: pass --provider or set default_model in config".to_owned()
+            })?;
         (default_provider, model)
     } else if let Some(default) = &config.default_model {
         if let Some((p, m)) = default.split_once('/') {
