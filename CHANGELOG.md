@@ -34,9 +34,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The `--debug` blocks have headings, colour and aligned fields. The section
-title is bold cyan, a field label is dim and its value in the default colour,
-and the model summary no longer prints fixed fallback limits.
+- The `--debug` blocks are framed panels whose columns are sized from their
+rows, so a long path no longer breaks the frame and the fields of a block line
+up whatever the block holds. The section title is bold cyan, a field label dim
+and its value in the default colour, and the startup panel carries the session
+key, the effective settings and the capabilities in force together. A pipe or a
+log file gets the plain rows instead of the box drawing.
 
 ### Fixed
 
@@ -126,6 +129,16 @@ and the model summary no longer prints fixed fallback limits.
   into several `┌ thinking` blocks. An empty text or reasoning delta changed the
   active block, so the gutter closed and the answer interleaved with its
   reasoning.
+- The renderer's own escape sequences are no longer escaped themselves, which
+  printed `\u{1b}[1mdebug: model` instead of a styled heading.
+- A resumed session announces its turn before replaying the history. The turn's
+  task emitted `TurnStarted` only after the replayed messages had been read, so
+  the transcript appeared while the client still showed the session as idle.
+- Markdown answers are escaped before they are rendered. A control character or
+  a bidi override inside a model's markdown could reach the terminal raw, and
+  one that spelled an escape sequence was turned into a real one by the
+  renderer.
+
 ### Added
 
 - A provider can override its wire and credential scheme in the configuration.
