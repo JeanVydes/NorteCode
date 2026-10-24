@@ -18,9 +18,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   omits the session-derived `prompt_cache_key` field that OpenAI wires send.
   A gateway that rejects unknown fields can now be used.
 - Resuming a session shows where the conversation was. The agent replays the
-  most recent messages, oldest first, capped at a hundred and never across a
-  compaction boundary, so a client that starts blank can print the transcript
-  before the turn continues.
+  most recent messages, oldest first, capped at a hundred, so a client that
+  starts blank can print the transcript before the turn continues.
 - The footer has a context dial: a ring whose filled share is how much of the
   model's window the last request used, blue below the compaction threshold,
   amber near it and red with `compact` once it is reached.
@@ -34,6 +33,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The workspace gate and the command sandbox live together under
+  `tools.confinement`. They answer the same question at two levels: the gate
+  re-roots a tool's path under the workspace and refuses an escape, while the
+  sandbox wraps `command`'s child process. The sandbox stays off by default and
+  paths stay confined by default.
+- `tools.confinement.workspace_only: false` lets `read`, `write`, `edit`,
+  `glob`, `list_dir`, `grep` and `command`'s `cwd` name any path, for a host
+  working across repositories. A special file such as a FIFO is still refused,
+  because opening one with no writer would block a tool forever.
 - The `--debug` blocks are framed panels whose columns are sized from their
 rows, so a long path no longer breaks the frame and the fields of a block line
 up whatever the block holds. The section title is bold cyan, a field label dim
@@ -138,6 +146,23 @@ log file gets the plain rows instead of the box drawing.
   a bidi override inside a model's markdown could reach the terminal raw, and
   one that spelled an escape sequence was turned into a real one by the
   renderer.
+- A resumed session shows the conversation, not just the live one. A compaction
+  replaces the session with a summary and the last few messages, and the replay
+  read only that, so resuming after a compaction printed a handful of lines
+  where the user expected the transcript. The chain of sessions a compaction
+  came from is walked to fill the window, still without crossing a boundary.
+- Resuming reports the usage the session already spent. The counters live in
+  the session record and survived, but only the replayed messages crossed the
+  wire, so the footer showed the totals of the messages it happened to see: a
+  session that had spent a hundred thousand input tokens showed nothing until
+  the next request arrived.
+- `Shift+Enter` breaks the line instead of submitting. The editor branched on
+  the shift modifier, which the terminal never reported: without the keyboard
+  protocol it sends the same carriage return for both, so the newline branch
+  was unreachable.
+- A multi-line message is drawn on its own rows. The input line always drew
+  one row and ignored the break, so a second line was invisible and the cursor
+  column counted it, which made the draft look like it was erasing itself.
 
 ### Added
 
