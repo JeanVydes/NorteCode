@@ -1822,31 +1822,6 @@ pub(crate) fn debug_start(
     let iterations = configuration
         .max_iterations
         .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
-    eprintln!("{}", style.dim("debug: startup"));
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  session    {}",
-            session.unwrap_or("(new; shown on first event)")
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  model      {} · provider {} · wire {}",
-            spec.label(),
-            spec.provider,
-            spec.wire.family()
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  approval   {}",
-            approval_label(configuration.approval_mode)
-        ))
-    );
-    eprintln!("{}", style.dim(format!("  iterations {iterations}")));
     let sandbox = if configuration.tools.sandbox.enabled {
         let name = if cfg!(target_os = "linux") {
             "bwrap"
@@ -1866,11 +1841,59 @@ pub(crate) fn debug_start(
     } else {
         "disabled".to_owned()
     };
-    eprintln!("{}", style.dim(format!("  sandbox    {sandbox}")));
+    eprintln!("{}", style.dim("debug: startup"));
+    eprintln!("{}", style.dim("  ┌──────────────┬──────────────────────────────────────────────┐"));
     eprintln!(
         "{}",
         style.dim(format!(
-            "  compaction {}{}",
+            "  │ session      │ {}",
+            session.unwrap_or("(new; shown on first event)")
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ model        │ {}",
+            spec.label()
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ provider     │ {}{}",
+            spec.provider,
+            if catalog.provider(&spec.provider).is_some() {
+                ""
+            } else {
+                "  (not in catalogue; using config/fallback)"
+            }
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ wire         │ {}",
+            spec.wire.family()
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ approval     │ {}",
+            approval_label(configuration.approval_mode)
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ iterations   │ {}",
+            iterations
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ compaction   │ {}{}",
             configuration.compaction.threshold,
             if !configuration.compaction.enabled {
                 " (disabled)"
@@ -1881,38 +1904,51 @@ pub(crate) fn debug_start(
             }
         ))
     );
-    eprintln!("{}", style.dim(format!("  workspace  {workspace}")));
-    eprintln!("{}", style.dim(format!("  config     {config_label}")));
-    eprintln!(
-        "{}",
-        style.dim(format!("  database   {}", database.display()))
-    );
-    let provider_count = catalog.providers.len();
-    let model_count: usize = catalog.providers.values().map(|p| p.models.len()).sum();
-    let in_catalogue = catalog.provider(&spec.provider).is_some();
     eprintln!(
         "{}",
         style.dim(format!(
-            "  catalogue  {} · {} providers · {} models",
+            "  │ sandbox      │ {}",
+            sandbox
+        ))
+    );
+    eprintln!("{}", style.dim("  ├──────────────┼──────────────────────────────────────────────┤"));
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ workspace    │ {}",
+            workspace
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ config       │ {}",
+            config_label
+        ))
+    );
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ database     │ {}",
+            database.display()
+        ))
+    );
+    let provider_count = catalog.providers.len();
+    let model_count: usize = catalog.providers.values().map(|p| p.models.len()).sum();
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "  │ catalogue    │ {} · {} providers · {} models",
             source_label(source),
             provider_count,
             model_count
         ))
     );
-    if !in_catalogue {
-        eprintln!(
-            "{}",
-            style.dim(format!(
-                "  provider   {} (not in catalogue; using config/fallback)",
-                spec.provider
-            ))
-        );
-    }
     if !configuration.extensions.is_empty() {
         eprintln!(
             "{}",
             style.dim(format!(
-                "  extensions {}",
+                "  │ extensions   │ {}",
                 configuration
                     .extensions
                     .keys()
@@ -1922,6 +1958,7 @@ pub(crate) fn debug_start(
             ))
         );
     }
+    eprintln!("{}", style.dim("  └──────────────┴──────────────────────────────────────────────┘"));
 }
 
 /// Prints the static prompt size in characters. Tokens are provider-reported,
