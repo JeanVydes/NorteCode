@@ -4,6 +4,10 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Renders markdown text to ANSI-styled terminal output.
 pub fn render(text: &str) -> String {
+    // The markup is trusted, the text inside it is not: the model writes it, so a
+    // control character or a bidi override in it must not reach the terminal raw.
+    let text = crate::text::terminal(text);
+    let text = text.as_ref();
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -67,7 +71,13 @@ pub fn render(text: &str) -> String {
                 if !table_row.is_empty() {
                     out.push_str(&table_row.join(" | "));
                     out.push('\n');
-                    out.push_str(&table_row.iter().map(|c| "-".repeat(c.len().max(3))).collect::<Vec<_>>().join(" | "));
+                    out.push_str(
+                        &table_row
+                            .iter()
+                            .map(|c| "-".repeat(c.len().max(3)))
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                    );
                     out.push('\n');
                     table_row.clear();
                 }
@@ -94,7 +104,11 @@ pub fn render(text: &str) -> String {
                 let _ = dest_url;
             }
             Event::End(TagEnd::Link) => out.push_str("\x1b[0m"),
+            // Every run of literal text is escaped again: a `\u{1b}` in the source
+            // cannot become an escape here just because it was written that way.
             Event::Text(t) => {
+                let t = crate::text::terminal(&t);
+                let t = t.as_ref();
                 if in_code_block {
                     for line in t.lines() {
                         out.push_str("  ");
@@ -102,13 +116,15 @@ pub fn render(text: &str) -> String {
                         out.push('\n');
                     }
                 } else if in_table_cell {
-                    table_cell.push_str(&t);
+                    table_cell.push_str(t);
                 } else {
-                    out.push_str(&t);
+                    out.push_str(t);
                 }
             }
             Event::Code(t) => {
-                out.push_str(&format!("\x1b[2m{}\x1b[0m", t));
+                out.push_str("\x1b[2m");
+                out.push_str(&crate::text::terminal(&t));
+                out.push_str("\x1b[0m");
             }
             Event::SoftBreak => {
                 if !in_table_cell {

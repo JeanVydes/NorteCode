@@ -9,6 +9,10 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+mod chars;
+
+pub(crate) use chars::needs_escape;
+
 /// Returns `text` with terminal controls and bidi overrides escaped.
 ///
 /// Printable text is returned without allocating. Newlines and tabs are kept;
@@ -28,20 +32,6 @@ pub(crate) fn terminal(text: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(escaped)
-}
-
-/// Whether a character can control the terminal or spoof reading order.
-fn needs_escape(character: char) -> bool {
-    (character.is_control() && character != '\n' && character != '\t')
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206f}'
-                | '\u{feff}'
-        )
 }
 
 #[cfg(test)]

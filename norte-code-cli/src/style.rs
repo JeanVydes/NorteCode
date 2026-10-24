@@ -3,6 +3,7 @@
 //! Styling is opt-in by destination: it is enabled only when the stream is a
 //! terminal, `NO_COLOR` is not set and `TERM` is not `dumb`. Piped output and
 //! `--jsonl` stay plain, so scripts never have to strip escape sequences.
+//! [`Colors`] holds that decision.
 //!
 //! Named colours use 24-bit RGB when the terminal advertises truecolour and
 //! 256-colour indexes otherwise. The classic 16-colour codes are only the last
@@ -12,17 +13,20 @@
 use std::fmt::Display;
 use std::io::IsTerminal;
 
-/// How many colours the destination can show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Colors {
-    /// No escape sequences at all.
-    None,
-    /// The classic 16-colour palette.
-    Ansi16,
-    /// The xterm 256-colour palette.
-    Ansi256,
-    /// 24-bit RGB.
-    True,
+mod colors;
+
+pub(crate) use colors::Colors;
+
+/// How a styled run ends its SGR sequence.
+///
+/// The `ESC` is split out for the same reason as [`ansi`]: the literal must not
+/// carry an escape byte that [`Style::decorate`] would then escape away.
+const RESET: &str = "\u{1b}[0m";
+
+/// Opens an SGR run with the given codes.
+#[must_use]
+fn ansi(codes: &str) -> String {
+    format!("{}[{codes}m", '\u{1b}')
 }
 
 /// Which SGR codes to wrap text in.
@@ -64,7 +68,7 @@ impl Style {
 
     fn for_terminal(is_terminal: bool) -> Self {
         Self {
-            colors: colors_for(is_terminal),
+            colors: colors::Environment::current(is_terminal).colors(),
         }
     }
 
@@ -74,17 +78,40 @@ impl Style {
         self.decorate(codes, text)
     }
 
-    /// Sanitises the text and wraps it in the given SGR codes.
+    /// Whether this style emits escape sequences at all.
+    #[must_use]
+    pub fn paints(self) -> bool {
+        !matches!(self.colors, Colors::None)
+    }
+
+    /// Wraps text that is already escaped in the given SGR codes.
     ///
-    /// Every styled string passes through here, so untrusted model, tool and
-    /// catalogue text cannot inject terminal controls even when it reaches a
-    /// caller that forgot to escape it.
+    /// [`paint`] escapes its input, so a caller that composes two styles would
+    /// get the inner codes escaped and printed as `\u{{1b}}[1m` instead of
+    /// styled. This is the raw form for that case: the caller guarantees the
+    /// text carries no terminal control of its own.
+    ///
+    /// [`paint`]: Style::paint
+    pub(crate) fn paint_raw(self, codes: &str, text: &str) -> String {
+        match self.colors {
+            Colors::None => text.to_owned(),
+            _ => format!("{}{text}{RESET}", ansi(codes)),
+        }
+    }
+
+    /// Escapes the text and wraps it in the given SGR codes.
+    ///
+    /// Every styled string passes through here, so the chrome the renderer
+    /// writes is escaped exactly like the untrusted model, tool and catalogue
+    /// text: one path, no exceptions to get wrong. The escape sequence this
+    /// function adds is built from a `char`, so its own `ESC` is never part of
+    /// a literal that the escaping could reach.
     fn decorate(self, codes: &str, text: impl Display) -> String {
         let text = text.to_string();
         let text = crate::text::terminal(&text);
         match self.colors {
             Colors::None => text.into_owned(),
-            _ => format!("\x1b[{codes}m{text}\x1b[0m"),
+            _ => format!("{}{text}{RESET}", ansi(codes)),
         }
     }
 
@@ -190,33 +217,6 @@ impl Style {
     }
 }
 
-fn colors_for(is_terminal: bool) -> Colors {
-    if !is_terminal {
-        return Colors::None;
-    }
-    if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
-        return Colors::None;
-    }
-    if std::env::var("TERM").is_ok_and(|term| term == "dumb") {
-        return Colors::None;
-    }
-    if std::env::var("CLICOLOR").is_ok_and(|value| value == "0")
-        && !std::env::var("CLICOLOR_FORCE").is_ok_and(|value| value == "1")
-    {
-        return Colors::None;
-    }
-    if std::env::var("COLORTERM")
-        .is_ok_and(|value| value.eq_ignore_ascii_case("truecolor") || value == "24bit")
-    {
-        return Colors::True;
-    }
-    if std::env::var("TERM").is_ok_and(|term| term.contains("256color") || term.contains("direct"))
-    {
-        return Colors::Ansi256;
-    }
-    Colors::Ansi16
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Colors, Style};
@@ -247,5 +247,26 @@ mod tests {
             "\x1b[38;2;86;182;194msafe\\u{1b}[2Jowned\x1b[0m"
         );
         assert_eq!(styled(Colors::None).dim(injected), "safe\\u{1b}[2Jowned");
+    }
+
+    #[test]
+    fn the_chrome_is_escaped_like_model_text() {
+        // "ú", "⏳" and "·" are not controls and must survive untouched.
+        assert_eq!(
+            styled(Colors::None).dim("archivó ⏳ · 1k"),
+            "archivó ⏳ · 1k"
+        );
+        // A bidi override in a label is escaped like one in an answer.
+        assert_eq!(
+            styled(Colors::None).dim("a\u{202e}b"),
+            "a\\u{202e}b",
+            "a styled label is escaped too"
+        );
+    }
+
+    #[test]
+    fn plain_style_reports_that_it_paints_nothing() {
+        assert!(!Style::plain().paints());
+        assert!(styled(Colors::True).paints());
     }
 }
