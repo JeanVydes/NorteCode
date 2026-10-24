@@ -553,6 +553,10 @@ async fn run_prompt(
         }
     }
     let show_cost = config.cost.show;
+    // The footer's context dial needs the window and the compaction threshold
+    // before the config and spec are moved into the service.
+    let max_context = spec.capabilities.max_context;
+    let compaction_threshold = config.compaction.threshold;
     let database = database_path();
     if debug {
         debug_start(
@@ -610,6 +614,8 @@ async fn run_prompt(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.model_name = Some(model_label);
+    renderer.max_context = max_context;
+    renderer.compaction_threshold = compaction_threshold;
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
@@ -719,6 +725,10 @@ async fn resume_session(
         }
     }
     let show_cost = config.cost.show;
+    // The footer's context dial needs the window and the compaction threshold
+    // before the config and spec are moved into the service.
+    let max_context = spec.capabilities.max_context;
+    let compaction_threshold = config.compaction.threshold;
     let database = database_path();
     if debug {
         debug_start(
@@ -775,6 +785,8 @@ async fn resume_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.model_name = Some(model_label);
+    renderer.max_context = max_context;
+    renderer.compaction_threshold = compaction_threshold;
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
     let mut input = if interactive {

@@ -92,6 +92,14 @@ pub(crate) struct Renderer {
     pub(crate) cost: f64,
     pub(crate) unpriced: u64,
     pub(crate) tool_counts: BTreeMap<String, u64>,
+    /// The current context size, as the last request reported its input tokens.
+    /// It is the number that grows toward the compaction limit, unlike the
+    /// cumulative `input` total.
+    pub(crate) context_used: u64,
+    /// The model's context window, when the catalogue knows it.
+    pub(crate) max_context: Option<u64>,
+    /// The used-context fraction that triggers compaction, in (0, 1].
+    pub(crate) compaction_threshold: f64,
     /// A `todo` call whose arguments arrived but whose result has not, keyed by
     /// call id. The footer changes only after the tool succeeds.
     pending_todos: BTreeMap<String, Vec<TodoItem>>,
@@ -142,6 +150,9 @@ impl Renderer {
             cost: 0.0,
             unpriced: 0,
             tool_counts: BTreeMap::new(),
+            context_used: 0,
+            max_context: None,
+            compaction_threshold: 1.0,
             pending_todos: BTreeMap::new(),
         }
     }
@@ -189,6 +200,9 @@ impl Renderer {
             ServerEventKind::RequestReconstructed { .. }
             | ServerEventKind::CostNotReported { .. } => {
                 self.usage_event(&event.kind);
+            }
+            ServerEventKind::MessageReplayed { index, role, text } => {
+                self.replay_message(*index, role, text);
             }
             kind => self.status_event(kind),
         }
@@ -296,6 +310,49 @@ impl Renderer {
             println!();
         }
         eprintln!();
+        self.last_char = Some('\n');
+    }
+
+    /// Writes one past message of a resumed session, so the client shows where
+    /// the conversation was before the turn continues.
+    ///
+    /// A user message keeps the live prompt's `›` marker; an assistant message
+    /// is rendered as markdown, like the answer it once was. Tool and system
+    /// messages are shown dimmed so they read as context, not as the answer.
+    pub(crate) fn replay_message(&mut self, index: u64, role: &str, text: &str) {
+        if self.quiet || matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        // The working bar shares stderr with the transcript, so the replay stops
+        // it before printing, exactly as the reasoning gutter does.
+        if let Some(mut bar) = self.loading_bar.take() {
+            bar.stop();
+        }
+        self.space();
+        match role {
+            "user" => {
+                let mut lines = text.lines();
+                let first = lines.next().unwrap_or_default();
+                eprintln!("{} {}", self.style.cyan("›"), first);
+                for line in lines {
+                    eprintln!("  {}", crate::text::terminal(line));
+                }
+            }
+            "assistant" => {
+                let rendered = crate::markdown::render(text);
+                eprint!("{rendered}");
+                if !rendered.ends_with('\n') {
+                    eprintln!();
+                }
+            }
+            other => {
+                let label = self.style.faint(format!("#{index} {other}"));
+                eprintln!("{label}");
+                for line in text.lines() {
+                    eprintln!("  {}", self.style.dim(line));
+                }
+            }
+        }
         self.last_char = Some('\n');
     }
 
@@ -702,6 +759,9 @@ impl Renderer {
                 self.turn_requests += 1;
                 self.input += usage.input_tokens.unwrap_or(0);
                 self.output += usage.output_tokens.unwrap_or(0);
+                if let Some(input) = usage.input_tokens {
+                    self.context_used = input;
+                }
                 if let Some(cache) = usage.cache_read_tokens {
                     self.cache_read += cache;
                     self.cache_reported = true;
@@ -1119,10 +1179,24 @@ impl Renderer {
     /// place: requests, input and output tokens, the average cache-read share,
     /// the total input:output ratio and the reported cost.
     pub(crate) fn session_status(&self) -> String {
+        // The dial shows the live context against the model's window, so a turn
+        // that is filling the window is visible before compaction hits. It is red
+        // while a compaction is running.
+        let compacting = self
+            .activity
+            .as_deref()
+            .is_some_and(|activity| activity.starts_with("compacting"));
         let mut parts = vec![
             self.style.cyan(format!("{} req", self.requests)),
             self.style.dim(format!("{} in", human_tokens(self.input))),
             self.style.dim(format!("{} out", human_tokens(self.output))),
+            context_dial(
+                self.style,
+                self.context_used,
+                self.max_context,
+                self.compaction_threshold,
+                compacting,
+            ),
         ];
         if self.cache_reported && self.input > 0 {
             parts.push(self.style.blue(format!(
@@ -1772,6 +1846,66 @@ pub(crate) fn percent_label(part: u64, total: u64) -> String {
         format!("{percent:.0}%")
     } else {
         format!("{percent:.1}%")
+    }
+}
+
+/// One cell of the context dial, from empty to full.
+const DIAL_CELLS: [char; 4] = ['░', '▒', '▓', '█'];
+
+/// How close to the compaction limit the context must be before the dial warns.
+const DIAL_WARN_FRACTION: f64 = 0.8;
+
+/// How many cells the context dial draws.
+const DIAL_WIDTH: usize = 8;
+
+/// A context-usage dial for the footer.
+///
+/// It draws a fixed-width ring whose filled share is how much of the model's
+/// context window the last request used, with the number beside it. The ring is
+/// blue well below the compaction threshold, amber near it, and red at or past
+/// it, where `compact` is added. `used` is the last request's input tokens.
+///
+/// When the model's window is unknown the ring is all-empty and only the raw
+/// token count is shown: a missing maximum is not a full context.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn context_dial(
+    style: Style,
+    used: u64,
+    max: Option<u64>,
+    threshold: f64,
+    compact: bool,
+) -> String {
+    let Some(max) = max.filter(|max| *max > 0) else {
+        return style.dim(format!("ctx {}", human_tokens(used)));
+    };
+    let fraction = (used as f64 / max as f64).clamp(0.0, 1.0);
+    let filled_cells = fraction * DIAL_WIDTH as f64;
+    let full = filled_cells as usize;
+    let mut ring = String::with_capacity(DIAL_WIDTH);
+    for cell in 0..DIAL_WIDTH {
+        if cell < full {
+            ring.push('█');
+        } else if (cell as f64) < filled_cells {
+            let partial = ((filled_cells - cell as f64) * 4.0) as usize;
+            ring.push(DIAL_CELLS[partial.min(3)]);
+        } else {
+            ring.push('░');
+        }
+    }
+    // The window is over the limit once the used fraction reaches the threshold.
+    let over = threshold > 0.0 && fraction >= threshold;
+    let near = !over && threshold > 0.0 && fraction >= threshold * DIAL_WARN_FRACTION;
+    let label = format!("ctx {} {}", percent_label(used, max), ring);
+    if over || compact {
+        format!("{} {}", style.red(label), style.red("⟳ compact"))
+    } else if near {
+        style.yellow(label)
+    } else {
+        style.blue(label)
     }
 }
 
@@ -2707,6 +2841,24 @@ mod tests {
         assert!(renderer.session_status().contains("cost not reported"));
         renderer.set_cost_silent(true);
         assert!(!renderer.session_status().contains("not reported"));
+    }
+
+    #[test]
+    fn the_context_dial_warns_as_the_window_fills() {
+        let style = Style::plain();
+        // A quarter full is neither near nor over the limit.
+        let low = super::context_dial(style, 25_000, Some(100_000), 0.8, false);
+        assert!(low.contains("25%"), "{low}");
+        assert!(!low.contains("compact"), "{low}");
+        // Past the threshold the dial says so.
+        let over = super::context_dial(style, 90_000, Some(100_000), 0.8, false);
+        assert!(over.contains("compact"), "{over}");
+    }
+
+    #[test]
+    fn the_context_dial_without_a_window_shows_only_the_count() {
+        let dial = super::context_dial(Style::plain(), 12_000, None, 0.8, false);
+        assert_eq!(dial, "ctx 12k");
     }
 
     #[test]
