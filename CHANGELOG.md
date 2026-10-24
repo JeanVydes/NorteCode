@@ -17,6 +17,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - `--disable-prompt-cache-key` (and `providers.<id>.prompt_cache_key: false`)
   omits the session-derived `prompt_cache_key` field that OpenAI wires send.
   A gateway that rejects unknown fields can now be used.
+- Resuming a session shows where the conversation was. The agent replays the
+  most recent messages, oldest first, capped at a hundred and never across a
+  compaction boundary, so a client that starts blank can print the transcript
+  before the turn continues.
+- The footer has a context dial: a ring whose filled share is how much of the
+  model's window the last request used, blue below the compaction threshold,
+  amber near it and red with `compact` once it is reached.
 
 ### Removed
 
@@ -98,6 +105,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - A retry says when the wait is over. The service reports the attempt as it
   starts and the prompt prints `retrying now (attempt N)`, so the last
   `retrying in ...` line no longer stands while the model is already thinking.
+- The working indicator no longer paints over the reasoning. It stopped only on
+  the first answer token, never on the first reasoning one, so the animated line
+  overwrote the dim `┌ thinking` gutter and left the thought cut up. It is now a
+  bar that owns its line, is painted through `Style` and is stopped before any
+  other writer emits.
+- A keepalive or the stream's trailing empty part no longer splits a thought
+  into several `┌ thinking` blocks. An empty text or reasoning delta changed the
+  active block, so the gutter closed and the answer interleaved with its
+  reasoning.
 
 ### Added
 
