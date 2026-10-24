@@ -934,6 +934,53 @@ mod unix {
         out
     }
 
+    /// The buffer split into the logical lines the input line draws.
+    ///
+    /// Returns the rendered rows and the number of rows that precede the top of
+    /// the visible window, so a draft taller than the footer scrolls instead of
+    /// running off it. The last returned row is the one the cursor sits on.
+    fn input_lines(buffer: &LineBuffer, window: usize) -> Vec<String> {
+        // Where each logical line starts and ends in the buffer.
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        let mut start = 0usize;
+        for (index, character) in buffer.chars.iter().enumerate() {
+            if *character == '\n' {
+                spans.push((start, index));
+                start = index + 1;
+            }
+        }
+        spans.push((start, buffer.chars.len()));
+
+        // The line the cursor is on, so the window can follow it.
+        let cursor_line = spans
+            .iter()
+            .position(|(from, to)| buffer.cursor >= *from && buffer.cursor <= *to)
+            .unwrap_or(spans.len() - 1);
+        let first = cursor_line.saturating_add(1).saturating_sub(window.max(1));
+
+        let mut rendered = Vec::new();
+        for (from, to) in spans.iter().skip(first).take(window.max(1)).copied() {
+            let mut row = String::new();
+            for index in from..to {
+                let character = buffer.chars[index];
+                if index == buffer.cursor {
+                    row.push_str("\x1b[7m");
+                    row.push(character);
+                    row.push_str("\x1b[27m");
+                } else {
+                    row.push(character);
+                }
+            }
+            // A cursor at the very end of a line still needs a cell, and an
+            // empty line still needs one row to itself.
+            if buffer.cursor == to {
+                row.push_str("\x1b[7m \x1b[27m");
+            }
+            rendered.push(row);
+        }
+        rendered
+    }
+
     fn draw_input(
         style: Style,
         cols: u16,
@@ -944,27 +991,36 @@ mod unix {
         let prompt = format!("{} ", style.cyan("›"));
         let prompt_width = 2usize;
         let available = usize::from(cols).saturating_sub(prompt_width + 1).max(1);
-        let offset = buffer.cursor.saturating_sub(available.saturating_sub(1));
-        let end = (offset + available).min(buffer.chars.len());
-        let mut visible = String::new();
-        for index in offset..end {
-            let character = buffer.chars[index];
-            if index == buffer.cursor {
-                visible.push_str("\x1b[7m");
-                visible.push(character);
-                visible.push_str("\x1b[27m");
+        // The input owns the footer rows below the pinned widgets, so a taller
+        // draft grows upward over its own rows instead of the widgets.
+        let window = usize::from(FOOTER_ROWS.saturating_sub(1).max(1));
+        let lines = input_lines(buffer, window);
+        let last_row = rows.max(1);
+        let first_row = last_row
+            .saturating_sub(u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
+
+        let mut frame = String::from("\x1b7");
+        for (offset, line) in lines.iter().enumerate() {
+            let row = first_row.saturating_add(u16::try_from(offset).unwrap_or(0));
+            frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            // Continuation rows keep the prompt column blank so the text stays
+            // aligned under the first line.
+            if offset == 0 {
+                frame.push_str(&prompt);
             } else {
-                visible.push(character);
+                frame.push_str(&" ".repeat(prompt_width));
             }
+            frame.push_str(&clip_visible(line, available));
         }
-        if buffer.cursor >= buffer.chars.len() {
-            visible.push_str("\x1b[7m \x1b[27m");
+        // The completion hint belongs on the cursor row and only makes sense
+        // while the draft is a single line.
+        if lines.len() == 1 {
             if let Some(suggestion) = suggestion {
                 if !suggestion.completion.is_empty() {
-                    let typed = end.saturating_sub(offset);
+                    let typed = buffer.chars.len().min(available);
                     let room = available.saturating_sub(typed + 1);
                     if room > 0 {
-                        visible.push_str(&clip_visible(
+                        frame.push_str(&clip_visible(
                             &style.faint(suggestion.completion.clone()),
                             room,
                         ));
@@ -972,8 +1028,8 @@ mod unix {
                 }
             }
         }
-        let row = rows.max(1);
-        write_frame(&format!("\x1b7\x1b[{row};1H\x1b[2K{prompt}{visible}\x1b8"));
+        frame.push_str("\x1b8");
+        write_frame(&frame);
     }
 
     #[cfg(test)]
@@ -984,8 +1040,8 @@ mod unix {
 
         use super::{
             FOOTER_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus, clip_visible,
-            handle_key, resize_frame, scroll_bottom, status_row, suggestion_row, todo_line,
-            todo_row,
+            handle_key, input_lines, resize_frame, scroll_bottom, status_row, suggestion_row,
+            todo_line, todo_row,
         };
 
         #[test]
@@ -1209,6 +1265,32 @@ mod unix {
             let mut buffer = LineBuffer::default();
             buffer.insert_text("one\r\ntwo\tthree");
             assert_eq!(buffer.text(), "one\ntwo    three");
+        }
+
+        #[test]
+        fn a_multi_line_draft_is_drawn_on_its_own_rows() {
+            // Shift+Enter adds a newline; before this the editor drew one row
+            // and ignored the break, so the extra lines were invisible.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("one\ntwo");
+            let lines = input_lines(&buffer, 4);
+            assert_eq!(lines.len(), 2, "each logical line gets a row: {lines:?}");
+            assert!(lines[0].starts_with("one"), "{lines:?}");
+            assert!(lines[1].starts_with("two"), "{lines:?}");
+            // The cursor is at the end of the second line and must be visible.
+            assert!(lines[1].contains("\x1b[7m"), "{lines:?}");
+        }
+
+        #[test]
+        fn a_draft_taller_than_the_window_scrolls_to_the_cursor_line() {
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("a\nb\nc\nd\ne");
+            let lines = input_lines(&buffer, 2);
+            assert_eq!(lines.len(), 2, "only the window is drawn: {lines:?}");
+            assert!(
+                lines[1].contains("e"),
+                "the window follows the cursor to the last line: {lines:?}"
+            );
         }
 
         #[test]
