@@ -994,7 +994,8 @@ impl Renderer {
                             eprintln!(
                                 "  {}",
                                 self.style.dim(
-                                    "no provider usage arrived before the cancel, so no cost is shown; the cancelled request is still recorded in telemetry"
+                                    "no provider usage arrived before the cancel, so no cost is \
+                                     shown; the cancelled request is still recorded in telemetry"
                                 )
                             );
                         }
