@@ -10,7 +10,7 @@ use super::edit::{
     EditBox, EditPreview, Side, clip_command, clip_plain, edit_box_width, edit_preview, line_range,
     preview_path, render_panel,
 };
-use super::helpers::{human_tokens, percent_label};
+use super::helpers::{cache_percent_label, human_tokens};
 use super::labels::{
     budget_action_name, budget_label, code_name, format_measure, scope_name, short, unit_name,
 };
@@ -975,7 +975,7 @@ impl Renderer {
                 if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
                     parts.push(
                         self.style
-                            .dim(format!("cache {}", percent_label(cache, input))),
+                            .dim(format!("cache {}", cache_percent_label(cache, input))),
                     );
                 } else if *cache_hit {
                     parts.push(self.style.dim("cache hit".to_owned()));
@@ -1377,7 +1377,7 @@ impl Renderer {
         if self.cache_reported && self.input > 0 {
             parts.push(self.style.blue(format!(
                 "cache {}",
-                percent_label(self.cache_read, self.input)
+                cache_percent_label(self.cache_read, self.input)
             )));
         }
         parts.push(
@@ -1423,7 +1423,7 @@ impl Renderer {
         if self.cache_reported && self.input > 0 {
             parts.push(self.style.blue(format!(
                 "cache {}",
-                percent_label(self.cache_read, self.input)
+                cache_percent_label(self.cache_read, self.input)
             )));
         }
         parts.push(

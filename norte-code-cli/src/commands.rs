@@ -4,8 +4,9 @@ use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
     LoadOptions, PathBuf, RequestRecord, SessionDirectory, SessionsArgs, SkillRegistry, SkillsArgs,
     SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session, by_turn,
-    cache_dir, discovery_roots, find_project_config, human_tokens, list_models, load_catalog,
-    percent_label, resume_session, run_prompt, short, summarize, token_ratio, user_config_path,
+    cache_dir, cache_percent_label, discovery_roots, find_project_config, human_tokens,
+    list_models, load_catalog, resume_session, run_prompt, short, summarize, token_ratio,
+    user_config_path,
 };
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
@@ -233,7 +234,7 @@ pub(crate) fn cost_summary(summary: &CostSummary) -> String {
     if summary.cache_read_tokens > 0 && summary.input_tokens > 0 {
         parts.push(format!(
             "cache {}",
-            percent_label(summary.cache_read_tokens, summary.input_tokens)
+            cache_percent_label(summary.cache_read_tokens, summary.input_tokens)
         ));
     }
     parts.push(format!(

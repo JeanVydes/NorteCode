@@ -58,6 +58,19 @@ pub(crate) fn human_tokens(tokens: u64) -> String {
     }
 }
 
+/// The cache share, always as a percentage with two decimals.
+///
+/// Two decimals because a cache that stops hitting moves by hundredths and the
+/// difference is worth seeing, and one rule — the same everywhere the share is
+/// printed — reads better than a format that depends on the value.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn cache_percent_label(part: u64, total: u64) -> String {
+    if total == 0 {
+        return "0.00%".to_owned();
+    }
+    format!("{:.2}%", part as f64 / total as f64 * 100.0)
+}
+
 /// A share of a total, rounded so `0.4%` does not become a bare `0%`.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn percent_label(part: u64, total: u64) -> String {
@@ -69,5 +82,30 @@ pub(crate) fn percent_label(part: u64, total: u64) -> String {
         format!("{percent:.0}%")
     } else {
         format!("{percent:.1}%")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cache_percent_label, percent_label};
+
+    #[test]
+    fn the_cache_share_always_carries_two_decimals() {
+        // A cache that stops hitting moves by hundredths, so the hundredths are
+        // the point; an exact and an empty share read the same way.
+        assert_eq!(cache_percent_label(9999, 10_000), "99.99%");
+        assert_eq!(cache_percent_label(9, 10), "90.00%");
+        assert_eq!(cache_percent_label(10, 10), "100.00%");
+        assert_eq!(cache_percent_label(0, 10), "0.00%");
+        assert_eq!(cache_percent_label(5, 0), "0.00%");
+    }
+
+    #[test]
+    fn the_context_share_keeps_its_own_format() {
+        // The dial is a different figure: it does not move by hundredths, so it
+        // keeps the shorter form.
+        assert_eq!(percent_label(1, 100), "1.0%");
+        assert_eq!(percent_label(90, 100), "90%");
+        assert_eq!(percent_label(1, 0), "0%");
     }
 }

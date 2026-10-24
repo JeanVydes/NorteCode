@@ -499,7 +499,7 @@ fn cost_totals_show_cache_and_the_input_output_ratio() {
     };
     assert_eq!(
         cost_summary(&mixed),
-        "2 request(s) · 1k in · 100 out · cache 90% · in:out 10:1 · $0.500000 · 1 not reported"
+        "2 request(s) · 1k in · 100 out · cache 90.00% · in:out 10:1 · $0.500000 · 1 not reported"
     );
     let unpriced = CostSummary {
         requests: 2,
