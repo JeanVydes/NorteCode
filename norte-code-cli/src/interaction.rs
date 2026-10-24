@@ -76,6 +76,8 @@ pub(crate) enum ChatCommand {
     Revoke { grant: Option<String> },
     /// Request a model switch.
     Model { model: String },
+    /// Set the current provider.
+    Provider { provider: String },
 }
 
 /// Parses one interactive command.
@@ -121,6 +123,9 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
     if let Some(rest) = command_rest(text, "/model") {
         return Some(parse_model_command(rest));
     }
+    if let Some(rest) = command_rest(text, "/provider") {
+        return Some(parse_provider_command(rest));
+    }
     None
 }
 
@@ -155,19 +160,30 @@ fn scope(value: &str) -> ReasoningScope {
 }
 
 fn parse_model_command(rest: &str) -> Result<ChatCommand, String> {
-    const USAGE: &str = "usage: /model <provider/model>";
+    const USAGE: &str = "usage: /model <model>  or  /model <provider/model>";
     let parts: Vec<&str> = rest.split_whitespace().collect();
     let [model] = parts.as_slice() else {
         return Err(USAGE.to_owned());
     };
-    let Some((provider, name)) = model.split_once('/') else {
-        return Err(USAGE.to_owned());
-    };
-    if provider.is_empty() || name.is_empty() {
+    if model.is_empty() {
         return Err(USAGE.to_owned());
     }
     Ok(ChatCommand::Model {
         model: (*model).to_owned(),
+    })
+}
+
+fn parse_provider_command(rest: &str) -> Result<ChatCommand, String> {
+    const USAGE: &str = "usage: /provider <provider>";
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [provider] = parts.as_slice() else {
+        return Err(USAGE.to_owned());
+    };
+    if provider.is_empty() {
+        return Err(USAGE.to_owned());
+    }
+    Ok(ChatCommand::Provider {
+        provider: (*provider).to_owned(),
     })
 }
 
@@ -187,6 +203,7 @@ const CHAT_COMMANDS: &[&str] = &[
     "/deny",
     "/reasoning",
     "/model",
+    "/provider",
     "/revoke",
     "/refresh",
     "/exit",
@@ -277,7 +294,8 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/allow" => Some("/allow <tool> [session|global]"),
         "/deny" => Some("/deny <tool> [session|global]"),
         "/reasoning" => Some("/reasoning <setting> [session|message]"),
-        "/model" => Some("/model <provider/model>"),
+        "/model" => Some("/model <model>"),
+        "/provider" => Some("/provider <provider>"),
         "/revoke" => Some("/revoke [grant-id-or-tool]"),
         "/refresh" => Some("/refresh"),
         "/exit" => Some("/exit"),
@@ -317,7 +335,8 @@ pub(crate) fn print_chat_help(style: Style) {
     eprintln!("  /allow <tool> [session|global]  allow without asking");
     eprintln!("  /deny <tool> [session|global]   refuse without asking");
     eprintln!("  /reasoning <setting> [session|message]  set reasoning");
-    eprintln!("  /model <provider/model>   switch at the next turn boundary");
+    eprintln!("  /model <model>             switch model (uses current provider)");
+    eprintln!("  /provider <provider>       switch provider (keeps current model)");
     eprintln!("  /revoke [grant-or-tool]   list or revoke an approval grant");
     eprintln!("  /refresh                  re-scan the skills and their tools");
     eprintln!("  /exit, /quit              leave the chat");
@@ -447,7 +466,38 @@ pub(crate) async fn interactive_loop(
                 }
                 ChatCommand::Model { model } => {
                     if let Some(current) = session.clone() {
-                        run_model(service, current, model, style).await;
+                        // If model doesn't contain '/', prepend the provider from
+                        // the renderer's current model name.
+                        let full_model = if model.contains('/') {
+                            model
+                        } else {
+                            let provider = renderer
+                                .model_name
+                                .as_ref()
+                                .and_then(|m| m.split_once('/').map(|(p, _)| p.to_owned()))
+                                .unwrap_or_else(|| "openai".to_owned());
+                            format!("{}/{}", provider, model)
+                        };
+                        renderer.model_name = Some(full_model.clone());
+                        run_model(service, current, full_model, style).await;
+                    } else {
+                        eprintln!(
+                            "{}",
+                            style.yellow("there is no session yet; send a message first")
+                        );
+                    }
+                }
+                ChatCommand::Provider { provider } => {
+                    if let Some(current) = session.clone() {
+                        // Switch provider while keeping the current model name.
+                        let model_name = renderer
+                            .model_name
+                            .as_ref()
+                            .and_then(|m| m.split_once('/').map(|(_, name)| name.to_owned()))
+                            .unwrap_or_else(|| "default".to_owned());
+                        let full = format!("{}/{}", provider, model_name);
+                        renderer.model_name = Some(full.clone());
+                        run_model(service, current, full, style).await;
                     } else {
                         eprintln!(
                             "{}",
@@ -625,6 +675,13 @@ async fn handle_live_command(
                     style.yellow("the session is not ready yet; try again")
                 );
             }
+        }
+        ChatCommand::Provider { provider } => {
+            let _ = provider;
+            eprintln!(
+                "{}",
+                style.yellow("provider switch is not available during a turn")
+            );
         }
         ChatCommand::Revoke { grant } => {
             if let Some(session) = current {
@@ -1294,10 +1351,12 @@ mod tests {
                 model: "openrouter/deepseek".to_owned()
             }))
         );
-        assert!(matches!(
+        assert_eq!(
             parse_chat_command("/model deepseek"),
-            Some(Err(_))
-        ));
+            Some(Ok(ChatCommand::Model {
+                model: "deepseek".to_owned()
+            }))
+        );
         assert_eq!(
             parse_chat_command("/revoke"),
             Some(Ok(ChatCommand::Revoke { grant: None }))
