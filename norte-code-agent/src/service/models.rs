@@ -6,9 +6,7 @@
 
 use std::sync::Arc;
 
-use norte::{
-    Message, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind,
-};
+use norte::{Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind};
 use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
 use norte_code_config::Config;
 use norte_code_protocol::{
