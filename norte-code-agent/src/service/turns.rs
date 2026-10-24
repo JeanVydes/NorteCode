@@ -102,10 +102,10 @@ impl Service {
             .or(session_reasoning);
         let reasoning = resolve_reasoning(
             requested_reasoning.as_ref(),
-            &self.config.reasoning.default,
+            &self.config().reasoning.default,
             &spec.capabilities.reasoning,
         )?;
-        let configured_message = configured_budget(self.config.budgets.message.as_ref());
+        let configured_message = configured_budget(self.config().budgets.message.as_ref());
         let message = message_budget.map(|budget| budget.or(configured_message.clone()));
         if let Some(budget) = message.as_ref().and_then(Option::as_ref) {
             self.validate_budget(&key, budget).await?;
@@ -148,7 +148,7 @@ impl Service {
             for record in engine.pending_approvals(nid).await? {
                 let arguments = call_arguments(&engine, nid, record.call_id).await;
                 let sandbox = (record.tool.as_str() == "command"
-                    && self.config.tools.confinement.sandbox.enabled)
+                    && self.config().tools.confinement.sandbox.enabled)
                     .then(|| sandbox_name().to_owned());
                 restored.push(ServerEvent::new(
                     request_id,
@@ -273,7 +273,7 @@ impl Service {
             if let Some(text) = input.take() {
                 turn_builder = turn_builder.input(Message::user(text));
             }
-            for (key, value) in &self.config.extensions {
+            for (key, value) in &self.config().extensions {
                 turn_builder = turn_builder.extension(key.clone(), value.clone());
             }
             let mut stream = turn_builder.start();
@@ -457,7 +457,7 @@ impl Service {
             // engine left the session streaming from that message.
             if !cancelled && !interrupted {
                 if let Err(error) = &outcome {
-                    if let Some((delay, reason)) = retry_plan(error, &self.config.retry, retries) {
+                    if let Some((delay, reason)) = retry_plan(error, &self.config().retry, retries) {
                         if let Ok(session) = engine.session(current_nid).await {
                             self.set_phase(key, to_phase(session.phase)).await;
                         }
@@ -707,7 +707,7 @@ impl Service {
             } => {
                 let arguments = call_arguments(engine, nid, *call_id).await;
                 let sandbox = (tool.as_str() == "command"
-                    && self.config.tools.confinement.sandbox.enabled)
+                    && self.config().tools.confinement.sandbox.enabled)
                     .then(|| sandbox_name().to_owned());
                 Some(ServerEventKind::ApprovalRequested {
                     turn: stats.turn,
@@ -924,8 +924,8 @@ impl Service {
             cache_hit: usage.cache_read_tokens.unwrap_or(0) > 0,
             tool_calls: Vec::new(),
             reasoning: None,
-            sandbox: self.config.tools.confinement.sandbox.enabled,
-            sandbox_network: self.config.tools.confinement.sandbox.network,
+            sandbox: self.config().tools.confinement.sandbox.enabled,
+            sandbox_network: self.config().tools.confinement.sandbox.network,
             params: serde_json::Value::Null,
             extensions: serde_json::Value::Null,
             metadata: serde_json::json!({"source": "history"}),

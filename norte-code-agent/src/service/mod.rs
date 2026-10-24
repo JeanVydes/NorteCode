@@ -114,7 +114,7 @@ struct CatalogSettings {
 
 /// The Norte Code service.
 pub struct Service {
-    config: Config,
+    config: RwLock<Config>,
     catalog: RwLock<Arc<Catalog>>,
     catalog_settings: CatalogSettings,
     default_spec: ModelSpec,
@@ -265,7 +265,7 @@ impl Service {
         let activity = Arc::new(ToolActivity::default());
         let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
         let service = Self {
-            config,
+            config: RwLock::new(config),
             catalog: RwLock::new(catalog),
             catalog_settings: settings,
             default_spec,
@@ -344,7 +344,7 @@ impl Service {
             .tools(self.tools()?)
             .policies(self.policies())
             .config(EngineConfig {
-                max_iterations: self.config.max_iterations.unwrap_or(usize::MAX),
+                max_iterations: self.config().max_iterations.unwrap_or(usize::MAX),
                 ..EngineConfig::default()
             })
             .tool_metadata({
@@ -390,8 +390,8 @@ impl Service {
         layers.push(Arc::new(TelemetryLayer::new(
             Arc::clone(&self.telemetry),
             spec.clone(),
-            self.config.tools.confinement.sandbox.enabled,
-            self.config.tools.confinement.sandbox.network,
+            self.config().tools.confinement.sandbox.enabled,
+            self.config().tools.confinement.sandbox.network,
         )));
         builder = builder.layers(LayerStack::new(layers));
         Ok(builder.build()?)
@@ -400,14 +400,14 @@ impl Service {
     /// The eager-compaction gate, when enabled and the model declares a context
     /// window. Without a window there is no threshold to compare against.
     fn compaction_gate(&self, spec: &ModelSpec) -> Option<Arc<CompactionGate>> {
-        if !self.config.compaction.enabled || self.config.compaction.trigger != "eager" {
+        if !self.config().compaction.enabled || self.config().compaction.trigger != "eager" {
             return None;
         }
         let max_context = spec.capabilities.max_context?;
         Some(Arc::new(CompactionGate::new(
             max_context,
-            self.config.compaction.threshold,
-            self.config.compaction.keep_recent,
+            self.config().compaction.threshold,
+            self.config().compaction.keep_recent,
         )))
     }
 
@@ -462,18 +462,18 @@ impl Service {
         }
         let command = CommandTool::new()
             .with_limits(CommandLimits {
-                max_model_bytes: self.config.tools.command_max_model_bytes,
+                max_model_bytes: self.config().tools.command_max_model_bytes,
                 ..CommandLimits::default()
             })
             .with_env(env)
             .with_secrets(self.secrets.clone())
             .with_blobs(Arc::clone(&self.blobs))
             .into_declaration();
-        let command = if self.config.tools.confinement.sandbox.enabled {
+        let command = if self.config().tools.confinement.sandbox.enabled {
             sandboxed_command(
                 command,
                 &self.workspace_root,
-                &self.config.tools.confinement.sandbox,
+                &self.config().tools.confinement.sandbox,
             )
         } else {
             command
@@ -499,11 +499,11 @@ impl Service {
             &mut tools,
             AskUserTool::new(Arc::clone(&self.questions)).into_declaration(),
         )?;
-        if self.config.tools.web_fetch {
+        if self.config().tools.web_fetch {
             self.register_tool(&mut tools, WebFetchTool::new().into_declaration())?;
         }
 
-        if self.config.skills.enabled {
+        if self.config().skills.enabled {
             let skills = self.skills();
             self.register_tool(
                 &mut tools,
@@ -513,7 +513,7 @@ impl Service {
                 &mut tools,
                 SkillResourceTool::new(Arc::clone(&skills)).into_declaration(),
             )?;
-            if self.config.skills.allow_scripts {
+            if self.config().skills.allow_scripts {
                 self.register_tool(
                     &mut tools,
                     SkillScriptTool::new(
@@ -534,12 +534,12 @@ impl Service {
             }),
             Arc::new(WorkspacePolicy {
                 root: self.workspace_root.clone(),
-                enforce_root: self.config.tools.confinement.workspace_only,
+                enforce_root: self.config().tools.confinement.workspace_only,
             }),
             Arc::new(ApprovalModePolicy {
-                mode: self.config.approval_mode,
+                mode: self.config().approval_mode,
                 skills: self.skills(),
-                honor_allowed_tools: self.config.skills.honor_allowed_tools,
+                honor_allowed_tools: self.config().skills.honor_allowed_tools,
                 rules: Arc::clone(&self.approval_rules),
             }),
         ])
@@ -584,7 +584,7 @@ impl Service {
     /// The next engine build registers the refreshed tools; a turn already in
     /// flight keeps the registry it started with.
     pub fn refresh_skills(&self) -> usize {
-        let registry = Arc::new(discover_skills(&self.config, &self.workspace_root));
+        let registry = Arc::new(discover_skills(&self.lock_config(), &self.workspace_root));
         let count = registry.len();
         for warning in registry.warnings() {
             tracing::warn!(
@@ -603,10 +603,31 @@ impl Service {
         Arc::clone(&self.lock_skills())
     }
 
-    /// The configuration the service was built with.
+    /// The configuration in force.
+    ///
+    /// A value rather than a borrow: the config is held behind a lock so a
+    /// reload can replace it, and it is a small type of strings and numbers.
+    /// The lock is held only long enough to copy.
     #[must_use]
-    pub fn config(&self) -> &Config {
-        &self.config
+    pub fn config(&self) -> Config {
+        self.lock_config().clone()
+    }
+
+    /// Replaces the configuration.
+    ///
+    /// The caller rebuilds what was derived from it; this only swaps the value.
+    pub(super) fn replace_config(&self, next: Config) {
+        *self
+            .config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    }
+
+    /// The config lock, for reads that must not copy the whole value.
+    pub(super) fn lock_config(&self) -> std::sync::RwLockReadGuard<'_, Config> {
+        self.config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The catalogue in use.

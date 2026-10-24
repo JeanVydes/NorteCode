@@ -28,7 +28,7 @@ impl Service {
         if let Some(book) = self.lock_budget_states().get(key).cloned() {
             return Ok(book);
         }
-        let message = configured_budget(self.config.budgets.message.as_ref());
+        let message = configured_budget(self.config().budgets.message.as_ref());
         let book = self.new_budget_book(key, message).await?;
         self.lock_budget_states()
             .insert(key.clone(), Arc::clone(&book));
@@ -75,7 +75,7 @@ impl Service {
         Ok(Arc::new(Mutex::new(BudgetBook::new(
             message,
             session_budget,
-            configured_budget(self.config.budgets.global_daily.as_ref()),
+            configured_budget(self.config().budgets.global_daily.as_ref()),
             CostSummary::default(),
             session_summary,
             global_summary,
@@ -84,7 +84,7 @@ impl Service {
 
     /// The budget the configuration gives every session.
     pub(super) fn configured_session_budget(&self) -> Option<Budget> {
-        configured_budget(self.config.budgets.session.as_ref())
+        configured_budget(self.config().budgets.session.as_ref())
     }
 
     /// The notices the book has for the cost it recorded.

@@ -137,7 +137,7 @@ impl Service {
         let mut repaired = Vec::new();
         for entry in stored {
             let key = SessionKey::new(entry.key.clone());
-            let spec = match ModelSpec::from_catalog(&self.config, &catalog, &entry.model, None) {
+            let spec = match ModelSpec::from_catalog(&self.lock_config(), &catalog, &entry.model, None) {
                 Ok(spec) => spec,
                 Err(error) => {
                     tracing::warn!(
@@ -514,7 +514,7 @@ impl Service {
         // an effort the selected model does not declare is never downgraded.
         super::resolve_reasoning(
             Some(&reasoning),
-            &self.config.reasoning.default,
+            &self.config().reasoning.default,
             &spec.capabilities.reasoning,
         )?;
         {

@@ -321,7 +321,7 @@ impl Service {
 
     /// Flattens the catalogue for a picker, applying the config overrides.
     pub(super) fn list_models(&self) -> Vec<ModelInfo> {
-        model_list(&self.config, &self.catalog())
+        model_list(&self.lock_config(), &self.catalog())
     }
 
     /// Refreshes the catalogue from where it came from.
@@ -388,7 +388,7 @@ impl Service {
         session: &SessionKey,
         model: &str,
     ) -> Result<ModelSpec, ServiceError> {
-        let spec = ModelSpec::from_catalog(&self.config, &self.catalog(), model, None)?;
+        let spec = ModelSpec::from_catalog(&self.lock_config(), &self.catalog(), model, None)?;
         self.ensure_model_supports_reasoning(session, &spec)?;
         self.ensure_model_supports_budget(session, &spec).await?;
         Ok(spec)
@@ -413,7 +413,7 @@ impl Service {
         {
             resolve_reasoning(
                 Some(setting),
-                &self.config.reasoning.default,
+                &self.config().reasoning.default,
                 &spec.capabilities.reasoning,
             )?;
         }

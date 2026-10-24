@@ -27,7 +27,7 @@ impl Service {
         spec: &ModelSpec,
         nid: norte::SessionId,
     ) -> Result<bool, ServiceError> {
-        if !self.config.compaction.enabled {
+        if !self.config().compaction.enabled {
             return Ok(false);
         }
         if self
@@ -51,12 +51,12 @@ impl Service {
             .get(key)
             .map_or(0, |record| record.compaction_baseline);
         if history.len() <= baseline
-            || history.len() <= self.config.compaction.keep_recent.saturating_add(1)
+            || history.len() <= self.config().compaction.keep_recent.saturating_add(1)
         {
             return Ok(false);
         }
         let used = used_context(&history);
-        Ok(used as f64 >= max_context as f64 * self.config.compaction.threshold)
+        Ok(used as f64 >= max_context as f64 * self.config().compaction.threshold)
     }
 
     /// Runs one compaction and reports its events, including a failure.
@@ -173,7 +173,7 @@ impl Service {
             .await?;
         let reasoning = compaction_reasoning(
             &summary_spec.capabilities.reasoning,
-            &self.config.compaction.reasoning,
+            &self.config().compaction.reasoning,
         );
         let outcome = summary_engine
             .turn(scratch.id)
@@ -193,7 +193,7 @@ impl Service {
         }
         self.record_summary_usage(key, scratch.id, state.turn, &message)
             .await?;
-        let start = recent_start(&conversation, self.config.compaction.keep_recent);
+        let start = recent_start(&conversation, self.config().compaction.keep_recent);
         let recent = conversation[start..].to_vec();
         let fresh = engine.create().await?;
         let mut seed = vec![Message::system(self.system_prompt.clone())];
@@ -227,9 +227,9 @@ impl Service {
     }
 
     fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
-        match &self.config.compaction.model {
+        match &self.config().compaction.model {
             Some(reference) => {
-                ModelSpec::from_catalog(&self.config, &self.catalog(), reference, None)
+                ModelSpec::from_catalog(&self.lock_config(), &self.catalog(), reference, None)
             }
             None => Ok(session.clone()),
         }
