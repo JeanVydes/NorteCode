@@ -1956,6 +1956,17 @@ pub(crate) fn source_label(source: Source) -> &'static str {
     }
 }
 
+/// One `debug:` section title, so every block reads as a heading.
+fn debug_heading(style: Style, title: &str) -> String {
+    style.cyan(style.bold(title))
+}
+
+/// One `label  value` line of a debug block: the label dim and padded, the
+/// value in the default colour so it stands out from the chrome around it.
+fn debug_field(style: Style, label: &str, value: &str) -> String {
+    format!("  {} {value}", style.dim(format!("{label:<10}")))
+}
+
 /// Prints the startup facts that make a run or resume reproducible.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn debug_start(
@@ -1994,7 +2005,7 @@ pub(crate) fn debug_start(
     } else {
         "disabled".to_owned()
     };
-    eprintln!("{}", style.dim("debug: startup"));
+    eprintln!("{}", debug_heading(style, "debug: startup"));
     eprintln!("{}", style.dim("  ┌──────────────┬──────────────────────────────────────────────┐"));
     eprintln!(
         "{}",
@@ -2122,29 +2133,29 @@ pub(crate) fn debug_start(
 pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) {
     match service.prompt_size() {
         Ok(size) => {
-            eprintln!("{}", style.dim("debug: prompt material"));
-            eprintln!("{}", style.dim(format!("  source     {source}")));
+            eprintln!("{}", debug_heading(style, "debug: prompt material"));
+            eprintln!("{}", debug_field(style, "source", source));
             eprintln!(
                 "{}",
-                style.dim(format!("  system     {} chars", size.system_chars))
+                debug_field(style, "system", &format!("{} chars", size.system_chars))
             );
             if let Some(path) = &size.project_path {
                 eprintln!(
                     "{}",
-                    style.dim(format!(
-                        "  project    {} chars ({})",
-                        size.project_chars,
-                        path.display()
-                    ))
+                    debug_field(
+                        style,
+                        "project",
+                        &format!("{} chars ({})", size.project_chars, path.display())
+                    )
                 );
             }
             eprintln!(
                 "{}",
-                style.dim(format!("  tools      {} chars", size.tool_chars))
+                debug_field(style, "tools", &format!("{} chars", size.tool_chars))
             );
             eprintln!(
                 "{}",
-                style.dim(format!("  total      {} chars", size.total_chars()))
+                debug_field(style, "total", &format!("{} chars", size.total_chars()))
             );
         }
         Err(error) => eprintln!(
@@ -2162,91 +2173,91 @@ pub(crate) fn debug_model(
     model: Option<&norte_code_catalog::Model>,
 ) {
     let capabilities = &spec.capabilities;
-    eprintln!("{}", style.dim("debug: model"));
-    eprintln!("{}", style.dim(format!("  reference  {}", spec.label())));
+    eprintln!("{}", debug_heading(style, "debug: model"));
+    eprintln!("{}", debug_field(style, "reference", &spec.label()));
     if let Some(model) = model {
         if !model.name.is_empty() {
-            eprintln!("{}", style.dim(format!("  name       {}", model.name)));
+            eprintln!("{}", debug_field(style, "name", &model.name));
         }
         if let Some(family) = &model.family {
-            eprintln!("{}", style.dim(format!("  family     {family}")));
+            eprintln!("{}", debug_field(style, "family", family));
         }
         if let Some(description) = &model.description {
-            eprintln!("{}", style.dim(format!("  about      {description}")));
+            eprintln!("{}", debug_field(style, "about", description));
         }
     } else {
-        eprintln!("{}", style.dim("  catalogue  not found; using fallback capabilities (200k context, 32k output)"));
+        eprintln!(
+            "{}",
+            style.yellow(
+                "  catalogue  not found; the capabilities below are the config/fallback ones"
+            )
+        );
     }
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  wire       {} · provider {}",
-            spec.wire.family(),
-            spec.provider
-        ))
+        debug_field(
+            style,
+            "wire",
+            &format!("{} · provider {}", spec.wire.family(), spec.provider)
+        )
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  context    {}",
-            token_limit_label(capabilities.max_context)
-        ))
+        debug_field(style, "context", &token_limit_label(capabilities.max_context))
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  output     {}",
-            token_limit_label(capabilities.max_output)
-        ))
+        debug_field(style, "output", &token_limit_label(capabilities.max_output))
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  modalities input {} · output {}",
-            modality_set(capabilities.modalities.input.keys()),
-            modality_set(capabilities.modalities.output.iter())
-        ))
+        debug_field(
+            style,
+            "modalities",
+            &format!(
+                "input {} · output {}",
+                modality_set(capabilities.modalities.input.keys()),
+                modality_set(capabilities.modalities.output.iter())
+            )
+        )
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  tools      {}",
-            tool_kind_set(&capabilities.tool_kinds)
-        ))
+        debug_field(style, "tools", &tool_kind_set(&capabilities.tool_kinds))
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  reasoning  {}",
-            reasoning_capabilities(&capabilities.reasoning)
-        ))
+        debug_field(
+            style,
+            "reasoning",
+            &reasoning_capabilities(&capabilities.reasoning)
+        )
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  streaming  {}",
-            capabilities
+        debug_field(
+            style,
+            "streaming",
+            &capabilities
                 .streaming
                 .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned())
-        ))
+        )
     );
     eprintln!(
         "{}",
-        style.dim(format!("  cache      {}", cache_name(capabilities.cache)))
+        debug_field(style, "cache", cache_name(capabilities.cache))
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  features   {}",
-            feature_set(&capabilities.features)
-        ))
+        debug_field(style, "features", &feature_set(&capabilities.features))
     );
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  structured {}",
-            structured_set(&capabilities.structured_output)
-        ))
+        debug_field(
+            style,
+            "structured",
+            &structured_set(&capabilities.structured_output)
+        )
     );
     if let Some(model) = model {
         let mut metadata = Vec::new();
@@ -2282,13 +2293,10 @@ pub(crate) fn debug_model(
 
 /// Prints the reasoning setting the session is actually using.
 pub(crate) fn debug_reasoning(style: Style, reasoning: &Reasoning) {
-    eprintln!("{}", style.dim("debug: reasoning"));
+    eprintln!("{}", debug_heading(style, "debug: reasoning"));
     eprintln!(
         "{}",
-        style.dim(format!(
-            "  effective  {}",
-            reasoning_setting_label(reasoning)
-        ))
+        debug_field(style, "effective", &reasoning_setting_label(reasoning))
     );
 }
 
