@@ -27,7 +27,7 @@ pub(crate) use labels::{
     format_measure, parse_budget_action, parse_budget_unit, parse_reasoning_setting, scope_name,
     select_system_prompt, short, unit_name,
 };
-pub(crate) use renderer::{BudgetPrompt, Format, Renderer};
+pub(crate) use renderer::{BudgetPrompt, Format, Renderer, Verbosity};
 
 // The shared names the submodules read through `super::`.
 

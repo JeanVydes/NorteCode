@@ -633,7 +633,7 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
 
     use crate::input::Pinned;
     use crate::interaction::drive_turns;
-    use crate::render::{Format, Renderer};
+    use crate::render::{Format, Renderer, Verbosity};
     use crate::style::Style;
 
     struct ScriptedFactory {
@@ -766,8 +766,7 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
 
     let mut renderer = Renderer::new(
         Format::Text,
-        true,
-        false,
+        Verbosity::Low,
         false,
         false,
         Style::plain(),

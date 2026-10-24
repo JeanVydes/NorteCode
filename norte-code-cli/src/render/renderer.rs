@@ -29,6 +29,52 @@ pub(crate) enum Format {
     Jsonl,
 }
 
+/// How much of the conversation the renderer shows.
+///
+/// One axis, not two flags: `low` is what `--quiet` used to be, `high` what
+/// `--verbose` used to be, and `medium` sits between them so "something is
+/// happening" stays visible without the whole transcript.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Verbosity {
+    /// The answer and nothing else: no reasoning, no tool activity, no usage.
+    Low,
+    /// Also says that a tool is running and that the model is thinking.
+    #[default]
+    Medium,
+    /// Everything: the reasoning text, what each tool was asked and what it
+    /// returned.
+    High,
+}
+
+impl Verbosity {
+    /// Whether the level reaches `level`.
+    pub(crate) fn at_least(self, level: Self) -> bool {
+        self >= level
+    }
+
+    /// Whether nothing but the answer is shown.
+    pub(crate) fn is_quiet(self) -> bool {
+        self == Self::Low
+    }
+
+    /// The level `--verbose` names.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the accepted words when `value` is none of
+    /// them, so the CLI can fail before a turn starts.
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" | "med" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            other => Err(format!(
+                "unknown verbosity `{other}`; use low, medium or high"
+            )),
+        }
+    }
+}
+
 /// Which streamed block the renderer is in, so reasoning never runs inline
 /// with the answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,8 +100,7 @@ pub(crate) struct BudgetPrompt {
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Renderer {
     pub(crate) format: Format,
-    pub(crate) quiet: bool,
-    pub(crate) verbose: bool,
+    pub(crate) verbosity: Verbosity,
     pub(crate) debug: bool,
     pub(crate) debug_session: bool,
     pub(crate) show_cost: bool,
@@ -118,8 +163,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     pub(crate) fn new(
         format: Format,
-        quiet: bool,
-        verbose: bool,
+        verbosity: Verbosity,
         debug: bool,
         show_cost: bool,
         style: Style,
@@ -127,8 +171,7 @@ impl Renderer {
     ) -> Self {
         Self {
             format,
-            quiet,
-            verbose,
+            verbosity,
             debug,
             debug_session: false,
             show_cost,
@@ -251,7 +294,7 @@ impl Renderer {
     /// Prints a "working…" line below the user's message instead of in the
     /// pinned footer. Cleared on the first answer token.
     pub(crate) fn mark_working(&mut self) {
-        if self.quiet || matches!(self.format, Format::Jsonl) {
+        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
         self.loading_bar = Some(LoadingBar::start(self.style));
@@ -259,7 +302,7 @@ impl Renderer {
 
     /// Replaces the activity label and redraws the pinned footer.
     fn set_activity(&mut self, activity: Option<String>) {
-        if self.quiet || matches!(self.format, Format::Jsonl) {
+        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
         self.activity = activity;
@@ -296,7 +339,7 @@ impl Renderer {
         }
         self.end_reasoning();
         if self.block == Block::Answer {
-            if !self.answer_buffer.is_empty() && !self.quiet {
+            if !self.answer_buffer.is_empty() && self.verbosity.at_least(Verbosity::Medium) {
                 let rendered = crate::markdown::render(&self.answer_buffer);
                 print!("{rendered}");
                 if !rendered.ends_with('\n') {
@@ -312,14 +355,14 @@ impl Renderer {
             self.block = Block::None;
             self.last_char = Some('\n');
         }
-        if !self.quiet && self.last_char.is_some() {
+        if self.verbosity.at_least(Verbosity::Medium) && self.last_char.is_some() {
             eprintln!();
         }
     }
 
     /// Prints a single blank separator line.
     pub(crate) fn space(&mut self) {
-        if self.quiet {
+        if !self.verbosity.at_least(Verbosity::Medium) {
             return;
         }
         if self.last_char != Some('\n') {
@@ -336,7 +379,7 @@ impl Renderer {
     /// is rendered as markdown, like the answer it once was. Tool and system
     /// messages are shown dimmed so they read as context, not as the answer.
     pub(crate) fn replay_message(&mut self, index: u64, role: &str, text: &str) {
-        if self.quiet || matches!(self.format, Format::Jsonl) {
+        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
         // The working bar shares stderr with the transcript, so the replay stops
@@ -399,7 +442,7 @@ impl Renderer {
     /// Writes answer text, closing reasoning and separating it first.
     pub(crate) fn answer_delta(&mut self, text: &str) {
         let text = crate::text::terminal(text);
-        if self.quiet {
+        if !self.verbosity.at_least(Verbosity::Medium) {
             print!("{text}");
             if let Some(last) = text.chars().last() {
                 self.last_char = Some(last);
@@ -481,21 +524,11 @@ impl Renderer {
                 } else {
                     None
                 };
-                if self.quiet {
-                    if tool == "command" {
-                        if let Some(command) = &command {
-                            self.end_blocks();
-                            eprintln!(
-                                "{} {} {}",
-                                self.style.blue("→"),
-                                self.style.tool(tool),
-                                self.style.dim(format!("$ {command}"))
-                            );
-                        }
-                    }
+                if self.verbosity.is_quiet() {
+                    // `low` does not announce a tool run. An edit's diff is the
+                    // exception, and it is printed below at every level.
                     if let Some(diff) = &diff {
                         self.end_blocks();
-                        eprintln!("{} {}", self.style.blue("→"), self.style.tool(tool));
                         self.print_edit_diff(diff);
                     }
                 } else {
@@ -512,7 +545,10 @@ impl Renderer {
                     if let Some(diff) = &diff {
                         self.print_edit_diff(diff);
                     }
-                    if self.verbose && tool.as_str() != "ask_user" && tool.as_str() != "edit" {
+                    if self.verbosity.at_least(Verbosity::High)
+                        && tool.as_str() != "ask_user"
+                        && tool.as_str() != "edit"
+                    {
                         if let Some(arguments) = arguments {
                             let text = serde_json::to_string_pretty(arguments)
                                 .unwrap_or_else(|_| compact_json(arguments, 4_000));
@@ -547,7 +583,7 @@ impl Renderer {
                 if *is_error && tool == "edit" {
                     if let Some(error) = error {
                         self.end_blocks();
-                        if self.quiet {
+                        if self.verbosity.is_quiet() {
                             for line in error.lines() {
                                 let escaped = crate::text::terminal(line);
                                 let (text, _) = clip_text(&escaped, 400);
@@ -558,7 +594,11 @@ impl Renderer {
                         }
                     }
                 }
-                if !self.quiet {
+                // Whether the run is announced needs `medium`, but what it
+                // produced is always shown: a write that landed nowhere and a
+                // command that failed are the two things a person must not have
+                // to ask for.
+                if self.verbosity.at_least(Verbosity::Medium) {
                     if *is_error {
                         eprintln!(
                             "{} {} {}",
@@ -574,26 +614,26 @@ impl Renderer {
                             self.style.dim(format!("in {duration_ms} ms"))
                         );
                     }
-                    if *is_error && tool.as_str() != "edit" {
-                        // A failure needs its reason whatever the verbosity.
-                        if let Some(error) = error {
-                            self.print_tool_result(error, *truncated);
-                        }
-                    } else if let Some(result) =
-                        Self::tool_result(tool, path.as_deref(), output.as_deref())
-                    {
-                        self.print_tool_result(&result, *truncated);
+                }
+                if *is_error && tool.as_str() != "edit" {
+                    // A failure needs its reason whatever the verbosity.
+                    if let Some(error) = error {
+                        self.print_tool_result(error, *truncated);
                     }
-                    if self.verbose {
-                        if *is_error {
-                            if tool.as_str() != "edit" {
-                                if let Some(error) = error {
-                                    self.code_block("text", error);
-                                }
+                } else if let Some(result) =
+                    Self::tool_result(tool, path.as_deref(), output.as_deref())
+                {
+                    self.print_tool_result(&result, *truncated);
+                }
+                if self.verbosity.at_least(Verbosity::High) {
+                    if *is_error {
+                        if tool.as_str() != "edit" {
+                            if let Some(error) = error {
+                                self.code_block("text", error);
                             }
-                        } else if let Some(output) = output {
-                            self.code_block("text", output);
                         }
+                    } else if let Some(output) = output {
+                        self.code_block("text", output);
                     }
                 }
             }
@@ -860,7 +900,8 @@ impl Renderer {
                 self.turn_requests = 0;
                 self.context_used = *context_used;
                 self.max_context = *context_window;
-                if !self.quiet && matches!(self.format, Format::Text) {
+                if self.verbosity.at_least(Verbosity::Medium) && matches!(self.format, Format::Text)
+                {
                     let status = self.session_status();
                     self.pinned.set_session(status);
                 }
@@ -895,11 +936,12 @@ impl Renderer {
                 } else {
                     self.unpriced += 1;
                 }
-                if !self.quiet && matches!(self.format, Format::Text) {
+                if self.verbosity.at_least(Verbosity::Medium) && matches!(self.format, Format::Text)
+                {
                     let status = self.session_status();
                     self.pinned.set_session(status);
                 }
-                if self.quiet {
+                if !self.verbosity.at_least(Verbosity::Medium) {
                     return;
                 }
                 if self.block != Block::None {
@@ -972,7 +1014,9 @@ impl Renderer {
                     );
                 }
             }
-            ServerEventKind::CostNotReported { requests } if !self.quiet && self.show_cost => {
+            ServerEventKind::CostNotReported { requests }
+                if self.verbosity.at_least(Verbosity::Medium) && self.show_cost =>
+            {
                 eprintln!(
                     "  {}",
                     self.style.yellow(format!(
@@ -989,7 +1033,7 @@ impl Renderer {
     pub(crate) fn status_event(&mut self, kind: &ServerEventKind) {
         match kind {
             ServerEventKind::CompactionStarted { reason } => {
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     self.end_blocks();
                     eprintln!(
                         "{} {}",
@@ -1006,7 +1050,7 @@ impl Renderer {
             } => {
                 self.end_blocks();
                 if *compacted {
-                    let detail = if self.quiet {
+                    let detail = if self.verbosity.is_quiet() {
                         String::new()
                     } else {
                         north_session
@@ -1047,7 +1091,7 @@ impl Renderer {
                 self.end_blocks();
                 let wait = duration_label(*delay_ms);
                 self.set_activity(Some(format!("retrying in {wait} (attempt {attempt})")));
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     eprintln!(
                         "{} {} {}",
                         self.style.yellow("retrying"),
@@ -1059,7 +1103,7 @@ impl Renderer {
             ServerEventKind::RetryStarted { attempt, .. } => {
                 self.end_blocks();
                 self.set_activity(None);
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     eprintln!(
                         "{}",
                         self.style.dim(format!("retrying now (attempt {attempt})"))
@@ -1079,7 +1123,7 @@ impl Renderer {
                 }
             }
             ServerEventKind::ApprovalResolved { approved, .. } => {
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     self.end_blocks();
                     if *approved {
                         eprintln!("{}", self.style.green("✓ approval granted"));
@@ -1093,7 +1137,7 @@ impl Renderer {
             } => {
                 self.end_blocks();
                 if !*committed && self.cancelled {
-                    if !self.quiet {
+                    if self.verbosity.at_least(Verbosity::Medium) {
                         eprintln!(
                             "{}",
                             self.style
@@ -1110,7 +1154,7 @@ impl Renderer {
                         }
                     }
                 } else if !*committed && self.budget_stopped {
-                    if !self.quiet {
+                    if self.verbosity.at_least(Verbosity::Medium) {
                         let message = if self.budget_prompt.is_some() {
                             "stopped by budget"
                         } else {
@@ -1130,7 +1174,9 @@ impl Renderer {
                         eprintln!("{}", self.style.red("the turn did not commit"));
                         self.failed = true;
                     }
-                } else if *phase == Phase::AwaitingApproval && !self.quiet {
+                } else if *phase == Phase::AwaitingApproval
+                    && self.verbosity.at_least(Verbosity::Medium)
+                {
                     eprintln!("{}", self.style.yellow("paused: waiting for approval"));
                 }
                 let activity = if *phase == Phase::AwaitingApproval {
@@ -1147,7 +1193,7 @@ impl Renderer {
                 spent,
                 limit,
             } => {
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     eprintln!(
                         "{} {}",
                         self.style.yellow("budget warning:"),
@@ -1193,7 +1239,7 @@ impl Renderer {
                 // resumable again; the next turn must not look stopped.
                 self.budget_stopped = false;
                 self.budget_prompt = None;
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     match budget {
                         Some(budget) => eprintln!(
                             "{} {}",
@@ -1204,19 +1250,23 @@ impl Renderer {
                     }
                 }
             }
-            ServerEventKind::ModelQueued { model } if !self.quiet => {
+            ServerEventKind::ModelQueued { model }
+                if self.verbosity.at_least(Verbosity::Medium) =>
+            {
                 eprintln!(
                     "{} {}",
                     self.style.dim("model switch queued:"),
                     self.style.dim(model)
                 );
             }
-            ServerEventKind::ModelChanged { model } if !self.quiet => {
+            ServerEventKind::ModelChanged { model }
+                if self.verbosity.at_least(Verbosity::Medium) =>
+            {
                 eprintln!("{} {}", self.style.dim("model set:"), self.style.dim(model));
             }
             ServerEventKind::TurnStopped { reason } => {
                 self.stopped = Some(reason.clone());
-                if !self.quiet {
+                if self.verbosity.at_least(Verbosity::Medium) {
                     eprintln!(
                         "{}",
                         self.style.yellow(format!("the turn was stopped: {reason}"))
@@ -1236,7 +1286,11 @@ impl Renderer {
                 if text.is_empty() {
                     return;
                 }
-                if self.quiet {
+                if self.verbosity.is_quiet() {
+                    // `low` is the answer alone: not even the fact that the
+                    // model is thinking is shown.
+                } else if !self.verbosity.at_least(Verbosity::High) {
+                    // `medium` says that it is thinking, without the thought.
                     if !self.reasoning_placeholder {
                         self.reasoning_placeholder = true;
                         eprintln!("  {}", self.style.dim("thinking…"));
@@ -1355,7 +1409,10 @@ impl Renderer {
 
     /// Writes the run's cost and tool summary, if the run made any requests.
     pub(crate) fn summary(&self) {
-        if matches!(self.format, Format::Jsonl) || self.quiet || self.requests == 0 {
+        if matches!(self.format, Format::Jsonl)
+            || !self.verbosity.at_least(Verbosity::Medium)
+            || self.requests == 0
+        {
             return;
         }
         let mut parts = vec![

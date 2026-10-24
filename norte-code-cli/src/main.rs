@@ -26,10 +26,10 @@ use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, echo_user_message, interactive_loop};
 use models::{list_models, resolve_spec};
 use render::{
-    Format, Renderer, approval_label, debug_model, debug_prompt_size, debug_reasoning, debug_start,
-    fallback_env, find_project_config, human_tokens, parse_budget_action, parse_budget_unit,
-    parse_reasoning_setting, percent_label, reasoning_label, select_system_prompt, short,
-    source_label, token_ratio,
+    Format, Renderer, Verbosity, approval_label, debug_model, debug_prompt_size, debug_reasoning,
+    debug_start, fallback_env, find_project_config, human_tokens, parse_budget_action,
+    parse_budget_unit, parse_reasoning_setting, percent_label, reasoning_label,
+    select_system_prompt, short, source_label, token_ratio,
 };
 
 #[cfg(test)]
@@ -93,9 +93,11 @@ struct Cli {
     /// Revalidate the catalogue with the network even when the cache is fresh.
     #[arg(long, global = true)]
     refresh: bool,
-    /// Show tool failures and other details.
-    #[arg(long, global = true)]
-    verbose: bool,
+    /// How much of the conversation to show: `low` (the answer alone),
+    /// `medium` (also that tools run and that the model is thinking) or `high`
+    /// (the reasoning, what each tool was asked and what it returned).
+    #[arg(long, global = true, value_name = "LEVEL", default_value = "medium")]
+    verbose: String,
     /// Print startup details, model metadata, paths and extensions.
     #[arg(long, global = true)]
     debug: bool,
@@ -187,9 +189,6 @@ struct RunArgs {
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
-    /// Redact reasoning and hide tool activity and usage.
-    #[arg(long)]
-    quiet: bool,
     /// Continue an existing session by key instead of creating one.
     #[arg(long, value_name = "KEY")]
     session: Option<String>,
@@ -230,9 +229,6 @@ struct ResumeArgs {
     /// Write one JSON event per line on stdout.
     #[arg(long)]
     jsonl: bool,
-    /// Redact reasoning and hide tool activity and usage.
-    #[arg(long)]
-    quiet: bool,
     /// Keep the session open and read the next message after each turn.
     #[arg(long, short = 'i')]
     interactive: bool,
@@ -468,7 +464,7 @@ async fn run_prompt(
     catalog: Catalog,
     source: Source,
     args: RunArgs,
-    verbose: bool,
+    verbosity: &str,
     debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
@@ -534,7 +530,8 @@ async fn run_prompt(
     } else {
         Style::stderr()
     };
-    if !args.quiet && !args.jsonl {
+    let verbosity = Verbosity::parse(verbosity)?;
+    if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
         eprintln!(
             "{} {} {} {} {}",
             style.magenta("◆"),
@@ -551,7 +548,7 @@ async fn run_prompt(
         .as_ref()
         .is_some_and(|budget| budget.unit == BudgetUnit::Usd);
     if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
-        if !args.quiet && !args.jsonl {
+        if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
             eprintln!("{}", style.red(warning));
         }
     }
@@ -608,8 +605,7 @@ async fn run_prompt(
         } else {
             Format::Text
         },
-        args.quiet,
-        verbose,
+        verbosity,
         debug,
         show_cost,
         style,
@@ -682,7 +678,7 @@ async fn resume_session(
     catalog: Catalog,
     source: Source,
     args: ResumeArgs,
-    verbose: bool,
+    verbosity: &str,
     debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
@@ -712,7 +708,8 @@ async fn resume_session(
     } else {
         Style::stderr()
     };
-    if !args.quiet && !args.jsonl {
+    let verbosity = Verbosity::parse(verbosity)?;
+    if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
         eprintln!(
             "{} {} {} {}",
             style.magenta("◆"),
@@ -723,7 +720,7 @@ async fn resume_session(
     }
     let budget_is_usd = args.budget.is_some() && args.budget_unit.eq_ignore_ascii_case("usd");
     if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
-        if !args.quiet && !args.jsonl {
+        if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
             eprintln!("{}", style.red(warning));
         }
     }
@@ -779,8 +776,7 @@ async fn resume_session(
         } else {
             Format::Text
         },
-        args.quiet,
-        verbose,
+        verbosity,
         debug,
         show_cost,
         style,

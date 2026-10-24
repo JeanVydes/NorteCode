@@ -9,8 +9,8 @@ use super::{
 use crate::approval::{ApprovalChoice, ApprovalOutcome, approval_request, ask_approval};
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
-    BudgetPrompt, format_measure, parse_reasoning_setting, reasoning_setting_label, scope_name,
-    unit_name,
+    BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
+    scope_name, unit_name,
 };
 
 /// Parses `/allow` and `/deny` into `(allow, tool, global)`.
@@ -433,7 +433,7 @@ pub(crate) async fn interactive_loop(
     message_budget: Option<Budget>,
     reasoning: Option<Reasoning>,
 ) -> Result<Option<SessionKey>, String> {
-    if !renderer.quiet {
+    if renderer.verbosity.at_least(Verbosity::Medium) {
         eprintln!(
             "{}",
             style.dim("interactive: /help for commands; /compact, /allow, /deny, /refresh, /exit")
@@ -1178,9 +1178,14 @@ pub(crate) async fn drive_turns(
                             None => {
                                 if let Some(session) = current.clone() {
                                     echo_user_message(style, &text);
-                                    if let Some(id) =
-                                        steer_text(service, session, text, style, renderer.quiet)
-                                            .await
+                                    if let Some(id) = steer_text(
+                                        service,
+                                        session,
+                                        text,
+                                        style,
+                                        !renderer.verbosity.at_least(Verbosity::Medium),
+                                    )
+                                    .await
                                     {
                                         steered.push(id);
                                     }

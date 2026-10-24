@@ -10,14 +10,13 @@ use crate::render::argument::todo_items;
 use crate::render::dial::context_dial;
 use crate::render::edit::{EditPreview, build_edit_preview, edit_preview};
 use crate::render::loading::{LOADING_BAR_WIDTH, loading_frame};
-use crate::render::renderer::{Block, Format, Renderer, tool_sections};
+use crate::render::renderer::{Block, Format, Renderer, Verbosity, tool_sections};
 use crate::style::Style;
 
 fn renderer(pinned: &Arc<Pinned>) -> Renderer {
     Renderer::new(
         Format::Text,
-        true,
-        false,
+        Verbosity::Low,
         false,
         true,
         Style::plain(),
@@ -28,13 +27,69 @@ fn renderer(pinned: &Arc<Pinned>) -> Renderer {
 fn visible_renderer(pinned: &Arc<Pinned>) -> Renderer {
     Renderer::new(
         Format::Text,
-        false,
-        false,
+        Verbosity::Medium,
         false,
         true,
         Style::plain(),
         Arc::clone(pinned),
     )
+}
+
+/// A renderer at `high`, the only level that draws the reasoning gutter.
+fn reasoning_renderer(pinned: &Arc<Pinned>) -> Renderer {
+    let mut renderer = visible_renderer(pinned);
+    renderer.verbosity = Verbosity::High;
+    renderer
+}
+
+#[test]
+fn the_levels_are_ordered_and_parse_by_name() {
+    assert!(Verbosity::High.at_least(Verbosity::Medium));
+    assert!(Verbosity::Medium.at_least(Verbosity::Medium));
+    assert!(!Verbosity::Low.at_least(Verbosity::Medium));
+    assert!(Verbosity::High.at_least(Verbosity::Low));
+
+    assert_eq!(Verbosity::parse("low").expect("low"), Verbosity::Low);
+    assert_eq!(
+        Verbosity::parse("medium").expect("medium"),
+        Verbosity::Medium
+    );
+    assert_eq!(Verbosity::parse("high").expect("high"), Verbosity::High);
+    let error = Verbosity::parse("loud").expect_err("unknown is refused");
+    assert!(error.contains("low, medium or high"), "{error}");
+}
+
+#[test]
+fn low_shows_no_reasoning_and_medium_does_not_show_the_thought() {
+    let pinned = Pinned::new();
+    // `low` is the answer alone: not even the fact that it is thinking.
+    let mut low = visible_renderer(&pinned);
+    low.verbosity = Verbosity::Low;
+    low.delta(&Delta::Reasoning {
+        index: 0,
+        text: "a thought".to_owned(),
+    });
+    assert_eq!(low.block, Block::None, "low opens no reasoning block");
+
+    // `medium` says that it is thinking, and the text stays hidden.
+    let mut medium = visible_renderer(&pinned);
+    medium.delta(&Delta::Reasoning {
+        index: 0,
+        text: "a thought".to_owned(),
+    });
+    assert_eq!(
+        medium.block,
+        Block::None,
+        "medium announces the thought without drawing it"
+    );
+
+    // `high` draws the thought in its gutter.
+    let mut high = reasoning_renderer(&pinned);
+    high.delta(&Delta::Reasoning {
+        index: 0,
+        text: "a thought".to_owned(),
+    });
+    assert_eq!(high.block, Block::Reasoning, "high draws the reasoning");
 }
 
 fn todo_started(call_id: &str, todos: &serde_json::Value) -> ServerEvent {
@@ -152,7 +207,7 @@ fn item(content: &str, status: TodoStatus) -> TodoItem {
 #[test]
 fn an_empty_text_delta_does_not_leave_the_reasoning_block() {
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = reasoning_renderer(&pinned);
     renderer.delta(&Delta::Reasoning {
         index: 0,
         text: "thinking".to_owned(),
@@ -170,7 +225,7 @@ fn an_empty_text_delta_does_not_leave_the_reasoning_block() {
 #[test]
 fn an_empty_reasoning_delta_does_not_open_the_gutter() {
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = reasoning_renderer(&pinned);
     renderer.delta(&Delta::Reasoning {
         index: 0,
         text: String::new(),
@@ -181,7 +236,7 @@ fn an_empty_reasoning_delta_does_not_open_the_gutter() {
 #[test]
 fn a_text_delta_after_reasoning_closes_the_gutter() {
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = reasoning_renderer(&pinned);
     renderer.delta(&Delta::Reasoning {
         index: 0,
         text: "thinking".to_owned(),

@@ -25,10 +25,11 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
                 Command::Run(args) => {
-                    run_prompt(config, catalog, source, args, verbose, debug, user_config).await
+                    run_prompt(config, catalog, source, args, &verbose, debug, user_config).await
                 }
                 Command::Resume(args) => {
-                    resume_session(config, catalog, source, args, verbose, debug, user_config).await
+                    resume_session(config, catalog, source, args, &verbose, debug, user_config)
+                        .await
                 }
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
                 Command::Skills(_)
