@@ -720,7 +720,10 @@ mod unix {
     /// writes is exactly how streamed text ends up duplicated or overwritten.
     fn resize_frame(rows: u16, old_rows: u16) -> String {
         let bottom = scroll_bottom(rows);
-        let mut frame = String::from("\x1b[r");
+        // Set the region first, so the clears below cannot scroll and the region
+        // is never absent: releasing it with `\x1b[r` left the renderer free to
+        // write over the footer until the new one was set.
+        let mut frame = format!("\x1b[1;{bottom}r");
 
         // Clear each row that was, or is now, part of the footer. A set keeps
         // an unchanged size from emitting the same clear twice.
@@ -737,11 +740,12 @@ mod unix {
             let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
         }
 
-        // Release the old region above, then set the new one and scroll one
-        // fresh line at its bottom. Scrolling (rather than jumping onto the
-        // last line) preserves whatever the terminal reflowed instead of
-        // writing over it.
-        let _ = write!(frame, "\x1b[{bottom};1H\x1b[1;{bottom}r\r\n");
+        // Park the cursor on the last row of the region. No newline here: on the
+        // bottom row one scrolls the whole region, and every scroll leaves a
+        // blank line above the footer, so a drag walked the footer down the
+        // screen one row per resize event. The footer rows are repainted by the
+        // caller right after this frame.
+        let _ = write!(frame, "\x1b[{bottom};1H");
         frame
     }
 
@@ -1086,7 +1090,10 @@ mod unix {
         #[test]
         fn resize_frame_clears_each_footer_row_once() {
             let frame = resize_frame(24, 24);
-            assert!(frame.starts_with("\x1b[r"));
+            // The region is set, never released: `\x1b[r` left the renderer free
+            // to write over the footer until the new one was set.
+            assert!(!frame.contains("\x1b[r"), "{frame:?}");
+            assert!(frame.starts_with("\x1b[1;20r"), "{frame:?}");
             for row in 21..=24 {
                 assert_eq!(
                     frame.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
@@ -1094,7 +1101,22 @@ mod unix {
                     "row {row} should be cleared once"
                 );
             }
-            assert!(frame.ends_with("\x1b[20;1H\x1b[1;20r\r\n"));
+            assert!(frame.ends_with("\x1b[20;1H"), "{frame:?}");
+        }
+
+        #[test]
+        fn resize_frame_never_scrolls() {
+            // A newline on the bottom row of the region scrolls it, and each
+            // scroll leaves a blank line above the footer. A drag fires the
+            // resize many times, so the footer walked down the screen.
+            for (rows, old_rows) in [(24, 24), (30, 24), (24, 30), (5, 5)] {
+                let frame = resize_frame(rows, old_rows);
+                assert!(
+                    !frame.contains('\n'),
+                    "the frame for {rows}/{old_rows} must not scroll: {frame:?}"
+                );
+                assert!(!frame.contains('\r'), "{frame:?}");
+            }
         }
 
         #[test]
@@ -1113,7 +1135,7 @@ mod unix {
                     "scroll row {row} must be preserved"
                 );
             }
-            assert!(grown.ends_with("\x1b[26;1H\x1b[1;26r\r\n"));
+            assert!(grown.ends_with("\x1b[26;1H"), "{grown:?}");
 
             let shrunk = resize_frame(24, 30);
             for row in 21..=24 {
@@ -1129,7 +1151,7 @@ mod unix {
                     "rows beyond the new height must not be addressed"
                 );
             }
-            assert!(shrunk.ends_with("\x1b[20;1H\x1b[1;20r\r\n"));
+            assert!(shrunk.ends_with("\x1b[20;1H"), "{shrunk:?}");
         }
 
         #[test]
