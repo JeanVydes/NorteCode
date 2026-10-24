@@ -11,6 +11,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - `--auth disabled`, and `providers.<id>.auth: "disabled"` in the config, sends
   no credential and needs no API key. A local OpenAI-compatible server can be
   used without exporting a dummy key.
+- `command`, `write` and `read` show a short result when they finish, so the
+  transcript carries what the tool did without `--verbose`: a command's output,
+  the path a write landed in with a glimpse of it, and what a read returned.
+  The block is bounded and escaped, and a failure now shows its reason at any
+  verbosity.
 - `/reload` re-reads the configuration without restarting, so a session keeps
   its transcript. Everything the config derives is rebuilt — the default model,
   the keys registered for redaction, the skills and the global approval rules —
