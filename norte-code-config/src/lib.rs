@@ -343,8 +343,8 @@ pub struct ToolsConfig {
     /// The tool still captures up to its own larger ceiling; this bounds only
     /// the text the model sees, eliding the middle with a marker.
     pub command_max_model_bytes: usize,
-    /// How `command` is sandboxed.
-    pub sandbox: SandboxConfig,
+    /// How far a tool may reach.
+    pub confinement: ConfinementConfig,
 }
 
 impl Default for ToolsConfig {
@@ -352,6 +352,41 @@ impl Default for ToolsConfig {
         Self {
             web_fetch: false,
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
+            confinement: ConfinementConfig::default(),
+        }
+    }
+}
+
+/// How far a tool may reach.
+///
+/// The two halves answer the same question at different levels. The workspace
+/// gate is argument-level: it re-roots a tool's path under the workspace and
+/// refuses an escape, a symlink out of it, or a special file that would block
+/// the tool. The sandbox is process-level and applies only to `command`: it
+/// wraps the child in the platform's isolation (bubblewrap on Linux,
+/// `sandbox-exec` on macOS).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfinementConfig {
+    /// Whether tool paths are confined to the workspace.
+    ///
+    /// On by default. Turning it off lets `read`, `write`, `edit`, `glob`,
+    /// `list_dir`, `grep` and `command`'s `cwd` name any path, which is what a
+    /// host working across repositories wants; a special file is still refused,
+    /// because opening a FIFO with no writer would block a tool forever.
+    pub workspace_only: bool,
+    /// How `command` is sandboxed.
+    pub sandbox: SandboxConfig,
+}
+
+impl Default for ConfinementConfig {
+    /// Confine paths, do not sandbox commands.
+    ///
+    /// The derived default would leave `workspace_only` false, which is the one
+    /// value this type must not pick by accident.
+    fn default() -> Self {
+        Self {
+            workspace_only: true,
             sandbox: SandboxConfig::default(),
         }
     }
@@ -624,12 +659,16 @@ impl Config {
         }
         if self
             .tools
+            .confinement
             .sandbox
             .writable
             .iter()
             .any(|path| path.as_os_str().is_empty())
         {
-            return Err(invalid("tools.sandbox.writable", "paths must not be empty"));
+            return Err(invalid(
+                "tools.confinement.sandbox.writable",
+                "paths must not be empty",
+            ));
         }
         if !(1024..=1024 * 1024).contains(&self.tools.command_max_model_bytes) {
             return Err(invalid(
@@ -1158,24 +1197,42 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_is_off_without_network_and_accepts_extra_writable_paths() {
+    fn confinement_confines_paths_and_leaves_the_sandbox_off() {
         let loaded = Config::from_json("{}").expect("config");
-        assert!(!loaded.config.tools.sandbox.enabled);
-        assert!(!loaded.config.tools.sandbox.network);
-        assert!(loaded.config.tools.sandbox.writable.is_empty());
+        assert!(
+            loaded.config.tools.confinement.workspace_only,
+            "tool paths are confined by default"
+        );
+        assert!(!loaded.config.tools.confinement.sandbox.enabled);
+        assert!(!loaded.config.tools.confinement.sandbox.network);
+        assert!(loaded.config.tools.confinement.sandbox.writable.is_empty());
+
         let enabled = Config::from_json(
-            r#"{"tools":{"sandbox":{"enabled":true,"network":true,"writable":["/tmp/cache"]}}}"#,
+            r#"{"tools":{"confinement":{"sandbox":{"enabled":true,"network":true,"writable":["/tmp/cache"]}}}}"#,
         )
         .expect("config");
-        assert!(enabled.config.tools.sandbox.enabled);
-        assert!(enabled.config.tools.sandbox.network);
+        assert!(enabled.config.tools.confinement.sandbox.enabled);
+        assert!(enabled.config.tools.confinement.sandbox.network);
         assert_eq!(
-            enabled.config.tools.sandbox.writable,
+            enabled.config.tools.confinement.sandbox.writable,
             vec![PathBuf::from("/tmp/cache")]
         );
-        let error = Config::from_json(r#"{"tools":{"sandbox":{"writable":[""]}}}"#)
+
+        let open = Config::from_json(r#"{"tools":{"confinement":{"workspace_only":false}}}"#)
+            .expect("config");
+        assert!(
+            !open.config.tools.confinement.workspace_only,
+            "the gate can be turned off without touching the sandbox"
+        );
+        assert!(!open.config.tools.confinement.sandbox.enabled);
+
+        let error = Config::from_json(r#"{"tools":{"confinement":{"sandbox":{"writable":[""]}}}}"#)
             .expect_err("empty path");
-        assert!(error.to_string().contains("tools.sandbox.writable"));
+        assert!(
+            error
+                .to_string()
+                .contains("tools.confinement.sandbox.writable")
+        );
     }
 
     #[test]

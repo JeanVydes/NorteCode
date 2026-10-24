@@ -238,10 +238,10 @@ struct ResumeArgs {
 /// Flags that override the command sandbox for one run or resume.
 #[derive(Args)]
 struct SandboxOptions {
-    /// Run commands inside the OS sandbox, overriding `tools.sandbox.enabled`.
+    /// Run commands inside the OS sandbox, overriding `tools.confinement.sandbox.enabled`.
     #[arg(long, conflicts_with = "no_sandbox")]
     sandbox: bool,
-    /// Run commands without the OS sandbox, overriding `tools.sandbox.enabled`.
+    /// Run commands without the OS sandbox, overriding `tools.confinement.sandbox.enabled`.
     #[arg(long, conflicts_with_all = ["sandbox", "sandbox_network"])]
     no_sandbox: bool,
     /// Let the sandbox use the network: `on` or `off`.
@@ -264,20 +264,20 @@ impl SandboxOptions {
             return Err("--sandbox-network cannot be combined with --no-sandbox".to_owned());
         }
         if self.sandbox {
-            config.tools.sandbox.enabled = true;
+            config.tools.confinement.sandbox.enabled = true;
         }
         if self.no_sandbox {
-            config.tools.sandbox.enabled = false;
+            config.tools.confinement.sandbox.enabled = false;
         }
         if let Some(network) = self.sandbox_network.as_deref() {
-            if !config.tools.sandbox.enabled {
+            if !config.tools.confinement.sandbox.enabled {
                 return Err(
                     "--sandbox-network needs the sandbox; pass --sandbox or set \
-                     tools.sandbox.enabled"
+                     tools.confinement.sandbox.enabled"
                         .to_owned(),
                 );
             }
-            config.tools.sandbox.network = match network {
+            config.tools.confinement.sandbox.network = match network {
                 "on" => true,
                 "off" => false,
                 other => return Err(format!("unknown sandbox network setting `{other}`")),

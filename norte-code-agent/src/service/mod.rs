@@ -390,8 +390,8 @@ impl Service {
         layers.push(Arc::new(TelemetryLayer::new(
             Arc::clone(&self.telemetry),
             spec.clone(),
-            self.config.tools.sandbox.enabled,
-            self.config.tools.sandbox.network,
+            self.config.tools.confinement.sandbox.enabled,
+            self.config.tools.confinement.sandbox.network,
         )));
         builder = builder.layers(LayerStack::new(layers));
         Ok(builder.build()?)
@@ -469,8 +469,12 @@ impl Service {
             .with_secrets(self.secrets.clone())
             .with_blobs(Arc::clone(&self.blobs))
             .into_declaration();
-        let command = if self.config.tools.sandbox.enabled {
-            sandboxed_command(command, &self.workspace_root, &self.config.tools.sandbox)
+        let command = if self.config.tools.confinement.sandbox.enabled {
+            sandboxed_command(
+                command,
+                &self.workspace_root,
+                &self.config.tools.confinement.sandbox,
+            )
         } else {
             command
         };
@@ -530,6 +534,7 @@ impl Service {
             }),
             Arc::new(WorkspacePolicy {
                 root: self.workspace_root.clone(),
+                enforce_root: self.config.tools.confinement.workspace_only,
             }),
             Arc::new(ApprovalModePolicy {
                 mode: self.config.approval_mode,

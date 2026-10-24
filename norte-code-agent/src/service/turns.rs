@@ -148,7 +148,7 @@ impl Service {
             for record in engine.pending_approvals(nid).await? {
                 let arguments = call_arguments(&engine, nid, record.call_id).await;
                 let sandbox = (record.tool.as_str() == "command"
-                    && self.config.tools.sandbox.enabled)
+                    && self.config.tools.confinement.sandbox.enabled)
                     .then(|| sandbox_name().to_owned());
                 restored.push(ServerEvent::new(
                     request_id,
@@ -706,7 +706,8 @@ impl Service {
                 ..
             } => {
                 let arguments = call_arguments(engine, nid, *call_id).await;
-                let sandbox = (tool.as_str() == "command" && self.config.tools.sandbox.enabled)
+                let sandbox = (tool.as_str() == "command"
+                    && self.config.tools.confinement.sandbox.enabled)
                     .then(|| sandbox_name().to_owned());
                 Some(ServerEventKind::ApprovalRequested {
                     turn: stats.turn,
@@ -923,8 +924,8 @@ impl Service {
             cache_hit: usage.cache_read_tokens.unwrap_or(0) > 0,
             tool_calls: Vec::new(),
             reasoning: None,
-            sandbox: self.config.tools.sandbox.enabled,
-            sandbox_network: self.config.tools.sandbox.network,
+            sandbox: self.config.tools.confinement.sandbox.enabled,
+            sandbox_network: self.config.tools.confinement.sandbox.network,
             params: serde_json::Value::Null,
             extensions: serde_json::Value::Null,
             metadata: serde_json::json!({"source": "history"}),
@@ -1044,9 +1045,8 @@ async fn replay_events(
     nid: SessionId,
     ancestors: &[SessionId],
 ) -> Vec<ServerEvent> {
-    let mut history = match engine.history(nid).await {
-        Ok(history) => history,
-        Err(_) => return Vec::new(),
+    let Ok(mut history) = engine.history(nid).await else {
+        return Vec::new();
     };
     // Walk back through the compaction chain, prepending each earlier session's
     // tail until there is enough to fill the window.

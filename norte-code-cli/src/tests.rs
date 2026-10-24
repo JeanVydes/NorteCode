@@ -146,14 +146,14 @@ fn the_telemetry_buckets_name_the_period_they_group() {
 #[test]
 fn sandbox_flags_override_the_config_and_respect_the_network() {
     let mut config = Config::default();
-    assert!(!config.tools.sandbox.enabled);
+    assert!(!config.tools.confinement.sandbox.enabled);
     let enable = SandboxOptions {
         sandbox: true,
         no_sandbox: false,
         sandbox_network: None,
     };
     enable.apply(&mut config).expect("enable");
-    assert!(config.tools.sandbox.enabled);
+    assert!(config.tools.confinement.sandbox.enabled);
 
     let networked = SandboxOptions {
         sandbox: false,
@@ -161,7 +161,7 @@ fn sandbox_flags_override_the_config_and_respect_the_network() {
         sandbox_network: Some("on".to_owned()),
     };
     networked.apply(&mut config).expect("network on");
-    assert!(config.tools.sandbox.network);
+    assert!(config.tools.confinement.sandbox.network);
 
     let offline = SandboxOptions {
         sandbox: false,
@@ -169,7 +169,7 @@ fn sandbox_flags_override_the_config_and_respect_the_network() {
         sandbox_network: Some("off".to_owned()),
     };
     offline.apply(&mut config).expect("network off");
-    assert!(!config.tools.sandbox.network);
+    assert!(!config.tools.confinement.sandbox.network);
 
     let disable = SandboxOptions {
         sandbox: false,
@@ -177,7 +177,7 @@ fn sandbox_flags_override_the_config_and_respect_the_network() {
         sandbox_network: None,
     };
     disable.apply(&mut config).expect("disable");
-    assert!(!config.tools.sandbox.enabled);
+    assert!(!config.tools.confinement.sandbox.enabled);
 }
 
 #[test]

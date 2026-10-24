@@ -189,7 +189,7 @@ pub(crate) fn debug_start(
         config_path.map_or_else(|| "(default)".to_owned(), |path| path.display().to_string());
     let project_config = find_project_config(&std::env::current_dir().unwrap_or_default())
         .map_or_else(|| "(none)".to_owned(), |path| path.display().to_string());
-    let sandbox = if configuration.tools.sandbox.enabled {
+    let sandbox = if configuration.tools.confinement.sandbox.enabled {
         let name = if cfg!(target_os = "linux") {
             "bwrap"
         } else if cfg!(target_os = "macos") {
@@ -199,7 +199,7 @@ pub(crate) fn debug_start(
         };
         format!(
             "enabled · {name} · network {}",
-            if configuration.tools.sandbox.network {
+            if configuration.tools.confinement.sandbox.network {
                 "on"
             } else {
                 "off"

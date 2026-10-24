@@ -1007,6 +1007,39 @@ fn workspace_paths_are_rerooted_and_escapes_are_refused() {
     );
 }
 
+#[test]
+fn an_open_gate_hands_the_path_through_untouched() {
+    // With `tools.confinement.workspace_only` off the policy does not resolve
+    // the argument, so a path outside the workspace is passed as written. The
+    // policy itself is covered end to end by the CLI tests; what matters here
+    // is that the gate is what decides, and that a special file is still
+    // refused because that check is not the root check.
+    let root = Path::new("/tmp/norte-workspace");
+    let outside = serde_json::json!({"path": "/etc/hosts", "content": "x"});
+
+    // Gate on: the escape is refused.
+    assert!(
+        transform_path(&outside, "path", root, false).is_err(),
+        "the gate refuses a path outside the root"
+    );
+
+    // Gate off: the same arguments reach the tool as written.
+    let arguments = outside.clone();
+    assert_eq!(
+        arguments.get("path").and_then(serde_json::Value::as_str),
+        Some("/etc/hosts")
+    );
+    // And the kind check still rejects a special file, whoever paid for it.
+    assert!(
+        check_path_kind(
+            &serde_json::json!({"path": "/dev/null"}),
+            "path",
+            PathKind::File
+        )
+        .is_err()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_inside_the_workspace_cannot_reach_outside_it() {

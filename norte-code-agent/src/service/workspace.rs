@@ -10,8 +10,18 @@ use norte::{Decision, Policy, PolicyView};
 /// outside the workspace. It stops the common mistake of a model reading
 /// `../../etc/passwd`, resolves symbolic links before comparing them with the
 /// root, and refuses FIFOs, sockets and devices so a tool cannot block forever.
+///
+/// The root check is what `tools.confinement.workspace_only` turns off. The
+/// special-file check stays either way: it protects the tool from blocking, not
+/// the filesystem from the model.
 pub(super) struct WorkspacePolicy {
     pub(super) root: PathBuf,
+    /// Whether a path outside the workspace is refused.
+    ///
+    /// Configured by `tools.confinement.workspace_only`. Off, the path argument
+    /// is handed through as the caller wrote it, so a host working across
+    /// repositories can name any file.
+    pub(super) enforce_root: bool,
 }
 
 /// What a path argument is expected to name when it already exists.
@@ -52,10 +62,13 @@ impl WorkspacePolicy {
         default_to_root: bool,
         kind: PathKind,
     ) -> Decision {
-        let arguments = match transform_path(&view.call.arguments, key, &self.root, default_to_root)
-        {
-            Ok(arguments) => arguments,
-            Err(reason) => return Decision::Deny(reason),
+        let arguments = if self.enforce_root {
+            match transform_path(&view.call.arguments, key, &self.root, default_to_root) {
+                Ok(arguments) => arguments,
+                Err(reason) => return Decision::Deny(reason),
+            }
+        } else {
+            view.call.arguments.clone()
         };
         match check_path_kind(&arguments, key, kind) {
             Ok(()) => Decision::Transform(arguments),
