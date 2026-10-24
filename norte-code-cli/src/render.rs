@@ -724,7 +724,7 @@ impl Renderer {
                 if let Some(first) = first_token_ms {
                     parts.push(
                         self.style
-                            .dim(format!("TTFT {}", duration_label(*first))),
+                            .dim(format!("latency {}", duration_label(*first))),
                     );
                 }
                 if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
