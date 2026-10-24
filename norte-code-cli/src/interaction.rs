@@ -159,32 +159,38 @@ fn scope(value: &str) -> ReasoningScope {
     }
 }
 
+fn parse_provider_command(rest: &str) -> Result<ChatCommand, String> {
+    const USAGE: &str = "usage: /provider <provider>  (no args lists available providers)";
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => Ok(ChatCommand::Provider { provider: String::new() }),
+        [provider] => {
+            if provider.is_empty() {
+                return Err(USAGE.to_owned());
+            }
+            Ok(ChatCommand::Provider {
+                provider: (*provider).to_owned(),
+            })
+        }
+        _ => Err(USAGE.to_owned()),
+    }
+}
+
 fn parse_model_command(rest: &str) -> Result<ChatCommand, String> {
     const USAGE: &str = "usage: /model <model>  or  /model <provider/model>";
     let parts: Vec<&str> = rest.split_whitespace().collect();
-    let [model] = parts.as_slice() else {
-        return Err(USAGE.to_owned());
-    };
-    if model.is_empty() {
-        return Err(USAGE.to_owned());
+    match parts.as_slice() {
+        [] => Ok(ChatCommand::Model { model: String::new() }),
+        [model] => {
+            if model.is_empty() {
+                return Err(USAGE.to_owned());
+            }
+            Ok(ChatCommand::Model {
+                model: (*model).to_owned(),
+            })
+        }
+        _ => Err(USAGE.to_owned()),
     }
-    Ok(ChatCommand::Model {
-        model: (*model).to_owned(),
-    })
-}
-
-fn parse_provider_command(rest: &str) -> Result<ChatCommand, String> {
-    const USAGE: &str = "usage: /provider <provider>";
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    let [provider] = parts.as_slice() else {
-        return Err(USAGE.to_owned());
-    };
-    if provider.is_empty() {
-        return Err(USAGE.to_owned());
-    }
-    Ok(ChatCommand::Provider {
-        provider: (*provider).to_owned(),
-    })
 }
 
 /// One dimmed completion shown by the input editor.
@@ -465,7 +471,28 @@ pub(crate) async fn interactive_loop(
                     }
                 }
                 ChatCommand::Model { model } => {
-                    if let Some(current) = session.clone() {
+                    if model.is_empty() {
+                        // List available models for the current provider
+                        let provider = renderer
+                            .model_name
+                            .as_ref()
+                            .and_then(|m| m.split_once('/').map(|(p, _)| p.to_owned()))
+                            .unwrap_or_else(|| "openai".to_owned());
+                        let catalog = service.catalog();
+                        eprintln!("{}", style.bold(format!("Models for {}:", provider)));
+                        if let Some(p) = catalog.provider(&provider) {
+                            let mut models: Vec<String> = p.models.keys().cloned().collect();
+                            models.sort();
+                            for m in &models {
+                                eprintln!("  {}", style.cyan(m));
+                            }
+                            if models.is_empty() {
+                                eprintln!("  {}", style.dim("(none in catalogue)"));
+                            }
+                        } else {
+                            eprintln!("  {}", style.dim("(provider not in catalogue; any model name accepted)"));
+                        }
+                    } else if let Some(current) = session.clone() {
                         // If model doesn't contain '/', prepend the provider from
                         // the renderer's current model name.
                         let full_model = if model.contains('/') {
@@ -488,7 +515,24 @@ pub(crate) async fn interactive_loop(
                     }
                 }
                 ChatCommand::Provider { provider } => {
-                    if let Some(current) = session.clone() {
+                    if provider.is_empty() {
+                        // List available providers
+                        let catalog = service.catalog();
+                        let config = service.config();
+                        eprintln!("{}", style.bold("Providers:"));
+                        let mut providers: Vec<String> = catalog.providers.keys().cloned().collect();
+                        for id in config.providers.keys() {
+                            if !providers.contains(id) {
+                                providers.push(id.clone());
+                            }
+                        }
+                        providers.sort();
+                        for p in &providers {
+                            let in_catalog = catalog.provider(p).is_some();
+                            let tag = if in_catalog { "catalog" } else { "config" };
+                            eprintln!("  {} ({})", style.cyan(p), style.dim(tag));
+                        }
+                    } else if let Some(current) = session.clone() {
                         // Switch provider while keeping the current model name.
                         let model_name = renderer
                             .model_name
