@@ -23,6 +23,23 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   model it resolved and the rules granted during the run, which are session
   state; a new session uses the new default. A file that does not parse, or
   names a model that cannot be built, changes nothing.
+- `--verbose <LEVEL>` replaces `--quiet` and `--verbose`, which were the two
+  ends of one axis and contradicted each other. `low` shows the answer and each
+  tool's result; `medium` (the default) also says that a tool is running and
+  that the model is thinking; `high` adds the reasoning text, the arguments each
+  tool was given and its full output. An `edit` shows its diff at every level.
+- `command`, `write` and `read` show a short result when they finish, so the
+  transcript carries what the tool did without asking for more verbosity. The
+  block is bounded and escaped, a long stdout no longer hides the stderr that
+  explains a failure, and a failed tool shows its reason at any level.
+- The footer names the session from `medium` up, so returning to one no longer
+  means scrolling back to the startup block to copy its key.
+- `/reload` re-reads the configuration without restarting, so a session keeps
+  its transcript. Everything the config derives is rebuilt and an unknown key is
+  reported rather than ignored; the open session keeps the model it resolved and
+  the rules granted during the run, which are session state.
+- The cache share shows two decimals wherever it is printed: `99.99%`, and
+  `100.00%` rather than `100%`. A cache that stops hitting moves by hundredths.
 - `--api-key-env VAR` reads the API key from `VAR` instead of the configured
   `api_key_env` or the catalogue's `env` names, without touching the config
   file.
@@ -154,6 +171,20 @@ log file gets the plain rows instead of the box drawing.
 - A resumed session announces its turn before replaying the history. The turn's
   task emitted `TurnStarted` only after the replayed messages had been read, so
   the transcript appeared while the client still showed the session as idle.
+- A selection of headers are rendered, tables are drawn with borders and
+  aligned columns, and emphasis inside a table cell keeps its style. The
+  renderer had lost all three: a table's header was dropped, its cells were
+  joined at whatever width each happened to be, and a style written inside a
+  cell landed outside the row. Inline and block HTML is now shown as the text it
+  is and never interpreted, a link shows its destination, an image its source,
+  and a `mermaid` block is labelled as a diagram rather than shown as runnable
+  code.
+- The footer no longer walks down the screen on every resize. The frame that
+  moves the scroll region ended with a newline on its bottom row, and each
+  newline scrolled the region and left a blank line above the footer; a drag
+  fires the event many times, so the gap grew. The frame also released the
+  region before setting the new one, which let streamed text land on a footer
+  row and be erased by the repaint.
 - Markdown answers are escaped before they are rendered. A control character or
   a bidi override inside a model's markdown could reach the terminal raw, and
   one that spelled an escape sequence was turned into a real one by the
