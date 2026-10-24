@@ -1,12 +1,21 @@
 //! Markdown to ANSI rendering for the interactive prompt.
 
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Renders markdown text to ANSI-styled terminal output.
 pub fn render(text: &str) -> String {
-    let parser = Parser::new(text);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(text, options);
     let mut out = String::new();
     let mut in_code_block = false;
+    let mut table_row: Vec<String> = Vec::new();
+    let mut table_cell = String::new();
+    let mut in_table_cell = false;
+    let mut list_depth: usize = 0;
 
     for event in parser {
         match event {
@@ -14,7 +23,8 @@ pub fn render(text: &str) -> String {
             Event::End(TagEnd::Strong) => out.push_str("\x1b[0m"),
             Event::Start(Tag::Emphasis) => out.push_str("\x1b[3m"),
             Event::End(TagEnd::Emphasis) => out.push_str("\x1b[0m"),
-            // Inline code is handled by Event::Code below, not by a tag.
+            Event::Start(Tag::Strikethrough) => out.push_str("\x1b[9m"),
+            Event::End(TagEnd::Strikethrough) => out.push_str("\x1b[0m"),
             Event::Start(Tag::Heading { .. }) => out.push_str("\x1b[1;36m"),
             Event::End(TagEnd::Heading { .. }) => out.push_str("\x1b[0m\n"),
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -33,8 +43,52 @@ pub fn render(text: &str) -> String {
                 in_code_block = false;
                 out.push('\n');
             }
-            Event::Start(Tag::Item) => out.push_str("  • "),
+            Event::Start(Tag::List(_)) => {
+                list_depth += 1;
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_depth = list_depth.saturating_sub(1);
+                out.push('\n');
+            }
+            Event::Start(Tag::Item) => {
+                let indent = "  ".repeat(list_depth.saturating_sub(1));
+                out.push_str(&format!("{}• ", indent));
+            }
             Event::End(TagEnd::Item) => out.push('\n'),
+            Event::Start(Tag::Table(_)) => {
+                table_row.clear();
+            }
+            Event::End(TagEnd::Table) => {
+                out.push('\n');
+            }
+            Event::Start(Tag::TableHead) => {}
+            Event::End(TagEnd::TableHead) => {
+                // Print header row
+                if !table_row.is_empty() {
+                    out.push_str(&table_row.join(" | "));
+                    out.push('\n');
+                    out.push_str(&table_row.iter().map(|c| "-".repeat(c.len().max(3))).collect::<Vec<_>>().join(" | "));
+                    out.push('\n');
+                    table_row.clear();
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                table_row.clear();
+            }
+            Event::End(TagEnd::TableRow) => {
+                out.push_str(&table_row.join(" | "));
+                out.push('\n');
+                table_row.clear();
+            }
+            Event::Start(Tag::TableCell) => {
+                in_table_cell = true;
+                table_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                in_table_cell = false;
+                table_row.push(table_cell.clone());
+                table_cell.clear();
+            }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 out.push_str(&format!("\x1b[4m"));
                 let _ = dest_url;
@@ -47,6 +101,8 @@ pub fn render(text: &str) -> String {
                         out.push_str(line);
                         out.push('\n');
                     }
+                } else if in_table_cell {
+                    table_cell.push_str(&t);
                 } else {
                     out.push_str(&t);
                 }
@@ -54,7 +110,11 @@ pub fn render(text: &str) -> String {
             Event::Code(t) => {
                 out.push_str(&format!("\x1b[2m{}\x1b[0m", t));
             }
-            Event::SoftBreak => out.push('\n'),
+            Event::SoftBreak => {
+                if !in_table_cell {
+                    out.push('\n');
+                }
+            }
             Event::HardBreak => out.push_str("\n"),
             Event::Rule => out.push_str("\x1b[2m────────────────\x1b[0m\n"),
             _ => {}
