@@ -163,7 +163,9 @@ fn parse_provider_command(rest: &str) -> Result<ChatCommand, String> {
     const USAGE: &str = "usage: /provider <provider>  (no args lists available providers)";
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.as_slice() {
-        [] => Ok(ChatCommand::Provider { provider: String::new() }),
+        [] => Ok(ChatCommand::Provider {
+            provider: String::new(),
+        }),
         [provider] => {
             if provider.is_empty() {
                 return Err(USAGE.to_owned());
@@ -180,7 +182,9 @@ fn parse_model_command(rest: &str) -> Result<ChatCommand, String> {
     const USAGE: &str = "usage: /model <model>  or  /model <provider/model>";
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.as_slice() {
-        [] => Ok(ChatCommand::Model { model: String::new() }),
+        [] => Ok(ChatCommand::Model {
+            model: String::new(),
+        }),
         [model] => {
             if model.is_empty() {
                 return Err(USAGE.to_owned());
@@ -490,7 +494,10 @@ pub(crate) async fn interactive_loop(
                                 eprintln!("  {}", style.dim("(none in catalogue)"));
                             }
                         } else {
-                            eprintln!("  {}", style.dim("(provider not in catalogue; any model name accepted)"));
+                            eprintln!(
+                                "  {}",
+                                style.dim("(provider not in catalogue; any model name accepted)")
+                            );
                         }
                     } else if let Some(current) = session.clone() {
                         // If model doesn't contain '/', prepend the provider from
@@ -520,7 +527,8 @@ pub(crate) async fn interactive_loop(
                         let catalog = service.catalog();
                         let config = service.config();
                         eprintln!("{}", style.bold("Providers:"));
-                        let mut providers: Vec<String> = catalog.providers.keys().cloned().collect();
+                        let mut providers: Vec<String> =
+                            catalog.providers.keys().cloned().collect();
                         for id in config.providers.keys() {
                             if !providers.contains(id) {
                                 providers.push(id.clone());

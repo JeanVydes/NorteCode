@@ -83,13 +83,13 @@ pub(crate) fn resolve_spec(
     // model name is used as-is and may contain slashes (e.g. nvidia/nemotron).
     let (provider, model_name) = if let Some(provider) = provider {
         let model = model.or_else(|| {
-            config.default_model.as_ref().and_then(|d| {
-                d.split_once('/').map(|(_, name)| name.to_owned())
-            })
+            config
+                .default_model
+                .as_ref()
+                .and_then(|d| d.split_once('/').map(|(_, name)| name.to_owned()))
         });
-        let model = model.ok_or_else(|| {
-            "no model selected: pass --model or set default_model".to_owned()
-        })?;
+        let model = model
+            .ok_or_else(|| "no model selected: pass --model or set default_model".to_owned())?;
         (provider, model)
     } else if let Some(model) = model {
         // No --provider: use the default provider from config. Do NOT split
@@ -122,10 +122,22 @@ pub(crate) fn resolve_spec(
         if wire.is_none() {
             return Err("--provider disabled requires --wire".to_owned());
         }
-        if endpoint.is_none() && config.providers.get("disabled").and_then(|e| e.endpoint.clone()).is_none() {
+        if endpoint.is_none()
+            && config
+                .providers
+                .get("disabled")
+                .and_then(|e| e.endpoint.clone())
+                .is_none()
+        {
             return Err("--provider disabled requires --endpoint".to_owned());
         }
-        if api_key_env.is_none() && config.providers.get("disabled").and_then(|e| e.api_key_env.clone()).is_none() {
+        if api_key_env.is_none()
+            && config
+                .providers
+                .get("disabled")
+                .and_then(|e| e.api_key_env.clone())
+                .is_none()
+        {
             return Err("--provider disabled requires --api-key-env".to_owned());
         }
     } else {
@@ -140,25 +152,26 @@ pub(crate) fn resolve_spec(
         }
     }
 
-    let config = if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
-        let mut config = config.clone();
-        let entry = config.providers.entry(provider.clone()).or_default();
-        if wire.is_some() {
-            entry.wire = wire;
-        }
-        if auth.is_some() {
-            entry.auth = auth;
-        }
-        if api_key_env.is_some() {
-            entry.api_key_env = api_key_env;
-        }
-        if disable_prompt_cache_key {
-            entry.prompt_cache_key = Some(false);
-        }
-        Cow::Owned(config)
-    } else {
-        Cow::Borrowed(config)
-    };
+    let config =
+        if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
+            let mut config = config.clone();
+            let entry = config.providers.entry(provider.clone()).or_default();
+            if wire.is_some() {
+                entry.wire = wire;
+            }
+            if auth.is_some() {
+                entry.auth = auth;
+            }
+            if api_key_env.is_some() {
+                entry.api_key_env = api_key_env;
+            }
+            if disable_prompt_cache_key {
+                entry.prompt_cache_key = Some(false);
+            }
+            Cow::Owned(config)
+        } else {
+            Cow::Borrowed(config)
+        };
     let config = config.as_ref();
     match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
         Ok(spec) => Ok(spec),
@@ -181,8 +194,13 @@ pub(crate) fn resolve_spec(
                 );
             }
             let fallback_provider = if is_disabled { "disabled" } else { &provider };
-            ModelSpec::resolve(config, &reference, endpoint, &fallback_env(fallback_provider))
-                .map_err(|error| error.to_string())
+            ModelSpec::resolve(
+                config,
+                &reference,
+                endpoint,
+                &fallback_env(fallback_provider),
+            )
+            .map_err(|error| error.to_string())
         }
         Err(error) => Err(error.to_string()),
     }
