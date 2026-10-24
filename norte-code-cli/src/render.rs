@@ -68,6 +68,8 @@ pub(crate) struct Renderer {
     /// Buffered answer text, rendered as markdown on `end_blocks`.
     pub(crate) answer_buffer: String,
     pub(crate) model_name: Option<String>,
+    /// Whether a "working…" line was printed and needs clearing.
+    pub(crate) working_line: bool,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -123,6 +125,7 @@ impl Renderer {
             last_char: None,
             answer_buffer: String::new(),
             model_name: None,
+            working_line: false,
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -215,8 +218,14 @@ impl Renderer {
     }
 
     /// Shows that a turn is in flight, before the first server event arrives.
+    /// Prints a "working…" line below the user's message instead of in the
+    /// pinned footer. Cleared on the first answer token.
     pub(crate) fn mark_working(&mut self) {
-        self.set_activity(Some("working…".to_owned()));
+        if self.quiet || matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        eprintln!("  {}", self.style.dim("working…"));
+        self.working_line = true;
     }
 
     /// Replaces the activity label and redraws the pinned footer.
@@ -253,6 +262,10 @@ impl Renderer {
     /// Finishes any streamed block and leaves one blank line.
     pub(crate) fn end_blocks(&mut self) {
         self.reasoning_placeholder = false;
+        if self.working_line {
+            eprint!("\x1b[1A\x1b[2K");
+            self.working_line = false;
+        }
         self.end_reasoning();
         if self.block == Block::Answer {
             if !self.answer_buffer.is_empty() && !self.quiet {
@@ -322,6 +335,12 @@ impl Renderer {
             }
             let _ = std::io::stdout().flush();
             return;
+        }
+        // Clear the "working…" line on the first answer token.
+        if self.working_line {
+            // Move up one line and clear it.
+            eprint!("\x1b[1A\x1b[2K");
+            self.working_line = false;
         }
         if self.block == Block::Reasoning {
             self.end_reasoning();
@@ -833,7 +852,7 @@ impl Renderer {
                 self.reasoning_placeholder = false;
                 self.turn_requests = 0;
                 self.pending_todos.clear();
-                self.set_activity(Some("working…".to_owned()));
+                self.set_activity(None);
             }
             ServerEventKind::RetryScheduled {
                 attempt,
@@ -855,7 +874,7 @@ impl Renderer {
             }
             ServerEventKind::RetryStarted { attempt, .. } => {
                 self.end_blocks();
-                self.set_activity(Some("working…".to_owned()));
+                self.set_activity(None);
                 if !self.quiet {
                     eprintln!(
                         "{}",
