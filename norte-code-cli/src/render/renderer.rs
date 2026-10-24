@@ -103,6 +103,8 @@ pub(crate) struct Renderer {
     pub(crate) verbosity: Verbosity,
     pub(crate) debug: bool,
     pub(crate) debug_session: bool,
+    /// The session key, for the footer. The server sends it on every event.
+    pub(crate) session: Option<String>,
     pub(crate) show_cost: bool,
     /// The provider never reports cost, so a missing figure is the expected
     /// state and is not printed as if it were missing.
@@ -174,6 +176,7 @@ impl Renderer {
             verbosity,
             debug,
             debug_session: false,
+            session: None,
             show_cost,
             cost_silent: false,
             style,
@@ -210,6 +213,7 @@ impl Renderer {
     }
 
     pub(crate) fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
+        self.session = event.session.as_ref().map(ToString::to_string);
         if self.debug && !self.debug_session {
             if let Some(session) = &event.session {
                 // The loading bar owns a line on stderr; a diagnostic that lands
@@ -1404,6 +1408,13 @@ impl Renderer {
             || self.style.faint("session"),
             |activity| self.style.yellow(activity.clone()),
         );
+        // The key, shortened, so a session can be named again without scrolling
+        // back to the startup block it was printed in.
+        if self.verbosity.at_least(Verbosity::Medium) {
+            if let Some(key) = &self.session {
+                parts.insert(0, self.style.faint(short(key).to_owned()));
+            }
+        }
         format!("{} {}", prefix, parts.join(&self.style.faint(" · ")))
     }
 

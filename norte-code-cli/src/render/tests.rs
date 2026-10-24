@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use norte_code_protocol::{Delta, ServerEvent, ServerEventKind};
+use norte_code_protocol::{Delta, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::input::{Pinned, TodoItem, TodoStatus};
 use crate::render::argument::todo_items;
@@ -40,6 +40,40 @@ fn reasoning_renderer(pinned: &Arc<Pinned>) -> Renderer {
     let mut renderer = visible_renderer(pinned);
     renderer.verbosity = Verbosity::High;
     renderer
+}
+
+#[test]
+fn the_footer_names_the_session_from_medium_up() {
+    // The key was only printed by `--debug` at startup, so returning to a
+    // session meant scrolling to the top to copy it.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.requests = 1;
+    renderer.input = 1_000;
+    renderer.output = 100;
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: Some(SessionKey::new(
+                "801605a1-dcb8-4d7b-91c0-7b17440274b1".to_owned(),
+            )),
+            kind: ServerEventKind::TurnStarted { turn: 1 },
+        })
+        .expect("event");
+
+    let status = renderer.session_status();
+    assert!(
+        status.contains("801605a1"),
+        "the footer names the session: {status}"
+    );
+
+    // `low` shows the answer alone, footer included.
+    renderer.verbosity = Verbosity::Low;
+    let quiet = renderer.session_status();
+    assert!(
+        !quiet.contains("801605a1"),
+        "low keeps the footer free of the key: {quiet}"
+    );
 }
 
 #[test]
