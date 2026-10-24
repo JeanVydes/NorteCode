@@ -72,6 +72,50 @@ pub struct Config {
     pub skills: SkillsConfig,
     /// Per-model overrides, keyed by `provider/model`.
     pub model_overrides: BTreeMap<String, ModelOverride>,
+    /// MCP servers whose tools the agent may call.
+    ///
+    /// The block keeps the name and the shape the rest of the ecosystem uses
+    /// (`mcpServers`, with `command`, `args` and `env` per entry), so a
+    /// configuration written for another client works here unchanged.
+    #[serde(
+        default,
+        rename = "mcpServers",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+}
+
+/// One MCP server the agent may reach.
+///
+/// The entry names a program to run and speaks the protocol over its standard
+/// input and output, which is what every client in the ecosystem does and what
+/// a server published on `npm` or `PyPI` expects.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// The program to run.
+    pub command: String,
+    /// Its arguments, in order.
+    pub args: Vec<String>,
+    /// Extra environment variables for the child.
+    ///
+    /// A server that needs a token gets it here, by name, and the value is
+    /// registered for redaction like any other secret.
+    pub env: BTreeMap<String, String>,
+    /// Whether the server is started. Off lets an entry be kept without
+    /// paying for its process on every run.
+    pub enabled: bool,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            enabled: true,
+        }
+    }
 }
 
 impl Default for Config {
@@ -94,6 +138,7 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             skills: SkillsConfig::default(),
             model_overrides: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
         }
     }
 }
@@ -392,6 +437,40 @@ impl Default for ConfinementConfig {
     }
 }
 
+impl Config {
+    /// Checks every `mcpServers` entry.
+    ///
+    /// A server that is on must name a program, and its name becomes a segment
+    /// of every tool it exposes (`mcp__<server>__<tool>`), so it may not carry
+    /// the separator the namespace uses.
+    fn validate_mcp_servers(&self) -> Result<(), ConfigError> {
+        for (name, server) in &self.mcp_servers {
+            if server.command.trim().is_empty() {
+                // A disabled entry is not started, so it may be a placeholder.
+                if server.enabled {
+                    return Err(invalid(
+                        format!("mcpServers.{name}"),
+                        "`command` must not be empty",
+                    ));
+                }
+                continue;
+            }
+            let sane = !name.is_empty()
+                && !name.contains("__")
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !sane {
+                return Err(invalid(
+                    format!("mcpServers.{name}"),
+                    "a server name may hold letters, digits, `-` and `_`, and not `__`",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Command sandbox settings.
 ///
 /// Disabled by default. When enabled, `command` runs through bubblewrap on
@@ -630,6 +709,7 @@ impl Config {
         if self.skills.max_skills == 0 {
             return Err(invalid("skills.max_skills", "must be at least 1"));
         }
+        self.validate_mcp_servers()?;
         if !(self.compaction.threshold > 0.0 && self.compaction.threshold <= 1.0) {
             return Err(invalid(
                 "compaction.threshold",
@@ -1235,6 +1315,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_mcp_block_written_for_another_client_loads_unchanged() {
+        // The shape Claude Desktop and Cursor write, copied verbatim.
+        let loaded = Config::from_json(
+            r#"{"mcpServers": {
+                "filesystem": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                    "env": { "TOKEN": "secret" }
+                },
+                "off": { "command": "slow", "enabled": false }
+            }}"#,
+        )
+        .expect("the ecosystem format loads");
+
+        let filesystem = loaded.config.mcp_servers.get("filesystem").expect("entry");
+        assert_eq!(filesystem.command, "npx");
+        assert_eq!(filesystem.args.len(), 3);
+        assert_eq!(
+            filesystem.env.get("TOKEN").map(String::as_str),
+            Some("secret")
+        );
+        assert!(filesystem.enabled, "a server without `enabled` is on");
+        assert!(
+            !loaded.config.mcp_servers.get("off").expect("entry").enabled,
+            "a disabled entry keeps its place"
+        );
+    }
+
+    #[test]
+    fn mcp_entries_are_validated() {
+        // A server that is on must name a program to run.
+        let error = Config::from_json(r#"{"mcpServers":{"x":{"command":"  "}}}"#)
+            .expect_err("an empty command is refused");
+        assert!(error.to_string().contains("mcpServers.x"), "{error}");
+        assert!(error.to_string().contains("command"), "{error}");
+
+        // A disabled entry may be incomplete: it is off, so it is not started.
+        Config::from_json(r#"{"mcpServers":{"x":{"command":"","enabled":false}}}"#)
+            .expect("a disabled placeholder is fine");
+
+        // The name becomes part of every tool name it exposes.
+        let error = Config::from_json(r#"{"mcpServers":{"a__b":{"command":"npx"}}}"#)
+            .expect_err("the namespace separator is refused");
+        assert!(error.to_string().contains("a__b"), "{error}");
+        let error = Config::from_json(r#"{"mcpServers":{"a b":{"command":"npx"}}}"#)
+            .expect_err("a space is refused");
+        assert!(error.to_string().contains("a b"), "{error}");
+    }
     #[test]
     fn a_bad_budget_is_rejected() {
         let error = Config::from_json(
