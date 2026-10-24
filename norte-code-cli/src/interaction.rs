@@ -59,6 +59,8 @@ pub(crate) enum ChatCommand {
     Compact,
     /// Re-scan the skill roots.
     Refresh,
+    /// Re-read the configuration.
+    Reload,
     /// Leave the chat.
     Exit,
     /// Change an approval rule.
@@ -91,6 +93,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/help" => Some(ChatCommand::Help),
         "/compact" => Some(ChatCommand::Compact),
         "/refresh" => Some(ChatCommand::Refresh),
+        "/reload" => Some(ChatCommand::Reload),
         "/exit" | "/quit" | "exit" | "quit" => Some(ChatCommand::Exit),
         _ => None,
     };
@@ -216,6 +219,7 @@ const CHAT_COMMANDS: &[&str] = &[
     "/provider",
     "/revoke",
     "/refresh",
+    "/reload",
     "/exit",
     "/quit",
 ];
@@ -308,6 +312,7 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/provider" => Some("/provider <provider>"),
         "/revoke" => Some("/revoke [grant-id-or-tool]"),
         "/refresh" => Some("/refresh"),
+        "/reload" => Some("/reload"),
         "/exit" => Some("/exit"),
         "/quit" => Some("/quit"),
         _ => None,
@@ -338,6 +343,43 @@ fn candidate_completion(candidates: &[&str], partial: &str) -> Option<String> {
     Some(candidate[partial.len()..].to_owned())
 }
 
+/// Re-reads the configuration and reports what happened.
+///
+/// The per-session rules and the model a session already resolved are session
+/// state and are not rebuilt, so the notice names what needs a new session.
+fn report_reload(service: &Arc<Service>, style: Style) {
+    match service.reload_config() {
+        Ok(reloaded) => {
+            eprintln!(
+                "{}",
+                style.green(format!(
+                    "configuration reloaded ({} providers)",
+                    reloaded.config.providers.len()
+                ))
+            );
+            for warning in &reloaded.warnings {
+                eprintln!(
+                    "{}",
+                    style.yellow(format!(
+                        "warning: unknown config key `{}`",
+                        crate::text::terminal(warning)
+                    ))
+                );
+            }
+            eprintln!(
+                "{}",
+                style.dim(
+                    "the open session keeps its model and its rules; a new session uses the new default"
+                )
+            );
+        }
+        Err(error) => eprintln!(
+            "{}",
+            style.red(format!("could not reload the configuration: {error}"))
+        ),
+    }
+}
+
 pub(crate) fn print_chat_help(style: Style) {
     eprintln!("{}", style.bold("chat commands"));
     eprintln!("  /help                     show this list");
@@ -349,6 +391,7 @@ pub(crate) fn print_chat_help(style: Style) {
     eprintln!("  /provider <provider>       switch provider (keeps current model)");
     eprintln!("  /revoke [grant-or-tool]   list or revoke an approval grant");
     eprintln!("  /refresh                  re-scan the skills and their tools");
+    eprintln!("  /reload                   re-read the configuration");
     eprintln!("  /exit, /quit              leave the chat");
     eprintln!(
         "{}",
@@ -443,6 +486,7 @@ pub(crate) async fn interactive_loop(
                     let count = service.refresh_skills();
                     eprintln!("{}", style.green(format!("skills refreshed: {count}")));
                 }
+                ChatCommand::Reload => report_reload(service, style),
                 ChatCommand::Approval {
                     allow,
                     tool,
@@ -689,6 +733,7 @@ async fn handle_live_command(
             let count = service.refresh_skills();
             eprintln!("{}", style.green(format!("skills refreshed: {count}")));
         }
+        ChatCommand::Reload => report_reload(service, style),
         ChatCommand::Approval {
             allow,
             tool,
@@ -1350,8 +1395,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        BudgetUnit, ChatCommand, Reasoning, ReasoningScope, SignalGuard, command_suggestion,
-        parse_budget_limit, parse_chat_command,
+        BudgetUnit, CHAT_COMMANDS, ChatCommand, Reasoning, ReasoningScope, SignalGuard,
+        command_suggestion, command_usage, parse_budget_limit, parse_chat_command,
     };
 
     #[test]
@@ -1433,6 +1478,24 @@ mod tests {
         assert!(parse_budget_limit(BudgetUnit::Requests, "1.5").is_err());
         assert!(parse_budget_limit(BudgetUnit::Usd, "0").is_err());
         assert!(parse_budget_limit(BudgetUnit::Tokens, "many").is_err());
+    }
+
+    #[test]
+    fn reload_is_a_command_and_not_a_message() {
+        // A command that a user types must never reach the model as text.
+        assert!(matches!(
+            parse_chat_command("/reload"),
+            Some(Ok(ChatCommand::Reload))
+        ));
+        assert!(
+            parse_chat_command("reload the config").is_none(),
+            "prose is a message, not the command"
+        );
+        assert_eq!(command_usage("/reload"), Some("/reload"));
+        assert!(
+            CHAT_COMMANDS.contains(&"/reload"),
+            "the completion list offers it"
+        );
     }
 
     #[test]
