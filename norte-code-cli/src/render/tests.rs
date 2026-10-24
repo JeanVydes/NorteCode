@@ -67,6 +67,34 @@ fn tool_finished(call_id: &str, tool: &str, is_error: bool) -> ServerEvent {
     }
 }
 
+#[test]
+fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
+    // A write is about the file it wrote: the path leads and a glimpse of the
+    // content follows. A read shows what came back. A tool with no result worth
+    // showing has none, so the transcript stays about the work.
+    let write = Renderer::tool_result("write", Some("src/lib.rs"), Some("fn main() {}"))
+        .expect("a write has a preview");
+    assert!(write.starts_with("src/lib.rs"), "{write}");
+    assert!(write.contains("fn main() {}"), "{write}");
+
+    let read = Renderer::tool_result("read", Some("Cargo.toml"), Some("12 lines"))
+        .expect("a read has a preview");
+    assert!(read.starts_with("Cargo.toml"), "{read}");
+
+    let command =
+        Renderer::tool_result("command", None, Some("ok")).expect("a command shows its output");
+    assert_eq!(command, "ok");
+
+    assert!(
+        Renderer::tool_result("todo", None, Some("done")).is_none(),
+        "a tool with nothing to show gets no preview"
+    );
+    assert!(
+        Renderer::tool_result("write", None, Some("x")).is_none(),
+        "a path is what makes a write's preview useful"
+    );
+}
+
 fn item(content: &str, status: TodoStatus) -> TodoItem {
     TodoItem {
         content: content.to_owned(),

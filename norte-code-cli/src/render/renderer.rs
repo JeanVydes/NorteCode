@@ -73,6 +73,8 @@ pub(crate) struct Renderer {
     pub(crate) last_char: Option<char>,
     /// Buffered answer text, rendered as markdown on `end_blocks`.
     pub(crate) answer_buffer: String,
+    /// The path a `write` or `read` is working on, by call, until it finishes.
+    pending_paths: BTreeMap<String, String>,
     pub(crate) model_name: Option<String>,
     /// Animated loading bar shown while working.
     pub(crate) loading_bar: Option<LoadingBar>,
@@ -138,6 +140,7 @@ impl Renderer {
             reasoning_placeholder: false,
             last_char: None,
             answer_buffer: String::new(),
+            pending_paths: BTreeMap::new(),
             model_name: None,
             loading_bar: None,
             failed: false,
@@ -461,6 +464,17 @@ impl Renderer {
                 if let Some(todos) = todo_items(arguments.as_ref()).filter(|_| tool == "todo") {
                     self.pending_todos.insert(call_id.clone(), todos);
                 }
+                // The finish event carries the tool's output but not its
+                // arguments, and a write's result is mostly the path it wrote.
+                if matches!(tool.as_str(), "write" | "read") {
+                    if let Some(path) = arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.get("path"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        self.pending_paths.insert(call_id.clone(), path.to_owned());
+                    }
+                }
                 let command = Self::command_summary(arguments.as_ref());
                 let diff = if tool == "edit" {
                     edit_preview(arguments.as_ref(), source.as_deref())
@@ -529,6 +543,7 @@ impl Renderer {
                         self.pinned.set_todos(todos);
                     }
                 }
+                let path = self.pending_paths.remove(call_id);
                 if *is_error && tool == "edit" {
                     if let Some(error) = error {
                         self.end_blocks();
@@ -559,6 +574,16 @@ impl Renderer {
                             self.style.dim(format!("in {duration_ms} ms"))
                         );
                     }
+                    if *is_error && tool.as_str() != "edit" {
+                        // A failure needs its reason whatever the verbosity.
+                        if let Some(error) = error {
+                            self.print_tool_result(error, *truncated);
+                        }
+                    } else if let Some(result) =
+                        Self::tool_result(tool, path.as_deref(), output.as_deref())
+                    {
+                        self.print_tool_result(&result, *truncated);
+                    }
                     if self.verbose {
                         if *is_error {
                             if tool.as_str() != "edit" {
@@ -568,17 +593,75 @@ impl Renderer {
                             }
                         } else if let Some(output) = output {
                             self.code_block("text", output);
-                            if *truncated {
-                                eprintln!(
-                                    "  {}",
-                                    self.style.yellow("output shortened for display")
-                                );
-                            }
                         }
                     }
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The short result of a finished tool, when one is worth showing.
+    ///
+    /// A command shows its output, because that is what it was run for; a write
+    /// names the file it wrote and a few lines of what landed there; a read
+    /// shows what it returned. `edit` is absent: it already has its boxed diff.
+    /// No other tool is summarised, so the transcript stays about the work.
+    pub(crate) fn tool_result(
+        tool: &str,
+        path: Option<&str>,
+        output: Option<&str>,
+    ) -> Option<String> {
+        // A write and a read are about a file, so the path leads and the output
+        // follows it; a command is about what it printed.
+        if matches!(tool, "write" | "read") {
+            let path = path?;
+            return Some(match output {
+                Some(output) if !output.trim().is_empty() => format!("{path}\n{output}"),
+                _ => path.to_owned(),
+            });
+        }
+        if tool == "command" {
+            return output.map(str::to_owned);
+        }
+        None
+    }
+
+    /// Prints a tool result as a short, dimmed, indented block.
+    ///
+    /// Bounded on purpose: the model may have received a large output and a
+    /// transcript is for reading, so the first lines are shown and the rest is
+    /// replaced by a count. The text is escaped like any other.
+    fn print_tool_result(&self, text: &str, truncated: bool) {
+        const MAX_LINES: usize = 12;
+        const MAX_LINE_CHARS: usize = 200;
+        let escaped = crate::text::terminal(text);
+        let mut lines = escaped.lines();
+        let mut shown = 0usize;
+        let mut hidden = 0usize;
+        for line in lines.by_ref() {
+            if shown == MAX_LINES {
+                hidden += 1;
+                continue;
+            }
+            let (line, clipped) = clip_text(line, MAX_LINE_CHARS);
+            eprintln!("  {}", self.style.dim(line));
+            if clipped {
+                hidden += 1;
+            }
+            shown += 1;
+        }
+        if hidden > 0 || truncated {
+            let suffix = if truncated {
+                " (shortened for the model)"
+            } else {
+                ""
+            };
+            eprintln!(
+                "  {}",
+                self.style
+                    .yellow(format!("… {hidden} more line(s){suffix}")),
+            );
         }
     }
 
