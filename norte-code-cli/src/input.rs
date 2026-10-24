@@ -500,7 +500,7 @@ mod unix {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
-            KeyCode::Enter if alt => {
+            KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 buffer.insert('\n');
                 KeyOutcome::Continue
             }
@@ -791,7 +791,7 @@ mod unix {
     /// and a `+N` says how many actionable items did not fit.
     fn todo_line(style: Style, todos: &[TodoItem], max: usize) -> String {
         if todos.is_empty() {
-            return style.faint("todo —");
+            return String::new();
         }
         let done = todos
             .iter()
@@ -1113,7 +1113,7 @@ mod unix {
                 todo_line(crate::style::Style::plain(), &todos, 80),
                 "todo 2/2 · all done"
             );
-            assert_eq!(todo_line(crate::style::Style::plain(), &[], 80), "todo —");
+            assert_eq!(todo_line(crate::style::Style::plain(), &[], 80), "");
         }
 
         #[test]

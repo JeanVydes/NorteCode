@@ -480,6 +480,7 @@ async fn run_prompt(
         args.api_key_env.clone(),
         args.disable_prompt_cache_key,
     )?;
+    let model_label = spec.label();
     let provider = spec.provider.clone();
     let mut config = config;
     if let Some(mode) = args.approval_mode.as_deref() {
@@ -607,6 +608,7 @@ async fn run_prompt(
         Arc::clone(&pinned),
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
+    renderer.model_name = Some(model_label);
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
@@ -687,6 +689,7 @@ async fn resume_session(
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     let spec = resolve_spec(&config, &catalog, None, None, None, None, None, None, false)?;
+    let model_label = spec.label();
     let provider = spec.provider.clone();
     let effective = effective_reasoning(
         None,
@@ -769,6 +772,7 @@ async fn resume_session(
         Arc::clone(&pinned),
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
+    renderer.model_name = Some(model_label);
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
     let mut input = if interactive {

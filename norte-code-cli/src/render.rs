@@ -67,6 +67,7 @@ pub(crate) struct Renderer {
     pub(crate) last_char: Option<char>,
     /// Buffered answer text, rendered as markdown on `end_blocks`.
     pub(crate) answer_buffer: String,
+    pub(crate) model_name: Option<String>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -121,6 +122,7 @@ impl Renderer {
             reasoning_placeholder: false,
             last_char: None,
             answer_buffer: String::new(),
+            model_name: None,
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -701,6 +703,9 @@ impl Renderer {
                     self.end_blocks();
                 }
                 let mut parts = Vec::new();
+                if let Some(name) = &self.model_name {
+                    parts.push(self.style.dim(name.clone()));
+                }
                 if let Some(input) = usage.input_tokens {
                     parts.push(self.style.dim(format!("{} in", human_tokens(input))));
                 }
@@ -719,7 +724,7 @@ impl Renderer {
                 if let Some(first) = first_token_ms {
                     parts.push(
                         self.style
-                            .dim(format!("latency {}", duration_label(*first))),
+                            .dim(format!("TTFT {}", duration_label(*first))),
                     );
                 }
                 if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
