@@ -87,7 +87,7 @@ impl Style {
     /// Wraps text that is already escaped in the given SGR codes.
     ///
     /// [`paint`] escapes its input, so a caller that composes two styles would
-    /// get the inner codes escaped and printed as `\u{{1b}}[1m` instead of
+    /// get the inner codes escaped and printed as `\u{1b}[1m` instead of
     /// styled. This is the raw form for that case: the caller guarantees the
     /// text carries no terminal control of its own.
     ///
