@@ -46,9 +46,19 @@ of truth.
 - `Cargo.lock` **is** committed (this is an application).
 - Review `git diff --staged` before every commit. Run a secret scan
   (`gitleaks` when available) before each push.
+
+## Running commands
+
+- Never run a command that can wait on input without disabling the prompt. A
+  command that blocks on a TTY hides the failure and stains the whole session:
+  set `GIT_TERMINAL_PROMPT=0` for anything that reaches the network,
+  `GIT_ASKPASS=/bin/true` and `SSH_ASKPASS=/bin/true` with it, and pass an
+  explicit timeout to every build, test or network command. Fail fast and
+  report the error; do not retry the same hanging call.
 - Push with the user's existing git credentials. If a push fails, report the
   exact error and stop. Never put a token in a remote URL and never write
-  credentials to disk.
+  credentials to disk. Authentication is the user's, so a push that needs
+  credentials is reported, not prompted for.
 
 ## Code
 
