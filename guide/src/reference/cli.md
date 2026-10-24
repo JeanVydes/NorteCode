@@ -23,11 +23,14 @@ norte-code run [OPTIONS] [PROMPT]
 
 | Option | Meaning |
 | --- | --- |
-| `-m, --model PROVIDER/MODEL` | Override the default model. |
+| `-m, --model MODEL` | Override the default model (name only, no provider). |
+| `--provider PROVIDER` | Override the provider id (e.g. `openai`, `groq`, `disabled`). |
 | `--system-prompt TEXT` | Replace the base system prompt for this run. |
 | `--endpoint URL` | Override the provider endpoint. |
 | `--wire WIRE` | Override the provider wire: `responses`, `chat`, `messages` or `generate-content`. |
 | `--auth AUTH` | Override the credential scheme: `bearer`, `x-api-key`, `x-goog-api-key` or `disabled`. |
+| `--api-key-env VAR` | Read the key from this environment variable instead of the configured one. |
+| `--disable-prompt-cache-key` | Omit `prompt_cache_key` for providers that reject it. |
 | `--budget LIMIT` | A limit for this message. |
 | `--budget-unit usd\|tokens\|requests` | What the limit measures. Default `usd`. |
 | `--budget-action warn\|ask\|stop` | What to do at the limit. Default `stop` for `--budget`. |
