@@ -70,7 +70,8 @@ was exercised.
 - Actual `sandbox-exec` execution on macOS: this host is Linux. The profile
   generator is tested, but deprecation or availability of the binary on a given
   macOS release is not.
-- The TUI (milestone 7) is still a stub. The CLI is the supported client.
+- There is no TUI. The interactive CLI is the supported client; no full-screen
+  client is planned.
 - Budget `action = "ask"` is a resumable stop with a notice, not an immediate
   approval prompt. Raising the budget and resuming continues the parked turn.
 - `skill_script` is not covered by the command sandbox; it remains opt-in
@@ -80,7 +81,8 @@ was exercised.
 
 ## Next work
 
-- Milestone 7: the ratatui client over the existing protocol.
+- Polishing the interactive REPL: redraw on demand, cancelling the input line,
+  file and model completion, and a persistent history.
 - A first-class budget-ask prompt if the parked-stop behaviour is not enough.
 - Provider probe runs for OpenAI, Anthropic and Gemini once keys are available.
 - A macOS runner in CI to execute the seatbelt path instead of only testing its
