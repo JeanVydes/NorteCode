@@ -11,6 +11,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - `--auth disabled`, and `providers.<id>.auth: "disabled"` in the config, sends
   no credential and needs no API key. A local OpenAI-compatible server can be
   used without exporting a dummy key.
+- `/reload` re-reads the configuration without restarting, so a session keeps
+  its transcript. Everything the config derives is rebuilt — the default model,
+  the keys registered for redaction, the skills and the global approval rules —
+  and an unknown key is reported rather than ignored. The open session keeps the
+  model it resolved and the rules granted during the run, which are session
+  state; a new session uses the new default. A file that does not parse, or
+  names a model that cannot be built, changes nothing.
 - `--api-key-env VAR` reads the API key from `VAR` instead of the configured
   `api_key_env` or the catalogue's `env` names, without touching the config
   file.
