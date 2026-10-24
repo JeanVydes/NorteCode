@@ -1956,19 +1956,168 @@ pub(crate) fn source_label(source: Source) -> &'static str {
     }
 }
 
-/// One `debug:` section title, so every block reads as a heading.
-fn debug_heading(style: Style, title: &str) -> String {
-    style.cyan(style.bold(title))
+/// One line of a debug panel: either a row or a rule.
+enum DebugRow {
+    /// A field or a heading, laid out in the panel's columns.
+    Row { left: String, right: String },
+    /// A horizontal rule that spans both columns.
+    Rule,
 }
 
-/// One `label  value` line of a debug block: the label dim and padded, the
-/// value in the default colour so it stands out from the chrome around it.
-fn debug_field(style: Style, label: &str, value: &str) -> String {
-    format!("  {} {value}", style.dim(format!("{label:<10}")))
+/// Collects rows and prints them as one aligned panel.
+///
+/// The columns are sized from the rows, so a long path never breaks the frame
+/// and every panel lines up whatever it holds. The frame is drawn only when the
+/// destination takes escapes: cloning it for a pipe or a log file would be
+/// noise, so those get the plain rows instead.
+struct DebugPanel {
+    left_title: &'static str,
+    right_title: &'static str,
+    rows: Vec<DebugRow>,
+}
+
+impl DebugPanel {
+    fn new(left_title: &'static str, right_title: &'static str) -> Self {
+        Self {
+            left_title,
+            right_title,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Adds a `left` to `right` row.
+    fn field(&mut self, left: impl Into<String>, right: impl Into<String>) -> &mut Self {
+        self.rows.push(DebugRow::Row {
+            left: left.into(),
+            right: right.into(),
+        });
+        self
+    }
+
+    /// Adds a rule, so two kinds of fact can be told apart.
+    fn rule(&mut self) -> &mut Self {
+        self.rows.push(DebugRow::Rule);
+        self
+    }
+
+    /// Writes the panel to stderr.
+    fn print(&self, style: Style) {
+        let left_width = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                DebugRow::Row { left, .. } => Some(display_width(left)),
+                DebugRow::Rule => None,
+            })
+            .chain(std::iter::once(display_width(self.left_title)))
+            .max()
+            .unwrap_or(0);
+        let right_width = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                DebugRow::Row { right, .. } => Some(display_width(right)),
+                DebugRow::Rule => None,
+            })
+            .chain(std::iter::once(display_width(self.right_title)))
+            .max()
+            .unwrap_or(0);
+        if !style.paints() {
+            for row in &self.rows {
+                match row {
+                    DebugRow::Row { left, right } => {
+                        eprintln!("  {} {right}", pad(left, left_width));
+                    }
+                    DebugRow::Rule => {
+                        eprintln!("  {}", style.dim("─".repeat(left_width + right_width + 3)))
+                    }
+                }
+            }
+            return;
+        }
+        {
+            let top = format!(
+                "┌{}┬{}┐",
+                "─".repeat(left_width + 2),
+                "─".repeat(right_width + 2)
+            );
+            let middle = format!(
+                "├{}┼{}┤",
+                "─".repeat(left_width + 2),
+                "─".repeat(right_width + 2)
+            );
+            let bottom = format!(
+                "└{}┴{}┘",
+                "─".repeat(left_width + 2),
+                "─".repeat(right_width + 2)
+            );
+            eprintln!("  {}", style.faint(top));
+            eprintln!(
+                "  {} {} {} {} {}",
+                style.faint("│"),
+                style.bold(&pad_title(self.left_title, left_width)),
+                style.faint("│"),
+                style.bold(&pad_title(self.right_title, right_width)),
+                style.faint("│")
+            );
+            eprintln!("  {}", style.faint(middle.clone()));
+            for row in &self.rows {
+                match row {
+                    DebugRow::Row { left, right } => {
+                        eprintln!(
+                            "  {} {} {} {}",
+                            style.faint("│"),
+                            style.dim(&pad(left, left_width)),
+                            style.faint("│"),
+                            format!("{}{}", pad(right, right_width), style.faint("│"))
+                        );
+                    }
+                    DebugRow::Rule => eprintln!("  {}", style.faint(middle.clone())),
+                }
+            }
+            eprintln!("  {}", style.faint(bottom));
+        }
+    }
+}
+
+/// How many columns a string occupies, ignoring escapes and refusing to split a
+/// character: the panel aligns on what the terminal shows, not on bytes.
+fn display_width(text: &str) -> usize {
+    crate::text::terminal(text).chars().count()
+}
+
+/// Pads a value to the column width it was measured at.
+fn pad(text: &str, width: usize) -> String {
+    let text = crate::text::terminal(text);
+    let shown = text.chars().count();
+    format!("{text}{}", " ".repeat(width.saturating_sub(shown)))
+}
+
+/// Pads a panel title, which is trusted chrome and is not escaped.
+fn pad_title(title: &str, width: usize) -> String {
+    format!(
+        "{title}{}",
+        " ".repeat(width.saturating_sub(title.chars().count()))
+    )
+}
+
+/// One `debug:` section title, so every block reads as a heading.
+///
+/// The title is escaped like any other text, then wrapped in the codes: the
+/// escaping runs before the escapes are added, so the heading is not turned
+/// into `\u{{1b}}[1m`.
+fn debug_heading(style: Style, title: &str) -> String {
+    let title = crate::text::terminal(title);
+    // Both codes go on in one run: nesting `cyan(bold(..))` would escape the
+    // inner codes and print them instead of styling the title.
+    match style.paints() {
+        true => style.paint_raw("1;36", title.as_ref()),
+        false => title.into_owned(),
+    }
 }
 
 /// Prints the startup facts that make a run or resume reproducible.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn debug_start(
     style: Style,
     spec: &ModelSpec,
@@ -1983,9 +2132,8 @@ pub(crate) fn debug_start(
         std::env::current_dir().map_or_else(|_| "?".to_owned(), |path| path.display().to_string());
     let config_label =
         config_path.map_or_else(|| "(default)".to_owned(), |path| path.display().to_string());
-    let iterations = configuration
-        .max_iterations
-        .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
+    let project_config = find_project_config(&std::env::current_dir().unwrap_or_default())
+        .map_or_else(|| "(none)".to_owned(), |path| path.display().to_string());
     let sandbox = if configuration.tools.sandbox.enabled {
         let name = if cfg!(target_os = "linux") {
             "bwrap"
@@ -2005,168 +2153,110 @@ pub(crate) fn debug_start(
     } else {
         "disabled".to_owned()
     };
-    eprintln!("{}", debug_heading(style, "debug: startup"));
-    eprintln!("{}", style.dim("  ┌──────────────┬──────────────────────────────────────────────┐"));
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ session      │ {}",
-            session.unwrap_or("(new; shown on first event)")
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ model        │ {}",
-            spec.label()
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ provider     │ {}{}",
-            spec.provider,
-            if catalog.provider(&spec.provider).is_some() {
-                ""
-            } else {
-                "  (not in catalogue; using config/fallback)"
-            }
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ wire         │ {}",
-            spec.wire.family()
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ approval     │ {}",
-            approval_label(configuration.approval_mode)
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ iterations   │ {}",
-            iterations
-        ))
-    );
     let compaction_pct = (configuration.compaction.threshold * 100.0) as u64;
-    let compaction_tokens = spec.capabilities.max_context.map(|c| (c as f64 * configuration.compaction.threshold) as u64);
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ compaction   │ {}%{}{}",
-            compaction_pct,
-            compaction_tokens.map(|t| format!(" (~{} tokens)", t)).unwrap_or_default(),
-            if !configuration.compaction.enabled {
-                " (disabled)"
-            } else if configuration.compaction.trigger == "eager" {
-                " (eager)"
-            } else {
-                " (idle)"
-            }
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ sandbox      │ {}",
-            sandbox
-        ))
-    );
-    eprintln!("{}", style.dim("  ├──────────────┼──────────────────────────────────────────────┤"));
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ workspace    │ {}",
-            workspace
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ config       │ {}",
-            config_label
-        ))
-    );
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ database     │ {}",
-            database.display()
-        ))
-    );
+    let compaction_tokens = spec
+        .capabilities
+        .max_context
+        .map(|context| (context as f64 * configuration.compaction.threshold) as u64);
     let provider_count = catalog.providers.len();
     let model_count: usize = catalog.providers.values().map(|p| p.models.len()).sum();
-    eprintln!(
-        "{}",
-        style.dim(format!(
-            "  │ catalogue    │ {} · {} providers · {} models",
-            source_label(source),
-            provider_count,
-            model_count
-        ))
-    );
-    if !configuration.extensions.is_empty() {
-        eprintln!(
-            "{}",
-            style.dim(format!(
-                "  │ extensions   │ {}",
-                configuration
-                    .extensions
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        );
-    }
-    eprintln!("{}", style.dim("  └──────────────┴──────────────────────────────────────────────┘"));
+    let max_iterations = configuration
+        .max_iterations
+        .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
+    let mut panel = DebugPanel::new("session", "value");
+    panel
+        .field("key", session.unwrap_or("(new; shown on first event)"))
+        .field("model", spec.label())
+        .field(
+            "provider",
+            format!(
+                "{}{}",
+                spec.provider,
+                if catalog.provider(&spec.provider).is_some() {
+                    String::new()
+                } else {
+                    "  (not in catalogue; using config/fallback)".to_owned()
+                }
+            ),
+        )
+        .field("wire", spec.wire.family())
+        .field("approval", approval_label(configuration.approval_mode))
+        .field("iterations", &max_iterations)
+        .field(
+            "compaction",
+            format!(
+                "{}%{}{}",
+                compaction_pct,
+                compaction_tokens
+                    .map(|tokens| format!(" (~{tokens} tokens)"))
+                    .unwrap_or_default(),
+                if !configuration.compaction.enabled {
+                    " (disabled)"
+                } else if configuration.compaction.trigger == "eager" {
+                    " (eager)"
+                } else {
+                    " (idle)"
+                }
+            ),
+        )
+        .field(
+            "keep recent",
+            format!(
+                "{} message(s) after a compaction",
+                configuration.compaction.keep_recent
+            ),
+        )
+        .field(
+            "catalogue",
+            format!("{provider_count} providers · {model_count} models"),
+        )
+        .field("catalogue source", source_label(source))
+        .field(
+            "reasoning",
+            format!(
+                "{} effort(s) available",
+                spec.capabilities.reasoning.efforts.len()
+            ),
+        )
+        .field("workspace", &workspace)
+        .field("config", &config_label)
+        .field("project config", &project_config)
+        .field("database", database.display().to_string())
+        .field("sandbox", &sandbox);
+    panel.print(style);
 }
 
 /// Prints the static prompt size in characters. Tokens are provider-reported,
 /// so no estimate is made here.
 pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) {
-    match service.prompt_size() {
-        Ok(size) => {
-            eprintln!("{}", debug_heading(style, "debug: prompt material"));
-            eprintln!("{}", debug_field(style, "source", source));
+    let size = match service.prompt_size() {
+        Ok(size) => size,
+        Err(error) => {
             eprintln!(
                 "{}",
-                debug_field(style, "system", &format!("{} chars", size.system_chars))
+                style.yellow(format!("debug: could not measure the prompt: {error}"))
             );
-            if let Some(path) = &size.project_path {
-                eprintln!(
-                    "{}",
-                    debug_field(
-                        style,
-                        "project",
-                        &format!("{} chars ({})", size.project_chars, path.display())
-                    )
-                );
-            }
-            eprintln!(
-                "{}",
-                debug_field(style, "tools", &format!("{} chars", size.tool_chars))
-            );
-            eprintln!(
-                "{}",
-                debug_field(style, "total", &format!("{} chars", size.total_chars()))
-            );
+            return;
         }
-        Err(error) => eprintln!(
-            "{}",
-            style.yellow(format!("debug: could not measure the prompt: {error}"))
-        ),
+    };
+    eprintln!("{}", debug_heading(style, "debug: prompt material"));
+    let mut panel = DebugPanel::new("part", "size");
+    panel
+        .field("source", source)
+        .field("system", format!("{} chars", size.system_chars));
+    if let Some(path) = &size.project_path {
+        panel.field(
+            "project",
+            format!("{} chars ({})", size.project_chars, path.display()),
+        );
     }
+    panel
+        .field("tools", format!("{} chars", size.tool_chars))
+        .field("total", format!("{} chars", size.total_chars()));
+    panel.print(style);
 }
 
 /// Prints the selected model's capabilities and catalogue metadata.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn debug_model(
     style: Style,
     spec: &ModelSpec,
@@ -2174,91 +2264,54 @@ pub(crate) fn debug_model(
 ) {
     let capabilities = &spec.capabilities;
     eprintln!("{}", debug_heading(style, "debug: model"));
-    eprintln!("{}", debug_field(style, "reference", &spec.label()));
+    let mut panel = DebugPanel::new("capability", "value");
+    panel.field("reference", spec.label());
     if let Some(model) = model {
         if !model.name.is_empty() {
-            eprintln!("{}", debug_field(style, "name", &model.name));
+            panel.field("name", &model.name);
         }
         if let Some(family) = &model.family {
-            eprintln!("{}", debug_field(style, "family", family));
+            panel.field("family", family);
         }
         if let Some(description) = &model.description {
-            eprintln!("{}", debug_field(style, "about", description));
+            panel.rule().field("about", description);
         }
     } else {
-        eprintln!(
-            "{}",
-            style.yellow(
-                "  catalogue  not found; the capabilities below are the config/fallback ones"
-            )
+        panel.rule().field(
+            "catalogue",
+            "not found; the capabilities below are the config/fallback ones",
         );
     }
-    eprintln!(
-        "{}",
-        debug_field(
-            style,
+    panel
+        .rule()
+        .field(
             "wire",
-            &format!("{} · provider {}", spec.wire.family(), spec.provider)
+            format!("{} · provider {}", spec.wire.family(), spec.provider),
         )
-    );
-    eprintln!(
-        "{}",
-        debug_field(style, "context", &token_limit_label(capabilities.max_context))
-    );
-    eprintln!(
-        "{}",
-        debug_field(style, "output", &token_limit_label(capabilities.max_output))
-    );
-    eprintln!(
-        "{}",
-        debug_field(
-            style,
+        .field("context", token_limit_label(capabilities.max_context))
+        .field("output", token_limit_label(capabilities.max_output))
+        .field(
             "modalities",
-            &format!(
+            format!(
                 "input {} · output {}",
                 modality_set(capabilities.modalities.input.keys()),
                 modality_set(capabilities.modalities.output.iter())
-            )
+            ),
         )
-    );
-    eprintln!(
-        "{}",
-        debug_field(style, "tools", &tool_kind_set(&capabilities.tool_kinds))
-    );
-    eprintln!(
-        "{}",
-        debug_field(
-            style,
-            "reasoning",
-            &reasoning_capabilities(&capabilities.reasoning)
-        )
-    );
-    eprintln!(
-        "{}",
-        debug_field(
-            style,
+        .field("tools", tool_kind_set(&capabilities.tool_kinds))
+        .field("reasoning", reasoning_capabilities(&capabilities.reasoning))
+        .field(
             "streaming",
-            &capabilities
+            capabilities
                 .streaming
-                .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned())
+                .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned()),
         )
-    );
-    eprintln!(
-        "{}",
-        debug_field(style, "cache", cache_name(capabilities.cache))
-    );
-    eprintln!(
-        "{}",
-        debug_field(style, "features", &feature_set(&capabilities.features))
-    );
-    eprintln!(
-        "{}",
-        debug_field(
-            style,
+        .field("cache", cache_name(capabilities.cache))
+        .field("features", feature_set(&capabilities.features))
+        .field(
             "structured",
-            &structured_set(&capabilities.structured_output)
-        )
-    );
+            structured_set(&capabilities.structured_output),
+        );
     if let Some(model) = model {
         let mut metadata = Vec::new();
         if let Some(status) = &model.status {
@@ -2283,21 +2336,18 @@ pub(crate) fn debug_model(
             metadata.push(format!("temperature {}", yes_no(temperature)));
         }
         if !metadata.is_empty() {
-            eprintln!(
-                "{}",
-                style.dim(format!("  catalogue  {}", metadata.join(" · ")))
-            );
+            panel.rule().field("catalogue", metadata.join(" · "));
         }
     }
+    panel.print(style);
 }
 
 /// Prints the reasoning setting the session is actually using.
 pub(crate) fn debug_reasoning(style: Style, reasoning: &Reasoning) {
     eprintln!("{}", debug_heading(style, "debug: reasoning"));
-    eprintln!(
-        "{}",
-        debug_field(style, "effective", &reasoning_setting_label(reasoning))
-    );
+    let mut panel = DebugPanel::new("field", "value");
+    panel.field("effective", reasoning_setting_label(reasoning));
+    panel.print(style);
 }
 
 pub(crate) fn reasoning_setting_label(reasoning: &Reasoning) -> String {
