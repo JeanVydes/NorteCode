@@ -210,6 +210,7 @@ impl Renderer {
                 self.tool_event(&event.kind);
             }
             ServerEventKind::RequestReconstructed { .. }
+            | ServerEventKind::SessionStats { .. }
             | ServerEventKind::CostNotReported { .. } => {
                 self.usage_event(&event.kind);
             }
@@ -756,6 +757,28 @@ impl Renderer {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn usage_event(&mut self, kind: &ServerEventKind) {
         match kind {
+            // A resume starts a fresh client, so the session's accumulated
+            // usage arrives once and replaces whatever this process counted.
+            ServerEventKind::SessionStats {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                requests,
+                context_used,
+                context_window,
+            } => {
+                self.input = *input_tokens;
+                self.output = *output_tokens;
+                self.cost = *cost_usd;
+                self.requests = *requests;
+                self.turn_requests = 0;
+                self.context_used = *context_used;
+                self.max_context = *context_window;
+                if !self.quiet && matches!(self.format, Format::Text) {
+                    let status = self.session_status();
+                    self.pinned.set_session(status);
+                }
+            }
             ServerEventKind::RequestReconstructed {
                 usage,
                 cost_usd,

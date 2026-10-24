@@ -20,6 +20,8 @@ use norte_code_protocol::{
 
 use norte_code_store_sqlite::SessionDirectory;
 
+use crate::provider::ModelSpec;
+
 use super::compaction::{
     COMPACTION_SAFE_POINT, CompactionGate, is_compaction_abort, is_compaction_message, used_context,
 };
@@ -168,9 +170,20 @@ impl Service {
         // A resume shows where the conversation was: the client starts blank, so
         // it gets the recent messages before the turn's own output. `input` is
         // `None` exactly for a resume, so a normal message never repeats history.
+        // A resume starts a fresh client, so its counters begin at zero: give
+        // it the session's accumulated usage, or it would report only what it
+        // happens to replay.
         let replay = if input.is_none() {
             let ancestors = compaction_ancestors(self.directory.as_ref(), nid).await;
-            replay_events(request_id, &key, &engine, nid, &ancestors).await
+            let mut events = Vec::new();
+            if let Some(stats) = self
+                .resume_stats(request_id, &key, &engine, nid, &spec)
+                .await
+            {
+                events.push(stats);
+            }
+            events.extend(replay_events(request_id, &key, &engine, nid, &ancestors).await);
+            events
         } else {
             Vec::new()
         };
@@ -927,6 +940,49 @@ impl Service {
         self.lock_sessions()
             .get(key)
             .map_or_else(String::new, |record| record.spec.label())
+    }
+}
+
+/// The session's accumulated usage, as the event a resuming client reads.
+///
+/// The counters live in the session record and survive a compaction; the context
+/// figure is recomputed from the history the model will actually see, so a
+/// compaction lowers it while the sums keep growing.
+impl Service {
+    async fn resume_stats(
+        &self,
+        request_id: u64,
+        key: &SessionKey,
+        engine: &Engine,
+        nid: SessionId,
+        spec: &ModelSpec,
+    ) -> Option<ServerEvent> {
+        let (input_tokens, output_tokens, cost_usd, requests) = {
+            let sessions = self.lock_sessions();
+            let record = sessions.get(key)?;
+            (
+                record.input_tokens,
+                record.output_tokens,
+                record.cost,
+                record.requests,
+            )
+        };
+        let context_used = engine
+            .history(nid)
+            .await
+            .map_or(0, |history| used_context(&history));
+        Some(ServerEvent::new(
+            request_id,
+            Some(key.clone()),
+            ServerEventKind::SessionStats {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                requests,
+                context_used,
+                context_window: spec.capabilities.max_context,
+            },
+        ))
     }
 }
 

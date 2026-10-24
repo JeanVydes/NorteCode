@@ -428,6 +428,27 @@ pub enum ServerEventKind {
         /// The budget now in force, or `None` when it was cleared.
         budget: Option<Budget>,
     },
+    /// The session's accumulated usage, sent when a client attaches.
+    ///
+    /// A resume starts a fresh client, so its counters begin at zero; without
+    /// this it would report the totals of the messages it happens to see rather
+    /// than the ones the session already spent. Sent once, in the prefix of a
+    /// resume, and never for an ordinary turn.
+    SessionStats {
+        /// Input tokens summed over the session's reported requests.
+        input_tokens: u64,
+        /// Output tokens summed over the session's reported requests.
+        output_tokens: u64,
+        /// Provider-reported cost, summed, in USD.
+        cost_usd: f64,
+        /// Model requests reported for usage.
+        requests: u64,
+        /// How much of the context window the current history occupies.
+        context_used: u64,
+        /// The context window, when the model declares one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
+    },
     /// The running cost total changed.
     CostUpdated {
         /// The total the provider reported, in USD.

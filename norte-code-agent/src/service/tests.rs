@@ -4100,6 +4100,62 @@ fn replays(events: &[ServerEvent]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
+async fn a_resume_reports_the_usage_the_session_already_spent() {
+    // A resuming client starts blank, so the session's accumulated counters
+    // have to arrive with the replay; otherwise the footer shows zero usage for
+    // a session that has spent tokens.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn(vec![
+        norte::StreamEvent::Usage(usage(120, 30, Some(0.02))),
+        norte::StreamEvent::TextDelta {
+            index: 0,
+            text: "first answer".to_owned(),
+        },
+        norte::StreamEvent::Finish(FinishReason::Stop),
+    ]));
+    let (service, _store) = persistent_service_with_config(config(), model).await;
+
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "first question".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+
+    let resumed = drain(
+        &service,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+    let stats = resumed
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::SessionStats {
+                input_tokens,
+                output_tokens,
+                requests,
+                ..
+            } => Some((*input_tokens, *output_tokens, *requests)),
+            _ => None,
+        })
+        .expect("the resume reports the session usage");
+    assert_eq!(stats, (120, 30, 1), "the spent usage comes back: {stats:?}");
+}
+
+#[tokio::test]
 async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
     // A compaction replaces the live session with a summary and the last few
     // messages. The replay used to read only that session, so a resume showed
