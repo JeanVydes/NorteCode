@@ -160,6 +160,12 @@ impl Renderer {
     pub(crate) fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
         if self.debug && !self.debug_session {
             if let Some(session) = &event.session {
+                // The loading bar owns a line on stderr; a diagnostic that lands
+                // on it would interleave with the animation, so the bar stops
+                // first, like every other writer on that stream.
+                if let Some(mut bar) = self.loading_bar.take() {
+                    bar.stop();
+                }
                 eprintln!("{}", self.style.dim(format!("debug: session {session}")));
                 self.debug_session = true;
             }
