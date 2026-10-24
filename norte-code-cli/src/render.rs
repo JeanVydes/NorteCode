@@ -1939,6 +1939,8 @@ pub(crate) fn debug_model(
         if let Some(description) = &model.description {
             eprintln!("{}", style.dim(format!("  about      {description}")));
         }
+    } else {
+        eprintln!("{}", style.dim("  catalogue  not found; using fallback capabilities (256k context, 32k output)"));
     }
     eprintln!(
         "{}",

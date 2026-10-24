@@ -528,17 +528,52 @@ fn expand_endpoint(provider: &CatalogProvider) -> Result<Option<String>, Service
 /// The conservative capability declaration for a model the catalogue does not
 /// list: text in, text out, streamed deltas and function tools.
 fn fallback_capabilities(overrides: Option<&ModelOverride>) -> Capabilities {
+    // A model the catalogue does not list gets conservative defaults: a large
+    // context window and a reasonable output cap, so compaction and the output
+    // limit still work. The host marks these as fallback values in debug output.
     let mut builder = Capabilities::builder()
         .input(Modality::Text)
         .output(Modality::Text)
         .streaming(StreamingGranularity::Delta)
-        .tool_kind(ToolKind::Function);
+        .tool_kind(ToolKind::Function)
+        .max_context(256_000)
+        .max_output(32_000);
     if let Some(overrides) = overrides {
         if let Some(max_context) = overrides.max_context {
             builder = builder.max_context(max_context);
         }
         if let Some(max_output) = overrides.max_output {
             builder = builder.max_output(max_output);
+        }
+        if let Some(reasoning) = overrides.reasoning.as_ref() {
+            let mut reasoning_cap = norte::Reasoning::default();
+            if let Some(supported) = reasoning.supported {
+                reasoning_cap.supported = supported;
+            }
+            if let Some(can_disable) = reasoning.can_disable {
+                reasoning_cap.can_disable = can_disable;
+            }
+            if let Some(efforts) = reasoning.efforts.as_ref() {
+                reasoning_cap.efforts = efforts
+                    .iter()
+                    .filter_map(|e| match e.as_str() {
+                        "minimal" => Some(norte::ReasoningEffort::Minimal),
+                        "low" => Some(norte::ReasoningEffort::Low),
+                        "medium" => Some(norte::ReasoningEffort::Medium),
+                        "high" => Some(norte::ReasoningEffort::High),
+                        "xhigh" => Some(norte::ReasoningEffort::XHigh),
+                        "max" => Some(norte::ReasoningEffort::Max),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            if let Some(supports_budget) = reasoning.supports_budget {
+                reasoning_cap.supports_budget = supports_budget;
+            }
+            if let Some(max_budget) = reasoning.max_budget {
+                reasoning_cap.max_budget = Some(max_budget);
+            }
+            builder = builder.reasoning(reasoning_cap);
         }
     }
     builder.build()
@@ -654,8 +689,8 @@ mod tests {
             spec.endpoint.as_deref(),
             Some("https://api.example.test/v1")
         );
-        assert_eq!(spec.capabilities.max_context, None);
-        assert_eq!(spec.capabilities.max_output, None);
+        assert_eq!(spec.capabilities.max_context, Some(256_000));
+        assert_eq!(spec.capabilities.max_output, Some(32_000));
         assert!(spec.capabilities.tool_kinds.contains(&ToolKind::Function));
         let _ = std::fs::remove_file(key_file);
     }

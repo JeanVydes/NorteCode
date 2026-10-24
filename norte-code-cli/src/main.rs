@@ -131,6 +131,10 @@ struct RunArgs {
     /// A `provider/model` reference (defaults to `default_model` in config).
     #[arg(long, short = 'm', value_name = "PROVIDER/MODEL")]
     model: Option<String>,
+    /// The provider id (e.g. `openai`, `groq`). Overrides the provider part
+    /// of `--model`. When `--model` omits the provider, this is required.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
     /// Replace the built-in system prompt for this run.
     #[arg(long, value_name = "TEXT")]
     system_prompt: Option<String>,
@@ -465,10 +469,27 @@ async fn run_prompt(
     debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
+    let model_ref = match (&args.provider, &args.model) {
+        (Some(provider), Some(model)) => format!("{}/{}", provider, model),
+        (Some(provider), None) => {
+            // Provider given without model: try to use default model's name
+            if let Some(default) = &config.default_model {
+                if let Some((_, name)) = default.split_once('/') {
+                    format!("{}/{}", provider, name)
+                } else {
+                    return Err("no model selected: pass --model or set default_model".to_owned());
+                }
+            } else {
+                return Err("no model selected: pass --model or set default_model".to_owned());
+            }
+        }
+        (None, Some(model)) => model.clone(),
+        (None, None) => config.default_model.clone().unwrap_or_default(),
+    };
     let spec = resolve_spec(
         &config,
         &catalog,
-        args.model.clone(),
+        Some(model_ref),
         args.endpoint.clone(),
         args.wire,
         args.auth,
