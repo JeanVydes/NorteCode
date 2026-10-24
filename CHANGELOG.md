@@ -32,6 +32,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `AGENTS.md` only. The block was a second system message, which local chat
   templates often reject, and it was not worth its prompt cost.
 
+### Changed
+
+- The `--debug` blocks have headings, colour and aligned fields. The section
+title is bold cyan, a field label is dim and its value in the default colour,
+and the model summary no longer prints fixed fallback limits.
+
 ### Fixed
 
 - OpenAI Responses now honors the host's `no_prompt_cache_key` quirk and the
@@ -110,11 +116,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   overwrote the dim `┌ thinking` gutter and left the thought cut up. It is now a
   bar that owns its line, is painted through `Style` and is stopped before any
   other writer emits.
+- The loading bar no longer carves through the `debug: session` line. It stops
+  before the diagnostic is written, like every other writer on stderr.
+- `--debug` no longer claims `(200k context, 32k output)` for a model the
+  catalogue does not list. It says the capabilities come from the config or the
+  fallback and prints the effective limits below, so a `model_overrides` context
+  is not contradicted on the line above it.
 - A keepalive or the stream's trailing empty part no longer splits a thought
   into several `┌ thinking` blocks. An empty text or reasoning delta changed the
   active block, so the gutter closed and the answer interleaved with its
   reasoning.
-
 ### Added
 
 - A provider can override its wire and credential scheme in the configuration.
