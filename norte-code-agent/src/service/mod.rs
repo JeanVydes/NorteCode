@@ -112,12 +112,21 @@ struct CatalogSettings {
     cache_dir: PathBuf,
 }
 
+/// A configuration that was re-read, with the keys it did not recognise.
+#[derive(Debug)]
+pub struct ReloadedConfig {
+    /// The configuration now in force.
+    pub config: Config,
+    /// Unknown keys, as dotted paths, for the caller to report.
+    pub warnings: Vec<String>,
+}
+
 /// The Norte Code service.
 pub struct Service {
     config: RwLock<Config>,
     catalog: RwLock<Arc<Catalog>>,
     catalog_settings: CatalogSettings,
-    default_spec: ModelSpec,
+    default_spec: RwLock<ModelSpec>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
     factory: Arc<dyn ModelFactory>,
@@ -128,7 +137,7 @@ pub struct Service {
     skills: RwLock<Arc<SkillRegistry>>,
     todo: Arc<TodoState>,
     questions: Arc<QuestionBroker>,
-    secrets: Vec<String>,
+    secrets: RwLock<Vec<String>>,
     directory: Arc<dyn SessionDirectory>,
     effects: Arc<EffectJournal>,
     activity: Arc<ToolActivity>,
@@ -268,7 +277,7 @@ impl Service {
             config: RwLock::new(config),
             catalog: RwLock::new(catalog),
             catalog_settings: settings,
-            default_spec,
+            default_spec: RwLock::new(default_spec),
             store,
             blobs,
             factory,
@@ -279,7 +288,7 @@ impl Service {
             skills: RwLock::new(skills),
             todo: Arc::new(TodoState::default()),
             questions,
-            secrets,
+            secrets: RwLock::new(secrets),
             directory,
             effects,
             activity,
@@ -294,7 +303,13 @@ impl Service {
         };
         // Fail at construction, not at the first message, when the model's
         // provider cannot be built.
-        let _ = service.engine(&service.default_spec)?;
+        let _ = service.engine(
+            &service
+                .default_spec
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )?;
         Ok(service)
     }
 
@@ -466,7 +481,12 @@ impl Service {
                 ..CommandLimits::default()
             })
             .with_env(env)
-            .with_secrets(self.secrets.clone())
+            .with_secrets(
+                self.secrets
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            )
             .with_blobs(Arc::clone(&self.blobs))
             .into_declaration();
         let command = if self.config().tools.confinement.sandbox.enabled {
@@ -621,6 +641,79 @@ impl Service {
             .config
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    }
+
+    /// Re-reads the configuration and rebuilds what it derived.
+    ///
+    /// Returns the new configuration so the caller can report what changed.
+    ///
+    /// Rebuilt: the default spec, the secrets registered for redaction, the
+    /// skill registry and the global approval rules. Not rebuilt: session state.
+    /// A session that already resolved a model keeps it, and the rules the user
+    /// granted during this run stay granted; the new default applies to the next
+    /// session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Config`] when the file cannot be read, parsed or
+    /// validated, and [`ServiceError::Provider`] when the default model it names
+    /// cannot be built. Nothing is replaced in either case.
+    pub fn reload_config(&self) -> Result<ReloadedConfig, ServiceError> {
+        let path = self
+            .config_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let project = self
+            .workspace_root
+            .ancestors()
+            .map(|dir| dir.join(".norte-code").join("config.json"))
+            .find(|candidate| candidate.exists());
+        let loaded = Config::load(path.as_deref(), project.as_deref())?;
+        let next = loaded.config;
+
+        // Everything that can fail happens before the live service is touched.
+        let catalog = self.catalog();
+        let reference = next.default_model.clone();
+        let spec = match reference {
+            Some(reference) => ModelSpec::from_catalog(&next, &catalog, &reference, None)?,
+            // No default model: keep the one in force rather than fail, since a
+            // config that only changes unrelated settings must still reload.
+            None => self.default_spec(),
+        };
+        let secrets = collect_secrets(&next, &catalog);
+        let skills = Arc::new(discover_skills(&next, &self.workspace_root));
+
+        self.replace_config(next.clone());
+        *self
+            .secrets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = secrets;
+        *self
+            .default_spec
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = spec;
+        *self.lock_skills_write() = skills;
+        // Only the global rules come from the config; the per-session grants the
+        // user made during this run are session state and stay.
+        for tool in &next.approvals.allow {
+            self.approval_rules.allow_global(tool);
+        }
+        for tool in &next.approvals.deny {
+            self.approval_rules.deny_global(tool);
+        }
+        Ok(ReloadedConfig {
+            config: next,
+            warnings: loaded.warnings,
+        })
+    }
+
+    /// The default spec in force.
+    pub(super) fn default_spec(&self) -> ModelSpec {
+        self.default_spec
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The config lock, for reads that must not copy the whole value.

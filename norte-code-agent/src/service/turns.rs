@@ -457,7 +457,8 @@ impl Service {
             // engine left the session streaming from that message.
             if !cancelled && !interrupted {
                 if let Err(error) = &outcome {
-                    if let Some((delay, reason)) = retry_plan(error, &self.config().retry, retries) {
+                    if let Some((delay, reason)) = retry_plan(error, &self.config().retry, retries)
+                    {
                         if let Ok(session) = engine.session(current_nid).await {
                             self.set_phase(key, to_phase(session.phase)).await;
                         }

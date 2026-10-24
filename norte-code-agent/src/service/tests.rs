@@ -208,6 +208,37 @@ fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<Scrip
     (service, model)
 }
 
+#[tokio::test]
+async fn a_reload_applies_a_good_config_and_discards_a_bad_one() {
+    let (service, _model) = scripted_service(spec("scripted"), &["hello"]);
+    let dir = std::env::temp_dir().join(format!("norte-reload-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("config.json");
+    std::fs::write(&path, r#"{"approval_mode":"yolo","max_iterations":7}"#).expect("write");
+    service.set_config_path(Some(path.clone()));
+
+    let reloaded = service.reload_config().expect("a valid config reloads");
+    assert_eq!(reloaded.config.max_iterations, Some(7));
+    assert_eq!(service.config().max_iterations, Some(7));
+
+    // A file that does not parse leaves the service on the config it had.
+    std::fs::write(&path, "{ not json").expect("write");
+    let error = service
+        .reload_config()
+        .expect_err("a broken file is refused");
+    assert!(
+        matches!(error, ServiceError::Config(_)),
+        "the failure names the config: {error:?}"
+    );
+    assert_eq!(
+        service.config().max_iterations,
+        Some(7),
+        "the last good config stays in force"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn user_texts(request: &ModelRequest) -> Vec<String> {
     request
         .messages

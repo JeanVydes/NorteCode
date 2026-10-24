@@ -137,18 +137,22 @@ impl Service {
         let mut repaired = Vec::new();
         for entry in stored {
             let key = SessionKey::new(entry.key.clone());
-            let spec = match ModelSpec::from_catalog(&self.lock_config(), &catalog, &entry.model, None) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    tracing::warn!(
-                        session = %entry.key,
-                        model = %entry.model,
-                        %error,
-                        "stored session model is unavailable; using the default"
-                    );
-                    self.default_spec.clone()
-                }
-            };
+            let spec =
+                match ModelSpec::from_catalog(&self.lock_config(), &catalog, &entry.model, None) {
+                    Ok(spec) => spec,
+                    Err(error) => {
+                        tracing::warn!(
+                            session = %entry.key,
+                            model = %entry.model,
+                            %error,
+                            "stored session model is unavailable; using the default"
+                        );
+                        self.default_spec
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                    }
+                };
             let (phase, needs_repair) = self.read_phase(&entry).await;
             self.approval_rules.load_session(
                 entry.north,
@@ -268,7 +272,11 @@ impl Service {
         &self,
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
-        let spec = self.default_spec.clone();
+        let spec = self
+            .default_spec
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let engine = self.engine(&spec)?;
         let session = engine.create().await?;
         engine
