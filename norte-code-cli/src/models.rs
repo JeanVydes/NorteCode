@@ -67,6 +67,50 @@ pub(crate) fn print_model(model: &ModelInfo) {
     println!("{reference:<54} {context:>8}  {tools:<5}  {reasoning:<18} {name}");
 }
 
+/// Splits the provider and the model name out of the command line and the
+/// config.
+///
+/// `--provider` takes precedence for the provider; the model name is used
+/// as-is and may contain slashes (e.g. `nvidia/nemotron`). Without a
+/// `--provider`, the provider comes from `default_model` and the model name is
+/// still not split on `/`.
+fn resolve_reference(
+    config: &Config,
+    provider: Option<String>,
+    model: Option<String>,
+) -> Result<(String, String), String> {
+    if let Some(provider) = provider {
+        let model = model.or_else(|| {
+            config
+                .default_model
+                .as_ref()
+                .and_then(|d| d.split_once('/').map(|(_, name)| name.to_owned()))
+        });
+        let model = model
+            .ok_or_else(|| "no model selected: pass --model or set default_model".to_owned())?;
+        Ok((provider, model))
+    } else if let Some(model) = model {
+        // No --provider: use the default provider from config. Do NOT split
+        // the model name on '/'. If there is no default, error out instead of
+        // silently assuming openai.
+        let default_provider = config
+            .default_model
+            .as_ref()
+            .and_then(|d| d.split_once('/').map(|(p, _)| p.to_owned()))
+            .ok_or_else(|| {
+                "no provider specified: pass --provider or set default_model in config".to_owned()
+            })?;
+        Ok((default_provider, model))
+    } else if let Some(default) = &config.default_model {
+        default
+            .split_once('/')
+            .map(|(p, m)| (p.to_owned(), m.to_owned()))
+            .ok_or_else(|| "no model selected: pass --model or set default_model".to_owned())
+    } else {
+        Err("no model selected: pass --model or set default_model".to_owned())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_spec(
     config: &Config,
@@ -79,41 +123,9 @@ pub(crate) fn resolve_spec(
     api_key_env: Option<String>,
     disable_prompt_cache_key: bool,
 ) -> Result<ModelSpec, String> {
-    // Build the reference. The provider comes from --provider or config; the
-    // model name is used as-is and may contain slashes (e.g. nvidia/nemotron).
-    let (provider, model_name) = if let Some(provider) = provider {
-        let model = model.or_else(|| {
-            config
-                .default_model
-                .as_ref()
-                .and_then(|d| d.split_once('/').map(|(_, name)| name.to_owned()))
-        });
-        let model = model
-            .ok_or_else(|| "no model selected: pass --model or set default_model".to_owned())?;
-        (provider, model)
-    } else if let Some(model) = model {
-        // No --provider: use the default provider from config. Do NOT split
-        // the model name on '/'. If there is no default, error out instead of
-        // silently assuming openai.
-        let default_provider = config
-            .default_model
-            .as_ref()
-            .and_then(|d| d.split_once('/').map(|(p, _)| p.to_owned()))
-            .ok_or_else(|| {
-                "no provider specified: pass --provider or set default_model in config".to_owned()
-            })?;
-        (default_provider, model)
-    } else if let Some(default) = &config.default_model {
-        if let Some((p, m)) = default.split_once('/') {
-            (p.to_owned(), m.to_owned())
-        } else {
-            return Err("no model selected: pass --model or set default_model".to_owned());
-        }
-    } else {
-        return Err("no model selected: pass --model or set default_model".to_owned());
-    };
+    let (provider, model_name) = resolve_reference(config, provider, model)?;
 
-    let reference = format!("{}/{}", provider, model_name);
+    let reference = format!("{provider}/{model_name}");
 
     // When provider is "disabled", it's a non-persistent custom provider:
     // require explicit wire, endpoint, and api_key_env.
@@ -146,8 +158,7 @@ pub(crate) fn resolve_spec(
         let in_config = config.providers.contains_key(&provider);
         if !in_catalogue && !in_config {
             return Err(format!(
-                "unknown provider `{}`; use a catalogue provider, a configured provider, or --provider disabled",
-                provider
+                "unknown provider `{provider}`; use a catalogue provider, a configured provider, or --provider disabled"
             ));
         }
     }
@@ -180,10 +191,9 @@ pub(crate) fn resolve_spec(
             // Do not silently fall back: the user should pick a listed model
             // or use --provider disabled for a custom one.
             Err(format!(
-                "model `{}` is not in the catalogue for provider `{}`. \
-                 Run `norte-code models --provider {}` to see available models, \
-                 or use --provider disabled for a custom endpoint.",
-                model_name, provider, provider
+                "model `{model_name}` is not in the catalogue for provider `{provider}`. \
+                 Run `norte-code models --provider {provider}` to see available models, \
+                 or use --provider disabled for a custom endpoint."
             ))
         }
         Err(ServiceError::UnknownProvider(_)) => {

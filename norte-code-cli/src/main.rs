@@ -123,6 +123,9 @@ enum Command {
 }
 
 #[derive(Args)]
+// A command line has flags: clap needs each one as a bool field, and they are
+// not a state machine to model. `SkillsConfig` carries the same allow.
+#[allow(clippy::struct_excessive_bools)]
 struct RunArgs {
     /// The prompt. With --interactive it may be omitted, so the session starts
     /// at the prompt.

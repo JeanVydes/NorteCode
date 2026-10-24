@@ -1,8 +1,16 @@
 //! Markdown to ANSI rendering for the interactive prompt.
 
+use std::fmt::Write as _;
+
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
+/// The SGR sequence that ends any styling.
+const RESET: &str = "\x1b[0m";
+
 /// Renders markdown text to ANSI-styled terminal output.
+// One arm per pulldown event, so the length is the event vocabulary rather than
+// tangled control flow.
+#[allow(clippy::too_many_lines)]
 pub fn render(text: &str) -> String {
     // The markup is trusted, the text inside it is not: the model writes it, so a
     // control character or a bidi override in it must not reach the terminal raw.
@@ -24,23 +32,27 @@ pub fn render(text: &str) -> String {
     for event in parser {
         match event {
             Event::Start(Tag::Strong) => out.push_str("\x1b[1m"),
-            Event::End(TagEnd::Strong) => out.push_str("\x1b[0m"),
             Event::Start(Tag::Emphasis) => out.push_str("\x1b[3m"),
-            Event::End(TagEnd::Emphasis) => out.push_str("\x1b[0m"),
             Event::Start(Tag::Strikethrough) => out.push_str("\x1b[9m"),
-            Event::End(TagEnd::Strikethrough) => out.push_str("\x1b[0m"),
             Event::Start(Tag::Heading { .. }) => out.push_str("\x1b[1;36m"),
-            Event::End(TagEnd::Heading { .. }) => out.push_str("\x1b[0m\n"),
+            // Every closing tag resets the styling it opened.
+            Event::End(
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link,
+            ) => out.push_str(RESET),
+            Event::End(TagEnd::Heading { .. }) => {
+                out.push_str(RESET);
+                out.push('\n');
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 in_code_block = true;
                 let code_lang = match kind {
                     pulldown_cmark::CodeBlockKind::Fenced(lang) => lang.to_string(),
-                    _ => String::new(),
+                    pulldown_cmark::CodeBlockKind::Indented => String::new(),
                 };
-                if !code_lang.is_empty() {
-                    out.push_str(&format!("\x1b[2m── {} ──\x1b[0m\n", code_lang));
+                if code_lang.is_empty() {
+                    let _ = writeln!(out, "\x1b[2m──{RESET}");
                 } else {
-                    out.push_str("\x1b[2m──\x1b[0m\n");
+                    let _ = writeln!(out, "\x1b[2m── {code_lang} ──{RESET}");
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -56,16 +68,14 @@ pub fn render(text: &str) -> String {
             }
             Event::Start(Tag::Item) => {
                 let indent = "  ".repeat(list_depth.saturating_sub(1));
-                out.push_str(&format!("{}• ", indent));
+                let _ = write!(out, "{indent}• ");
             }
-            Event::End(TagEnd::Item) => out.push('\n'),
-            Event::Start(Tag::Table(_)) => {
+            Event::Start(Tag::Table(_) | Tag::TableRow) => {
                 table_row.clear();
             }
             Event::End(TagEnd::Table) => {
                 out.push('\n');
             }
-            Event::Start(Tag::TableHead) => {}
             Event::End(TagEnd::TableHead) => {
                 // Print header row
                 if !table_row.is_empty() {
@@ -82,9 +92,6 @@ pub fn render(text: &str) -> String {
                     table_row.clear();
                 }
             }
-            Event::Start(Tag::TableRow) => {
-                table_row.clear();
-            }
             Event::End(TagEnd::TableRow) => {
                 out.push_str(&table_row.join(" | "));
                 out.push('\n');
@@ -99,11 +106,7 @@ pub fn render(text: &str) -> String {
                 table_row.push(table_cell.clone());
                 table_cell.clear();
             }
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                out.push_str(&format!("\x1b[4m"));
-                let _ = dest_url;
-            }
-            Event::End(TagEnd::Link) => out.push_str("\x1b[0m"),
+            Event::Start(Tag::Link { .. }) => out.push_str("\x1b[4m"),
             // Every run of literal text is escaped again: a `\u{1b}` in the source
             // cannot become an escape here just because it was written that way.
             Event::Text(t) => {
@@ -122,17 +125,17 @@ pub fn render(text: &str) -> String {
                 }
             }
             Event::Code(t) => {
-                out.push_str("\x1b[2m");
-                out.push_str(&crate::text::terminal(&t));
-                out.push_str("\x1b[0m");
+                let _ = write!(out, "\x1b[2m{}{RESET}", crate::text::terminal(&t));
             }
             Event::SoftBreak => {
                 if !in_table_cell {
                     out.push('\n');
                 }
             }
-            Event::HardBreak => out.push_str("\n"),
-            Event::Rule => out.push_str("\x1b[2m────────────────\x1b[0m\n"),
+            Event::End(TagEnd::Item) | Event::HardBreak => out.push('\n'),
+            Event::Rule => {
+                let _ = writeln!(out, "\x1b[2m────────────────{RESET}");
+            }
             _ => {}
         }
     }

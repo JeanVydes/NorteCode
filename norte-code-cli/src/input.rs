@@ -1002,7 +1002,7 @@ mod unix {
         let mut frame = String::from("\x1b7");
         for (offset, line) in lines.iter().enumerate() {
             let row = first_row.saturating_add(u16::try_from(offset).unwrap_or(0));
-            frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
             // Continuation rows keep the prompt column blank so the text stays
             // aligned under the first line.
             if offset == 0 {
@@ -1288,7 +1288,7 @@ mod unix {
             let lines = input_lines(&buffer, 2);
             assert_eq!(lines.len(), 2, "only the window is drawn: {lines:?}");
             assert!(
-                lines[1].contains("e"),
+                lines[1].contains('e'),
                 "the window follows the cursor to the last line: {lines:?}"
             );
         }

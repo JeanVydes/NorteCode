@@ -483,7 +483,7 @@ pub(crate) async fn interactive_loop(
                             .and_then(|m| m.split_once('/').map(|(p, _)| p.to_owned()))
                             .unwrap_or_else(|| "openai".to_owned());
                         let catalog = service.catalog();
-                        eprintln!("{}", style.bold(format!("Models for {}:", provider)));
+                        eprintln!("{}", style.bold(format!("Models for {provider}:")));
                         if let Some(p) = catalog.provider(&provider) {
                             let mut models: Vec<String> = p.models.keys().cloned().collect();
                             models.sort();
@@ -510,7 +510,7 @@ pub(crate) async fn interactive_loop(
                                 .as_ref()
                                 .and_then(|m| m.split_once('/').map(|(p, _)| p.to_owned()))
                                 .unwrap_or_else(|| "openai".to_owned());
-                            format!("{}/{}", provider, model)
+                            format!("{provider}/{model}")
                         };
                         renderer.model_name = Some(full_model.clone());
                         run_model(service, current, full_model, style).await;
@@ -547,7 +547,7 @@ pub(crate) async fn interactive_loop(
                             .as_ref()
                             .and_then(|m| m.split_once('/').map(|(_, name)| name.to_owned()))
                             .unwrap_or_else(|| "default".to_owned());
-                        let full = format!("{}/{}", provider, model_name);
+                        let full = format!("{provider}/{model_name}");
                         renderer.model_name = Some(full.clone());
                         run_model(service, current, full, style).await;
                     } else {

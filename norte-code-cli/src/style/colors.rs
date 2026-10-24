@@ -75,10 +75,10 @@ impl Environment {
             return Colors::None;
         }
         if self.clicolor.as_deref().is_some_and(|value| value == "0")
-            && !self
+            && self
                 .clicolor_force
                 .as_deref()
-                .is_some_and(|value| value == "1")
+                .is_none_or(|value| value != "1")
         {
             return Colors::None;
         }
@@ -104,15 +104,15 @@ impl Environment {
 mod tests {
     use super::{Colors, Environment};
 
-    fn colors(environment: Environment) -> Colors {
+    fn colors(environment: &Environment) -> Colors {
         environment.colors()
     }
 
     #[test]
     fn a_pipe_or_an_opt_out_gets_no_escapes() {
-        assert_eq!(colors(Environment::default()), Colors::None);
+        assert_eq!(colors(&Environment::default()), Colors::None);
         assert_eq!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 no_color: Some("1".to_owned()),
                 ..Environment::default()
@@ -120,7 +120,7 @@ mod tests {
             Colors::None
         );
         assert_eq!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 term: Some("dumb".to_owned()),
                 ..Environment::default()
@@ -128,7 +128,7 @@ mod tests {
             Colors::None
         );
         assert_eq!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 clicolor: Some("0".to_owned()),
                 ..Environment::default()
@@ -137,7 +137,7 @@ mod tests {
         );
         // `CLICOLOR_FORCE=1` wins over `CLICOLOR=0`.
         assert_ne!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 clicolor: Some("0".to_owned()),
                 clicolor_force: Some("1".to_owned()),
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn truecolor_is_preferred_and_256_is_the_fallback() {
         assert_eq!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 colorterm: Some("truecolor".to_owned()),
                 term: Some("xterm-256color".to_owned()),
@@ -159,7 +159,7 @@ mod tests {
             Colors::True
         );
         assert_eq!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 term: Some("xterm-256color".to_owned()),
                 ..Environment::default()
@@ -167,7 +167,7 @@ mod tests {
             Colors::Ansi256
         );
         assert_eq!(
-            colors(Environment {
+            colors(&Environment {
                 terminal: true,
                 term: Some("xterm".to_owned()),
                 ..Environment::default()
