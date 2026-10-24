@@ -13,6 +13,7 @@ mod approval;
 mod commands;
 mod input;
 mod interaction;
+mod markdown;
 mod models;
 mod prompt;
 mod render;

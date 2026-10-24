@@ -65,6 +65,8 @@ pub(crate) struct Renderer {
     /// for this turn.
     pub(crate) reasoning_placeholder: bool,
     pub(crate) last_char: Option<char>,
+    /// Buffered answer text, rendered as markdown on `end_blocks`.
+    pub(crate) answer_buffer: String,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -118,6 +120,7 @@ impl Renderer {
             reasoning_line_start: false,
             reasoning_placeholder: false,
             last_char: None,
+            answer_buffer: String::new(),
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -249,8 +252,18 @@ impl Renderer {
     pub(crate) fn end_blocks(&mut self) {
         self.reasoning_placeholder = false;
         self.end_reasoning();
-        if self.block == Block::Answer && self.last_char != Some('\n') {
-            println!();
+        if self.block == Block::Answer {
+            if !self.answer_buffer.is_empty() && !self.quiet {
+                let rendered = crate::markdown::render(&self.answer_buffer);
+                print!("{rendered}");
+                if !rendered.ends_with('\n') {
+                    println!();
+                }
+            }
+            self.answer_buffer.clear();
+            if self.last_char != Some('\n') {
+                println!();
+            }
         }
         if self.block != Block::None {
             self.block = Block::None;
@@ -318,11 +331,10 @@ impl Renderer {
             self.block = Block::Answer;
         }
         self.block = Block::Answer;
-        print!("{text}");
+        self.answer_buffer.push_str(&text);
         if let Some(last) = text.chars().last() {
             self.last_char = Some(last);
         }
-        let _ = std::io::stdout().flush();
     }
 
     /// Renders a fenced block, so verbose tool activity stays readable and can

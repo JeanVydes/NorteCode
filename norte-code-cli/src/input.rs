@@ -287,9 +287,16 @@ mod unix {
         }
 
         fn insert_text(&mut self, text: &str) {
-            for character in text.chars() {
+            let mut chars = text.chars().peekable();
+            while let Some(character) = chars.next() {
                 match character {
-                    '\n' | '\r' => self.insert(' '),
+                    '\r' => {
+                        if chars.peek() == Some(&'\n') {
+                            chars.next();
+                        }
+                        self.insert('\n');
+                    }
+                    '\n' => self.insert('\n'),
                     '\t' => {
                         for _ in 0..4 {
                             self.insert(' ');
@@ -493,6 +500,10 @@ mod unix {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            KeyCode::Enter if alt => {
+                buffer.insert('\n');
+                KeyOutcome::Continue
+            }
             KeyCode::Enter => {
                 let line = buffer.text();
                 if !line.trim().is_empty() {
@@ -1188,10 +1199,10 @@ mod unix {
         }
 
         #[test]
-        fn pasted_newlines_stay_inside_one_line() {
+        fn pasted_newlines_become_line_breaks() {
             let mut buffer = LineBuffer::default();
             buffer.insert_text("one\r\ntwo\tthree");
-            assert_eq!(buffer.text(), "one  two    three");
+            assert_eq!(buffer.text(), "one\ntwo    three");
         }
 
         #[test]
