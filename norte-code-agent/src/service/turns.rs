@@ -31,7 +31,8 @@ use super::tooling::output_text;
 use super::{EventStream, Service, ServiceError, Stats};
 
 impl Service {
-    /// Starts a turn (or a resume) and returns the stream of its events.    ///
+    /// Starts a turn (or a resume) and returns the stream of its events.
+    ///
     /// The outer option distinguishes a new message (which replaces the
     /// message budget) from a resume (which keeps the one already in force).
     #[allow(
@@ -170,6 +171,15 @@ impl Service {
         } else {
             Vec::new()
         };
+        // The turn starts here, in the stream's prefix, so a client always sees
+        // it begin before the transcript it replays. `run_turn` used to be the
+        // only sender, and its event arrives after this prefix is read, which
+        // put `TurnStarted` after the replayed messages.
+        leading.push(ServerEvent::new(
+            request_id,
+            Some(key.clone()),
+            ServerEventKind::TurnStarted { turn },
+        ));
         leading.extend(replay);
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
         let notify = Arc::new(Notify::new());
@@ -236,18 +246,6 @@ impl Service {
         let mut input = input;
         let mut stats = self.stats(key, turn);
         let mut questions = self.questions.subscribe();
-        if !emit(
-            tx,
-            ServerEvent::new(
-                request_id,
-                Some(key.clone()),
-                ServerEventKind::TurnStarted { turn },
-            ),
-        )
-        .await
-        {
-            return Ok(());
-        }
 
         let mut compacted_eagerly = false;
         let mut retries = 0u32;

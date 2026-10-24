@@ -4128,6 +4128,21 @@ async fn a_resume_replays_the_recent_messages() {
         replay.contains(&("user".to_owned(), "hi".to_owned())),
         "the user message comes back: {replay:?}"
     );
+    // The turn is announced before the transcript it replays: a client that
+    // rendered the history first showed the session as idle while the turn was
+    // already running.
+    let started = resumed
+        .iter()
+        .position(|event| matches!(event.kind, ServerEventKind::TurnStarted { .. }))
+        .expect("the resume announces its turn");
+    let first_replay = resumed
+        .iter()
+        .position(|event| matches!(event.kind, ServerEventKind::MessageReplayed { .. }))
+        .expect("the resume replays the history");
+    assert!(
+        started < first_replay,
+        "TurnStarted must come before the replay, got {started} > {first_replay}"
+    );
     assert!(
         replay.contains(&("assistant".to_owned(), "hello there".to_owned())),
         "the answer comes back: {replay:?}"
