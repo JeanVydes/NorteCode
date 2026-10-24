@@ -55,6 +55,11 @@ of truth.
   `GIT_ASKPASS=/bin/true` and `SSH_ASKPASS=/bin/true` with it, and pass an
   explicit timeout to every build, test or network command. Fail fast and
   report the error; do not retry the same hanging call.
+- Set `HOME` when a command needs the user's git credentials. A sandboxed or
+  detached process can start with `HOME` unset, and git then finds neither
+  `~/.gitconfig` nor the credential helper it names: the push fails with
+  `No anonymous write access` or `$HOME not set` even though the user is logged
+  in. `HOME=/home/<user> git push origin dev` is the fix, not a token.
 - Push with the user's existing git credentials. If a push fails, report the
   exact error and stop. Never put a token in a remote URL and never write
   credentials to disk. Authentication is the user's, so a push that needs
