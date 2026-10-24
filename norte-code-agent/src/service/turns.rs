@@ -18,6 +18,8 @@ use norte_code_protocol::{
     Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind, SessionKey,
 };
 
+use norte_code_store_sqlite::SessionDirectory;
+
 use super::compaction::{
     COMPACTION_SAFE_POINT, CompactionGate, is_compaction_abort, is_compaction_message, used_context,
 };
@@ -167,7 +169,8 @@ impl Service {
         // it gets the recent messages before the turn's own output. `input` is
         // `None` exactly for a resume, so a normal message never repeats history.
         let replay = if input.is_none() {
-            replay_events(request_id, &key, &engine, nid).await
+            let ancestors = compaction_ancestors(self.directory.as_ref(), nid).await;
+            replay_events(request_id, &key, &engine, nid, &ancestors).await
         } else {
             Vec::new()
         };
@@ -927,6 +930,41 @@ impl Service {
     }
 }
 
+/// The Norte sessions this one descends from through compaction, newest first.
+///
+/// A compaction replaces the live session and records only its immediate
+/// parent, so the older links are read back from the stored sessions: each one
+/// knows the parent it came from, and the directory keeps them all.
+async fn compaction_ancestors(
+    directory: &dyn SessionDirectory,
+    current: SessionId,
+) -> Vec<SessionId> {
+    let Ok(stored) = directory.sessions().await else {
+        return Vec::new();
+    };
+    // Map each Norte session to the one it was compacted from.
+    let mut parents: std::collections::HashMap<SessionId, SessionId> =
+        std::collections::HashMap::new();
+    for entry in stored {
+        if let Some(parent) = entry.compacted_from {
+            parents.insert(entry.north, parent);
+        }
+    }
+    let mut chain = Vec::new();
+    let mut cursor = current;
+    // A guard against a corrupt store that points a session at itself.
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(cursor);
+    while let Some(parent) = parents.get(&cursor).copied() {
+        if !seen.insert(parent) {
+            break;
+        }
+        chain.push(parent);
+        cursor = parent;
+    }
+    chain
+}
+
 /// The most recent messages a resume replays, so a client that starts blank can
 /// show where the conversation was.
 const REPLAY_MESSAGES: usize = 100;
@@ -934,18 +972,38 @@ const REPLAY_MESSAGES: usize = 100;
 /// The recent messages of a session, as replay events for a client that is
 /// starting blank.
 ///
-/// The live Norte session already begins at the last compaction boundary, so its
-/// history cannot cross one; only the most recent [`REPLAY_MESSAGES`] are sent,
-/// oldest first.
+/// A compaction seeds a fresh Norte session with the summary and the last few
+/// messages, so the live history alone is short: a session that has compacted
+/// would replay a handful of messages where the user expects the transcript.
+/// The history is therefore reassembled from the chain of sessions this one was
+/// compacted from, newest first, until [`REPLAY_MESSAGES`] are collected.
+///
+/// A compaction boundary is never crossed, which is what the user asked for: a
+/// session compacted at message 50 replays from there, not from before the
+/// summary that replaced the earlier turns.
 async fn replay_events(
     request_id: u64,
     key: &SessionKey,
     engine: &Engine,
     nid: SessionId,
+    ancestors: &[SessionId],
 ) -> Vec<ServerEvent> {
-    let Ok(history) = engine.history(nid).await else {
-        return Vec::new();
+    let mut history = match engine.history(nid).await {
+        Ok(history) => history,
+        Err(_) => return Vec::new(),
     };
+    // Walk back through the compaction chain, prepending each earlier session's
+    // tail until there is enough to fill the window.
+    for ancestor in ancestors {
+        if history.len() >= REPLAY_MESSAGES {
+            break;
+        }
+        if let Ok(earlier) = engine.history(*ancestor).await {
+            let mut combined = earlier;
+            combined.extend(history);
+            history = combined;
+        }
+    }
     let start = history.len().saturating_sub(REPLAY_MESSAGES);
     history[start..]
         .iter()

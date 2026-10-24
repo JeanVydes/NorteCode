@@ -4100,6 +4100,80 @@ fn replays(events: &[ServerEvent]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
+async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
+    // A compaction replaces the live session with a summary and the last few
+    // messages. The replay used to read only that session, so a resume showed
+    // `keep_recent` messages instead of the conversation the user just had.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "first answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn_text("the summary of the earlier conversation")
+            .turn(vec![
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "second answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ]),
+    );
+    let mut config = config();
+    config.compaction.threshold = 0.1;
+    config.compaction.keep_recent = 1;
+    let (service, _store) = persistent_service_with_config(config, model).await;
+
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "first question".to_owned(),
+            budget: None,
+            reasoning: None,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    let compacted = first.iter().any(|event| {
+        matches!(
+            &event.kind,
+            ServerEventKind::CompactionFinished { compacted, .. } if *compacted
+        )
+    });
+    assert!(compacted, "the first turn compacted");
+
+    // The message written before the compaction is outside the live session, so
+    // only the ancestor chain can supply it.
+    let resumed = drain(
+        &service,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+    let replay = replays(&resumed);
+    assert!(
+        replay.contains(&("user".to_owned(), "first question".to_owned())),
+        "the pre-compaction question comes back: {replay:?}"
+    );
+    assert!(
+        replay.contains(&("assistant".to_owned(), "first answer".to_owned())),
+        "the pre-compaction answer comes back: {replay:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_resume_replays_the_recent_messages() {
     let (service, _model) = scripted_service(spec("scripted"), &["hello there"]);
     let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
