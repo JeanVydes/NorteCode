@@ -629,38 +629,41 @@ impl Renderer {
 
     /// Prints a tool result as a short, dimmed, indented block.
     ///
-    /// Bounded on purpose: the model may have received a large output and a
-    /// transcript is for reading, so the first lines are shown and the rest is
-    /// replaced by a count. The text is escaped like any other.
+    /// Bounded on purpose: the model may have received far more than a person
+    /// wants to read, so each section shows its first lines and a count replaces
+    /// the rest. `stdout` and `stderr` are budgeted apart, because a long stdout
+    /// would otherwise hide the line of stderr that explains a failure.
     fn print_tool_result(&self, text: &str, truncated: bool) {
-        const MAX_LINES: usize = 12;
-        const MAX_LINE_CHARS: usize = 200;
         let escaped = crate::text::terminal(text);
-        let mut lines = escaped.lines();
-        let mut shown = 0usize;
-        let mut hidden = 0usize;
-        for line in lines.by_ref() {
-            if shown == MAX_LINES {
-                hidden += 1;
-                continue;
+        let sections = tool_sections(&escaped);
+        let labelled = sections
+            .iter()
+            .filter(|section| section.name.is_some())
+            .count()
+            > 1;
+        let mut first = true;
+        for section in &sections {
+            if !first {
+                eprintln!();
             }
-            let (line, clipped) = clip_text(line, MAX_LINE_CHARS);
-            eprintln!("  {}", self.style.dim(line));
-            if clipped {
-                hidden += 1;
+            first = false;
+            if labelled {
+                if let Some(name) = &section.name {
+                    eprintln!("  {}", self.style.faint(name.clone()));
+                }
             }
-            shown += 1;
+            let hidden = print_tool_lines(self.style, &section.lines);
+            if hidden > 0 {
+                eprintln!(
+                    "  {}",
+                    self.style.yellow(format!("… {hidden} more line(s)"))
+                );
+            }
         }
-        if hidden > 0 || truncated {
-            let suffix = if truncated {
-                " (shortened for the model)"
-            } else {
-                ""
-            };
+        if truncated {
             eprintln!(
                 "  {}",
-                self.style
-                    .yellow(format!("… {hidden} more line(s){suffix}")),
+                self.style.yellow("(the text above is what the model saw)")
             );
         }
     }
@@ -1396,4 +1399,86 @@ impl Renderer {
             eprintln!("  {} {}", self.style.faint("tools"), self.tool_summary());
         }
     }
+}
+
+/// How many lines of one section a tool result shows.
+const TOOL_RESULT_LINES: usize = 12;
+/// How wide one shown line may be before it is clipped.
+const TOOL_RESULT_LINE_CHARS: usize = 200;
+
+/// One labelled run of lines inside a tool result.
+#[derive(Debug)]
+pub(crate) struct ToolSection {
+    /// The label the tool wrote, when the text carries one.
+    pub(crate) name: Option<String>,
+    /// The lines the section holds.
+    pub(crate) lines: Vec<String>,
+}
+
+/// Splits a tool result into the sections its own text declares.
+///
+/// A command renders `exit_status:`, `duration_ms:`, `stdout:`, `stderr:` and
+/// `summary:`, and those are the labels a section can start with; nothing else
+/// in the suite writes one at the start of a line. A text with no label is a
+/// single unnamed section, so every tool still prints. A `summary:` is folded
+/// into what precedes it, because it quotes lines already shown.
+pub(crate) fn tool_sections(text: &str) -> Vec<ToolSection> {
+    const LABELS: [&str; 5] = ["exit_status", "duration_ms", "stdout", "stderr", "summary"];
+    let mut sections: Vec<ToolSection> = Vec::new();
+    let mut current: Option<ToolSection> = None;
+    // The summary quotes lines already shown above it, so it and everything
+    // after it are dropped rather than opened as a section of their own.
+    let mut in_summary = false;
+    for line in text.lines() {
+        let label = line
+            .strip_suffix(':')
+            .filter(|label| LABELS.contains(label));
+        if label == Some("summary") {
+            if let Some(section) = current.take() {
+                sections.push(section);
+            }
+            in_summary = true;
+            continue;
+        }
+        if in_summary {
+            continue;
+        }
+        match label {
+            Some(label) => {
+                if let Some(section) = current.take() {
+                    sections.push(section);
+                }
+                current = Some(ToolSection {
+                    name: Some(format!("{label}:")),
+                    lines: Vec::new(),
+                });
+            }
+            None => match current.as_mut() {
+                Some(section) => section.lines.push(line.to_owned()),
+                None => {
+                    current = Some(ToolSection {
+                        name: None,
+                        lines: vec![line.to_owned()],
+                    });
+                }
+            },
+        }
+    }
+    if let Some(section) = current {
+        sections.push(section);
+    }
+    sections
+}
+
+/// Prints up to [`TOOL_RESULT_LINES`] of a section, returning how many it hid.
+fn print_tool_lines(style: Style, lines: &[String]) -> usize {
+    let mut hidden = lines.len().saturating_sub(TOOL_RESULT_LINES);
+    for line in lines.iter().take(TOOL_RESULT_LINES) {
+        let (line, clipped) = clip_text(line, TOOL_RESULT_LINE_CHARS);
+        eprintln!("  {}", style.dim(line));
+        if clipped {
+            hidden += 1;
+        }
+    }
+    hidden
 }

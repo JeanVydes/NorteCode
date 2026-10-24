@@ -1,5 +1,6 @@
 //! Tests for the renderer, the edit preview and the argument readers.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use norte_code_protocol::{Delta, ServerEvent, ServerEventKind};
@@ -9,7 +10,7 @@ use crate::render::argument::todo_items;
 use crate::render::dial::context_dial;
 use crate::render::edit::{EditPreview, build_edit_preview, edit_preview};
 use crate::render::loading::{LOADING_BAR_WIDTH, loading_frame};
-use crate::render::renderer::{Block, Format, Renderer};
+use crate::render::renderer::{Block, Format, Renderer, tool_sections};
 use crate::style::Style;
 
 fn renderer(pinned: &Arc<Pinned>) -> Renderer {
@@ -65,6 +66,52 @@ fn tool_finished(call_id: &str, tool: &str, is_error: bool) -> ServerEvent {
             duration_ms: 0,
         },
     }
+}
+
+#[test]
+fn a_long_stdout_does_not_hide_stderr() {
+    // The command text lists stdout before stderr, so one budget for the whole
+    // block let a long stdout push the stderr out of view: a failing command
+    // looked like it printed nothing wrong.
+    let mut text = String::from("exit_status: 1\nduration_ms: 5\nstdout:\n");
+    for line in 0..40 {
+        let _ = writeln!(text, "out {line}");
+    }
+    text.push_str("stderr:\nboom\n");
+
+    let sections = tool_sections(&text);
+    let names: Vec<&str> = sections
+        .iter()
+        .filter_map(|section| section.name.as_deref())
+        .collect();
+    assert!(names.contains(&"stdout:"), "{names:?}");
+    assert!(
+        names.contains(&"stderr:"),
+        "the stderr keeps its own section: {names:?}"
+    );
+    let stderr = sections
+        .iter()
+        .find(|section| section.name.as_deref() == Some("stderr:"))
+        .expect("stderr section");
+    assert_eq!(stderr.lines, vec!["boom".to_owned()]);
+}
+
+#[test]
+fn a_summary_is_folded_away_and_a_plain_text_stays_one_section() {
+    // The summary quotes lines already shown above it.
+    let text = "stdout:\nhello\nsummary:\nhello\n";
+    let sections = tool_sections(text);
+    assert_eq!(sections.len(), 1, "{:?}", sections.len());
+    assert_eq!(sections[0].name.as_deref(), Some("stdout:"));
+
+    // A tool that writes no label still prints as one unnamed block.
+    let plain = tool_sections("just text\nmore");
+    assert_eq!(plain.len(), 1);
+    assert!(plain[0].name.is_none());
+    assert_eq!(
+        plain[0].lines,
+        vec!["just text".to_owned(), "more".to_owned()]
+    );
 }
 
 #[test]
