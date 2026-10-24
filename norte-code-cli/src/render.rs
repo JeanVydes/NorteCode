@@ -1813,6 +1813,7 @@ pub(crate) fn debug_start(
     database: &Path,
     config_path: Option<&Path>,
     session: Option<&str>,
+    catalog: &norte_code_catalog::Catalog,
 ) {
     let workspace =
         std::env::current_dir().map_or_else(|_| "?".to_owned(), |path| path.display().to_string());
@@ -1886,10 +1887,27 @@ pub(crate) fn debug_start(
         "{}",
         style.dim(format!("  database   {}", database.display()))
     );
+    let provider_count = catalog.providers.len();
+    let model_count: usize = catalog.providers.values().map(|p| p.models.len()).sum();
+    let in_catalogue = catalog.provider(&spec.provider).is_some();
     eprintln!(
         "{}",
-        style.dim(format!("  catalogue  {}", source_label(source)))
+        style.dim(format!(
+            "  catalogue  {} · {} providers · {} models",
+            source_label(source),
+            provider_count,
+            model_count
+        ))
     );
+    if !in_catalogue {
+        eprintln!(
+            "{}",
+            style.dim(format!(
+                "  provider   {} (not in catalogue; using config/fallback)",
+                spec.provider
+            ))
+        );
+    }
     if !configuration.extensions.is_empty() {
         eprintln!(
             "{}",

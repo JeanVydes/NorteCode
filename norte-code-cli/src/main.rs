@@ -563,6 +563,7 @@ async fn run_prompt(
             &database,
             config_path.as_deref(),
             args.session.as_deref(),
+            &catalog,
         );
         debug_model(style, &spec, catalog.find(&spec.provider, &spec.model));
         debug_reasoning(style, &effective);
@@ -728,6 +729,7 @@ async fn resume_session(
             &database,
             config_path.as_deref(),
             Some(args.session.as_str()),
+            &catalog,
         );
         debug_model(style, &spec, catalog.find(&spec.provider, &spec.model));
         debug_reasoning(style, &effective);
