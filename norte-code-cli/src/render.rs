@@ -68,8 +68,8 @@ pub(crate) struct Renderer {
     /// Buffered answer text, rendered as markdown on `end_blocks`.
     pub(crate) answer_buffer: String,
     pub(crate) model_name: Option<String>,
-    /// Whether a "working…" line was printed and needs clearing.
-    pub(crate) working_line: bool,
+    /// Animated loading bar shown while working.
+    pub(crate) loading_bar: Option<LoadingBar>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -125,7 +125,7 @@ impl Renderer {
             last_char: None,
             answer_buffer: String::new(),
             model_name: None,
-            working_line: false,
+            loading_bar: None,
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -224,8 +224,7 @@ impl Renderer {
         if self.quiet || matches!(self.format, Format::Jsonl) {
             return;
         }
-        eprintln!("  {}", self.style.dim("working…"));
-        self.working_line = true;
+        self.loading_bar = Some(LoadingBar::start(self.style));
     }
 
     /// Replaces the activity label and redraws the pinned footer.
@@ -262,9 +261,8 @@ impl Renderer {
     /// Finishes any streamed block and leaves one blank line.
     pub(crate) fn end_blocks(&mut self) {
         self.reasoning_placeholder = false;
-        if self.working_line {
-            eprint!("\x1b[1A\x1b[2K");
-            self.working_line = false;
+        if let Some(mut bar) = self.loading_bar.take() {
+            bar.stop();
         }
         self.end_reasoning();
         if self.block == Block::Answer {
@@ -336,16 +334,21 @@ impl Renderer {
             let _ = std::io::stdout().flush();
             return;
         }
-        // Clear the "working…" line on the first answer token.
-        if self.working_line {
-            // Move up one line and clear it.
-            eprint!("\x1b[1A\x1b[2K");
-            self.working_line = false;
+        // A delta with no text changes nothing: a keepalive or the stream's
+        // trailing empty part must not close the reasoning gutter or open an
+        // answer, which is what split one thought into several `┌ thinking`
+        // blocks and interleaved an answer with its reasoning.
+        if text.is_empty() {
+            return;
+        }
+        // Stop the loading bar on the first answer token.
+        if let Some(mut bar) = self.loading_bar.take() {
+            bar.stop();
         }
         if self.block == Block::Reasoning {
             self.end_reasoning();
             self.space();
-        } else if self.block != Block::Answer && !text.is_empty() {
+        } else if self.block != Block::Answer {
             if self.last_char.is_some() {
                 self.space();
             }
@@ -1046,12 +1049,22 @@ impl Renderer {
         match delta {
             Delta::Text { text, .. } => self.answer_delta(text),
             Delta::Reasoning { text, .. } => {
+                // An empty part never opens or reopens the gutter; it is the
+                // same keepalive case as an empty text delta.
+                if text.is_empty() {
+                    return;
+                }
                 if self.quiet {
                     if !self.reasoning_placeholder {
                         self.reasoning_placeholder = true;
                         eprintln!("  {}", self.style.dim("thinking…"));
                     }
                 } else {
+                    // The bar and the gutter share stderr, so the first reasoning
+                    // token clears the bar before the gutter writes over it.
+                    if let Some(mut bar) = self.loading_bar.take() {
+                        bar.stop();
+                    }
                     if self.block != Block::Reasoning {
                         if self.block == Block::Answer {
                             self.end_blocks();
@@ -2466,11 +2479,96 @@ pub(crate) fn code_name(code: ErrorCode) -> &'static str {
     }
 }
 
+/// An animated loading bar printed below the user's message.
+///
+/// The bar owns the line under the user's message while a turn is in flight: it
+/// writes one carriage-returned line on stderr and clears it on stop. Because
+/// the reasoning gutter and the diagnostics share that stream, every writer
+/// stops the bar before it emits anything, so the two never interleave.
+pub(crate) struct LoadingBar {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LoadingBar {
+    /// Animates a bar on its own thread until [`LoadingBar::stop`] is called.
+    ///
+    /// The thread repaints a single line in place. It is written through
+    /// [`Style`], so a terminal without colour shows the frames plain instead of
+    /// leaking raw SGR codes.
+    pub(crate) fn start(style: Style) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut tick = 0_usize;
+            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                let line = format!("  {} {}", style.dim("working…"), loading_frame(style, tick));
+                // `\r` returns to the start of the bar's own line and `\x1b[2K`
+                // clears it, so a shorter frame never leaves the tail of a long
+                // one behind.
+                eprint!("\r\x1b[2K{line}");
+                let _ = std::io::stderr().flush();
+                std::thread::sleep(std::time::Duration::from_millis(LOADING_TICK_MS));
+                tick = tick.wrapping_add(1);
+            }
+            // Leave the cursor at the start of a cleared line for whatever runs
+            // after the bar.
+            eprint!("\r\x1b[2K");
+            let _ = std::io::stderr().flush();
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stops the animation and joins its thread, clearing the bar's line.
+    pub(crate) fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for LoadingBar {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Width of the loading bar, in cells, not counting the label.
+const LOADING_BAR_WIDTH: usize = 24;
+
+/// How often the loading bar advances, in milliseconds.
+const LOADING_TICK_MS: u64 = 90;
+
+/// One frame of the bar: a highlight that travels left to right.
+///
+/// The cells are painted through [`Style`], so a terminal without colour draws a
+/// legible plain frame instead of leaking raw SGR codes.
+fn loading_frame(style: Style, tick: usize) -> String {
+    // `head` stays below the bar width, so `abs_diff` on `usize` cannot wrap.
+    let head = tick % (LOADING_BAR_WIDTH + 4);
+    let mut frame = String::with_capacity(LOADING_BAR_WIDTH * 4);
+    for cell in 0..LOADING_BAR_WIDTH {
+        let distance = cell.abs_diff(head);
+        if distance < 2 {
+            frame.push_str(&style.bold("█"));
+        } else if distance < 4 {
+            frame.push_str(&style.faint("▓"));
+        } else {
+            frame.push_str(&style.dim("░"));
+        }
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use norte_code_protocol::{ServerEvent, ServerEventKind};
+    use norte_code_protocol::{Delta, ServerEvent, ServerEventKind};
 
     use super::{EditPreview, Format, Renderer, build_edit_preview, edit_preview, todo_items};
     use crate::input::{Pinned, TodoItem, TodoStatus};
@@ -2480,6 +2578,18 @@ mod tests {
         Renderer::new(
             Format::Text,
             true,
+            false,
+            false,
+            true,
+            Style::plain(),
+            Arc::clone(pinned),
+        )
+    }
+
+    fn visible_renderer(pinned: &Arc<Pinned>) -> Renderer {
+        Renderer::new(
+            Format::Text,
+            false,
             false,
             false,
             true,
@@ -2524,6 +2634,68 @@ mod tests {
             content: content.to_owned(),
             status,
         }
+    }
+
+    #[test]
+    fn an_empty_text_delta_does_not_leave_the_reasoning_block() {
+        let pinned = Pinned::new();
+        let mut renderer = visible_renderer(&pinned);
+        renderer.delta(&Delta::Reasoning {
+            index: 0,
+            text: "thinking".to_owned(),
+        });
+        assert_eq!(renderer.block, super::Block::Reasoning);
+        // A keepalive or the stream's trailing empty part must not close the
+        // gutter: doing so split one thought into several `┌ thinking` blocks.
+        renderer.delta(&Delta::Text {
+            index: 0,
+            text: String::new(),
+        });
+        assert_eq!(renderer.block, super::Block::Reasoning);
+    }
+
+    #[test]
+    fn an_empty_reasoning_delta_does_not_open_the_gutter() {
+        let pinned = Pinned::new();
+        let mut renderer = visible_renderer(&pinned);
+        renderer.delta(&Delta::Reasoning {
+            index: 0,
+            text: String::new(),
+        });
+        assert_eq!(renderer.block, super::Block::None);
+    }
+
+    #[test]
+    fn a_text_delta_after_reasoning_closes_the_gutter() {
+        let pinned = Pinned::new();
+        let mut renderer = visible_renderer(&pinned);
+        renderer.delta(&Delta::Reasoning {
+            index: 0,
+            text: "thinking".to_owned(),
+        });
+        renderer.delta(&Delta::Text {
+            index: 1,
+            text: "answer".to_owned(),
+        });
+        assert_eq!(renderer.block, super::Block::Answer);
+    }
+
+    #[test]
+    fn loading_frame_is_legible_without_colour() {
+        let frame = super::loading_frame(Style::plain(), 3);
+        assert_eq!(frame.chars().count(), super::LOADING_BAR_WIDTH);
+        assert!(
+            !frame.contains('\u{1b}'),
+            "plain style must not emit escapes"
+        );
+    }
+
+    #[test]
+    fn loading_frame_moves_with_the_tick() {
+        assert_ne!(
+            super::loading_frame(Style::plain(), 0),
+            super::loading_frame(Style::plain(), 2)
+        );
     }
 
     #[test]
