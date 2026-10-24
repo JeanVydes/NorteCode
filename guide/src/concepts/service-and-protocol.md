@@ -5,7 +5,7 @@
 Norte Code is split into a service library and clients:
 
 ```text
-CLI / TUI / your program
+CLI / your program
         │
         │  ClientRequest { request_id, kind }
         ▼
@@ -16,7 +16,7 @@ Service  ──►  Norte engine  ──►  provider
         │
         │  ServerEvent stream
         ▼
-CLI / TUI / your program
+CLI / your program
 ```
 
 `Service` lives in `norte-code-agent`. It owns the engines, the logical session
@@ -55,7 +55,7 @@ The protocol crate has no Norte dependency. That is deliberate:
   a Norte `SessionId`.
 - The protocol can be versioned independently. `PROTOCOL_VERSION` is `1`, and
   request and event frames deny unknown fields.
-- The same events can feed the CLI today and a TUI or remote transport later
+- The same events can feed the CLI today and a remote transport later
   without a second mapping.
 
 The service maps Norte events and records into protocol events in one place.

@@ -22,12 +22,12 @@ instead of worked around here.
 | `norte-code-tools` | Host tools: `glob`, `list_dir`, `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | Norte `Store` + `BlobStore`, logical sessions, approvals, questions, effects, costs and request telemetry. |
 | `norte-code-cli` | The `norte-code` command and its interactive prompt. |
-| `norte-code-tui` | Reserved for the ratatui client; not implemented yet. |
+
 
 ## Runtime path
 
 ```text
-CLI / TUI
+CLI
    │  ClientRequest { request_id, kind }
    ▼
 norte-code-protocol
@@ -89,10 +89,9 @@ versioned shape. Clients never receive Norte IDs or Norte event types: the
 service maps them once. New optional fields use `#[serde(default,
 skip_serializing_if = "Option::is_none")]` so older clients keep working.
 
-The CLI is a normal client of the same protocol; the TUI is expected to use it
-too. Approvals and questions are durable protocol objects, not terminal-only
-state. A non-interactive client leaves the session parked instead of guessing a
-decision.
+The CLI is a normal client of the same protocol. Approvals and questions are
+durable protocol objects, not terminal-only state. A non-interactive client
+leaves the session parked instead of guessing a decision.
 
 ## System prompt
 

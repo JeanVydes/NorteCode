@@ -12,10 +12,10 @@ Yes. Depend on `norte-code-agent` and `norte-code-protocol`, build a `Service`
 with a store, blob store, model factory and catalogue, then submit
 `ClientRequest` values. The CLI is a normal client of that API.
 
-## Where is the TUI?
+## Is there a TUI?
 
-`norte-code-tui` is a placeholder. The CLI is the supported client, and the
-protocol is designed so the TUI can reuse it without a rewrite.
+No. The CLI is the only supported client. The protocol is designed so a future
+client can reuse it without a rewrite, but no TUI is planned.
 
 ## Does it work with OpenRouter?
 

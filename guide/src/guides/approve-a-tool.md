@@ -63,7 +63,7 @@ allow. A deny rule is not a suggestion: the engine does not execute the call.
 
 ## Non-interactive clients
 
-With no terminal, a parked approval stays parked. A JSONL script or a future TUI
+With no terminal, a parked approval stays parked. A JSONL script
 should read `ApprovalRequested` and submit `Approve` or `Deny` through the
 protocol. Guessing a decision on the user's behalf is deliberately not the
 default.

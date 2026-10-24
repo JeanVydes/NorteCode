@@ -1271,13 +1271,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "norte-code-tui"
-version = "0.1.0"
-dependencies = [
- "norte-code-protocol",
-]
-
-[[package]]
 name = "norte-core"
 version = "0.0.2"
 source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#6b33419a56929db06a46020d70ee47f813b4e2f4"

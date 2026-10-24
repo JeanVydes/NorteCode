@@ -74,7 +74,7 @@ to the model as human feedback instead of a bare refusal.
 
 Approval resumes the same turn. Input comes from the terminal, never from the
 model. With no interactive terminal the session stays parked, which is what a
-JSONL script or a future TUI expects.
+JSONL script expects.
 
 ## Grants and durable denials
 

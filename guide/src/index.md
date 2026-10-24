@@ -15,7 +15,7 @@ Five ideas hold the host together.
 
 - **The service is in-process.** `Service` is a library, not a daemon. A client
   submits `ClientRequest` values and consumes a stream of `ServerEvent` values.
-  The CLI is one client; the TUI will be another. There is no port to open.
+  The CLI is the only client. There is no port to open.
 - **A logical session survives its engine.** A `SessionKey` stays stable while
   the Norte `SessionId` behind it may change. Compaction is the clearest case:
   the transcript is summarised into a fresh Norte session, but the client keeps
@@ -36,7 +36,7 @@ Five ideas hold the host together.
 - Not a model catalogue. Models come from models.dev, with local overrides and a
   cache; the host does not bake in a price table.
 - Not a fork of Norte. Sessions, history, policies and commits are Norte's.
-- Not finished. The service and CLI are usable; the TUI is still a stub.
+- Not finished. The service and CLI are usable.
 
 ## Where to go
 

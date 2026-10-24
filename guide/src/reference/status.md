@@ -1,8 +1,8 @@
 # Status and verification
 
-Norte Code is under construction. The service and CLI are usable; the TUI is a
-stub. This page records what has actually been exercised, not what the code
-aspires to.
+Norte Code is under construction. The service and CLI are usable; the CLI is the
+only client. This page records what has actually been exercised, not what the
+code aspires to.
 
 ## What is implemented
 
@@ -45,7 +45,7 @@ aspires to.
 - Actual `sandbox-exec` execution on macOS: the host was Linux. The profile
   generator is tested, but the binary's availability and deprecation on a given
   macOS release are not.
-- The TUI (milestone 7) is still a stub.
+- No TUI is planned. The CLI is the only client.
 - `skill_script` is outside the command sandbox and remains opt-in.
 
 ## Test caveat

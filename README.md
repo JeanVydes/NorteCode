@@ -9,7 +9,7 @@ model catalogue, approvals, compaction, cost tracking and the user interface.
 Norte Code never forks Norte.
 
 > Status: under construction. The workspace skeleton is in place; the service,
-> CLI and TUI are built milestone by milestone. Nothing here is released yet.
+> The CLI is built milestone by milestone. Nothing here is released yet.
 
 ## Layout
 
@@ -23,12 +23,12 @@ Norte Code never forks Norte.
 | `norte-code-tools` | The tools Norte does not ship: `glob`, `list_dir`, `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | A Norte `Store` + `BlobStore` over SQLite, plus Norte Code's own tables. |
 | `norte-code-cli` | The `norte-code` command and its interactive prompt. |
-| `norte-code-tui` | The interactive terminal UI (not implemented yet). |
+
 
 ## Architecture
 
 ```text
-CLI / TUI
+CLI
    │  ClientRequest { request_id, kind }
    ▼
 norte-code-protocol          versioned serde wire; no Norte types

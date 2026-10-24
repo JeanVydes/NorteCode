@@ -10,7 +10,6 @@ members = [
     "norte-code-skills",
     "norte-code-store-sqlite",
     "norte-code-tools",
-    "norte-code-tui",
 ]
 
 [workspace.package]
