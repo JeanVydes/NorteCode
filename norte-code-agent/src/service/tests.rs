@@ -1,5 +1,7 @@
 use super::compaction::recent_start;
 use super::mapping::retry_plan;
+#[cfg(test)]
+use super::prompt::{MAX_SKILL_DESCRIPTION_CHARS, MAX_SKILLS_BLOCK_CHARS, clip};
 use super::sandbox::sandbox_name;
 use super::*;
 use norte::{FinishReason, Role};
@@ -2538,6 +2540,69 @@ async fn the_request_table_records_usage_latency_and_metadata() {
     assert!(record.first_token_ms.is_some());
     assert!(record.metadata.get("engine_events").is_some());
     assert_eq!(record.params, serde_json::json!({"max_output_tokens": 100}));
+}
+
+#[test]
+fn the_skills_block_is_bounded_and_says_what_it_left_out() {
+    // The real shape of the problem: a directory of AWS skills whose
+    // descriptions are written for a model to read, and none of which a given
+    // session is likely to need.
+    // Each description caps at the limit, so enough skills still overflow the
+    // block: 200 chars each against a 4 KB budget.
+    let description = "Builds generative AI applications on Amazon Bedrock. ".to_owned()
+        + &"and more detail the opening sentence does not need. ".repeat(20);
+    let skills: Vec<(String, String)> = (0..40)
+        .map(|n| (format!("skill-number-{n:02}"), description.clone()))
+        .collect();
+
+    let block = skills_block(&skills);
+    assert!(
+        block.chars().count() <= MAX_SKILLS_BLOCK_CHARS,
+        "the block is bounded: {} chars",
+        block.chars().count()
+    );
+    assert!(
+        block.contains("more not listed"),
+        "the skills that did not fit are counted, not dropped in silence: {block}"
+    );
+    // A name that fits is complete, and its description is capped.
+    assert!(block.contains("`skill-number-00`"), "{block}");
+    let line = block
+        .lines()
+        .find(|line| line.starts_with("- `skill-number-00`"))
+        .expect("the first skill is listed");
+    assert!(
+        line.chars().count() < MAX_SKILL_DESCRIPTION_CHARS + 40,
+        "one skill cannot fill the block: {} chars",
+        line.chars().count()
+    );
+    assert!(
+        line.contains("Bedrock."),
+        "the opening sentence is kept: {line}"
+    );
+    assert!(!line.contains("xxxx"), "the tail is not: {line}");
+}
+
+#[test]
+fn a_short_description_reaches_the_model_whole() {
+    let block = skills_block(&[("tiny".to_owned(), "Does one thing.".to_owned())]);
+    assert!(block.contains("- `tiny`: Does one thing."), "{block}");
+    assert!(
+        !block.contains("more not listed"),
+        "nothing was left out: {block}"
+    );
+}
+
+#[test]
+fn the_first_sentence_is_preferred_over_a_hard_cut() {
+    let description = "Reads a PDF and reports its tables. It also handles images, \
+                       and a good deal more that does not fit in the opening line.";
+    let clipped = clip(description, 60);
+    assert!(
+        clipped.ends_with("tables."),
+        "cut at the sentence: {clipped}"
+    );
+    assert!(clipped.chars().count() <= 60, "{clipped}");
 }
 
 #[test]

@@ -30,6 +30,22 @@ pub(super) const PROJECT_INSTRUCTIONS_FILE: &str = "AGENTS.md";
 /// A project file is untrusted input; keep the prompt bounded.
 pub(super) const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 
+/// The largest the skills block may grow, in characters.
+///
+/// A host can have fifty skills installed and never use one of them, and their
+/// descriptions are written for a model to read, so they are long: the AWS set
+/// alone is nineteen thousand characters. Paying that on every request — every
+/// turn, every retry, every tool call — is a cost a session should choose, not
+/// one it inherits from its directory layout.
+pub(super) const MAX_SKILLS_BLOCK_CHARS: usize = 4096;
+
+/// How much of one skill's description reaches the prompt.
+///
+/// A description says what the skill is for and when to reach for it, and the
+/// useful part of that is the opening sentence. The rest is detail the model
+/// reads after activating, which is where it belongs.
+pub(super) const MAX_SKILL_DESCRIPTION_CHARS: usize = 200;
+
 /// Instructions loaded from `AGENTS.md`.
 #[derive(Clone, Debug)]
 pub(super) struct ProjectInstructions {
@@ -76,6 +92,10 @@ pub(super) fn load_project_instructions(root: &Path) -> Option<ProjectInstructio
 /// Only the name and the description go in. The body is what `skill(activate)`
 /// returns, and it is deliberately not here: a session that never needs a skill
 /// should not pay for its instructions on every request.
+///
+/// The block is bounded, and a skill that does not fit is named in a count
+/// rather than dropped in silence: a model that cannot see a skill it needs has
+/// no way to ask for it, so the prompt has to say that there are more.
 pub(super) fn skills_block(skills: &[(String, String)]) -> String {
     if skills.is_empty() {
         return String::new();
@@ -86,10 +106,47 @@ pub(super) fn skills_block(skills: &[(String, String)]) -> String {
          carries the full instructions and a listing of the skill's resources. \
          Do not guess at a skill's contents from its description.\n\n",
     );
+    let mut listed = 0;
+    // The count line is written after the loop and its length varies, so room is
+    // left for a generous one.
+    let budget = MAX_SKILLS_BLOCK_CHARS.saturating_sub(80);
     for (name, description) in skills {
-        let _ = writeln!(block, "- `{name}`: {description}");
+        let line = format!(
+            "- `{name}`: {}\n",
+            clip(description, MAX_SKILL_DESCRIPTION_CHARS)
+        );
+        if block.len() + line.len() > budget {
+            break;
+        }
+        block.push_str(&line);
+        listed += 1;
+    }
+    let skipped = skills.len() - listed;
+    if skipped > 0 {
+        let _ = writeln!(
+            block,
+            "\n({skipped} more not listed; call `skill` with `action: list` to see them)"
+        );
     }
     block.trim_end().to_owned()
+}
+
+/// `text`, cut to `limit` characters at a sentence or word boundary.
+pub(super) fn clip(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_owned();
+    }
+    // Prefer the last sentence that fits: a description's first sentence is the
+    // one that says what the skill is for.
+    let head: String = trimmed.chars().take(limit).collect();
+    if let Some(end) = head.rfind(". ") {
+        return format!("{}.", head[..end].trim_end_matches('.'));
+    }
+    match head.rfind(' ') {
+        Some(space) if space > limit / 2 => format!("{}…", head[..space].trim_end()),
+        _ => format!("{head}…"),
+    }
 }
 
 /// Appends project instructions to the base prompt. They are repository
