@@ -297,6 +297,27 @@ pub enum ServerEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
     },
+    /// A chunk of a running tool's output, as it arrives.
+    ///
+    /// A tool that streams — the shell executor does — reports what it reads
+    /// while it reads it. The chunks are a view, not the result: the result is
+    /// `ToolFinished`, and a client that ignores these only loses the live
+    /// view.
+    ToolOutput {
+        /// The turn.
+        turn: u64,
+        /// The call the output belongs to.
+        call_id: String,
+        /// The tool.
+        tool: String,
+        /// Which stream the bytes came from: `stdout` or `stderr`.
+        stream: String,
+        /// The text, already redacted by the tool and decoded as UTF-8.
+        text: String,
+        /// Whether this chunk closes that stream.
+        #[serde(default)]
+        last: bool,
+    },
     /// A tool call finished.
     ToolFinished {
         /// The turn.

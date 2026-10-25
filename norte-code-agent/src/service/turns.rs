@@ -27,7 +27,8 @@ use super::compaction::{
 };
 use super::mapping::{
     call_arguments, configured_budget, emit, error_code, reported_cost, request_metrics,
-    retry_plan, shorten_tool_output, to_delta, to_phase, to_usage, tool_error, tool_result_text,
+    retry_plan, shorten_tool_output, stream_label, to_delta, to_phase, to_usage, tool_error,
+    tool_result_text,
 };
 use super::models::resolve_reasoning;
 use super::sandbox::sandbox_name;
@@ -643,6 +644,27 @@ impl Service {
                     delta,
                 })
             }
+            // A tool that streams reports as it reads. It rides the same
+            // channel as the call's own events, so the client sees the output
+            // arrive instead of waiting for the call to finish.
+            EngineEvent::ToolOutput {
+                call_id,
+                tool,
+                stream,
+                bytes,
+                last,
+                ..
+            } => Some(ServerEventKind::ToolOutput {
+                turn: stats.turn,
+                call_id: call_id.to_string(),
+                tool: tool.to_string(),
+                stream: stream_label(*stream).to_owned(),
+                // The tool redacted before it stored the bytes; the lossy
+                // conversion is for a chunk that splits a code point, which the
+                // reader already avoids by cutting on character boundaries.
+                text: String::from_utf8_lossy(bytes).into_owned(),
+                last: *last,
+            }),
             EngineEvent::ToolCallStarted { call_id, tool, .. } => {
                 let arguments = if let Some(arguments) = self.activity.started(call_id) {
                     Some(arguments)

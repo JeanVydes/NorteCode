@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use norte::ToolStream;
 use norte::harness::Harness;
 use norte::harness::StreamDelta;
 use norte::{
@@ -378,6 +379,17 @@ pub(super) fn retry_plan(
         |after| after.min(cap),
     );
     Some((delay, error.to_string()))
+}
+
+/// The wire name of the stream a chunk came from.
+pub(super) fn stream_label(stream: ToolStream) -> &'static str {
+    match stream {
+        ToolStream::Stdout => "stdout",
+        ToolStream::Stderr => "stderr",
+        // `ToolStream` is `#[non_exhaustive]`: a stream added later is one this
+        // client has no name for, and an unnamed one is better than a panic.
+        _ => "other",
+    }
 }
 
 pub(super) fn to_delta(delta: &StreamDelta) -> Option<Delta> {
