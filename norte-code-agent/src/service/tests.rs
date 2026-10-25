@@ -17,7 +17,7 @@ use norte::harness::{Interception, InterceptionContext, TurnInterceptor};
 use norte::{
     CallId, Capabilities, Message, ModelId, ModelRef, ModelRequest, ModelStream, ProviderErrorKind,
     ProviderId, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
-    Usage,
+    ToolContext, Usage,
 };
 use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
 use norte_code_protocol::{
@@ -4782,4 +4782,203 @@ fn the_job_buffer_keeps_the_tail_and_says_it_dropped_the_rest() {
         "the buffer stays bounded: {} bytes",
         job.output.len()
     );
+}
+
+#[tokio::test]
+async fn shell_bg_answers_at_once_and_reports_when_the_process_ends() {
+    // The real tool, not a stand-in: what is under test is that the job's own
+    // sink collects the output and that its end is the stream closing, neither
+    // of which a fake executor would exercise.
+    let dir = std::env::temp_dir().join(format!("norte-bg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let marker = dir.join("done");
+    let jobs = Arc::new(JobRegistry::default());
+    let steering = Arc::new(Steering::default());
+    let declaration = ShellTool::new().into_declaration();
+    let background =
+        BackgroundShell::declaration(declaration, Arc::clone(&jobs), Arc::clone(&steering));
+
+    // The process writes, waits, then writes again and touches its marker: the
+    // call has to answer long before any of that is done.
+    let script = format!(
+        "echo first; sleep 1; echo second; touch {}",
+        marker.display()
+    );
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let session = SessionId::new();
+    let call = CallId::new();
+    let context = ToolContext::new().with_session(session).with_call(call);
+
+    let started = tokio::time::Instant::now();
+    let answer = background
+        .executor
+        .call_with_context(&context, request.clone())
+        .await
+        .expect("the call answers");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "the call must not wait for the process: {:?}",
+        started.elapsed()
+    );
+    let text = answer
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect::<String>();
+    assert!(
+        text.contains("job-1"),
+        "the model is told the job id: {text}"
+    );
+
+    let job = jobs.get("job-1").expect("the job is registered");
+    assert_eq!(job.state, JobState::Running, "it is still running");
+    assert_eq!(
+        job.script,
+        format!(
+            "echo first; sleep 1; echo second; touch {}",
+            marker.display()
+        )
+    );
+
+    // Let the process finish of its own accord. The job ends because its
+    // streams closed, and its output is what its own sink collected.
+    for _ in 0..50 {
+        if jobs.get("job-1").is_some_and(|job| job.state.is_done()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let job = jobs.get("job-1").expect("the job is still registered");
+    assert_eq!(
+        job.state,
+        JobState::Finished,
+        "the closing chunk ends the job, not its call: {job:?}"
+    );
+    assert!(
+        job.output.contains("first"),
+        "the sink collected: {:?}",
+        job.output
+    );
+    assert!(
+        job.output.contains("second"),
+        "and the tail too: {:?}",
+        job.output
+    );
+    assert!(marker.exists(), "the process ran to completion");
+
+    // The result reached the model as a steering message, because the call it
+    // would have answered was answered at the start.
+    let steered = steering.take(session);
+    assert_eq!(steered.len(), 1, "one report per job: {steered:?}");
+    assert_eq!(steered[0].id, "job:job-1");
+    assert!(
+        steered[0].text.contains("finished"),
+        "the report says it ended: {}",
+        steered[0].text
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn stopping_a_job_through_the_registry_ends_its_process() {
+    // Cancel is what `/jobs stop` and Ctrl-C reach: the job's own token, which
+    // kills the process group without touching the turn.
+    let dir = std::env::temp_dir().join(format!("norte-bg-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let marker = dir.join("survived");
+    let jobs = Arc::new(JobRegistry::default());
+    let steering = Arc::new(Steering::default());
+    let background = BackgroundShell::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&jobs),
+        steering,
+    );
+    let script = format!("sleep 3; touch {}", marker.display());
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let context = ToolContext::new()
+        .with_session(SessionId::new())
+        .with_call(CallId::new());
+    let _ = background
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("the call answers");
+
+    assert!(jobs.cancel("job-1"), "a running job is stoppable");
+    // The process was killed, so it never wrote its marker.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!marker.exists(), "the stopped process did not finish");
+    assert_eq!(jobs.get("job-1").expect("job").state, JobState::Cancelled);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn detaching_stops_waiting_and_leaves_the_process_running() {
+    // The whole point of the third answer: unlike Ctrl-C, detaching does not
+    // kill anything. The call returns with what arrived, the process outlives
+    // it and writes what it had left.
+    let dir = std::env::temp_dir().join(format!("norte-detach-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let first = dir.join("first");
+    let later = dir.join("later");
+    let detaches = Arc::new(DetachRegistry::default());
+    let declaration =
+        Detachable::declaration(ShellTool::new().into_declaration(), Arc::clone(&detaches));
+
+    // Detaching only once the first line has reached the pipe, so the assertion
+    // on the captured output is not a race with startup.
+    let session = SessionId::new();
+    let watched = first.clone();
+    let registry = Arc::clone(&detaches);
+    tokio::spawn(async move {
+        for _ in 0..100 {
+            if watched.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(registry.detach(session), "there is a call to detach");
+    });
+
+    let script = format!(
+        "echo before; touch {}; sleep 1; touch {}",
+        first.display(),
+        later.display()
+    );
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let context = ToolContext::new()
+        .with_session(session)
+        .with_call(CallId::new());
+
+    let started = tokio::time::Instant::now();
+    let output = declaration
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("the call answers");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "the call stopped waiting instead of running to the end: {:?}",
+        started.elapsed()
+    );
+    let structured = output.structured.expect("a shell result is structured");
+    assert_eq!(structured["code"], "detached");
+    assert_eq!(structured["detached"], true);
+
+    // The process outlived the call: it writes its second marker a second
+    // after the call returned, which is exactly what cancelling would prevent.
+    for _ in 0..50 {
+        if later.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(later.exists(), "the process kept running after the detach");
+
+    // A later detach finds nothing: the token was released with the call.
+    assert!(!detaches.detach(session), "no call is waiting now");
+    let _ = std::fs::remove_dir_all(&dir);
 }
