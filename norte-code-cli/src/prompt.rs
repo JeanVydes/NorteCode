@@ -18,7 +18,7 @@ use super::{
 pub(crate) async fn answer_if_asked(
     service: &Arc<Service>,
     event: &ServerEvent,
-    input: Option<&mut mpsc::UnboundedReceiver<Option<String>>>,
+    input: Option<&mut crate::input::InteractiveInput>,
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<bool, String> {
     let ServerEventKind::QuestionAsked {
@@ -44,7 +44,7 @@ pub(crate) async fn answer_if_asked(
         return submit_answer(service, session, question, answer).await;
     };
     let answer = if options.is_empty() {
-        match prompt_input("answer> ", &mut *input, interrupts).await? {
+        match prompt_input("answer> ", input, interrupts).await? {
             PromptInput::Line(line) => line,
             PromptInput::Eof => {
                 "(no interactive client is attached; continue with your best judgment)".to_owned()
@@ -65,7 +65,7 @@ pub(crate) async fn answer_if_asked(
             }
         );
         loop {
-            let line = match prompt_input("choice> ", &mut *input, interrupts).await? {
+            let line = match prompt_input("choice> ", input, interrupts).await? {
                 PromptInput::Line(line) => line,
                 PromptInput::Eof => {
                     break "(no interactive client is attached; continue with your best judgment)"
@@ -78,7 +78,7 @@ pub(crate) async fn answer_if_asked(
                 continue;
             };
             let extra = if other {
-                match prompt_input("something else> ", &mut *input, interrupts).await? {
+                match prompt_input("something else> ", input, interrupts).await? {
                     PromptInput::Line(text) => Some(text),
                     PromptInput::Eof => {
                         break "(no interactive client is attached; continue with your best judgment)"
@@ -130,9 +130,13 @@ pub(crate) enum PromptInput {
 }
 
 /// Prints a prompt and waits for one line or Ctrl-C.
+///
+/// The actions a keystroke asks for — Escape, Ctrl-C, Ctrl-Shift-B — have no
+/// meaning while a prompt owns the line, so they are skipped rather than
+/// mistaken for input: a prompt wants a line, and taking one is the answer.
 pub(crate) async fn prompt_input(
     prompt: &str,
-    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    input: &mut crate::input::InteractiveInput,
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<PromptInput, String> {
     if !prompt.is_empty() {
@@ -141,7 +145,7 @@ pub(crate) async fn prompt_input(
     let line = tokio::select! {
         biased;
         Some(()) = interrupts.recv() => return Ok(PromptInput::Cancelled),
-        line = input.recv() => line,
+        line = input.recv_line() => line,
     };
     match line {
         Some(Some(line)) => Ok(PromptInput::Line(line)),

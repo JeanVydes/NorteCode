@@ -1,18 +1,22 @@
 //! Background jobs: a shell call that is not waited for.
 //!
-//! Every `shell` call is a job. When the model asks to wait — the default — the
-//! job runs and its result is the tool result, exactly as before. When it does
-//! not, the call answers immediately with the job's id and the job carries on
-//! in the background, reporting its output as `EngineEvent::ToolOutput` like any
-//! other call.
+//! Every `shell_bg` call is a job. Its call answers at once with the job's id,
+//! and the job carries on in the background, reporting its output as
+//! `EngineEvent::ToolOutput` like any other call.
 //!
 //! The registry is what makes the difference visible: it is where a job's
 //! output is accumulated while it runs, so `manage_jobs` can read it, and where
-//! its cancellation token lives, so `/jobs stop` can end it. Nothing else needs
-//! to know whether a call was waited for.
+//! its cancellation token lives, so `Ctrl-C` and `/jobs stop` can end it.
+//! Nothing else needs to know whether a call was waited for.
 //!
-//! The job ends when its output ends. There is no unbounded job: the shell
-//! executor applies the request's timeout either way, so a detached call is
+//! Only `shell_bg` registers here. A waited `shell` call is its own result and
+//! has no id to be reached by, so putting it in the registry would list a job
+//! nobody can name. That is what makes the end of a job unambiguous: it is the
+//! closing of its streams, never the finishing of its call, which for a call
+//! that answered at once happens at the very start.
+//!
+//! The job ends when its process does. There is no unbounded job: the shell
+//! executor applies the request's timeout either way, so a background call is
 //! killed at the same bound a waited one is.
 
 use std::collections::BTreeMap;
@@ -20,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use norte::{CallId, Cancellation, SessionId};
+use norte_code_protocol::JobInfo;
 
 /// How much of a job's output is kept for `manage_jobs` to read.
 ///
@@ -88,7 +93,7 @@ struct Job {
     bytes: usize,
 }
 
-/// The jobs a service knows about, newest last.
+/// The jobs a service knows about, oldest last.
 #[derive(Default)]
 pub(super) struct JobRegistry {
     jobs: Mutex<BTreeMap<String, Job>>,
@@ -165,21 +170,51 @@ impl JobRegistry {
         }
     }
 
-    /// Records that a call ended, unless it was cancelled first.
+    /// Marks a job's streams as closed, which is the process exiting.
     ///
-    /// A job cancelled through the registry keeps that state: the call ending is
-    /// the consequence, not a new fact about it.
-    pub(super) fn finish(&self, call_id: CallId, exit_code: Option<i32>) {
+    /// A stream reports `last` when its pipe closes, and the closing chunk
+    /// always arrives, even when the process wrote nothing. It is the one end a
+    /// job cannot miss: the call that started it answered at once, so its own
+    /// finish says nothing about the process, and a job nobody is holding has
+    /// no other task to report it.
+    pub(super) fn close(&self, call_id: CallId, last: bool) {
+        if !last {
+            return;
+        }
         let mut jobs = self.jobs();
-        let Some(job) = jobs.values_mut().find(|job| job.summary.call_id == call_id) else {
+        let Some(job) = jobs
+            .values_mut()
+            .find(|job| job.summary.call_id == call_id && !job.summary.state.is_done())
+        else {
             return;
         };
         job.summary.elapsed_ms = millis(job.started.elapsed());
+        job.summary.state = JobState::Finished;
+    }
+
+    /// Records the exit code a job's process reported.
+    ///
+    /// The code arrives with the result, which the holder of the process reads
+    /// after its streams have closed, so it lands on a job that is already
+    /// `Finished`. That is why this only records the code rather than also
+    /// deciding the state — except for a job that was cancelled, where the code
+    /// is the consequence of the cancellation and not a fact about it.
+    pub(super) fn settle(&self, id: &str, exit_code: Option<i32>, timed_out: bool) {
+        let mut jobs = self.jobs();
+        let Some(job) = jobs.get_mut(id) else {
+            return;
+        };
+        job.summary.elapsed_ms = millis(job.started.elapsed());
+        job.summary.timed_out = timed_out;
         if job.summary.state == JobState::Cancelled {
             return;
         }
-        job.summary.state = JobState::Finished;
-        job.summary.exit_code = exit_code;
+        if !job.summary.state.is_done() {
+            job.summary.state = JobState::Finished;
+        }
+        if let Some(code) = exit_code {
+            job.summary.exit_code = Some(code);
+        }
     }
 
     /// Marks a job cancelled and signals its token. Answers whether it was one.
@@ -194,6 +229,23 @@ impl JobRegistry {
         job.summary.state = JobState::Cancelled;
         job.cancel.cancel();
         true
+    }
+
+    /// Stops every running job of one session, and answers how many it stopped.
+    ///
+    /// It is what `Ctrl-C` asks for, and what `/jobs stop` with no id asks for:
+    /// the jobs of the work in hand, not every job the service holds.
+    pub(super) fn cancel_session(&self, session: SessionId) -> usize {
+        let mut stopped = 0;
+        for id in self.running_of(session) {
+            stopped += usize::from(self.cancel(&id));
+        }
+        stopped
+    }
+
+    /// Whether any job of the session is still running.
+    pub(super) fn any_running(&self, session: SessionId) -> bool {
+        !self.running_of(session).is_empty()
     }
 
     /// One job, by id.
@@ -220,8 +272,31 @@ impl JobRegistry {
         out
     }
 
+    /// The ids of the session's running jobs, oldest first.
+    fn running_of(&self, session: SessionId) -> Vec<String> {
+        let jobs = self.jobs();
+        jobs.values()
+            .filter(|job| job.summary.session == session && !job.summary.state.is_done())
+            .map(|job| job.summary.id.clone())
+            .collect()
+    }
+
     fn jobs(&self) -> MutexGuard<'_, BTreeMap<String, Job>> {
         self.jobs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The registry's view of a job, as the wire carries it.
+pub(super) fn job_info(job: &JobSummary) -> JobInfo {
+    JobInfo {
+        id: job.id.clone(),
+        script: job.script.clone(),
+        state: job.state.label().to_owned(),
+        exit_code: job.exit_code,
+        timed_out: job.timed_out,
+        elapsed_ms: job.elapsed_ms,
+        output: job.output.clone(),
+        dropped: job.dropped,
     }
 }
 

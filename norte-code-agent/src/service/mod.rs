@@ -9,6 +9,7 @@ mod approvals;
 mod background;
 mod budgets;
 mod compaction;
+mod detach;
 mod effects;
 mod jobs;
 mod manage;
@@ -63,8 +64,9 @@ use self::steering::{Steered, Steering, SteeringInterceptor};
 use approvals::{ApprovalModePolicy, ApprovalRules};
 use background::BackgroundShell;
 use compaction::{CompactionGate, CompactionLayer};
+use detach::{DetachRegistry, Detachable};
 use effects::{EffectJournal, EffectJournalPolicy};
-use jobs::JobRegistry;
+use jobs::{JobRegistry, job_info};
 use manage::ManageJobs;
 use mapping::{BudgetLayer, single};
 use mcp::McpServers;
@@ -177,6 +179,8 @@ pub struct Service {
     steering: Arc<Steering>,
     /// The shell calls running in the background, by job id.
     jobs: Arc<JobRegistry>,
+    /// The detach token of the call each session's turn is waiting on.
+    detaches: Arc<DetachRegistry>,
     /// The interceptors the host registered, consulted at the safe points of
     /// every turn.
     interceptors: Vec<Arc<dyn TurnInterceptor>>,
@@ -343,6 +347,7 @@ impl Service {
             cancels: Mutex::new(BTreeMap::new()),
             steering: Arc::new(Steering::default()),
             jobs: Arc::new(JobRegistry::default()),
+            detaches: Arc::new(DetachRegistry::default()),
             interceptors: Vec::new(),
             // Connected in `with_directory`, which can await; `new` cannot.
             mcp_servers: RwLock::new(McpServers::none()),
@@ -546,6 +551,10 @@ impl Service {
         } else {
             command
         };
+        // The foreground shell is the one a turn can be stuck on, so it is the
+        // one that carries a detach token. `shell_bg` answers at once and needs
+        // none; the manager is not a shell at all.
+        let command = Detachable::declaration(command, Arc::clone(&self.detaches));
         let background = BackgroundShell::declaration(
             ToolDeclaration {
                 name: command.name,
@@ -799,6 +808,18 @@ impl Service {
         Arc::clone(&self.lock_skills())
     }
 
+    /// Whether the session has a background job still running.
+    ///
+    /// The CLI asks before deciding what `Ctrl-C` means: it ends a job when
+    /// there is one and does nothing otherwise. A plain `bool` rather than a
+    /// borrow, so the answer does not hold the sessions lock across a redraw.
+    #[must_use]
+    pub fn has_running_jobs(&self, session: &SessionKey) -> bool {
+        self.lock_sessions()
+            .get(session)
+            .is_some_and(|record| self.jobs.any_running(record.id))
+    }
+
     /// The configuration in force.
     ///
     /// A value rather than a borrow: the config is held behind a lock so a
@@ -994,6 +1015,58 @@ impl Service {
                     notify.notify_one();
                 }
                 Ok(Box::pin(futures_util::stream::empty()))
+            }
+            Kind::StopJobs { session, id } => {
+                // A job's token is its own: stopping one is not cancelling the
+                // turn, and this is the path that says so.
+                let stopped = {
+                    let sessions = self.lock_sessions();
+                    match sessions.get(&session) {
+                        Some(record) => match id.as_deref() {
+                            Some(id) => usize::from(self.jobs.cancel(id)),
+                            None => self.jobs.cancel_session(record.id),
+                        },
+                        None => 0,
+                    }
+                };
+                Ok(Box::pin(futures_util::stream::iter([ServerEvent::new(
+                    request_id,
+                    Some(session),
+                    ServerEventKind::JobsStopped { stopped },
+                )])))
+            }
+            Kind::DetachTurn { session } => {
+                // Detaching is not cancelling: the call stops waiting and the
+                // process keeps running. The token is the one the executor
+                // published for the session, so no turn state is touched here.
+                let detached = self
+                    .lock_sessions()
+                    .get(&session)
+                    .is_some_and(|record| self.detaches.detach(record.id));
+                Ok(Box::pin(futures_util::stream::iter([ServerEvent::new(
+                    request_id,
+                    Some(session),
+                    ServerEventKind::TurnStopped {
+                        reason: if detached {
+                            "the running call was detached; its process keeps going".to_owned()
+                        } else {
+                            "there was no running call to detach".to_owned()
+                        },
+                    },
+                )])))
+            }
+            Kind::ListJobs { session } => {
+                let jobs = match self.lock_sessions().get(&session) {
+                    Some(record) => self.jobs.list(Some(record.id)),
+                    None => Vec::new(),
+                };
+                Ok(single(
+                    request_id,
+                    Some(session),
+                    ServerEventKind::JobList {
+                        jobs: jobs.iter().map(job_info).collect(),
+                    },
+                ))
             }
             Kind::CostReport { session } => Ok(self.cost_report(request_id, session.as_ref())),
             Kind::ListModels => Ok(self.list_models_event(request_id)),

@@ -131,6 +131,27 @@ pub enum ClientRequestKind {
         /// The session.
         session: SessionKey,
     },
+    /// Stop a session's background jobs.
+    StopJobs {
+        /// The session.
+        session: SessionKey,
+        /// One job by id, or every job of the session when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// Stop waiting for the running call and leave it running.
+    ///
+    /// The turn keeps its process and gives up its hold on it: the call answers
+    /// as a background job does, and its output arrives as a message.
+    DetachTurn {
+        /// The session.
+        session: SessionKey,
+    },
+    /// List the background jobs of a session.
+    ListJobs {
+        /// The session.
+        session: SessionKey,
+    },
     /// Continue a session that is parked or interrupted.
     Resume {
         /// The session.
@@ -503,6 +524,20 @@ pub enum ServerEventKind {
         /// Why the turn ended.
         reason: String,
     },
+    /// The background jobs of one session.
+    JobList {
+        /// One entry per job, oldest first.
+        jobs: Vec<JobInfo>,
+    },
+    /// Background jobs were stopped on request.
+    ///
+    /// It answers `StopJobs` rather than reporting a turn: stopping a job is
+    /// not stopping the turn that started it, and a client that asked for one
+    /// needs to know how many it reached.
+    JobsStopped {
+        /// How many jobs the request stopped.
+        stopped: usize,
+    },
     /// The engine applied a steering message to the request already in flight.
     SteerApplied {
         /// The names of the messages that reached the request.
@@ -685,6 +720,34 @@ pub struct ModelInfo {
     pub reasoning: ReasoningInfo,
     /// Whether the catalogue marks the model deprecated.
     pub deprecated: bool,
+}
+
+/// One background job, as a client sees it.
+///
+/// It is the registry's summary, flattened for the wire: the output is a string
+/// rather than a byte buffer, the state is the word the model reads, and the
+/// timings are milliseconds. A client that only lists jobs ignores the output;
+/// one that checks a job reads it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobInfo {
+    /// The id the model was given.
+    pub id: String,
+    /// The script, clipped to one line.
+    pub script: String,
+    /// Where it stands: `running`, `finished` or `cancelled`.
+    pub state: String,
+    /// The exit code, once it ended on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Whether its time bound killed it.
+    pub timed_out: bool,
+    /// Milliseconds since it started.
+    pub elapsed_ms: u64,
+    /// The most recent output.
+    pub output: String,
+    /// Whether older output was dropped to stay within the buffer.
+    pub dropped: bool,
 }
 
 /// One installed Agent Skill, as a client sees it.

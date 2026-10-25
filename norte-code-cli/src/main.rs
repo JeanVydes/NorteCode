@@ -67,8 +67,8 @@ use norte_code_config::{ApprovalMode, AuthKind, Config, WireKind, user_config_pa
 use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
-    DenyScope, ErrorCode, GrantInfo, GrantScope, ModelInfo, Phase, Reasoning, ReasoningInfo,
-    ReasoningScope, ServerEvent, ServerEventKind, SessionKey,
+    DenyScope, ErrorCode, GrantInfo, GrantScope, JobInfo, ModelInfo, Phase, Reasoning,
+    ReasoningInfo, ReasoningScope, ServerEvent, ServerEventKind, SessionKey,
 };
 use norte_code_skills::{SkillRegistry, discovery_roots};
 use norte_code_store_sqlite::{RequestRecord, SessionDirectory, SqliteStore};
@@ -650,20 +650,13 @@ async fn run_prompt(
         };
         renderer.mark_working();
         let stream = service.submit(request).await.map_err(|e| e.to_string())?;
-        let outcome = drive_turns(
-            &service,
-            stream,
-            &mut renderer,
-            style,
-            input.as_mut().map(InteractiveInput::lines),
-        )
-        .await?;
+        let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
         session = outcome.session.or(session);
         parked = outcome.parked;
         renderer.ensure_newline();
     }
     if interactive && !parked && !renderer.budget_stopped {
-        if let Some(receiver) = input.as_mut().map(InteractiveInput::lines) {
+        if let Some(receiver) = input.as_mut() {
             interactive_loop(
                 &service,
                 session,
@@ -823,14 +816,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(
-            &service,
-            stream,
-            &mut renderer,
-            style,
-            input.as_mut().map(InteractiveInput::lines),
-        )
-        .await?;
+        drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
     }
     // The override goes through the same request the interactive `/model` sends,
     // so the session's own rules judge it and a model it refuses is reported.
@@ -845,14 +831,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(
-            &service,
-            stream,
-            &mut renderer,
-            style,
-            input.as_mut().map(InteractiveInput::lines),
-        )
-        .await?;
+        drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
     }
     renderer.mark_working();
     let stream = service
@@ -864,17 +843,10 @@ async fn resume_session(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let outcome = drive_turns(
-        &service,
-        stream,
-        &mut renderer,
-        style,
-        input.as_mut().map(InteractiveInput::lines),
-    )
-    .await?;
+    let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
     renderer.ensure_newline();
     if interactive && !outcome.parked && !renderer.budget_stopped {
-        if let Some(receiver) = input.as_mut().map(InteractiveInput::lines) {
+        if let Some(receiver) = input.as_mut() {
             interactive_loop(
                 &service,
                 Some(session),

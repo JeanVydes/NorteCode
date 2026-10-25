@@ -3,10 +3,11 @@
 
 use super::{
     Arc, Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, EventStream,
-    GrantInfo, GrantScope, Phase, Reasoning, ReasoningScope, Renderer, ServerEvent,
+    GrantInfo, GrantScope, JobInfo, Phase, Reasoning, ReasoningScope, Renderer, ServerEvent,
     ServerEventKind, Service, SessionKey, StreamExt, Style, VecDeque, mpsc, short,
 };
 use crate::approval::{ApprovalChoice, ApprovalOutcome, approval_request, ask_approval};
+use crate::input::{EditorAction, EditorEvent, InteractiveInput};
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
     BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
@@ -113,6 +114,24 @@ pub(crate) enum ChatCommand {
     Model { model: String },
     /// Set the current provider.
     Provider { provider: String },
+    /// List the background jobs, read one, or stop one.
+    Jobs {
+        action: JobListAction,
+        id: Option<String>,
+    },
+    /// Start a fresh session, leaving this one saved.
+    Restart,
+}
+
+/// What `/jobs` was asked to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JobListAction {
+    /// Every job of the session.
+    List,
+    /// One job, with what it has written.
+    Check,
+    /// End one job.
+    Stop,
 }
 
 /// Parses one interactive command.
@@ -131,8 +150,16 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             server: None,
         }),
         "/exit" | "/quit" | "exit" | "quit" => Some(ChatCommand::Exit),
+        "/restart" => Some(ChatCommand::Restart),
+        "/jobs" => Some(ChatCommand::Jobs {
+            action: JobListAction::List,
+            id: None,
+        }),
         _ => None,
     };
+    if let Some(rest) = command_rest(text, "/jobs") {
+        return Some(parse_jobs_command(rest));
+    }
     if let Some(command) = exact {
         return Some(Ok(command));
     }
@@ -196,6 +223,36 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
 fn command_rest<'a>(text: &'a str, command: &str) -> Option<&'a str> {
     let rest = text.strip_prefix(command)?;
     (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
+}
+
+/// Parses the arguments of `/jobs`.
+///
+/// The action is optional and defaults to `list`, which is what a bare `/jobs`
+/// asks for. `list` takes no id and the others require one: a `check` with
+/// nothing to check is a usage error, not an empty listing.
+fn parse_jobs_command(rest: &str) -> Result<ChatCommand, String> {
+    let mut parts = rest.split_whitespace();
+    let action = match parts.next() {
+        None | Some("list") => JobListAction::List,
+        Some("check") => JobListAction::Check,
+        Some("stop") => JobListAction::Stop,
+        Some(other) => {
+            return Err(format!(
+                "unknown /jobs action `{other}`; use list, check or stop"
+            ));
+        }
+    };
+    let id = parts.next().map(str::to_owned);
+    if parts.next().is_some() {
+        return Err("usage: /jobs [list|check|stop] [job-id]".to_owned());
+    }
+    match (action, &id) {
+        (JobListAction::List, Some(_)) => Err("/jobs list takes no job id".to_owned()),
+        (JobListAction::Check | JobListAction::Stop, None) => {
+            Err("/jobs check and /jobs stop need a job id".to_owned())
+        }
+        _ => Ok(ChatCommand::Jobs { action, id }),
+    }
 }
 
 fn parse_reasoning_command(rest: &str) -> Result<ChatCommand, String> {
@@ -281,6 +338,8 @@ const CHAT_COMMANDS: &[&str] = &[
     "/refresh",
     "/reload",
     "/mcp",
+    "/jobs",
+    "/restart",
     "/exit",
     "/quit",
 ];
@@ -291,6 +350,9 @@ const REASONING_SUGGESTIONS: &[&str] = &[
 
 const REASONING_SCOPES: &[&str] = &["session", "message"];
 const TOOL_SCOPES: &[&str] = &["session", "global"];
+
+/// The actions `/jobs` accepts, for the completion hint.
+const JOB_ACTIONS: &[&str] = &["list", "check", "stop"];
 
 /// Suggests a command name or a command argument for the current input line.
 ///
@@ -374,6 +436,8 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/revoke" => Some("/revoke [grant-id-or-tool]"),
         "/refresh" | "/reload" => Some("/refresh  (alias: /reload)"),
         "/mcp" => Some("/mcp [list|enable|disable] [server]"),
+        "/jobs" => Some("/jobs [list|check|stop] [job-id]"),
+        "/restart" => Some("/restart"),
         "/exit" => Some("/exit"),
         "/quit" => Some("/quit"),
         _ => None,
@@ -390,6 +454,10 @@ fn argument_candidates(command: &str, completed: usize) -> Option<&'static [&'st
         "/allow" | "/deny" => match completed {
             0 => None,
             1 => Some(TOOL_SCOPES),
+            _ => Some(&[]),
+        },
+        "/jobs" => match completed {
+            0 => Some(JOB_ACTIONS),
             _ => Some(&[]),
         },
         _ => None,
@@ -574,7 +642,7 @@ pub(crate) async fn interactive_loop(
     mut session: Option<SessionKey>,
     renderer: &mut Renderer,
     style: Style,
-    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    input: &mut InteractiveInput,
     message_budget: Option<Budget>,
     reasoning: Option<Reasoning>,
 ) -> Result<Option<SessionKey>, String> {
@@ -586,7 +654,7 @@ pub(crate) async fn interactive_loop(
     }
     let mut request_id = 2_u64;
     loop {
-        let Some(text) = read_repl_line(input, style).await? else {
+        let Some(text) = read_repl_line(service, session.as_ref(), input, style).await? else {
             break;
         };
         let command = match parse_chat_command(&text) {
@@ -754,6 +822,28 @@ pub(crate) async fn interactive_loop(
                             style.yellow("there is no session yet; send a message first")
                         );
                     }
+                }
+                ChatCommand::Jobs { action, id } => match session.clone() {
+                    Some(current) => report_jobs(service, current, action, id, style).await,
+                    None => eprintln!(
+                        "{}",
+                        style.yellow("there is no session yet; send a message first")
+                    ),
+                },
+                // A restart drops the session and starts a fresh one. The
+                // service creates a session on the first message, so clearing
+                // this is the whole of it, and the old session stays saved and
+                // resumable. Only between turns: during one, the service is
+                // still writing to the session being dropped.
+                ChatCommand::Restart => {
+                    session = None;
+                    eprintln!(
+                        "{}",
+                        style.green(
+                            "starting a fresh session; the previous one is saved and can be \
+                             resumed"
+                        )
+                    );
                 }
             }
             continue;
@@ -936,6 +1026,16 @@ async fn handle_live_command(
                 );
             }
         }
+        ChatCommand::Jobs { action, id } => match current {
+            Some(session) => report_jobs(service, session.clone(), action, id, style).await,
+            None => eprintln!("{}", style.yellow("no session yet; send a message first")),
+        },
+        // A restart ends the session, so it cannot wait for the turn; the
+        // turn loop does it, where the boundary is known.
+        ChatCommand::Restart => eprintln!(
+            "{}",
+            style.yellow("wait until the current turn finishes, then /restart")
+        ),
     }
 }
 
@@ -946,7 +1046,7 @@ async fn handle_live_command(
 async fn prompt_budget_limit(
     service: &Arc<Service>,
     session: &SessionKey,
-    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    input: &mut InteractiveInput,
     interrupts: &mut mpsc::Receiver<()>,
     style: Style,
     prompt: BudgetPrompt,
@@ -1133,6 +1233,147 @@ async fn fetch_grants(
     Err("the service did not return a grant list".to_owned())
 }
 
+/// Reports the session's background jobs: a listing, one job, or a stop.
+///
+/// A job belongs to the session that started it, and the service is asked
+/// rather than the registry read directly: the CLI has no registry, and a job
+/// may be running in a turn this client never started.
+async fn report_jobs(
+    service: &Arc<Service>,
+    session: SessionKey,
+    action: JobListAction,
+    id: Option<String>,
+    style: Style,
+) {
+    match action {
+        // `stop` names one job; `list` names none. The service treats a stop
+        // with no id as every job of the session, which is what Ctrl-C sends.
+        JobListAction::Stop => {
+            let request = ClientRequest {
+                request_id: 0,
+                kind: ClientRequestKind::StopJobs {
+                    session,
+                    id: id.clone(),
+                },
+            };
+            match service.submit(request).await {
+                Ok(mut stream) => {
+                    let mut stopped = None;
+                    while let Some(event) = stream.next().await {
+                        if let ServerEventKind::JobsStopped { stopped: count } = event.kind {
+                            stopped = Some(count);
+                        }
+                    }
+                    match stopped {
+                        Some(0) => eprintln!(
+                            "{}",
+                            style.yellow(match &id {
+                                Some(id) => format!("no running job `{id}`"),
+                                None => "no background job was running".to_owned(),
+                            })
+                        ),
+                        Some(count) => eprintln!(
+                            "{}",
+                            style.green(format!("stopped {count} background job(s)"))
+                        ),
+                        None => eprintln!("{}", style.yellow("the jobs could not be stopped")),
+                    }
+                }
+                Err(error) => eprintln!(
+                    "{}",
+                    style.yellow(format!("warning: could not stop the jobs: {error}"))
+                ),
+            }
+        }
+        JobListAction::List | JobListAction::Check => {
+            let jobs = match fetch_jobs(service, session).await {
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    eprintln!("{}", style.red(format!("could not list the jobs: {error}")));
+                    return;
+                }
+            };
+            if let (JobListAction::Check, Some(id)) = (&action, &id) {
+                match jobs.iter().find(|job| &job.id == id) {
+                    Some(job) => print_job(job, style),
+                    None => eprintln!(
+                        "{}",
+                        style.yellow(format!("no job `{id}`; /jobs lists the ones there are"))
+                    ),
+                }
+            } else {
+                if jobs.is_empty() {
+                    eprintln!("{}", style.dim("no background jobs in this session"));
+                    return;
+                }
+                eprintln!(
+                    "{}",
+                    style.bold(format!("{} background job(s)", jobs.len()))
+                );
+                for job in &jobs {
+                    eprintln!(
+                        "  {} {} {}",
+                        crate::text::terminal(&job.id),
+                        job_state_label(&job.state, style),
+                        style.dim(&job.script)
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One job, with what it has written.
+fn print_job(job: &JobInfo, style: Style) {
+    eprintln!(
+        "{} {}{} ({} ms)",
+        crate::text::terminal(&job.id),
+        job_state_label(&job.state, style),
+        match job.exit_code {
+            Some(code) => format!(", exit {code}"),
+            None => String::new(),
+        },
+        job.elapsed_ms
+    );
+    eprintln!("  {}", style.dim(&job.script));
+    if job.timed_out {
+        eprintln!("  {}", style.yellow("it reached its time bound"));
+    }
+    if job.dropped {
+        eprintln!(
+            "  {}",
+            style.yellow("older output was dropped to stay within the buffer")
+        );
+    }
+    if job.output.is_empty() {
+        eprintln!("  {}", style.dim("(no output yet)"));
+        return;
+    }
+    eprintln!("{}", crate::text::terminal(&job.output));
+}
+
+/// The state of a job as it is printed.
+fn job_state_label(state: &str, style: Style) -> String {
+    match state {
+        "running" => style.cyan(state.to_owned()),
+        "cancelled" => style.yellow(state.to_owned()),
+        _ => style.green(state.to_owned()),
+    }
+}
+
+/// Asks the service for the session's jobs.
+async fn fetch_jobs(service: &Arc<Service>, session: SessionKey) -> Result<Vec<JobInfo>, String> {
+    let events = drain_request(service, ClientRequestKind::ListJobs { session }).await?;
+    for event in events {
+        match event.kind {
+            ServerEventKind::JobList { jobs } => return Ok(jobs),
+            ServerEventKind::Error { message, .. } => return Err(message),
+            _ => {}
+        }
+    }
+    Err("the service did not return a job list".to_owned())
+}
+
 fn grant_scope_label(scope: GrantScope) -> &'static str {
     match scope {
         GrantScope::Once => "once",
@@ -1168,23 +1409,48 @@ fn stream_error(events: &[ServerEvent]) -> Option<String> {
 ///
 /// Ctrl-C, Ctrl-D, `/exit` and `quit` all leave the loop without inventing a
 /// message. Empty lines are ignored.
+///
+/// Ctrl-C is read from the editor rather than from a signal: the terminal is in
+/// raw mode, so the key never becomes `SIGINT`. At the prompt its meaning
+/// depends on what is running — a background job is stopped, and with none the
+/// key leaves the loop, which is what it did when it was a signal.
 pub(crate) async fn read_repl_line(
-    input: &mut mpsc::UnboundedReceiver<Option<String>>,
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    input: &mut InteractiveInput,
     style: Style,
 ) -> Result<Option<String>, String> {
     let _ = style;
     loop {
-        let line = tokio::select! {
+        let event = tokio::select! {
             biased;
+            // A signal can still arrive from outside the terminal, so it keeps
+            // its old meaning: leave the loop.
             _ = tokio::signal::ctrl_c() => {
                 eprintln!();
                 return Ok(None);
             }
-            line = input.recv() => line,
+            event = input.recv() => event,
         };
-        let Some(Some(line)) = line else {
-            eprintln!();
-            return Ok(None);
+        let line = match event {
+            Some(EditorEvent::Line(line)) => line,
+            Some(EditorEvent::End) | None => {
+                eprintln!();
+                return Ok(None);
+            }
+            Some(EditorEvent::Action(EditorAction::CancelJobs)) => {
+                let Some(session) = session.filter(|session| service.has_running_jobs(session))
+                else {
+                    // No job to stop: the key means what it always meant at the
+                    // prompt, which is to leave.
+                    eprintln!();
+                    return Ok(None);
+                };
+                stop_jobs(service, session.clone(), style).await;
+                continue;
+            }
+            // Nothing is running at the prompt, so nothing to cancel or detach.
+            Some(EditorEvent::Action(_)) => continue,
         };
         let line = line.trim();
         if line.is_empty() {
@@ -1194,6 +1460,36 @@ pub(crate) async fn read_repl_line(
             return Ok(None);
         }
         return Ok(Some(line.to_owned()));
+    }
+}
+
+/// Stops every background job of the session, and reports what it reached.
+pub(crate) async fn stop_jobs(service: &Arc<Service>, session: SessionKey, style: Style) {
+    let request = ClientRequest {
+        request_id: 0,
+        kind: ClientRequestKind::StopJobs { session, id: None },
+    };
+    match service.submit(request).await {
+        Ok(mut stream) => {
+            let mut stopped = None;
+            while let Some(event) = stream.next().await {
+                if let ServerEventKind::JobsStopped { stopped: count } = event.kind {
+                    stopped = Some(count);
+                }
+            }
+            match stopped {
+                Some(0) => eprintln!("{}", style.yellow("no background job was running")),
+                Some(count) => eprintln!(
+                    "{}",
+                    style.yellow(format!("stopped {count} background job(s)"))
+                ),
+                None => eprintln!("{}", style.yellow("the jobs could not be stopped")),
+            }
+        }
+        Err(error) => eprintln!(
+            "{}",
+            style.yellow(format!("warning: could not stop the jobs: {error}"))
+        ),
     }
 }
 
@@ -1218,6 +1514,9 @@ impl Drop for SignalGuard {
 enum Wake {
     /// Ctrl-C or another interrupt.
     Interrupt,
+    /// Escape, Ctrl-C or Ctrl-Shift-B reached the editor and asked for
+    /// something that is not a line.
+    Action(EditorAction),
     /// A line completed in the input box.
     Line(String),
     /// End of input.
@@ -1236,7 +1535,10 @@ pub(crate) async fn drive_turns(
     primary: EventStream,
     renderer: &mut Renderer,
     style: Style,
-    mut input: Option<&mut mpsc::UnboundedReceiver<Option<String>>>,
+    // The editor itself, not one of its channels: a turn needs the lines *and*
+    // the actions, and asking for them through one handle is what keeps the
+    // select below honest.
+    mut input: Option<&mut crate::input::InteractiveInput>,
 ) -> Result<DriveOutcome, String> {
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
@@ -1262,15 +1564,16 @@ pub(crate) async fn drive_turns(
     loop {
         while let Some(mut stream) = streams.pop_front() {
             loop {
-                let wake = if let Some(receiver) = input.as_mut() {
+                let wake = if let Some(receiver) = input.as_deref_mut() {
                     tokio::select! {
                         biased;
                         Some(()) = interrupt_rx.recv() => Wake::Interrupt,
-                        line = receiver.recv() => match line {
-                            Some(Some(line)) => Wake::Line(line),
-                            Some(None) | None => Wake::Eof,
+                        event = receiver.recv() => match event {
+                            Some(EditorEvent::Line(line)) => Wake::Line(line),
+                            Some(EditorEvent::Action(action)) => Wake::Action(action),
+                            Some(EditorEvent::End) | None => Wake::Eof,
                         },
-                        event = stream.next() => Wake::Event(Box::new(event)),
+                        next = stream.next() => Wake::Event(Box::new(next)),
                     }
                 } else {
                     tokio::select! {
@@ -1280,6 +1583,65 @@ pub(crate) async fn drive_turns(
                     }
                 };
                 let event = match wake {
+                    // A keystroke the editor could not act on itself: it knows
+                    // which key was pressed, not what a turn is. All three
+                    // decisions are made here, where that is known.
+                    Wake::Action(action) => {
+                        match action {
+                            EditorAction::CancelTurn => {
+                                if let Some(session) = current.clone() {
+                                    renderer.mark_cancelled();
+                                    eprintln!("{}", style.yellow("cancelling the running turn…"));
+                                    let request = ClientRequest {
+                                        request_id: 0,
+                                        kind: ClientRequestKind::CancelTurn { session },
+                                    };
+                                    if let Err(error) = service.submit(request).await {
+                                        eprintln!(
+                                            "{}",
+                                            style.yellow(format!(
+                                                "warning: could not cancel the turn: {error}"
+                                            ))
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+                            EditorAction::CancelJobs => {
+                                // The session's jobs, and only its: a job
+                                // belongs to the work it was started for. With
+                                // none running, the key says so rather than
+                                // silently doing nothing.
+                                let Some(session) = current.clone() else {
+                                    continue;
+                                };
+                                if !service.has_running_jobs(&session) {
+                                    eprintln!("{}", style.dim("no background job is running"));
+                                    continue;
+                                }
+                                stop_jobs(service, session, style).await;
+                                continue;
+                            }
+                            EditorAction::Detach => {
+                                let Some(session) = current.clone() else {
+                                    continue;
+                                };
+                                let request = ClientRequest {
+                                    request_id: 0,
+                                    kind: ClientRequestKind::DetachTurn { session },
+                                };
+                                if let Err(error) = service.submit(request).await {
+                                    eprintln!(
+                                        "{}",
+                                        style.yellow(format!(
+                                            "warning: could not detach the turn: {error}"
+                                        ))
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     Wake::Interrupt => {
                         let Some(session) = current.clone() else {
                             continue;
@@ -1546,8 +1908,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        BudgetUnit, CHAT_COMMANDS, ChatCommand, McpAction, Reasoning, ReasoningScope, SignalGuard,
-        command_suggestion, command_usage, parse_budget_limit, parse_chat_command,
+        BudgetUnit, CHAT_COMMANDS, ChatCommand, JobListAction, McpAction, Reasoning,
+        ReasoningScope, SignalGuard, command_suggestion, command_usage, parse_budget_limit,
+        parse_chat_command,
     };
 
     #[test]
@@ -1714,6 +2077,69 @@ mod tests {
         assert_eq!(tool_scope.completion, "session");
 
         assert!(command_suggestion("/steer", "/steer".len()).is_none());
+    }
+
+    #[test]
+    fn jobs_takes_a_list_check_or_stop_and_validates_its_id() {
+        // A bare `/jobs` is the listing, which is what a user reaching for it
+        // without arguments means.
+        assert_eq!(
+            parse_chat_command("/jobs"),
+            Some(Ok(ChatCommand::Jobs {
+                action: JobListAction::List,
+                id: None
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/jobs list"),
+            Some(Ok(ChatCommand::Jobs {
+                action: JobListAction::List,
+                id: None
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/jobs check job-2"),
+            Some(Ok(ChatCommand::Jobs {
+                action: JobListAction::Check,
+                id: Some("job-2".to_owned())
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/jobs stop job-2"),
+            Some(Ok(ChatCommand::Jobs {
+                action: JobListAction::Stop,
+                id: Some("job-2".to_owned())
+            }))
+        );
+        // `check` with nothing to check is a usage error, not an empty listing.
+        assert!(matches!(parse_chat_command("/jobs check"), Some(Err(_))));
+        assert!(matches!(parse_chat_command("/jobs stop"), Some(Err(_))));
+        assert!(matches!(
+            parse_chat_command("/jobs list job-1"),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            parse_chat_command("/jobs show job-1"),
+            Some(Err(_))
+        ));
+        assert!(matches!(parse_chat_command("/jobs one two"), Some(Err(_))));
+    }
+
+    #[test]
+    fn restart_is_an_exact_command_and_offered_by_help() {
+        assert!(matches!(
+            parse_chat_command("/restart"),
+            Some(Ok(ChatCommand::Restart))
+        ));
+        assert!(
+            CHAT_COMMANDS.contains(&"/jobs") && CHAT_COMMANDS.contains(&"/restart"),
+            "the list must offer both: {CHAT_COMMANDS:?}"
+        );
+        assert_eq!(
+            command_usage("/jobs"),
+            Some("/jobs [list|check|stop] [job-id]")
+        );
+        assert_eq!(command_usage("/restart"), Some("/restart"));
     }
 
     #[tokio::test]

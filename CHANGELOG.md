@@ -8,6 +8,27 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `shell_bg` runs a shell script in the background and answers at once with a
+  job id; `manage_jobs` lists a session's jobs, reads what one has written, or
+  stops one. A job's output is kept in a bounded buffer while it runs and its
+  result arrives as a message when the process ends, so a long build no longer
+  holds the turn. Only `shell_bg` registers a job: a waited `shell` is its own
+  result, and the job ends when its streams close rather than when its call
+  finishes.
+- `/jobs [list|check|stop] [job-id]` shows the session's background jobs, reads
+  one, or ends one. A job belongs to the session that started it, which is also
+  what `Ctrl-C` reaches.
+- `/restart` starts a fresh session and leaves the previous one saved and
+  resumable.
+- `Ctrl-C` stops the session's background jobs while a turn runs, `Escape` asks
+  the running turn to stop, and `Ctrl-Shift-B` detaches the running call: the
+  turn stops waiting, the process keeps running, and the call answers with what
+  arrived so far. `Ctrl-Shift-B` rather than `Ctrl-B`, which readline uses to
+  move the cursor back.
+- The terminal is put in raw mode with `ISIG` cleared, so `Ctrl-C` reaches the
+  editor as a key instead of being turned into `SIGINT`. Before, the signal
+  handler and the key reader raced for the same keystroke and the handler did
+  not always win, so `Ctrl-C` looked like it sometimes did nothing.
 - `--auth disabled`, and `providers.<id>.auth: "disabled"` in the config, sends
   no credential and needs no API key. A local OpenAI-compatible server can be
   used without exporting a dummy key.

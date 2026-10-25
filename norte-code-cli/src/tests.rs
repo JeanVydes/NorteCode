@@ -761,10 +761,13 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
             let _ = approval_tx.send(());
         }
     }));
-    let (input_tx, mut input) = mpsc::unbounded_channel();
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let mut input = crate::input::InteractiveInput::from_events(input_rx);
     let responder = tokio::spawn(async move {
         approval_rx.recv().await.expect("approval event");
-        input_tx.send(Some("y".to_owned())).expect("approval input");
+        input_tx
+            .send(crate::input::EditorEvent::Line("y".to_owned()))
+            .expect("approval input");
     });
 
     let mut renderer = Renderer::new(

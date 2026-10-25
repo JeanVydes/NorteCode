@@ -1,4 +1,5 @@
 use super::compaction::recent_start;
+use super::jobs::{JOB_BUFFER_BYTES, JobRegistry, JobState};
 use super::mapping::retry_plan;
 #[cfg(test)]
 use super::prompt::{MAX_SKILL_DESCRIPTION_CHARS, MAX_SKILLS_BLOCK_CHARS, clip};
@@ -4695,5 +4696,90 @@ async fn a_resume_replays_the_recent_messages() {
         replays(&sent).is_empty(),
         "a message does not replay the conversation: {:?}",
         replays(&sent)
+    );
+}
+
+/// A registry with one job, for the state transitions.
+fn registry_with_job() -> (Arc<JobRegistry>, SessionId, CallId, String) {
+    let registry = Arc::new(JobRegistry::default());
+    let session = SessionId::new();
+    let call = CallId::new();
+    let cancel = Arc::new(norte::Cancellation::new());
+    let id = registry.start(session, call, "sleep 60", Arc::clone(&cancel));
+    (registry, session, call, id)
+}
+
+#[test]
+fn a_job_ends_when_its_streams_close_not_when_its_call_finishes() {
+    // The whole reason the registry keys on the call: a `shell_bg` result
+    // arrives long before the process does, so the result cannot be the end.
+    let (registry, _, call, id) = registry_with_job();
+    assert_eq!(registry.get(&id).expect("job").state, JobState::Running);
+
+    // One stream closing is not the end when the other is still open.
+    registry.close(call, false);
+    assert_eq!(registry.get(&id).expect("job").state, JobState::Running);
+    registry.close(call, true);
+    assert_eq!(registry.get(&id).expect("job").state, JobState::Finished);
+
+    // The exit code lands after the streams have closed, on a finished job.
+    registry.settle(&id, Some(7), false);
+    let job = registry.get(&id).expect("job");
+    assert_eq!(job.exit_code, Some(7));
+    assert_eq!(job.state, JobState::Finished);
+}
+
+#[test]
+fn a_cancelled_job_keeps_its_state_when_the_call_reports_an_exit() {
+    // Cancelling signals the token, which makes the process die non-zero. That
+    // code is the consequence of the cancellation, not a new fact about the job.
+    let (registry, _, _, id) = registry_with_job();
+    assert!(registry.cancel(&id), "a running job is cancellable");
+    assert_eq!(registry.get(&id).expect("job").state, JobState::Cancelled);
+
+    registry.settle(&id, Some(143), false);
+    let job = registry.get(&id).expect("job");
+    assert_eq!(job.state, JobState::Cancelled);
+    assert_eq!(job.exit_code, None, "the signal exit is not the job's code");
+    assert!(
+        !registry.cancel(&id),
+        "a cancelled job is not cancellable again"
+    );
+}
+
+#[test]
+fn stopping_a_session_reaches_only_its_own_jobs() {
+    let registry = Arc::new(JobRegistry::default());
+    let mine = SessionId::new();
+    let theirs = SessionId::new();
+    let cancel = Arc::new(norte::Cancellation::new());
+    let ours = registry.start(mine, CallId::new(), "one", Arc::clone(&cancel));
+    registry.start(theirs, CallId::new(), "two", Arc::clone(&cancel));
+
+    assert!(registry.any_running(mine));
+    assert_eq!(registry.cancel_session(mine), 1, "exactly one job was ours");
+    assert_eq!(registry.get(&ours).expect("job").state, JobState::Cancelled);
+    assert!(
+        registry.any_running(theirs),
+        "the other session's job is untouched"
+    );
+    assert!(!registry.any_running(mine), "and ours is done");
+}
+
+#[test]
+fn the_job_buffer_keeps_the_tail_and_says_it_dropped_the_rest() {
+    let (registry, _, call, id) = registry_with_job();
+    // The cap is generous, so filling it needs a lot: this writes more than it
+    // holds and checks the *end* survived, which is what a reader wants.
+    let chunk = "x".repeat(JOB_BUFFER_BYTES);
+    registry.write(call, &chunk);
+    registry.write(call, "THE END");
+    let job = registry.get(&id).expect("job");
+    assert!(job.dropped, "older output was dropped");
+    assert!(job.output.ends_with("THE END"), "the tail survives");
+    assert!(
+        job.output.len() <= JOB_BUFFER_BYTES + "THE END".len(),
+        "the buffer stays bounded: {} bytes",
+        job.output.len()
     );
 }

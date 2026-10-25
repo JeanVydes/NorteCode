@@ -655,11 +655,7 @@ impl Service {
                 last,
                 ..
             } => {
-                // Kept for a background job, whose caller has already been
-                // answered and can only read its output here. A call that is
-                // not a job is not in the registry, and this is a no-op.
                 let text = String::from_utf8_lossy(bytes).into_owned();
-                self.jobs.write(*call_id, &text);
                 Some(ServerEventKind::ToolOutput {
                     turn: stats.turn,
                     call_id: call_id.to_string(),
@@ -695,10 +691,6 @@ impl Service {
                 duration_ms,
                 ..
             } => {
-                // A background call's result is recorded here rather than
-                // returned: the call that would have carried it answered long
-                // ago, and `manage_jobs` is what reads it now.
-                self.jobs.finish(*call_id, None);
                 self.effects
                     .finished(nid, *call_id, tool.as_str(), *is_error);
                 let recorded = self.activity.finished(call_id);

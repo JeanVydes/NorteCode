@@ -20,11 +20,22 @@
 //! ```
 //!
 //! and the job id is what `manage_jobs` and `/jobs` take.
+//!
+//! The job's output is collected by a sink of its own rather than by the one the
+//! engine installed. The engine's sink writes to the turn's event channel, which
+//! is a live view of the call being waited on and is gone by the time a
+//! background job has anything to say; the registry has to hold the bytes
+//! instead. So a job reports into [`JobProgress`], and the engine never hears
+//! about it — which is right, because nobody is waiting for it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
-use norte::{Cancellation, FnExecutor, Result, ToolContext, ToolDeclaration, ToolOutput};
+use norte::{
+    CallId, Cancellation, FnExecutor, ProgressSink, Result, ToolContext, ToolDeclaration,
+    ToolOutput, ToolProgress,
+};
 use norte_tools::ShellRequest;
 
 use super::jobs::{JobRegistry, JobSummary};
@@ -54,7 +65,7 @@ fn started(id: &str, script: &str) -> ToolOutput {
     ))
 }
 
-/// Everything a detached call needs to finish on its own.
+/// Everything a background call needs to finish on its own.
 pub(super) struct BackgroundShell {
     /// The executor being wrapped, with the host's limits already applied.
     inner: Arc<dyn FnExecutor<ShellRequest, ToolOutput>>,
@@ -118,30 +129,46 @@ impl FnExecutor<ShellRequest, ToolOutput> for BackgroundShell {
         let jobs = Arc::clone(&self.jobs);
         let steering = Arc::clone(&self.steering);
         let job_id = id.clone();
-        // The context is a borrow and the task outlives this call, so what the
-        // job needs is taken out of it first: the metadata is the host's, and
-        // the detach token is how the job's own work is later asked to stop.
         let metadata: Vec<(String, serde_json::Value)> = context
             .metadata
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
+        // How many closing chunks to expect before the job is over: the reader
+        // reports one per stream it reads, and merging means there is only one.
+        // A job whose process never started emits none, and is ended by
+        // `settle` below instead.
+        let closes = if request.merge_stderr { 1 } else { 2 };
         let detach = context.detach();
         tokio::spawn(async move {
             let mut job_context = ToolContext::new()
                 .with_session(session)
                 .with_call(call_id)
                 .with_cancellation((*cancel).clone())
-                .with_detach(detach);
+                .with_detach(detach)
+                .with_progress(Arc::new(JobProgress {
+                    jobs: Arc::clone(&jobs),
+                    call_id,
+                    open: AtomicU8::new(closes),
+                }));
             for (key, value) in metadata {
                 job_context = job_context.with_metadata(key, value);
             }
             let outcome = inner.call_with_context(&job_context, request).await;
-            let (text, exit_code) = match &outcome {
-                Ok(output) => (output_text(output), exit_code_of(output)),
-                Err(error) => (format!("the job failed: {error}"), None),
+            let (text, exit_code, timed_out) = match &outcome {
+                Ok(output) => (
+                    output_text(output),
+                    exit_code_of(output),
+                    output
+                        .structured
+                        .as_ref()
+                        .and_then(|value| value.get("timed_out"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                ),
+                Err(error) => (format!("the job failed: {error}"), None, false),
             };
-            jobs.finish(call_id, exit_code);
+            jobs.settle(&job_id, exit_code, timed_out);
             // The result has no tool call left to answer, so it arrives as a
             // user message: the model reads it at the next safe point of the
             // turn, or at the start of the next one.
@@ -152,6 +179,34 @@ impl FnExecutor<ShellRequest, ToolOutput> for BackgroundShell {
         });
 
         Ok(started(&id, &script))
+    }
+}
+
+/// Where a background job's output goes while it runs.
+///
+/// It writes into the registry instead of onto the turn's event channel: the
+/// job's reader is `manage_jobs` or `/jobs`, and the turn that started it has
+/// already moved on.
+struct JobProgress {
+    jobs: Arc<JobRegistry>,
+    call_id: CallId,
+    /// How many streams have still to close.
+    open: AtomicU8,
+}
+
+impl ProgressSink for JobProgress {
+    fn send(&self, progress: ToolProgress) {
+        if !progress.bytes.is_empty() {
+            let text = String::from_utf8_lossy(&progress.bytes).into_owned();
+            self.jobs.write(self.call_id, &text);
+        }
+        // A stream's closing chunk is its pipe closing. The job is over once
+        // every stream has closed — one for a merged run, two otherwise — and
+        // not before: ending on the first would cut off a job whose stderr is
+        // still producing.
+        if progress.last && self.open.fetch_sub(1, Ordering::AcqRel) <= 1 {
+            self.jobs.close(self.call_id, true);
+        }
     }
 }
 

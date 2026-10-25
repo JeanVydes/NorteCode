@@ -42,7 +42,7 @@ pub(crate) enum ApprovalOutcome {
 pub(crate) async fn ask_approval(
     event: &ServerEvent,
     style: Style,
-    input: Option<&mut mpsc::UnboundedReceiver<Option<String>>>,
+    input: Option<&mut crate::input::InteractiveInput>,
     interrupts: &mut mpsc::Receiver<()>,
 ) -> Result<ApprovalOutcome, String> {
     let ServerEventKind::ApprovalRequested {
@@ -113,7 +113,7 @@ pub(crate) async fn ask_approval(
             style.red("[ns] deny this tool for this session"),
             style.red("[ng] deny this tool always")
         );
-        match prompt_input("", &mut *input, interrupts).await? {
+        match prompt_input("", input, interrupts).await? {
             PromptInput::Line(line) => {
                 if let Some(choice) = parse_approval_choice(&line) {
                     return Ok(ApprovalOutcome::Decision((

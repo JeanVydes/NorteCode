@@ -129,7 +129,8 @@ mod unix {
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use termios::{
-        ECHO, ECHOE, ECHOK, ECHONL, ICANON, ICRNL, IXON, TCSANOW, Termios, VMIN, VTIME, tcsetattr,
+        ECHO, ECHOE, ECHOK, ECHONL, ICANON, ICRNL, ISIG, IXON, TCSANOW, Termios, VMIN, VTIME,
+        tcsetattr,
     };
     use tokio::sync::mpsc;
 
@@ -190,10 +191,41 @@ mod unix {
         }
     }
 
-    /// A running input line editor and its channel of completed lines.
+    /// What the editor handed the repl: a line, or something a keystroke asked
+    /// for that is not a line.
+    ///
+    /// One channel for both, because they cannot be read at the same time: two
+    /// readers would each take `&mut self`, which a `select!` over both refuses
+    /// to borrow. Reading them in sequence would be worse than this: a keystroke
+    /// would wait behind an unfinished line.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum EditorEvent {
+        /// A line was submitted.
+        Line(String),
+        /// A keystroke asked for something that is not a line.
+        Action(EditorAction),
+        /// The editor ended: end of input.
+        End,
+    }
+
+    /// What a keystroke asked the repl to do, when it is not a line.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum EditorAction {
+        /// Escape, on a running turn: stop it.
+        CancelTurn,
+        /// Ctrl-C, when the session has background jobs: stop them.
+        CancelJobs,
+        /// Ctrl-Shift-B, on a running turn: stop waiting for the call, leave the
+        /// process running.
+        Detach,
+    }
+
+    /// A running input line editor and its channel of lines and actions.
     pub(crate) struct InteractiveInput {
-        lines: mpsc::UnboundedReceiver<Option<String>>,
-        _terminal: TerminalGuard,
+        events: mpsc::UnboundedReceiver<EditorEvent>,
+        /// The terminal settings to restore. Absent for a test that drives the
+        /// channel directly, which owns no terminal to put back.
+        _terminal: Option<TerminalGuard>,
     }
 
     impl InteractiveInput {
@@ -206,7 +238,11 @@ mod unix {
             let original = Termios::from_fd(fd)
                 .map_err(|error| format!("could not read the terminal settings: {error}"))?;
             let mut edited = original;
-            edited.c_lflag &= !(ICANON | ECHO | ECHOE | ECHOK | ECHONL);
+            // `ISIG` is the line that makes Ctrl-C work. Without it cleared,
+            // the terminal turns Ctrl-C into SIGINT and the editor never sees
+            // the key at all: the signal handler and the key reader were racing
+            // for the same keystroke, and the handler did not always win.
+            edited.c_lflag &= !(ICANON | ECHO | ECHOE | ECHOK | ECHONL | ISIG);
             edited.c_iflag &= !(ICRNL | IXON);
             edited.c_cc[VMIN] = 1;
             edited.c_cc[VTIME] = 0;
@@ -230,7 +266,7 @@ mod unix {
                 return Err(error);
             }
 
-            let (sender, lines) = mpsc::unbounded_channel();
+            let (sender, events) = mpsc::unbounded_channel();
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let handle = match thread::Builder::new()
@@ -246,18 +282,44 @@ mod unix {
             };
 
             Ok(Self {
-                lines,
-                _terminal: TerminalGuard {
+                events,
+                _terminal: Some(TerminalGuard {
                     original,
                     stop,
                     handle: Some(handle),
-                },
+                }),
             })
         }
 
-        /// The channel of completed lines. `None` means end of input.
-        pub(crate) fn lines(&mut self) -> &mut mpsc::UnboundedReceiver<Option<String>> {
-            &mut self.lines
+        /// The next thing the editor handed over.
+        ///
+        /// `None` means the editor is gone, which is the end of input.
+        pub(crate) async fn recv(&mut self) -> Option<EditorEvent> {
+            self.events.recv().await
+        }
+
+        /// A handle over a channel a test fills, with no terminal behind it.
+        #[cfg(test)]
+        pub(crate) fn from_events(events: mpsc::UnboundedReceiver<EditorEvent>) -> Self {
+            Self {
+                events,
+                _terminal: None,
+            }
+        }
+
+        /// The next submitted line, ignoring what keystrokes asked for.
+        ///
+        /// It is for the prompts that want a line and nothing else — an
+        /// approval, a question, a budget limit — where an Escape or a Ctrl-C
+        /// has no meaning of its own and waiting for a line is the answer.
+        pub(crate) async fn recv_line(&mut self) -> Option<Option<String>> {
+            loop {
+                match self.events.recv().await {
+                    Some(EditorEvent::Line(line)) => return Some(Some(line)),
+                    Some(EditorEvent::Action(_)) => {}
+                    Some(EditorEvent::End) | None => return Some(None),
+                }
+            }
         }
     }
 
@@ -475,7 +537,7 @@ mod unix {
         mut cols: u16,
         mut rows: u16,
         pinned: &Pinned,
-        sender: &mpsc::UnboundedSender<Option<String>>,
+        sender: &mpsc::UnboundedSender<EditorEvent>,
         stop: &AtomicBool,
     ) {
         let mut buffer = LineBuffer::default();
@@ -508,6 +570,24 @@ mod unix {
                             ) {
                                 KeyOutcome::Continue => redraw = true,
                                 KeyOutcome::Exit => break,
+                                // The editor does not act on these: it cannot
+                                // cancel a turn, and it cannot know whether one
+                                // is running. It says what was asked, and the
+                                // reader that has that context does the rest.
+                                KeyOutcome::CancelTurn => {
+                                    let _ =
+                                        sender.send(EditorEvent::Action(EditorAction::CancelTurn));
+                                    redraw = true;
+                                }
+                                KeyOutcome::CancelJobs => {
+                                    let _ =
+                                        sender.send(EditorEvent::Action(EditorAction::CancelJobs));
+                                    redraw = true;
+                                }
+                                KeyOutcome::Detach => {
+                                    let _ = sender.send(EditorEvent::Action(EditorAction::Detach));
+                                    redraw = true;
+                                }
                             }
                         }
                         Ok(Event::Paste(text)) => {
@@ -527,7 +607,7 @@ mod unix {
                 }
                 Ok(false) => {}
                 Err(_) => {
-                    let _ = sender.send(None);
+                    let _ = sender.send(EditorEvent::End);
                     break;
                 }
             }
@@ -551,6 +631,13 @@ mod unix {
     enum KeyOutcome {
         Continue,
         Exit,
+        /// The user asked to stop the running turn (Escape).
+        CancelTurn,
+        /// The user asked to stop the running jobs (Ctrl-C).
+        CancelJobs,
+        /// The user asked to stop waiting for the running call and leave its
+        /// process running (Ctrl-Shift-B).
+        Detach,
     }
 
     #[allow(clippy::too_many_lines)]
@@ -560,7 +647,7 @@ mod unix {
         history: &mut Vec<String>,
         history_pos: &mut Option<usize>,
         draft: &mut String,
-        sender: &mpsc::UnboundedSender<Option<String>>,
+        sender: &mpsc::UnboundedSender<EditorEvent>,
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -578,7 +665,7 @@ mod unix {
                     history_pos.take();
                     draft.clear();
                 }
-                if sender.send(Some(line)).is_err() {
+                if sender.send(EditorEvent::Line(line)).is_err() {
                     return KeyOutcome::Exit;
                 }
                 buffer.clear();
@@ -586,12 +673,22 @@ mod unix {
             }
             KeyCode::Char('d') if control => {
                 if buffer.is_empty() {
-                    let _ = sender.send(None);
+                    let _ = sender.send(EditorEvent::End);
                     return KeyOutcome::Exit;
                 }
                 KeyOutcome::Continue
             }
-            KeyCode::Char('c' | 'l') if control => KeyOutcome::Continue,
+            // Ctrl-C ends the jobs the session started rather than the turn.
+            //
+            // It always reports the key: the editor cannot know whether a job
+            // is running, and the reader that knows turns a jobless Ctrl-C into
+            // nothing at all. Deciding here would need the editor to reach the
+            // service, which it cannot.
+            KeyCode::Char('c') if control => KeyOutcome::CancelJobs,
+            KeyCode::Char('l') if control => KeyOutcome::Continue,
+            // Ctrl-Shift-B stops waiting for the running call. Plain Ctrl-B
+            // stays where readline put it: one character back.
+            KeyCode::Char('B') if control => KeyOutcome::Detach,
             KeyCode::Char('a') if control => {
                 buffer.home();
                 KeyOutcome::Continue
@@ -685,11 +782,11 @@ mod unix {
                 }
                 KeyOutcome::Continue
             }
-            KeyCode::Esc => {
-                buffer.clear();
-                *history_pos = None;
-                KeyOutcome::Continue
-            }
+            // Escape asks for the running turn to stop, and does nothing
+            // otherwise; the reader decides which. It used to clear the draft,
+            // which is gone: a key that sometimes cancels and sometimes erases
+            // is one a user cannot press with confidence.
+            KeyCode::Esc => KeyOutcome::CancelTurn,
             _ => KeyOutcome::Continue,
         }
     }
@@ -1155,7 +1252,7 @@ mod unix {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         use super::{
-            FOOTER_ROWS, INPUT_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus,
+            EditorEvent, FOOTER_ROWS, INPUT_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus,
             clip_visible, handle_key, input_bottom, input_lines, resize_frame, scroll_bottom,
             status_row, suggestion_row, todo_line, todo_row,
         };
@@ -1487,7 +1584,8 @@ mod unix {
             let last_row = input_bottom(24);
             let block_top = last_row.saturating_sub(INPUT_ROWS) + 1;
             for row in block_top..=last_row {
-                frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+                use std::fmt::Write as _;
+                let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
             }
             for row in block_top..=last_row {
                 assert!(
@@ -1573,11 +1671,8 @@ mod unix {
             );
             assert_eq!(buffer.text(), "", "a plain enter clears the buffer");
             assert_eq!(
-                receiver
-                    .try_recv()
-                    .expect("the message was sent")
-                    .as_deref(),
-                Some("first\nsecond"),
+                receiver.try_recv().expect("the message was sent"),
+                EditorEvent::Line("first\nsecond".to_owned()),
                 "a plain enter submits the whole multi-line message"
             );
         }
@@ -1624,9 +1719,6 @@ mod unix {
     }
 }
 
-#[cfg(unix)]
-pub(crate) use unix::InteractiveInput;
-
 #[cfg(not(unix))]
 mod fallback {
     use std::io;
@@ -1638,41 +1730,88 @@ mod fallback {
 
     /// A plain line reader for platforms without the Unix terminal editor.
     pub(crate) struct InteractiveInput {
-        lines: mpsc::UnboundedReceiver<Option<String>>,
+        events: mpsc::UnboundedReceiver<EditorEvent>,
+    }
+
+    /// What the editor handed the repl; the same shape as the Unix build.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) enum EditorEvent {
+        /// A line was submitted.
+        Line(String),
+        /// A keystroke asked for something that is not a line.
+        Action(EditorAction),
+        /// The editor ended: end of input.
+        End,
+    }
+
+    /// The same actions, for a build without a terminal to read keys from.
+    ///
+    /// Nothing ever sends one — there is no key to intercept — but the repl is
+    /// one body for both builds, so the type has to exist.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum EditorAction {
+        /// Escape, on a running turn: stop it.
+        CancelTurn,
+        /// Ctrl-C, when the session has background jobs: stop them.
+        CancelJobs,
+        /// Ctrl-Shift-B, on a running turn: stop waiting for the call.
+        Detach,
     }
 
     impl InteractiveInput {
         /// Starts a blocking line reader on stdin.
         pub(crate) fn start(_style: Style, _pinned: Arc<super::Pinned>) -> Result<Self, String> {
-            let (sender, lines) = mpsc::unbounded_channel();
+            let (sender, events) = mpsc::unbounded_channel();
             std::thread::spawn(move || {
                 loop {
                     let mut line = String::new();
                     match io::stdin().read_line(&mut line) {
                         Ok(0) | Err(_) => {
-                            let _ = sender.send(None);
+                            let _ = sender.send(EditorEvent::End);
                             break;
                         }
                         Ok(_) => {
-                            if sender.send(Some(line.trim_end().to_owned())).is_err() {
+                            if sender
+                                .send(EditorEvent::Line(line.trim_end().to_owned()))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
                     }
                 }
             });
-            Ok(Self { lines })
+            Ok(Self { events })
         }
 
-        /// The channel of completed lines.
-        pub(crate) fn lines(&mut self) -> &mut mpsc::UnboundedReceiver<Option<String>> {
-            &mut self.lines
+        /// A handle over a channel a test fills.
+        #[cfg(test)]
+        pub(crate) fn from_events(events: mpsc::UnboundedReceiver<EditorEvent>) -> Self {
+            Self { events }
+        }
+
+        /// The next thing the editor handed over.
+        pub(crate) async fn recv(&mut self) -> Option<EditorEvent> {
+            self.events.recv().await
+        }
+
+        /// The next submitted line, ignoring what keystrokes asked for.
+        pub(crate) async fn recv_line(&mut self) -> Option<Option<String>> {
+            loop {
+                match self.events.recv().await {
+                    Some(EditorEvent::Line(line)) => return Some(Some(line)),
+                    Some(EditorEvent::Action(_)) => continue,
+                    Some(EditorEvent::End) | None => return Some(None),
+                }
+            }
         }
     }
 }
 
 #[cfg(not(unix))]
-pub(crate) use fallback::InteractiveInput;
+pub(crate) use fallback::{EditorAction, EditorEvent, InteractiveInput};
+#[cfg(unix)]
+pub(crate) use unix::{EditorAction, EditorEvent, InteractiveInput};
 
 #[cfg(test)]
 mod pinned_tests {
