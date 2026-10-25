@@ -295,8 +295,11 @@ impl Service {
         // descriptions can go into it: a model cannot activate a skill it has
         // no way of knowing about.
         let skills = Arc::new(discover_skills(&config, &workspace_root));
+        // By precedence, not by name: the prompt's budget is spent on the
+        // skills closest to this workspace first, so a bundled set cannot crowd
+        // out the one the session was set up for.
         let skill_index: Vec<(String, String)> = skills
-            .skills()
+            .skills_by_precedence()
             .iter()
             .map(|skill| (skill.name.clone(), skill.description.clone()))
             .collect();

@@ -120,6 +120,14 @@ pub struct Skill {
     pub allowed_tools: Vec<String>,
     /// The canonical skill directory.
     pub root: PathBuf,
+    /// Which discovery root it came from, and where that root sits in the
+    /// precedence order.
+    ///
+    /// Roots are searched most-specific last (a workspace skill shadows a
+    /// bundled one), which is the order a reader expects and not the order a
+    /// name sorts in. The index keeps that order recoverable after the registry
+    /// has filed the skill by name.
+    pub(crate) origin: (usize, PathBuf),
     /// The Markdown body after the frontmatter.
     pub body: String,
 }
@@ -247,7 +255,7 @@ impl SkillRegistry {
         };
         let limit = max_skills.max(1);
         let mut full = false;
-        for root in roots {
+        for (rank, root) in roots.iter().enumerate() {
             if full {
                 break;
             }
@@ -296,6 +304,8 @@ impl SkillRegistry {
                                 ),
                             );
                         }
+                        let mut skill = skill;
+                        skill.origin = (rank, root.clone());
                         registry.skills.insert(skill.name.clone(), skill);
                     }
                     Err(message) => registry.warn(path, message),
@@ -316,6 +326,26 @@ impl SkillRegistry {
     #[must_use]
     pub fn skills(&self) -> Vec<&Skill> {
         self.skills.values().collect()
+    }
+
+    /// Every valid skill, most-specific root first, by name within a root.
+    ///
+    /// This is the order a prompt wants. A workspace skill is the one the
+    /// session was set up for, and a bundled or user-wide one is context the
+    /// session may never need; a name sort puts `amazon-bedrock` ahead of
+    /// `rust-best-practices` and gives the budget to the wrong one.
+    #[must_use]
+    pub fn skills_by_precedence(&self) -> Vec<&Skill> {
+        let mut out: Vec<&Skill> = self.skills.values().collect();
+        // The later root in `discovery_roots` is the more specific one, so the
+        // ranking is reversed: a workspace skill shadows a user-wide one.
+        out.sort_by(|a, b| {
+            b.origin
+                .0
+                .cmp(&a.origin.0)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out
     }
 
     /// One skill by name.
@@ -497,6 +527,8 @@ fn load_skill(directory: &Path) -> std::result::Result<(Skill, Option<String>), 
             metadata: parsed.metadata,
             allowed_tools: parsed.allowed_tools,
             root,
+            // Filled in by `discover`, which is what knows the root's rank.
+            origin: (usize::MAX, PathBuf::new()),
             body: parsed.body,
         },
         warning,
@@ -540,6 +572,7 @@ pub fn parse_skill(text: &str, directory_name: &str) -> std::result::Result<Skil
         metadata: frontmatter.metadata,
         allowed_tools,
         root: PathBuf::new(),
+        origin: (usize::MAX, PathBuf::new()),
         body: body.to_owned(),
     })
 }
@@ -1288,6 +1321,95 @@ mod tests {
                 .iter()
                 .any(|warning| warning.message.contains("shadows"))
         );
+        let _ = std::fs::remove_dir_all(user);
+        let _ = std::fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn the_prompt_order_puts_the_most_specific_root_first() {
+        // The shape this exists for: twenty-five user-wide skills whose names
+        // sort early, and one workspace skill whose name sorts late. A name
+        // sort gives the budget to the AWS set and leaves the workspace's own
+        // skill out.
+        let user = temp_root("precedence-user");
+        let project = temp_root("precedence-project");
+        write_skill(
+            &user,
+            "amazon-bedrock",
+            "name: amazon-bedrock\ndescription: aws",
+            "b",
+        );
+        write_skill(
+            &user,
+            "aws-compute",
+            "name: aws-compute\ndescription: aws",
+            "b",
+        );
+        write_skill(
+            &project,
+            "rust-best-practices",
+            "name: rust-best-practices\ndescription: rust",
+            "b",
+        );
+
+        // The workspace root is last, which makes it the most specific.
+        let registry = SkillRegistry::discover(&[user.clone(), project.clone()], 16);
+        let ordered: Vec<&str> = registry
+            .skills_by_precedence()
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        assert_eq!(
+            ordered,
+            ["rust-best-practices", "amazon-bedrock", "aws-compute"],
+            "the workspace skill comes first, the rest by name inside their root"
+        );
+        // And the alphabetical view is still available for a listing.
+        let by_name: Vec<&str> = registry
+            .skills()
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        assert_eq!(by_name[0], "amazon-bedrock", "{by_name:?}");
+
+        let _ = std::fs::remove_dir_all(user);
+        let _ = std::fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn the_prompt_budget_favours_the_workspace_skill() {
+        // The point of the order: with room for one, the workspace skill is the
+        // one that reaches the prompt.
+        let user = temp_root("budget-user");
+        let project = temp_root("budget-project");
+        for name in ["amazon-bedrock", "aws-compute", "aws-storage"] {
+            write_skill(
+                &user,
+                name,
+                &format!(
+                    "name: {name}\ndescription: a long winded AWS description that fills the budget"
+                ),
+                "b",
+            );
+        }
+        write_skill(
+            &project,
+            "zzz-workspace",
+            "name: zzz-workspace\ndescription: the one this repo is for",
+            "b",
+        );
+
+        let registry = SkillRegistry::discover(&[user.clone(), project.clone()], 16);
+        let index: Vec<(String, String)> = registry
+            .skills_by_precedence()
+            .iter()
+            .map(|skill| (skill.name.clone(), skill.description.clone()))
+            .collect();
+        assert_eq!(
+            index[0].0, "zzz-workspace",
+            "the workspace skill leads the index the prompt is built from"
+        );
+
         let _ = std::fs::remove_dir_all(user);
         let _ = std::fs::remove_dir_all(project);
     }
