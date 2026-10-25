@@ -1,17 +1,11 @@
-feat(cli): make /refresh re-read everything it can
+feat(cli): let resume choose the model it comes back with
 
-Three things can change underneath a running agent: the configuration, the skill
-roots, and an MCP server that failed to start. They were three commands, and
-`/refresh` did one of them, which is not what a person means by the word.
+A session stores the model it was using, and resuming was stuck with it: the only
+way to change it was to start the session and type `/model`. `run` takes
+`--model`, so a person expects `resume` to take it too, and being refused where
+the other command accepts was a trap.
 
-`/refresh` now does all three. `/reload` stays as an alias so a habit keeps
-working, and the two spellings are asserted to parse to the same command rather
-than to look alike by accident.
-
-The retry touches only the servers that failed: one that is connected keeps its
-process and its session, so refreshing cannot disturb it. A server that fails
-again keeps its place with the new reason, and the command says how many are
-still unreachable.
-
-The retry runs without holding the servers lock across an await, which would
-have blocked the runtime; the lock is taken once, to install the result.
+The override goes through `SetModel`, the same request the interactive command
+sends, so the session's own rules judge it: a model it cannot honour is reported
+with a reason instead of being half-applied. `--provider` is not needed, because
+a `provider/model` reference already names the provider.

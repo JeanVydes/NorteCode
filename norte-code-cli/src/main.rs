@@ -204,6 +204,10 @@ struct ResumeArgs {
     /// Replace the built-in system prompt for this resume.
     #[arg(long, value_name = "TEXT")]
     system_prompt: Option<String>,
+    /// A `provider/model` reference to resume with, replacing the one the
+    /// session holds.
+    #[arg(long, short = 'm', value_name = "PROVIDER/MODEL")]
+    model: Option<String>,
     /// Replace the session budget before resuming.
     #[arg(long, value_name = "LIMIT")]
     budget: Option<f64>,
@@ -811,6 +815,28 @@ async fn resume_session(
                         limit,
                         action,
                     },
+                },
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        drive_turns(
+            &service,
+            stream,
+            &mut renderer,
+            style,
+            input.as_mut().map(InteractiveInput::lines),
+        )
+        .await?;
+    }
+    // The override goes through the same request the interactive `/model` sends,
+    // so the session's own rules judge it and a model it refuses is reported.
+    if let Some(model) = args.model.clone() {
+        let stream = service
+            .submit(ClientRequest {
+                request_id: 2,
+                kind: ClientRequestKind::SetModel {
+                    session: session.clone(),
+                    model,
                 },
             })
             .await
