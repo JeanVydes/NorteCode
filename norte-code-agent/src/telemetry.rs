@@ -26,6 +26,9 @@ use uuid::Uuid;
 
 use crate::provider::ModelSpec;
 
+/// The vendor extension that names an upstream provider, when a host pins one.
+const ROUTE_EXTENSION: &str = "openai.chat:provider";
+
 /// Engine-event counters that an observer can update without blocking.
 #[derive(Debug, Default)]
 pub struct EngineCounters {
@@ -197,6 +200,8 @@ impl Layer for TelemetryLayer {
                 tool_calls: Vec::new(),
                 status: None,
                 error: None,
+                error_kind: None,
+                retry_after_ms: None,
                 finished: false,
                 metadata,
             })),
@@ -210,6 +215,10 @@ impl Layer for TelemetryLayer {
                     "error",
                 );
                 record.error = Some(error.to_string());
+                record.error_kind = error_kind_label(&error);
+                record.retry_after_ms = error
+                    .retry_after()
+                    .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
                 self.telemetry.push(record);
                 Err(error)
             }
@@ -242,10 +251,19 @@ impl RequestMetadata {
             extensions: serde_json::to_value(&request.extensions).unwrap_or(Value::Null),
             metadata: json!({
                 "wire": format!("{:?}", spec.wire),
+                // A count and an estimate, never the messages themselves.
                 "messages": request.messages.len(),
                 "tool_declarations": request.tools.len(),
                 "cache_boundaries": request.cache_boundaries.len(),
                 "estimated_input_tokens": u64::try_from(bytes / 4).unwrap_or(0),
+                // Which upstream the request asked for, and which one served it.
+                // `requested` is the vendor extension as it went out — for
+                // OpenRouter, `openai.chat:provider`. `served` is what the
+                // response named, and stays null until Norte exposes it.
+                "route": json!({
+                    "requested": request.extensions.get(ROUTE_EXTENSION),
+                    "served": Value::Null,
+                }),
             }),
         }
     }
@@ -267,6 +285,7 @@ impl RequestMetadata {
             turn,
             provider: spec.provider.clone(),
             model: spec.model.clone(),
+            endpoint: spec.endpoint.clone(),
             started_at,
             duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             first_token_ms: None,
@@ -292,6 +311,8 @@ impl RequestMetadata {
             finish_reason: None,
             status: status.to_owned(),
             error: None,
+            error_kind: None,
+            retry_after_ms: None,
         }
     }
 }
@@ -311,6 +332,8 @@ struct TelemetryStream {
     tool_calls: Vec<String>,
     status: Option<&'static str>,
     error: Option<String>,
+    error_kind: Option<String>,
+    retry_after_ms: Option<u64>,
     finished: bool,
     metadata: RequestMetadata,
 }
@@ -351,6 +374,8 @@ impl TelemetryStream {
         }
         record.finish_reason.clone_from(&self.finish_reason);
         record.error.clone_from(&self.error);
+        record.error_kind.clone_from(&self.error_kind);
+        record.retry_after_ms = self.retry_after_ms;
         record.metadata["engine_events"] = self.telemetry.counter_snapshot();
         self.telemetry.push(record);
     }
@@ -380,6 +405,10 @@ impl Stream for TelemetryStream {
             Poll::Ready(Some(Err(error))) => {
                 self.status = Some("error");
                 self.error = Some(error.to_string());
+                self.error_kind = error_kind_label(&error);
+                self.retry_after_ms = error
+                    .retry_after()
+                    .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
                 self.finish("error");
                 Poll::Ready(Some(Err(error)))
             }
@@ -423,6 +452,36 @@ fn finish_label(reason: &norte::FinishReason) -> String {
         norte::FinishReason::Other(other) => other.clone(),
         _ => "other".to_owned(),
     }
+}
+
+/// The typed kind of a provider failure, as it goes into the telemetry row.
+///
+/// A report should count rate limits without parsing error messages, so the
+/// variant is stored beside the text. A non-provider error has no kind.
+fn error_kind_label(error: &norte::Error) -> Option<String> {
+    use norte::ProviderErrorKind as Kind;
+    let kind = match error {
+        norte::Error::Provider(provider) => provider.kind,
+        _ => return None,
+    };
+    Some(
+        match kind {
+            Kind::RateLimited => "rate_limited",
+            Kind::QuotaExceeded => "quota_exceeded",
+            Kind::InvalidRequest => "invalid_request",
+            Kind::Authentication => "authentication",
+            Kind::Permission => "permission",
+            Kind::NotFound => "not_found",
+            Kind::ContentFilter => "content_filter",
+            Kind::ModelOverloaded => "model_overloaded",
+            Kind::ServerError => "server_error",
+            Kind::Transport => "transport",
+            Kind::Decode => "decode",
+            Kind::Cancelled => "cancelled",
+            _ => "other",
+        }
+        .to_owned(),
+    )
 }
 
 fn reasoning_label(reasoning: ReasoningRequest) -> String {

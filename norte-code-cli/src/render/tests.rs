@@ -218,7 +218,7 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
     assert!(read.starts_with("Cargo.toml"), "{read}");
 
     let command =
-        Renderer::tool_result("command", None, Some("ok")).expect("a command shows its output");
+        Renderer::tool_result("shell", None, Some("ok")).expect("a shell shows its output");
     assert_eq!(command, "ok");
 
     assert!(

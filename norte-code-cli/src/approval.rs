@@ -185,7 +185,7 @@ pub(crate) fn argument_preview(tool: &str, arguments: &serde_json::Value) -> Vec
         return vec![PreviewLine::Note(compact_json(arguments, 200))];
     };
     let lines = match tool {
-        "command" => command_preview(object),
+        "shell" => shell_preview(object),
         "read" => read_preview(object),
         "write" => write_preview(object),
         "edit" => edit_preview(object),
@@ -200,35 +200,15 @@ pub(crate) fn argument_preview(tool: &str, arguments: &serde_json::Value) -> Vec
     }
 }
 
-pub(crate) fn command_preview(
+pub(crate) fn shell_preview(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<PreviewLine> {
     let mut lines = Vec::new();
-    if let Some(command) = object.get("command").and_then(serde_json::Value::as_object) {
-        match command.get("kind").and_then(serde_json::Value::as_str) {
-            Some("shell") => {
-                if let Some(shell) = command.get("shell").and_then(serde_json::Value::as_str) {
-                    lines.push(field("shell", shell));
-                }
-                if let Some(script) = command.get("script").and_then(serde_json::Value::as_str) {
-                    lines.push(block("script", script, 14));
-                }
-            }
-            Some("program") => {
-                if let Some(program) = command.get("program").and_then(serde_json::Value::as_str) {
-                    lines.push(field("program", program));
-                }
-                if let Some(args) = command.get("args").and_then(serde_json::Value::as_array) {
-                    let args: Vec<&str> =
-                        args.iter().filter_map(serde_json::Value::as_str).collect();
-                    if !args.is_empty() {
-                        let joined = args.join(" ");
-                        lines.push(field("args", &joined));
-                    }
-                }
-            }
-            _ => {}
-        }
+    if let Some(script) = object.get("script").and_then(serde_json::Value::as_str) {
+        lines.push(block("script", script, 14));
+    }
+    if let Some(shell) = object.get("shell").and_then(serde_json::Value::as_str) {
+        lines.push(field("shell", shell));
     }
     if let Some(cwd) = object.get("cwd").and_then(serde_json::Value::as_str) {
         lines.push(field("cwd", cwd));

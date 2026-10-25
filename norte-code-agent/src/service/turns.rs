@@ -148,7 +148,7 @@ impl Service {
             let mut restored = Vec::new();
             for record in engine.pending_approvals(nid).await? {
                 let arguments = call_arguments(&engine, nid, record.call_id).await;
-                let sandbox = (record.tool.as_str() == "command"
+                let sandbox = (record.tool.as_str() == "shell"
                     && self.config().tools.confinement.sandbox.enabled)
                     .then(|| sandbox_name().to_owned());
                 restored.push(ServerEvent::new(
@@ -707,7 +707,7 @@ impl Service {
                 ..
             } => {
                 let arguments = call_arguments(engine, nid, *call_id).await;
-                let sandbox = (tool.as_str() == "command"
+                let sandbox = (tool.as_str() == "shell"
                     && self.config().tools.confinement.sandbox.enabled)
                     .then(|| sandbox_name().to_owned());
                 Some(ServerEventKind::ApprovalRequested {
@@ -914,6 +914,7 @@ impl Service {
             turn,
             provider,
             model,
+            endpoint: None,
             started_at: Utc::now(),
             duration_ms: 0,
             first_token_ms: None,
@@ -936,6 +937,8 @@ impl Service {
             finish_reason: None,
             status: "ok".to_owned(),
             error: None,
+            error_kind: None,
+            retry_after_ms: None,
         }
     }
 

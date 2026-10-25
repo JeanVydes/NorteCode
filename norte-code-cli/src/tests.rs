@@ -26,6 +26,7 @@ fn telemetry_record(
         turn: 1,
         provider: provider.to_owned(),
         model: model.to_owned(),
+        endpoint: None,
         started_at: DateTime::<Utc>::from_timestamp(0, 0).expect("epoch"),
         duration_ms: 1_000,
         first_token_ms,
@@ -46,6 +47,8 @@ fn telemetry_record(
         finish_reason: None,
         status: "ok".to_owned(),
         error: None,
+        error_kind: None,
+        retry_after_ms: None,
         sandbox: false,
         sandbox_network: false,
     }
@@ -418,10 +421,11 @@ fn a_read_preview_names_the_path_instead_of_dumping_json() {
 #[test]
 fn a_command_preview_shows_the_script_and_its_shell() {
     let arguments = serde_json::json!({
-        "command": {"kind": "shell", "shell": "sh", "script": "cargo test\ncargo clippy"},
+        "script": "cargo test\ncargo clippy",
+        "shell": "sh",
         "cwd": "/tmp/project",
     });
-    let lines = argument_preview("command", &arguments);
+    let lines = argument_preview("shell", &arguments);
     assert!(lines.contains(&PreviewLine::Field {
         key: "shell".to_owned(),
         value: "sh".to_owned(),

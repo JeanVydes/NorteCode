@@ -677,7 +677,7 @@ impl Renderer {
                 _ => path.to_owned(),
             });
         }
-        if tool == "command" {
+        if tool == "shell" {
             return output.map(str::to_owned);
         }
         None

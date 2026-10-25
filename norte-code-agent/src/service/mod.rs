@@ -44,7 +44,7 @@ use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredSession
 use norte_code_tools::{
     AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
 };
-use norte_tools::{BrowserTool, CommandLimits, CommandTool, EditTool, ReadTool, WriteTool};
+use norte_tools::{BrowserTool, EditTool, ReadTool, ShellLimits, ShellTool, WriteTool};
 use tokio::sync::Notify;
 
 use norte_code_catalog::Catalog;
@@ -63,6 +63,8 @@ use effects::{EffectJournal, EffectJournalPolicy};
 use mapping::{BudgetLayer, single};
 use mcp::McpServers;
 use models::resolve_reasoning;
+#[cfg(test)]
+use prompt::skills_block;
 use prompt::{compose_system_prompt, load_project_instructions};
 use questions::DirectoryQuestions;
 use sandbox::sandboxed_command;
@@ -288,9 +290,18 @@ impl Service {
         let project_chars = project
             .as_ref()
             .map_or(0, |project| project.text.chars().count());
-        let system_prompt = compose_system_prompt(system_prompt.into(), project.as_ref());
         let secrets = collect_secrets(&config, &catalog);
+        // Discovered before the prompt is composed, so their names and
+        // descriptions can go into it: a model cannot activate a skill it has
+        // no way of knowing about.
         let skills = Arc::new(discover_skills(&config, &workspace_root));
+        let skill_index: Vec<(String, String)> = skills
+            .skills()
+            .iter()
+            .map(|skill| (skill.name.clone(), skill.description.clone()))
+            .collect();
+        let system_prompt =
+            compose_system_prompt(&system_prompt.into(), project.as_ref(), &skill_index);
         let questions = Arc::new(
             QuestionBroker::new()
                 .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
@@ -502,10 +513,10 @@ impl Service {
         if let Ok(path) = std::env::var("PATH") {
             env.insert("PATH".to_owned(), path);
         }
-        let command = CommandTool::new()
-            .with_limits(CommandLimits {
+        let command = ShellTool::new()
+            .with_limits(ShellLimits {
                 max_model_bytes: self.config().tools.command_max_model_bytes,
-                ..CommandLimits::default()
+                ..ShellLimits::default()
             })
             .with_env(env)
             .with_secrets(

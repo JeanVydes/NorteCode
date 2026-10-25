@@ -256,6 +256,8 @@ impl Service {
                 "unpriced": record.unpriced,
                 "input_tokens": record.input_tokens,
                 "output_tokens": record.output_tokens,
+                "cache_read_tokens": record.cache_read_tokens,
+                "cache_write_tokens": record.cache_write_tokens,
                 "budget": record.budget,
                 "compaction_baseline": record.compaction_baseline,
                 "reasoning": record.reasoning,

@@ -90,6 +90,12 @@ pub struct RequestRecord {
     pub provider: String,
     /// The model id.
     pub model: String,
+    /// The base `URL` the request went to, when the provider declares one.
+    ///
+    /// A column rather than a metadata key because it is grouped and filtered
+    /// on: one provider id can serve from more than one endpoint, and a latency
+    /// change is worth attributing to one of them.
+    pub endpoint: Option<String>,
     /// When the request started.
     pub started_at: DateTime<Utc>,
     /// How long the request took, including streaming.
@@ -152,6 +158,13 @@ pub struct RequestRecord {
     /// The provider or transport error, when the request failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The kind of provider failure, when the request failed.
+    ///
+    /// The typed half of `error`: a report should count rate limits without
+    /// parsing messages.
+    pub error_kind: Option<String>,
+    /// How long the provider asked the caller to wait before retrying.
+    pub retry_after_ms: Option<u64>,
 }
 
 /// A question a turn is parked on, durable across a restart.
@@ -719,6 +732,7 @@ CREATE TABLE IF NOT EXISTS requests (
     turn                    INTEGER NOT NULL,
     provider                TEXT NOT NULL,
     model                   TEXT NOT NULL,
+    endpoint                TEXT,
     started_at              TEXT NOT NULL,
     duration_ms             INTEGER NOT NULL,
     first_token_ms          INTEGER,
@@ -739,6 +753,8 @@ CREATE TABLE IF NOT EXISTS requests (
     finish_reason           TEXT,
     status                  TEXT NOT NULL,
     error                   TEXT,
+    error_kind              TEXT,
+    retry_after_ms          INTEGER,
     sandbox                 INTEGER NOT NULL DEFAULT 0,
     sandbox_network         INTEGER NOT NULL DEFAULT 0
 );
@@ -1487,16 +1503,16 @@ impl SessionDirectory for SqliteStore {
             connection
                 .execute(
                     "INSERT INTO requests (
-                         id, session, north_session, turn, provider, model, started_at,
+                         id, session, north_session, turn, provider, model, endpoint, started_at,
                          duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                          reasoning_tokens, cache_read_tokens, cache_write_tokens,
                          estimated_input_tokens, cache_hit, tool_calls, reasoning,
                          params, extensions, metadata, cost_usd, finish_reason, status, error,
-                         sandbox, sandbox_network
+                         error_kind, retry_after_ms, sandbox, sandbox_network
                      ) VALUES (
                          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                         ?28
+                         ?28, ?29, ?30, ?31
                      )
                      ON CONFLICT(id) DO UPDATE SET
                          session = excluded.session,
@@ -1504,6 +1520,7 @@ impl SessionDirectory for SqliteStore {
                          turn = excluded.turn,
                          provider = excluded.provider,
                          model = excluded.model,
+                         endpoint = excluded.endpoint,
                          started_at = excluded.started_at,
                          duration_ms = excluded.duration_ms,
                          first_token_ms = excluded.first_token_ms,
@@ -1524,6 +1541,8 @@ impl SessionDirectory for SqliteStore {
                          finish_reason = excluded.finish_reason,
                          status = excluded.status,
                          error = excluded.error,
+                         error_kind = excluded.error_kind,
+                         retry_after_ms = excluded.retry_after_ms,
                          sandbox = excluded.sandbox,
                          sandbox_network = excluded.sandbox_network",
                     params![
@@ -1533,6 +1552,7 @@ impl SessionDirectory for SqliteStore {
                         sqlite_u64(record.turn),
                         record.provider,
                         record.model,
+                        record.endpoint,
                         record.started_at.to_rfc3339(),
                         sqlite_u64(record.duration_ms),
                         record.first_token_ms.map(sqlite_u64),
@@ -1553,6 +1573,8 @@ impl SessionDirectory for SqliteStore {
                         record.finish_reason,
                         record.status,
                         record.error,
+                        record.error_kind,
+                        record.retry_after_ms.map(sqlite_u64),
                         i64::from(record.sandbox),
                         i64::from(record.sandbox_network),
                     ],
@@ -1566,51 +1588,54 @@ impl SessionDirectory for SqliteStore {
     async fn requests(&self, session: Option<&str>) -> Result<Vec<RequestRecord>> {
         let session = session.map(str::to_owned);
         let rows: Vec<(
-            String,
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            i64,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            i64,
-            String,
-            Option<String>,
-            String,
-            String,
-            String,
-            Option<f64>,
-            Option<String>,
-            String,
-            Option<String>,
-            i64,
-            i64,
+            String,         // id
+            String,         // session
+            String,         // north_session
+            i64,            // turn
+            String,         // provider
+            String,         // model
+            Option<String>, // endpoint
+            String,         // started_at
+            i64,            // duration_ms
+            Option<i64>,    // first_token_ms
+            Option<i64>,    // last_token_ms
+            Option<i64>,    // input_tokens
+            Option<i64>,    // output_tokens
+            Option<i64>,    // reasoning_tokens
+            Option<i64>,    // cache_read_tokens
+            Option<i64>,    // cache_write_tokens
+            Option<i64>,    // estimated_input_tokens
+            i64,            // cache_hit
+            String,         // tool_calls
+            Option<String>, // reasoning
+            String,         // params
+            String,         // extensions
+            String,         // metadata
+            Option<f64>,    // cost_usd
+            Option<String>, // finish_reason
+            String,         // status
+            Option<String>, // error
+            Option<String>, // error_kind
+            Option<i64>,    // retry_after_ms
+            i64,            // sandbox
+            i64,            // sandbox_network
         )> = self
             .run(move |connection| {
                 let sql = if session.is_some() {
-                    "SELECT id, session, north_session, turn, provider, model, started_at,
+                    "SELECT id, session, north_session, turn, provider, model, endpoint, started_at,
                             duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
                             params, extensions, metadata, cost_usd, finish_reason, status, error,
-                            sandbox, sandbox_network
+                            error_kind, retry_after_ms, sandbox, sandbox_network
                      FROM requests WHERE session = ?1 ORDER BY started_at, id"
                 } else {
-                    "SELECT id, session, north_session, turn, provider, model, started_at,
+                    "SELECT id, session, north_session, turn, provider, model, endpoint, started_at,
                             duration_ms, first_token_ms, last_token_ms, input_tokens, output_tokens,
                             reasoning_tokens, cache_read_tokens, cache_write_tokens,
                             estimated_input_tokens, cache_hit, tool_calls, reasoning,
                             params, extensions, metadata, cost_usd, finish_reason, status, error,
-                            sandbox, sandbox_network
+                            error_kind, retry_after_ms, sandbox, sandbox_network
                      FROM requests ORDER BY started_at, id"
                 };
                 let mut statement = connection.prepare(sql).map_err(Fault::from)?;
@@ -1644,6 +1669,9 @@ impl SessionDirectory for SqliteStore {
                         row.get(25)?,
                         row.get(26)?,
                         row.get(27)?,
+                        row.get(28)?,
+                        row.get(29)?,
+                        row.get(30)?,
                     ))
                 };
                 let mapped = if let Some(session) = session.as_deref() {
@@ -1671,6 +1699,7 @@ impl SessionDirectory for SqliteStore {
                     turn,
                     provider,
                     model,
+                    endpoint,
                     started_at,
                     duration_ms,
                     first_token_ms,
@@ -1691,6 +1720,8 @@ impl SessionDirectory for SqliteStore {
                     finish_reason,
                     status,
                     error,
+                    error_kind,
+                    retry_after_ms,
                     sandbox,
                     sandbox_network,
                 ) = row;
@@ -1704,6 +1735,7 @@ impl SessionDirectory for SqliteStore {
                     turn: rust_u64(turn, "request turn")?,
                     provider,
                     model,
+                    endpoint,
                     started_at: started_at.parse().map_err(|error: chrono::ParseError| {
                         Fault::Corrupt {
                             what: "request started_at".to_owned(),
@@ -1734,6 +1766,10 @@ impl SessionDirectory for SqliteStore {
                     finish_reason,
                     status,
                     error,
+                    error_kind,
+                    retry_after_ms: retry_after_ms
+                        .map(|value| rust_u64(value, "retry after"))
+                        .transpose()?,
                 })
             })
             .collect()
@@ -1951,6 +1987,7 @@ mod tests {
             turn: 1,
             provider: "provider".to_owned(),
             model: "model".to_owned(),
+            endpoint: Some("https://example.invalid/v1".to_owned()),
             started_at: Utc::now(),
             duration_ms: 10,
             first_token_ms: Some(1),
@@ -1973,6 +2010,8 @@ mod tests {
             finish_reason: None,
             status: "ok".to_owned(),
             error: None,
+            error_kind: None,
+            retry_after_ms: None,
         };
         store.record_request(&record).await.expect("record");
         let rows = store.requests(Some("session")).await.expect("requests");

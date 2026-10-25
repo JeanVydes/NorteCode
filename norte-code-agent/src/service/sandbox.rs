@@ -1,4 +1,4 @@
-//! The optional OS sandbox for the `command` tool.
+//! The optional OS sandbox for the `shell` tool.
 //!
 //! The wrapper sits inside the tool executor, after policies, approvals and the
 //! effect journal. A human approves and the audit records the original command;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use norte::{FnExecutor, ToolContext, ToolDeclaration, ToolOutput};
 use norte_code_config::SandboxConfig;
-use norte_tools::CommandRequest;
+use norte_tools::ShellRequest;
 
 #[cfg(any(target_os = "macos", test))]
 use std::fmt::Write as _;
@@ -21,10 +21,10 @@ use std::fmt::Write as _;
 /// and the effect journal: the human approves and the audit records the
 /// original command, while only the process invocation gains the sandbox.
 pub(super) fn sandboxed_command(
-    declaration: ToolDeclaration<CommandRequest>,
+    declaration: ToolDeclaration<ShellRequest>,
     workspace: &Path,
     config: &SandboxConfig,
-) -> ToolDeclaration<CommandRequest> {
+) -> ToolDeclaration<ShellRequest> {
     let writable = config
         .writable
         .iter()
@@ -53,15 +53,15 @@ pub(super) fn sandboxed_command(
 
 /// Runs the command tool's request through the platform sandbox.
 struct SandboxExecutor {
-    inner: Arc<dyn FnExecutor<CommandRequest, ToolOutput>>,
+    inner: Arc<dyn FnExecutor<ShellRequest, ToolOutput>>,
     workspace: PathBuf,
     network: bool,
     writable: Vec<PathBuf>,
 }
 
 #[async_trait]
-impl FnExecutor<CommandRequest, ToolOutput> for SandboxExecutor {
-    async fn call(&self, args: CommandRequest) -> norte::Result<ToolOutput> {
+impl FnExecutor<ShellRequest, ToolOutput> for SandboxExecutor {
+    async fn call(&self, args: ShellRequest) -> norte::Result<ToolOutput> {
         let args = sandbox_request(&args, &self.workspace, self.network, &self.writable)
             .map_err(norte::Error::InvalidInput)?;
         self.inner.call(args).await
@@ -70,7 +70,7 @@ impl FnExecutor<CommandRequest, ToolOutput> for SandboxExecutor {
     async fn call_with_context(
         &self,
         context: &ToolContext,
-        args: CommandRequest,
+        args: ShellRequest,
     ) -> norte::Result<ToolOutput> {
         let args = sandbox_request(&args, &self.workspace, self.network, &self.writable)
             .map_err(norte::Error::InvalidInput)?;
@@ -80,11 +80,11 @@ impl FnExecutor<CommandRequest, ToolOutput> for SandboxExecutor {
 
 /// Rewrites one command request to run under the platform sandbox.
 pub(super) fn sandbox_request(
-    request: &CommandRequest,
+    request: &ShellRequest,
     workspace: &Path,
     network: bool,
     writable: &[PathBuf],
-) -> std::result::Result<CommandRequest, String> {
+) -> std::result::Result<ShellRequest, String> {
     let value = serde_json::to_value(request).map_err(|error| error.to_string())?;
     let value = sandboxed_arguments(&value, workspace, network, writable)?;
     serde_json::from_value(value).map_err(|error| error.to_string())
@@ -103,49 +103,16 @@ pub(super) fn sandboxed_arguments(
         .cloned()
         .ok_or_else(|| "tool arguments must be a JSON object".to_owned())?;
     let (program, args, cwd) = {
-        let command = request
-            .get("command")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| "missing `command`".to_owned())?;
-        let kind = command
-            .get("kind")
+        // The schema is flat: `script` and an optional `shell`, beside `cwd`.
+        let script = request
+            .get("script")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing command kind".to_owned())?;
-        let (program, args) = match kind {
-            "program" => {
-                let program = command
-                    .get("program")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "missing `program`".to_owned())?
-                    .to_owned();
-                let args = match command.get("args") {
-                    None => Vec::new(),
-                    Some(serde_json::Value::Array(values)) => values
-                        .iter()
-                        .map(|value| {
-                            value
-                                .as_str()
-                                .map(str::to_owned)
-                                .ok_or_else(|| "`args` must contain only strings".to_owned())
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                    Some(_) => return Err("`args` must be an array".to_owned()),
-                };
-                (program, args)
-            }
-            "shell" => {
-                let shell = command
-                    .get("shell")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("sh");
-                let script = command
-                    .get("script")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "missing `script`".to_owned())?;
-                (shell.to_owned(), vec!["-c".to_owned(), script.to_owned()])
-            }
-            other => return Err(format!("unknown command kind `{other}`")),
-        };
+            .ok_or_else(|| "missing `script`".to_owned())?;
+        let shell = request
+            .get("shell")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("sh");
+        let (program, args) = (shell.to_owned(), vec!["-c".to_owned(), script.to_owned()]);
         let cwd = match request.get("cwd") {
             None => None,
             Some(serde_json::Value::String(path)) => Some(PathBuf::from(path)),
@@ -155,14 +122,17 @@ pub(super) fn sandboxed_arguments(
     };
     let (program, args) =
         wrap_command(program, args, cwd.as_deref(), workspace, network, writable)?;
-    request.insert(
-        "command".to_owned(),
-        serde_json::json!({
-            "kind": "program",
-            "program": program,
-            "args": args,
-        }),
-    );
+    // The sandbox is a wrapper program now, so the request becomes a shell
+    // script that runs it. Every argument is quoted, so the script the sandbox
+    // wraps reaches the shell as one word exactly as it arrived — joining on a
+    // space would split `echo hi` into two arguments.
+    let mut line = shell_quote(&program);
+    for argument in &args {
+        line.push(' ');
+        line.push_str(&shell_quote(argument));
+    }
+    request.insert("script".to_owned(), serde_json::Value::String(line));
+    request.insert("shell".to_owned(), serde_json::json!("sh"));
     Ok(serde_json::Value::Object(request))
 }
 
@@ -313,4 +283,21 @@ fn macos_wrap(
     ];
     wrapped.extend(args);
     Ok(("sandbox-exec".to_owned(), wrapped))
+}
+
+/// One argument as a single word a shell will not re-split.
+///
+/// The sandbox wraps the invocation as a script, so the original command has to
+/// survive the round trip through a shell. Wrapping in single quotes does that;
+/// an embedded single quote is closed, escaped and reopened, which is the only
+/// way a POSIX shell spells one.
+fn shell_quote(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:=@,+%".contains(&byte))
+    {
+        return argument.to_owned();
+    }
+    format!("'{}'", argument.replace('\'', "'\\''"))
 }

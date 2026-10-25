@@ -23,7 +23,7 @@ use norte_code_protocol::{
 };
 use norte_code_store_sqlite::SqliteStore;
 use norte_testing::ScriptedModel;
-use norte_tools::CommandRequest;
+use norte_tools::ShellRequest;
 
 struct ScriptedFactory {
     model: Arc<dyn Model>,
@@ -675,25 +675,22 @@ async fn a_permanent_failure_is_not_retried() {
 fn the_command_sandbox_wraps_the_original_request_without_losing_it() {
     let workspace = PathBuf::from("/work");
     let arguments = serde_json::json!({
-        "command": {"kind": "shell", "shell": "sh", "script": "echo hi"},
+        "script": "echo hi",
+        "shell": "sh",
         "cwd": "/work/sub",
         "env": {"A": "B"},
         "timeout_ms": 1_000
     });
     let wrapped = sandboxed_arguments(&arguments, &workspace, false, &[PathBuf::from("/cache")])
         .expect("wrap");
-    let command = wrapped
-        .get("command")
-        .and_then(serde_json::Value::as_object)
-        .expect("command");
-    assert_eq!(command["kind"], "program");
-    assert_eq!(command["program"], "bwrap");
-    let args: Vec<&str> = command["args"]
-        .as_array()
-        .expect("args")
-        .iter()
-        .map(|value| value.as_str().expect("string"))
-        .collect();
+    let command = wrapped.as_object().expect("the request stays flat");
+    assert_eq!(command["shell"], "sh");
+    let script = command["script"].as_str().expect("script");
+    assert!(
+        script.starts_with("bwrap"),
+        "the sandbox becomes the program: {script}"
+    );
+    let args: Vec<&str> = script.split_whitespace().collect();
     assert!(args.contains(&"--unshare-all"));
     assert!(args.contains(&"--cap-drop"));
     assert!(!args.contains(&"--share-net"));
@@ -705,37 +702,43 @@ fn the_command_sandbox_wraps_the_original_request_without_losing_it() {
         args.windows(3)
             .any(|pair| pair[0] == "--bind" && pair[1] == "/cache" && pair[2] == "/cache")
     );
-    assert_eq!(&args[args.len() - 4..], ["--", "sh", "-c", "echo hi"]);
     assert_eq!(wrapped["cwd"], "/work/sub");
     assert_eq!(wrapped["env"]["A"], "B");
     assert_eq!(wrapped["timeout_ms"], 1_000);
 
+    // Same request, network allowed: the sandbox gains the sharing flag.
     let networked = sandboxed_arguments(&arguments, &workspace, true, &[]).expect("networked");
-    let args = networked["command"]["args"].as_array().expect("args");
+    let script = networked["script"].as_str().expect("script");
     assert!(
-        args.iter()
-            .any(|value| value.as_str() == Some("--share-net"))
+        script.split_whitespace().any(|word| word == "--share-net"),
+        "the network is shared when asked: {script}"
     );
 
-    let program = serde_json::json!({
-        "command": {"kind": "program", "program": "cargo", "args": ["test", "--all"]}
-    });
+    // A program with arguments is a script too, so the only difference is what
+    // the original text says. The sandbox still goes in front of it.
+    let program = serde_json::json!({ "script": "cargo test --all" });
     let wrapped = sandboxed_arguments(&program, &workspace, false, &[]).expect("program");
-    let args: Vec<&str> = wrapped["command"]["args"]
-        .as_array()
-        .expect("args")
-        .iter()
-        .map(|value| value.as_str().expect("string"))
-        .collect();
-    assert_eq!(&args[args.len() - 4..], ["--", "cargo", "test", "--all"]);
+    let script = wrapped["script"].as_str().expect("script");
+    assert!(
+        script.contains("cargo test --all"),
+        "the original line survives: {script}"
+    );
 
-    let request: CommandRequest = serde_json::from_value(arguments).expect("request");
+    // The typed path produces the same request the JSON path does.
+    let request: ShellRequest = serde_json::from_value(arguments).expect("request");
     let wrapped = sandbox_request(&request, &workspace, false, &[]).expect("request wrap");
     let value = serde_json::to_value(&wrapped).expect("value");
-    assert_eq!(value["command"]["program"], "bwrap");
     assert_eq!(sandbox_name(), "bwrap");
+    assert!(
+        value["script"]
+            .as_str()
+            .is_some_and(|script| script.starts_with("bwrap")),
+        "the sandbox is the program now: {value}"
+    );
 
-    let broken = serde_json::json!({"command": {"kind": "teleport"}});
+    // A request with no script cannot be wrapped, and says so.
+    let broken = serde_json::json!({ "shell": "sh" });
+    assert!(sandboxed_arguments(&broken, &workspace, false, &[]).is_err());
     assert!(sandboxed_arguments(&broken, &workspace, false, &[]).is_err());
 }
 
@@ -2538,6 +2541,40 @@ async fn the_request_table_records_usage_latency_and_metadata() {
 }
 
 #[test]
+fn the_skills_block_names_every_installed_skill() {
+    // A model cannot activate a skill it has no way of knowing about, so the
+    // name and description go into the prompt. The body does not: it is what
+    // `skill(activate)` returns.
+    let skills = vec![
+        (
+            "pdf-extract".to_owned(),
+            "Read text out of a PDF.".to_owned(),
+        ),
+        (
+            "commit-style".to_owned(),
+            "Write a Conventional Commit.".to_owned(),
+        ),
+    ];
+    let prompt = compose_system_prompt("base", None, &skills);
+    assert!(prompt.contains("# Skills"), "{prompt}");
+    assert!(
+        prompt.contains("`pdf-extract`: Read text out of a PDF."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("`commit-style`"), "{prompt}");
+    assert!(prompt.contains("activate"), "the prompt says how: {prompt}");
+    assert!(prompt.starts_with("base"), "the base prompt comes first");
+
+    // No skills, no block: a session that has none pays nothing for it.
+    assert_eq!(compose_system_prompt("base", None, &[]), "base");
+    // And with no base prompt either, the block is still well formed.
+    let only_skills = compose_system_prompt("", None, &skills);
+    assert!(only_skills.starts_with("# Skills"), "{only_skills}");
+    assert!(!only_skills.starts_with('\n'), "{only_skills}");
+    assert_eq!(skills_block(&[]), "");
+}
+
+#[test]
 fn project_instructions_are_bounded_and_appended_to_the_prompt() {
     let dir = std::env::temp_dir().join(format!("norte-instructions-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -2549,11 +2586,11 @@ fn project_instructions_are_bounded_and_appended_to_the_prompt() {
     std::fs::write(dir.join(PROJECT_INSTRUCTIONS_FILE), "Use tabs.\n").expect("write");
     let loaded = load_project_instructions(&dir).expect("instructions");
     assert_eq!(loaded.text, "Use tabs.\n");
-    let prompt = compose_system_prompt("base".to_owned(), Some(&loaded));
+    let prompt = compose_system_prompt("base", Some(&loaded), &[]);
     assert!(prompt.starts_with("base\n\n# Project instructions"));
     assert!(prompt.contains("Use tabs."));
-    assert_eq!(compose_system_prompt("base".to_owned(), None), "base");
-    assert!(!compose_system_prompt(String::new(), Some(&loaded)).starts_with('\n'));
+    assert_eq!(compose_system_prompt("base", None, &[]), "base");
+    assert!(!compose_system_prompt("", Some(&loaded), &[]).starts_with('\n'));
 
     // A socket is not a regular file, so it is refused instead of read.
     let socket = dir.join("socket");

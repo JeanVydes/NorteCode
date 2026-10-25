@@ -46,7 +46,7 @@ impl Policy for WorkspacePolicy {
             "read" | "write" | "edit" => self.apply(view, "path", false, PathKind::File),
             "glob" | "list_dir" => self.apply(view, "path", true, PathKind::Directory),
             "grep" => self.apply(view, "path", true, PathKind::FileOrDirectory),
-            "command" => self.apply(view, "cwd", false, PathKind::Directory),
+            "shell" => self.apply(view, "cwd", false, PathKind::Directory),
             _ => Decision::Allow,
         }
     }
