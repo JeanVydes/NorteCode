@@ -105,8 +105,7 @@ impl McpServers {
         config: &McpServerConfig,
         root: &Path,
     ) -> Result<McpServer, String> {
-        let transport = StdioTransport::from_command(command_for(config, root))
-            .map_err(|error| format!("could not start `{}`: {error}", config.command))?;
+        let transport = transport_for(config, root)?;
         let client = Arc::new(
             McpClient::connect(
                 Arc::new(transport),
@@ -151,7 +150,7 @@ impl McpServers {
 
         Ok(McpServer {
             name: name.to_owned(),
-            command: config.command.clone(),
+            command: config.target(),
             tools,
             filtered,
             active: true,
@@ -190,6 +189,21 @@ impl McpServers {
             .filter(|value| !value.is_empty())
             .collect()
     }
+}
+
+/// The transport an entry names: a remote endpoint, or a program to run.
+///
+/// A `url` needs the HTTP transport, which lives in a Norte revision that is not
+/// on the remote yet; until the dependency can move, a remote entry is reported
+/// as unreachable rather than silently ignored.
+fn transport_for(config: &McpServerConfig, root: &Path) -> Result<StdioTransport, String> {
+    if let Some(url) = config.url.as_ref().filter(|url| !url.trim().is_empty()) {
+        return Err(format!(
+            "`{url}` is remote, and this build speaks only to a local server"
+        ));
+    }
+    StdioTransport::from_command(command_for(config, root))
+        .map_err(|error| format!("could not start `{}`: {error}", config.command))
 }
 
 /// The child command for one server.

@@ -87,14 +87,26 @@ pub struct Config {
 
 /// One MCP server the agent may reach.
 ///
-/// The entry names a program to run and speaks the protocol over its standard
-/// input and output, which is what every client in the ecosystem does and what
-/// a server published on `npm` or `PyPI` expects.
+/// An entry names either a program to run, which speaks the protocol over its
+/// standard input and output and is what a server published on `npm` or `PyPI`
+/// expects, or a `url` to talk to over Streamable HTTP. Exactly one of the two
+/// is required.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpServerConfig {
-    /// The program to run.
+    /// The program to run, for a local server.
     pub command: String,
+    /// The endpoint, for a remote server.
+    ///
+    /// A server that has one is reached over Streamable HTTP instead of being
+    /// started, so `command` is ignored.
+    pub url: Option<String>,
+    /// The headers every request to a remote server carries.
+    ///
+    /// A token goes here as `Authorization`, by value or read from the
+    /// environment; the values are registered for redaction like any other
+    /// secret.
+    pub headers: BTreeMap<String, String>,
     /// Its arguments, in order.
     pub args: Vec<String>,
     /// Extra environment variables for the child.
@@ -119,6 +131,18 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
+    /// How the startup line names this server.
+    #[must_use]
+    pub fn target(&self) -> String {
+        self.url.clone().unwrap_or_else(|| self.command.clone())
+    }
+
+    /// Whether this entry reaches a remote endpoint.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        self.url.as_ref().is_some_and(|url| !url.trim().is_empty())
+    }
+
     /// The tools of `published` this entry lets through.
     ///
     /// A tool is kept when it is not denied and either nothing is allowed or it
@@ -142,6 +166,8 @@ impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
             command: String::new(),
+            url: None,
+            headers: BTreeMap::new(),
             args: Vec::new(),
             env: BTreeMap::new(),
             enabled: true,
@@ -478,15 +504,23 @@ impl Config {
     /// the separator the namespace uses.
     fn validate_mcp_servers(&self) -> Result<(), ConfigError> {
         for (name, server) in &self.mcp_servers {
-            if server.command.trim().is_empty() {
+            let remote = server.is_remote();
+            let local = !server.command.trim().is_empty();
+            if !remote && !local {
                 // A disabled entry is not started, so it may be a placeholder.
                 if server.enabled {
                     return Err(invalid(
                         format!("mcpServers.{name}"),
-                        "`command` must not be empty",
+                        "either `command` or `url` is required",
                     ));
                 }
                 continue;
+            }
+            if remote && local {
+                return Err(invalid(
+                    format!("mcpServers.{name}"),
+                    "`command` and `url` cannot both be set: one server is local or remote",
+                ));
             }
             let sane = !name.is_empty()
                 && !name.contains("__")
@@ -1375,6 +1409,43 @@ mod tests {
             !loaded.config.mcp_servers.get("off").expect("entry").enabled,
             "a disabled entry keeps its place"
         );
+    }
+
+    #[test]
+    fn a_remote_entry_is_a_url_and_not_a_command() {
+        // The shape another client writes for a hosted server.
+        let loaded = Config::from_json(
+            r#"{"mcpServers":{"remote":{"url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer x"}}}}"#,
+        )
+        .expect("a remote entry loads");
+        let server = loaded.config.mcp_servers.get("remote").expect("entry");
+        assert!(server.is_remote());
+        assert_eq!(server.target(), "https://mcp.example.com/mcp");
+        assert_eq!(
+            server.headers.get("Authorization").map(String::as_str),
+            Some("Bearer x")
+        );
+
+        // A local entry is labelled by its program.
+        let local = Config::from_json(r#"{"mcpServers":{"local":{"command":"npx"}}}"#)
+            .expect("a local entry loads")
+            .config;
+        let server = local.mcp_servers.get("local").expect("entry");
+        assert!(!server.is_remote());
+        assert_eq!(server.target(), "npx");
+
+        // A url on its own is a remote server, which is the point of the form.
+        Config::from_json(r#"{"mcpServers":{"x":{"url":"https://a"}}}"#)
+            .expect("a url alone is a remote entry");
+
+        // Nothing at all is a server that cannot be reached; both is ambiguous.
+        let error =
+            Config::from_json(r#"{"mcpServers":{"x":{}}}"#).expect_err("an empty entry is refused");
+        assert!(error.to_string().contains("either"), "{error}");
+        let error =
+            Config::from_json(r#"{"mcpServers":{"x":{"command":"npx","url":"https://a"}}}"#)
+                .expect_err("both is ambiguous");
+        assert!(error.to_string().contains("cannot both"), "{error}");
     }
 
     #[test]
