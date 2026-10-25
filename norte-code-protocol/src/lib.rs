@@ -103,6 +103,16 @@ pub enum ClientRequestKind {
         budget: Option<Budget>,
         /// A reasoning override for this message only.
         reasoning: Option<Reasoning>,
+        /// Whether the client is attaching to a session that already has a
+        /// history, and wants it replayed before the answer.
+        ///
+        /// A client that starts blank cannot tell what the session holds, so it
+        /// asks for the transcript. The service used to infer this from the
+        /// request having no message, which is true for a resume and false for
+        /// `run --session KEY`: a message sent to an existing session got no
+        /// transcript at all.
+        #[serde(default)]
+        replay: bool,
     },
     /// Queue a message to apply at the next turn boundary.
     Steer {
@@ -940,6 +950,7 @@ mod tests {
                 reasoning: Some(Reasoning::Effort {
                     effort: "high".to_owned(),
                 }),
+                replay: false,
             },
         };
         let json = serde_json::to_string(&request).expect("serialize");

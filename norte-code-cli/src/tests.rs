@@ -747,6 +747,7 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
                 text: "write it".to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         })
         .await

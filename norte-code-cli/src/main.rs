@@ -635,6 +635,9 @@ async fn run_prompt(
         if interactive {
             echo_user_message(style, &prompt);
         }
+        // `--session` names a session that already existed, so the client is
+        // starting blank against a history and asks for it.
+        let attaching = args.session.is_some();
         let request = ClientRequest {
             request_id: 1,
             kind: ClientRequestKind::SendMessage {
@@ -642,6 +645,7 @@ async fn run_prompt(
                 text: prompt,
                 budget: message_budget.clone(),
                 reasoning: reasoning.clone(),
+                replay: attaching,
             },
         };
         renderer.mark_working();

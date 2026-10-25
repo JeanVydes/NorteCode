@@ -1,11 +1,17 @@
-feat(cli): let resume choose the model it comes back with
+fix(agent): replay a session's history when the client asks for it
 
-A session stores the model it was using, and resuming was stuck with it: the only
-way to change it was to start the session and type `/model`. `run` takes
-`--model`, so a person expects `resume` to take it too, and being refused where
-the other command accepts was a trap.
+`run --session KEY "message"` attaches to a session that already has a history
+and the client starts blank, so it wants the transcript. It got none: the replay
+hung on the request having no message, which is true for a resume and false for
+every other turn, so the one case that sends a message to an existing session
+was the one case with nothing to show.
 
-The override goes through `SetModel`, the same request the interactive command
-sends, so the session's own rules judge it: a model it cannot honour is reported
-with a reason instead of being half-applied. `--provider` is not needed, because
-a `provider/model` reference already names the provider.
+The request now says so itself. `SendMessage` carries `replay`, the client sets
+it when it is attaching to a session it has not shown, and the service acts on
+what it is told instead of inferring intent from the shape of the request.
+`run --session` asks for it; the interactive prompt does not, because the
+transcript is already on screen and replaying it would print the conversation
+twice.
+
+`Resume` keeps replaying without the flag, because showing where the
+conversation was is what a resume is for.

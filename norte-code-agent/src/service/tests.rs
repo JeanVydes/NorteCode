@@ -364,6 +364,7 @@ async fn a_turn_streams_text_and_commits() {
             text: "hi".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -420,6 +421,7 @@ async fn a_transient_failure_retries_the_same_session() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -521,6 +523,7 @@ async fn cancelling_a_turn_stops_a_running_command() {
                 text: "run it".to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         })
         .await
@@ -584,6 +587,7 @@ async fn retries_report_increasing_attempts_and_backoff() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -638,6 +642,7 @@ async fn a_permanent_failure_is_not_retried() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -871,6 +876,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
             text: "hello".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -974,6 +980,7 @@ async fn two_sessions_run_turns_concurrently() {
                 text: "one".to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         })
         .await
@@ -986,6 +993,7 @@ async fn two_sessions_run_turns_concurrently() {
                 text: "two".to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         })
         .await
@@ -1383,6 +1391,7 @@ async fn set_reasoning_applies_to_the_session() {
             text: "hi".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1423,6 +1432,7 @@ async fn a_message_reasoning_override_is_used_once() {
                 text: text.to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         )
         .await;
@@ -1506,6 +1516,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             text: "one".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1532,6 +1543,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             text: "three".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1554,6 +1566,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
             text: "one".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1624,6 +1637,7 @@ async fn a_queued_model_that_cannot_be_honoured_does_not_break_the_session() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1685,6 +1699,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             text: "first".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1703,6 +1718,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             text: "second".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1720,6 +1736,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             text: "third".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1784,6 +1801,7 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -1881,6 +1899,7 @@ async fn the_budget_stops_the_next_request_every_time() {
                 text: "work".to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         )
         .await;
@@ -1962,6 +1981,7 @@ async fn reasoning_and_steering_survive_a_restart() {
             text: "hello".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2077,6 +2097,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
             text: "first".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2122,6 +2143,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
             text: "second".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2190,6 +2212,7 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2277,6 +2300,7 @@ async fn a_failed_eager_summary_stops_at_the_safe_point() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2336,6 +2360,7 @@ async fn manual_compaction_links_the_new_session_and_keeps_the_old_one() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2402,6 +2427,7 @@ async fn a_failed_summary_leaves_the_session_unchanged() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2486,6 +2512,7 @@ async fn the_request_table_records_usage_latency_and_metadata() {
             text: "hi".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2586,6 +2613,7 @@ async fn a_reconstructed_request_carries_its_tools_and_timing() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2636,6 +2664,7 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
             text: "one".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2647,6 +2676,7 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
             text: "two".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2703,6 +2733,7 @@ async fn a_session_budget_stops_the_next_request() {
             text: "work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2791,6 +2822,7 @@ async fn vendor_extensions_reach_the_model_request() {
             text: "hello".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2823,6 +2855,7 @@ async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
             text: "one".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -2892,6 +2925,7 @@ async fn a_write_parks_for_approval_and_resumes() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3018,6 +3052,7 @@ async fn a_model_switch_while_parked_is_applied_at_the_next_turn_boundary() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3078,6 +3113,7 @@ async fn a_model_switch_while_parked_is_applied_at_the_next_turn_boundary() {
             text: "next".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3140,6 +3176,7 @@ async fn grants_are_listed_and_can_be_revoked() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3269,6 +3306,7 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
             text: "edit it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3369,6 +3407,7 @@ async fn a_global_allow_skips_the_approval_prompt() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3422,6 +3461,7 @@ async fn a_global_deny_refuses_without_asking() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3481,6 +3521,7 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
             text: "hello".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3580,6 +3621,7 @@ async fn ask_user_parks_the_turn_until_the_client_answers() {
             text: "do the work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     };
     let mut stream = service.submit(request).await.expect("turn");
@@ -3667,6 +3709,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
             text: "do the work".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     };
     let mut stream = service.submit(request).await.expect("turn");
@@ -3765,6 +3808,7 @@ async fn an_unknown_session_is_an_error() {
                 text: "hi".to_owned(),
                 budget: None,
                 reasoning: None,
+                replay: false,
             },
         })
         .await;
@@ -3817,6 +3861,7 @@ async fn a_parked_approval_survives_a_restart() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -3892,6 +3937,10 @@ async fn a_parked_approval_survives_a_restart() {
 }
 
 #[tokio::test]
+// One scenario end to end: park, crash, reopen, refuse. The length is the
+// scenario, and the `replay` field every `SendMessage` carries is what tipped it
+// past the limit.
+#[allow(clippy::too_many_lines)]
 async fn a_write_that_started_before_a_crash_is_not_repeated() {
     let directory = std::env::temp_dir().join(format!(
         "norte-code-effect-restart-{}-{}",
@@ -3936,6 +3985,7 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
             text: "write it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -4036,6 +4086,7 @@ async fn a_pending_question_survives_a_restart() {
             text: "go".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     };
     let mut stream = first.submit(request).await.expect("turn");
@@ -4199,6 +4250,7 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
             text: "read it".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -4234,6 +4286,66 @@ fn replays(events: &[ServerEvent]) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
+async fn a_message_to_an_existing_session_replays_it_when_asked() {
+    // `run --session KEY` sends a message to a session that already has a
+    // history, and the client starts blank. The replay used to hang on the
+    // request having no message, so this case got no transcript at all.
+    let (service, _model) = scripted_service(spec("scripted"), &["hello there", "again"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "first".to_owned(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    // The same session, a new message, and the client asking for the history.
+    let attached = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "second".to_owned(),
+            budget: None,
+            reasoning: None,
+            replay: true,
+        },
+    )
+    .await;
+    let replay = replays(&attached);
+    assert!(
+        replay
+            .iter()
+            .any(|(role, text)| role == "user" && text == "first"),
+        "the history comes back: {replay:?}"
+    );
+
+    // Without the flag nothing is replayed: the transcript is already on screen.
+    let plain = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "third".to_owned(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    assert!(
+        replays(&plain).is_empty(),
+        "a plain message does not repeat history: {:?}",
+        replays(&plain)
+    );
+}
+
+#[tokio::test]
 async fn a_resume_reports_the_usage_the_session_already_spent() {
     // A resuming client starts blank, so the session's accumulated counters
     // have to arrive with the replay; otherwise the footer shows zero usage for
@@ -4259,6 +4371,7 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
             text: "first question".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -4328,6 +4441,7 @@ async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
             text: "first question".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -4376,6 +4490,7 @@ async fn a_resume_replays_the_recent_messages() {
             text: "hi".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -4420,6 +4535,7 @@ async fn a_resume_replays_the_recent_messages() {
             text: "again".to_owned(),
             budget: None,
             reasoning: None,
+            replay: false,
         },
     )
     .await;

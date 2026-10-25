@@ -920,12 +920,21 @@ impl Service {
                 text,
                 budget,
                 reasoning,
+                replay,
             } => {
-                self.start_turn(request_id, session, Some(text), Some(budget), reasoning)
-                    .await
+                self.start_turn(
+                    request_id,
+                    session,
+                    Some(text),
+                    Some(budget),
+                    reasoning,
+                    replay,
+                )
+                .await
             }
             Kind::Resume { session } => {
-                self.start_turn(request_id, Some(session), None, None, None)
+                // A resume exists to show where the conversation was.
+                self.start_turn(request_id, Some(session), None, None, None, true)
                     .await
             }
             Kind::CancelTurn { session } => {

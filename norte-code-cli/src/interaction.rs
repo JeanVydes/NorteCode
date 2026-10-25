@@ -768,6 +768,9 @@ pub(crate) async fn interactive_loop(
                     text,
                     budget: message_budget.clone(),
                     reasoning: reasoning.clone(),
+                    // The transcript is already on screen; replaying it would
+                    // print the conversation twice.
+                    replay: false,
                 },
             })
             .await

@@ -51,6 +51,7 @@ impl Service {
         input: Option<String>,
         message_budget: Option<Option<Budget>>,
         reasoning: Option<ProtocolReasoning>,
+        replay: bool,
     ) -> Result<EventStream, ServiceError> {
         let (key, mut nid, mut spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
@@ -167,13 +168,12 @@ impl Service {
         } else {
             Vec::new()
         };
-        // A resume shows where the conversation was: the client starts blank, so
-        // it gets the recent messages before the turn's own output. `input` is
-        // `None` exactly for a resume, so a normal message never repeats history.
-        // A resume starts a fresh client, so its counters begin at zero: give
-        // it the session's accumulated usage, or it would report only what it
-        // happens to replay.
-        let replay = if input.is_none() {
+        // A client that starts blank cannot tell what the session holds, so it
+        // asks for the transcript. It asks explicitly because the request's own
+        // shape cannot answer it: a resume has no message and a message has one,
+        // but `run --session KEY` sends a message to a session with a history
+        // and wants both.
+        let replay = if replay {
             let ancestors = compaction_ancestors(self.directory.as_ref(), nid).await;
             let mut events = Vec::new();
             if let Some(stats) = self
