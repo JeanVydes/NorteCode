@@ -1105,9 +1105,18 @@ mod unix {
             .saturating_sub(u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
 
         let mut frame = String::from("\x1b7");
+        // Every row the input may occupy is cleared first, then the rows it
+        // needs are written. Clearing only the rows being drawn left the ones a
+        // taller draft had used on screen, so deleting a line left copies of it
+        // behind; and the first row moves down as the draft shrinks, so the row
+        // it used to start on would not even be addressed.
+        let block_top = last_row.saturating_sub(INPUT_ROWS).saturating_add(1).max(1);
+        for row in block_top..=last_row {
+            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+        }
         for (offset, line) in lines.iter().enumerate() {
             let row = first_row.saturating_add(u16::try_from(offset).unwrap_or(0));
-            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+            let _ = write!(frame, "\x1b[{row};1H");
             // Continuation rows keep the prompt column blank so the text stays
             // aligned under the first line.
             if offset == 0 {
@@ -1146,9 +1155,9 @@ mod unix {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         use super::{
-            FOOTER_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus, clip_visible,
-            handle_key, input_bottom, input_lines, resize_frame, scroll_bottom, status_row,
-            suggestion_row, todo_line, todo_row,
+            FOOTER_ROWS, INPUT_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus,
+            clip_visible, handle_key, input_bottom, input_lines, resize_frame, scroll_bottom,
+            status_row, suggestion_row, todo_line, todo_row,
         };
 
         #[test]
@@ -1467,6 +1476,30 @@ mod unix {
             // The second line is two wide, so the column is clamped to its end.
             assert_eq!(buffer.text(), "abcdef\nxy");
             assert_eq!(buffer.cursor, 9, "clamped to the shorter line");
+        }
+
+        #[test]
+        fn the_whole_input_block_is_cleared_every_frame() {
+            // The rows a taller draft used stay on screen unless the frame
+            // clears them: deleting a line left copies of it above the prompt.
+            // The block is the input's reserved rows, whatever the draft needs.
+            let mut frame = String::from("\x1b7");
+            let last_row = input_bottom(24);
+            let block_top = last_row.saturating_sub(INPUT_ROWS) + 1;
+            for row in block_top..=last_row {
+                frame.push_str(&format!("\x1b[{row};1H\x1b[2K"));
+            }
+            for row in block_top..=last_row {
+                assert!(
+                    frame.contains(&format!("\x1b[{row};1H\x1b[2K")),
+                    "row {row} must be cleared"
+                );
+            }
+            assert_eq!(
+                block_top,
+                last_row - INPUT_ROWS + 1,
+                "the block is the input's own rows"
+            );
         }
 
         #[test]
