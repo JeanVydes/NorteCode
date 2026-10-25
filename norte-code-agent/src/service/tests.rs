@@ -160,6 +160,66 @@ fn config() -> Config {
     .config
 }
 
+#[tokio::test]
+#[ignore = "starts a real MCP server over stdio; needs node and the network"]
+async fn a_real_mcp_server_publishes_its_tools_into_the_service() {
+    // The path a user takes: a server named in `mcpServers`, started at
+    // startup, its tools in front of the model.
+    let mut config = config();
+    config.mcp_servers.insert(
+        "everything".to_owned(),
+        norte_code_config::McpServerConfig {
+            command: "npx".to_owned(),
+            args: vec![
+                "-y".to_owned(),
+                "@modelcontextprotocol/server-everything".to_owned(),
+            ],
+            ..norte_code_config::McpServerConfig::default()
+        },
+    );
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("done"));
+    let service = Arc::new(
+        Service::with_directory(
+            config,
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            Arc::new(InMemoryDirectory::new()),
+            "system",
+        )
+        .await
+        .expect("service"),
+    );
+
+    let status = service.mcp_status();
+    assert_eq!(status.len(), 1, "one server connected: {status:?}");
+    let (name, _command, tools) = &status[0];
+    assert_eq!(name, "everything");
+    assert!(*tools > 0, "the server published tools");
+
+    // The tools are in the registry the engine reads, with the namespace.
+    let registry = service.tools().expect("registry");
+    let specs = registry.specs();
+    let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
+    assert!(
+        names
+            .iter()
+            .any(|name| name.starts_with("mcp__everything__")),
+        "an MCP tool is registered: {names:?}"
+    );
+    assert!(
+        service.mcp_failures().is_empty(),
+        "no server failed: {:?}",
+        service.mcp_failures()
+    );
+}
+
 fn service() -> Arc<Service> {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),

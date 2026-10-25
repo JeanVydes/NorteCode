@@ -289,6 +289,26 @@ pub(crate) fn debug_start(
     panel.print(style);
 }
 
+/// Prints the MCP servers that connected, and the ones that did not.
+///
+/// A server that failed to start leaves its tools absent, so the reason is
+/// named here rather than left to the log.
+pub(crate) fn debug_mcp(style: Style, service: &Service) {
+    let connected = service.mcp_status();
+    let failures = service.mcp_failures();
+    if connected.is_empty() && failures.is_empty() {
+        return;
+    }
+    let mut panel = DebugPanel::new("server", "tools");
+    for (name, command, tools) in &connected {
+        panel.field(format!("{name} · {command}"), tools.to_string());
+    }
+    for (name, reason) in &failures {
+        panel.field(name.clone(), format!("failed: {reason}"));
+    }
+    panel.print(style);
+}
+
 /// Prints the static prompt size in characters. Tokens are provider-reported,
 /// so no estimate is made here.
 pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) {

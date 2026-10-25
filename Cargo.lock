@@ -1153,6 +1153,7 @@ dependencies = [
  "norte-code-skills",
  "norte-code-store-sqlite",
  "norte-code-tools",
+ "norte-mcp",
  "norte-testing",
  "norte-tools",
  "serde",

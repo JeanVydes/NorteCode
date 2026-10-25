@@ -10,6 +10,7 @@ mod budgets;
 mod compaction;
 mod effects;
 mod mapping;
+mod mcp;
 mod models;
 mod prompt;
 mod questions;
@@ -29,8 +30,9 @@ use std::time::Duration;
 
 use futures_core::Stream;
 use norte::{
-    BlobStore, Engine, EngineBuilder, EngineConfig, InMemoryBlobStore, InMemoryStore, Layer,
-    LayerStack, Model, PolicySet, Store, ToolArgs, ToolDeclaration, ToolRegistry, TurnInterceptor,
+    AnyFunction, BlobStore, Engine, EngineBuilder, EngineConfig, InMemoryBlobStore, InMemoryStore,
+    Layer, LayerStack, Model, PolicySet, Store, ToolArgs, ToolDeclaration, ToolRegistry,
+    TurnInterceptor,
 };
 use norte_code_cost::{BudgetBook, CostRecord};
 use norte_code_skills::{
@@ -57,6 +59,7 @@ use approvals::{ApprovalModePolicy, ApprovalRules};
 use compaction::{CompactionGate, CompactionLayer};
 use effects::{EffectJournal, EffectJournalPolicy};
 use mapping::{BudgetLayer, single};
+use mcp::McpServers;
 use models::resolve_reasoning;
 use prompt::{compose_system_prompt, load_project_instructions};
 use questions::DirectoryQuestions;
@@ -148,6 +151,8 @@ pub struct Service {
     /// The interceptors the host registered, consulted at the safe points of
     /// every turn.
     interceptors: Vec<Arc<dyn TurnInterceptor>>,
+    /// The MCP servers that connected, and the tools they published.
+    mcp_servers: RwLock<McpServers>,
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
@@ -215,6 +220,7 @@ impl Service {
             directory,
             system_prompt,
         )?;
+        service.connect_mcp().await;
         service.directory.repair_interrupted().await?;
         service.load_sessions().await?;
         service.effects.load().await?;
@@ -296,6 +302,8 @@ impl Service {
             cancels: Mutex::new(BTreeMap::new()),
             steering: Arc::new(Steering::default()),
             interceptors: Vec::new(),
+            // Connected in `with_directory`, which can await; `new` cannot.
+            mcp_servers: RwLock::new(McpServers::none()),
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
             config_path: Mutex::new(norte_code_config::user_config_path()),
@@ -544,7 +552,55 @@ impl Service {
                 )?;
             }
         }
+
+        // The MCP tools were wrapped when the servers connected; registering
+        // them here is what puts them in front of the model.
+        let mcp_tools: Vec<Arc<dyn AnyFunction>> = self
+            .mcp_servers
+            .read()
+            .map(|servers| servers.tools())
+            .unwrap_or_default();
+        for tool in mcp_tools {
+            tools.register(tool)?;
+        }
         Ok(tools)
+    }
+
+    /// Connects the configured MCP servers, once, at startup.
+    async fn connect_mcp(&self) {
+        let root = self.workspace_root.clone();
+        // The servers are read before the first await: a `std` lock must not be
+        // held across one.
+        let configured = self.lock_config().mcp_servers.clone();
+        let connected = McpServers::connect(&configured, &root).await;
+        for (name, reason) in &connected.failures {
+            tracing::warn!(server = %name, %reason, "an MCP server could not be started");
+        }
+        if let Ok(mut slot) = self.mcp_servers.write() {
+            *slot = connected;
+        }
+    }
+
+    /// The MCP servers that connected, for the startup line.
+    pub fn mcp_status(&self) -> Vec<(String, String, usize)> {
+        self.mcp_servers
+            .read()
+            .map(|servers| {
+                servers
+                    .servers
+                    .iter()
+                    .map(|server| (server.name.clone(), server.label(), server.tools.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The MCP servers that could not be started, for the startup line.
+    pub fn mcp_failures(&self) -> Vec<(String, String)> {
+        self.mcp_servers
+            .read()
+            .map(|servers| servers.failures.clone())
+            .unwrap_or_default()
     }
 
     fn policies(&self) -> PolicySet {

@@ -26,7 +26,7 @@ use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, echo_user_message, interactive_loop};
 use models::{list_models, resolve_spec};
 use render::{
-    Format, Renderer, Verbosity, approval_label, cache_percent_label, debug_model,
+    Format, Renderer, Verbosity, approval_label, cache_percent_label, debug_mcp, debug_model,
     debug_prompt_size, debug_reasoning, debug_start, fallback_env, find_project_config,
     human_tokens, parse_budget_action, parse_budget_unit, parse_reasoning_setting, reasoning_label,
     select_system_prompt, short, source_label, token_ratio,
@@ -595,6 +595,7 @@ async fn run_prompt(
     );
     if debug {
         debug_prompt_size(style, &service, system_prompt_source);
+        debug_mcp(style, &service);
     }
     service.set_config_path(config_path);
 
@@ -767,6 +768,7 @@ async fn resume_session(
     );
     if debug {
         debug_prompt_size(style, &service, system_prompt_source);
+        debug_mcp(style, &service);
     }
     service.set_config_path(config_path);
     let pinned = Pinned::new();

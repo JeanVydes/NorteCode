@@ -37,6 +37,9 @@ pub(super) fn collect_secrets(config: &Config, catalog: &Catalog) -> Vec<String>
             secrets.push(key.expose().to_owned());
         }
     }
+    // An MCP server's `env` is where its token lives, and a command's output is
+    // redacted against this list.
+    secrets.extend(super::mcp::McpServers::secrets(&config.mcp_servers));
     secrets.retain(|secret| !secret.trim().is_empty());
     secrets.sort();
     secrets.dedup();
