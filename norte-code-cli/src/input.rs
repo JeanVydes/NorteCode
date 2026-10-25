@@ -938,12 +938,13 @@ mod unix {
         out
     }
 
-    /// The buffer split into the logical lines the input line draws.
+    /// The buffer as the rows the input line draws.
     ///
-    /// Returns the rendered rows and the number of rows that precede the top of
-    /// the visible window, so a draft taller than the footer scrolls instead of
-    /// running off it. The last returned row is the one the cursor sits on.
-    fn input_lines(buffer: &LineBuffer, window: usize) -> Vec<String> {
+    /// A logical line (one separated by `\n`) becomes as many rows as it needs
+    /// at `width`, and the window keeps the row the cursor is on in view: a
+    /// draft longer than the terminal wraps, it does not lose its tail.
+    fn input_lines(buffer: &LineBuffer, window: usize, width: usize) -> Vec<String> {
+        let width = width.max(1);
         // Where each logical line starts and ends in the buffer.
         let mut spans: Vec<(usize, usize)> = Vec::new();
         let mut start = 0usize;
@@ -955,32 +956,45 @@ mod unix {
         }
         spans.push((start, buffer.chars.len()));
 
-        // The line the cursor is on, so the window can follow it.
-        let cursor_line = spans
-            .iter()
-            .position(|(from, to)| buffer.cursor >= *from && buffer.cursor <= *to)
-            .unwrap_or(spans.len() - 1);
-        let first = cursor_line.saturating_add(1).saturating_sub(window.max(1));
+        // Every visual row, as the buffer range it shows, and which one holds
+        // the cursor.
+        let mut rows: Vec<(usize, usize)> = Vec::new();
+        let mut cursor_row = 0usize;
+        for (from, to) in spans {
+            let mut row = from;
+            loop {
+                let end = (row + width).min(to);
+                if buffer.cursor >= row && buffer.cursor <= end {
+                    cursor_row = rows.len();
+                }
+                rows.push((row, end));
+                if end == to {
+                    break;
+                }
+                row = end;
+            }
+        }
 
+        let first = cursor_row.saturating_add(1).saturating_sub(window.max(1));
         let mut rendered = Vec::new();
-        for (from, to) in spans.iter().skip(first).take(window.max(1)).copied() {
-            let mut row = String::new();
+        for (from, to) in rows.iter().skip(first).take(window.max(1)).copied() {
+            let mut line = String::new();
             for index in from..to {
                 let character = buffer.chars[index];
                 if index == buffer.cursor {
-                    row.push_str("\x1b[7m");
-                    row.push(character);
-                    row.push_str("\x1b[27m");
+                    line.push_str("\x1b[7m");
+                    line.push(character);
+                    line.push_str("\x1b[27m");
                 } else {
-                    row.push(character);
+                    line.push(character);
                 }
             }
-            // A cursor at the very end of a line still needs a cell, and an
-            // empty line still needs one row to itself.
+            // A cursor at the very end of a row still needs a cell, and an empty
+            // logical line still needs one row to itself.
             if buffer.cursor == to {
-                row.push_str("\x1b[7m \x1b[27m");
+                line.push_str("\x1b[7m \x1b[27m");
             }
-            rendered.push(row);
+            rendered.push(line);
         }
         rendered
     }
@@ -998,7 +1012,7 @@ mod unix {
         // The input owns the footer rows below the pinned widgets, so a taller
         // draft grows upward over its own rows instead of the widgets.
         let window = usize::from(FOOTER_ROWS.saturating_sub(1).max(1));
-        let lines = input_lines(buffer, window);
+        let lines = input_lines(buffer, window, available);
         let last_row = rows.max(1);
         let first_row = last_row
             .saturating_sub(u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
@@ -1014,7 +1028,9 @@ mod unix {
             } else {
                 frame.push_str(&" ".repeat(prompt_width));
             }
-            frame.push_str(&clip_visible(line, available));
+            // Already wrapped to the width; clipping here would cut the rows
+            // the wrap just made.
+            frame.push_str(line);
         }
         // The completion hint belongs on the cursor row and only makes sense
         // while the draft is a single line.
@@ -1295,7 +1311,7 @@ mod unix {
             // and ignored the break, so the extra lines were invisible.
             let mut buffer = LineBuffer::default();
             buffer.insert_text("one\ntwo");
-            let lines = input_lines(&buffer, 4);
+            let lines = input_lines(&buffer, 4, 80);
             assert_eq!(lines.len(), 2, "each logical line gets a row: {lines:?}");
             assert!(lines[0].starts_with("one"), "{lines:?}");
             assert!(lines[1].starts_with("two"), "{lines:?}");
@@ -1307,11 +1323,45 @@ mod unix {
         fn a_draft_taller_than_the_window_scrolls_to_the_cursor_line() {
             let mut buffer = LineBuffer::default();
             buffer.insert_text("a\nb\nc\nd\ne");
-            let lines = input_lines(&buffer, 2);
+            let lines = input_lines(&buffer, 2, 80);
             assert_eq!(lines.len(), 2, "only the window is drawn: {lines:?}");
             assert!(
                 lines[1].contains('e'),
                 "the window follows the cursor to the last line: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn a_long_draft_wraps_instead_of_losing_its_tail() {
+            // It used to be clipped to the width with a `…`, so the end of a
+            // long message was simply not on screen.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("abcdefghij");
+            let lines = input_lines(&buffer, 8, 4);
+            assert_eq!(lines.len(), 3, "ten characters at width four: {lines:?}");
+            assert!(lines[0].contains('a'), "{lines:?}");
+            assert!(lines[1].contains('e'), "{lines:?}");
+            assert!(
+                lines[2].contains('i'),
+                "the tail is on its own row: {lines:?}"
+            );
+            assert!(
+                !lines.iter().any(|line| line.contains('…')),
+                "nothing is elided: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn the_wrapped_window_follows_the_cursor() {
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text(&"x".repeat(40));
+            // Two rows of window, width ten: the cursor is on the last row, so
+            // the window shows the last two rows and not the first ones.
+            let lines = input_lines(&buffer, 2, 10);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert!(
+                lines[1].contains("\x1b[7m"),
+                "the cursor row is drawn: {lines:?}"
             );
         }
 
