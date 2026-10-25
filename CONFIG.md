@@ -235,17 +235,63 @@ from the catalogue.
 | --- | --- | --- | --- |
 | `web_fetch` | boolean | `false` | Register the `web_fetch` tool. |
 | `command_max_model_bytes` | integer | `131072` | Bytes of each `command` stream and summary that reach the model. The tool still captures up to its own larger ceiling; this only bounds the text the model sees, eliding the middle with a marker. Valid range: `1024`–`1048576`. |
-| `sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
-| `sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
-| `sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |
+| `confinement.workspace_only` | boolean | `true` | Confine tool paths to the workspace. Off, `read`, `write`, `edit`, `glob`, `list_dir`, `grep` and `command`'s `cwd` may name any path, for a host working across repositories. A special file such as a FIFO is refused either way. |
+| `confinement.sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
+| `confinement.sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
+| `confinement.sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |
 
 On Linux the workspace and extras are writable, the rest of the filesystem is
 read-only, `/tmp` is a private tmpfs and the process tree gets new namespaces.
 On macOS the seatbelt profile keeps reads, denies writes outside the workspace,
 the extras and the temporary roots, and denies the network unless enabled. A
 missing platform binary fails closed; there is no unsandboxed fallback.
-`--sandbox`, `--no-sandbox` and `--sandbox-network on|off` override this
-section for one run or resume.
+`--sandbox`, `--no-sandbox` and `--sandbox-network on|off` override the sandbox
+for one run or resume. The two halves of `confinement` are separate: the
+workspace gate is a check on a tool's arguments and the sandbox is an operating
+system isolation of one child process.
+
+## `mcpServers`
+
+Servers that speak the Model Context Protocol over their standard input and
+output. The block keeps the name and the shape the rest of the ecosystem uses,
+so a configuration written for another client works here unchanged.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `<name>.command` | string | — | The program to run. Required unless the entry is disabled. |
+| `<name>.args` | array of strings | `[]` | Its arguments, in order. |
+| `<name>.env` | object | `{}` | Environment variables for the child. A value named here is registered for redaction, so it never reaches a log or a model event. |
+| `<name>.enabled` | boolean | `true` | Whether the server is started. An entry may be kept disabled while its command is filled in. |
+
+Every tool a server publishes is registered as `mcp__<name>__<tool>`, so the
+server keeps its own namespace and a per-tool approval rule still names one
+tool. The name may hold letters, digits, `-` and `_`, and not the `__` the
+namespace uses.
+
+The child gets only the variables listed in its `env` and the `PATH`: the
+ambient environment is cleared, because a server is a program from elsewhere and
+that is where a key would leak from.
+
+A server that cannot start is reported and skipped. One broken entry does not
+stop the agent, which is what a person expects from a configuration they have
+not tried yet; `--debug` prints the servers that connected and the ones that did
+not, with the reason.
+
+```json
+{
+    "mcpServers": {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/notes"],
+            "env": { "TOKEN": "..." }
+        },
+        "everything": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-everything"]
+        }
+    }
+}
+```
 
 ## `skills`
 

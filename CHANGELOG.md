@@ -23,6 +23,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   model it resolved and the rules granted during the run, which are session
   state; a new session uses the new default. A file that does not parse, or
   names a model that cannot be built, changes nothing.
+- MCP servers, named in an `mcpServers` block and each started once at
+  startup. Every tool a server publishes is registered as
+  `mcp__<server>__<tool>`, so the server keeps its own namespace and a per-tool
+  approval rule still names one tool. The block keeps the name and the shape the
+  rest of the ecosystem uses, so a configuration written for another client works
+  here unchanged. The child gets only its configured `env` and the `PATH`, and
+  its values are registered for redaction. A server that cannot start is
+  reported and skipped rather than stopping the run, and `--debug` prints the
+  servers that connected with the ones that did not.
 - `--verbose <LEVEL>` replaces `--quiet` and `--verbose`, which were the two
   ends of one axis and contradicted each other. `low` shows the answer and each
   tool's result; `medium` (the default) also says that a tool is running and
