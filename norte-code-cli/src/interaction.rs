@@ -87,10 +87,8 @@ pub(crate) enum ChatCommand {
     Help,
     /// Summarise the session on demand.
     Compact,
-    /// Re-scan the skill roots.
+    /// Re-read everything that can be re-read while the process runs.
     Refresh,
-    /// Re-read the configuration.
-    Reload,
     /// List the MCP servers, or switch one off or on.
     Mcp {
         action: McpAction,
@@ -127,8 +125,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
     let exact = match text {
         "/help" => Some(ChatCommand::Help),
         "/compact" => Some(ChatCommand::Compact),
-        "/refresh" => Some(ChatCommand::Refresh),
-        "/reload" => Some(ChatCommand::Reload),
+        "/refresh" | "/reload" => Some(ChatCommand::Refresh),
         "/mcp" => Some(ChatCommand::Mcp {
             action: McpAction::List,
             server: None,
@@ -375,8 +372,7 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/model" => Some("/model <model>"),
         "/provider" => Some("/provider <provider>"),
         "/revoke" => Some("/revoke [grant-id-or-tool]"),
-        "/refresh" => Some("/refresh"),
-        "/reload" => Some("/reload"),
+        "/refresh" | "/reload" => Some("/refresh  (alias: /reload)"),
         "/mcp" => Some("/mcp [list|enable|disable] [server]"),
         "/exit" => Some("/exit"),
         "/quit" => Some("/quit"),
@@ -441,6 +437,34 @@ fn report_reload(service: &Arc<Service>, style: Style) {
         Err(error) => eprintln!(
             "{}",
             style.red(format!("could not reload the configuration: {error}"))
+        ),
+    }
+}
+
+/// Re-reads everything that can be re-read while the process runs.
+///
+/// The configuration, the skill roots and the MCP servers that failed to start
+/// are the three things that can change underneath a running agent, so one
+/// command covers them: what a person means by "refresh" is not one of the
+/// three, and asking them to remember which is which was the mistake.
+async fn report_refresh(service: &Arc<Service>, style: Style) {
+    report_reload(service, style);
+    let count = service.refresh_skills();
+    eprintln!("{}", style.green(format!("skills refreshed: {count}")));
+    let recovered = service.retry_mcp().await;
+    match recovered {
+        0 => {
+            let failed = service.mcp_failures();
+            if !failed.is_empty() {
+                eprintln!(
+                    "{}",
+                    style.yellow(format!("{} mcp server(s) still unreachable", failed.len()))
+                );
+            }
+        }
+        count => eprintln!(
+            "{}",
+            style.green(format!("mcp server(s) connected: {count}"))
         ),
     }
 }
@@ -511,8 +535,8 @@ pub(crate) fn print_chat_help(style: Style) {
     eprintln!("  /model <model>             switch model (uses current provider)");
     eprintln!("  /provider <provider>       switch provider (keeps current model)");
     eprintln!("  /revoke [grant-or-tool]   list or revoke an approval grant");
-    eprintln!("  /refresh                  re-scan the skills and their tools");
-    eprintln!("  /reload                   re-read the configuration");
+    eprintln!("  /refresh                  re-read the config, the skills and the MCP servers");
+    eprintln!("  /reload                   an alias for /refresh");
     eprintln!("  /exit, /quit              leave the chat");
     eprintln!(
         "{}",
@@ -603,11 +627,7 @@ pub(crate) async fn interactive_loop(
                         break;
                     }
                 }
-                ChatCommand::Refresh => {
-                    let count = service.refresh_skills();
-                    eprintln!("{}", style.green(format!("skills refreshed: {count}")));
-                }
-                ChatCommand::Reload => report_reload(service, style),
+                ChatCommand::Refresh => report_refresh(service, style).await,
                 ChatCommand::Mcp { action, server } => {
                     report_mcp(service, action, server.as_deref(), style);
                 }
@@ -853,11 +873,7 @@ async fn handle_live_command(
             "{}",
             style.yellow("wait until the current turn finishes, then /compact")
         ),
-        ChatCommand::Refresh => {
-            let count = service.refresh_skills();
-            eprintln!("{}", style.green(format!("skills refreshed: {count}")));
-        }
-        ChatCommand::Reload => report_reload(service, style),
+        ChatCommand::Refresh => report_refresh(service, style).await,
         ChatCommand::Mcp { action, server } => {
             report_mcp(service, action, server.as_deref(), style);
         }
@@ -1649,21 +1665,25 @@ mod tests {
     }
 
     #[test]
-    fn reload_is_a_command_and_not_a_message() {
-        // A command that a user types must never reach the model as text.
+    fn refresh_and_reload_are_the_same_command() {
+        // A command a user types must never reach the model as text, and the
+        // two spellings do the same work: one re-reads what can be re-read.
+        assert!(matches!(
+            parse_chat_command("/refresh"),
+            Some(Ok(ChatCommand::Refresh))
+        ));
         assert!(matches!(
             parse_chat_command("/reload"),
-            Some(Ok(ChatCommand::Reload))
+            Some(Ok(ChatCommand::Refresh))
         ));
         assert!(
-            parse_chat_command("reload the config").is_none(),
+            parse_chat_command("refresh the config").is_none(),
             "prose is a message, not the command"
         );
-        assert_eq!(command_usage("/reload"), Some("/reload"));
-        assert!(
-            CHAT_COMMANDS.contains(&"/reload"),
-            "the completion list offers it"
-        );
+        assert!(command_usage("/refresh").is_some());
+        assert!(command_usage("/reload").is_some());
+        assert!(CHAT_COMMANDS.contains(&"/refresh"), "the list offers it");
+        assert!(CHAT_COMMANDS.contains(&"/reload"), "and its alias");
     }
 
     #[test]

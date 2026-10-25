@@ -100,6 +100,48 @@ impl McpServers {
         Self { servers, failures }
     }
 
+    /// The failures worth retrying, with their configuration.
+    ///
+    /// Only the failures are named: a server that is up keeps its process and
+    /// its session, so a retry cannot disturb it.
+    pub(super) fn failed_to_retry(
+        &self,
+        configured: &BTreeMap<String, McpServerConfig>,
+    ) -> Vec<(String, McpServerConfig)> {
+        self.failures
+            .iter()
+            .filter_map(|(name, _)| {
+                configured
+                    .get(name)
+                    .filter(|config| config.enabled)
+                    .map(|config| (name.clone(), config.clone()))
+            })
+            .collect()
+    }
+
+    /// Installs the result of a retry: what came up, and what did not.
+    pub(super) fn install(
+        &mut self,
+        recovered: Vec<McpServer>,
+        still_failed: Vec<(String, String)>,
+    ) {
+        self.servers.extend(recovered);
+        self.failures = still_failed;
+    }
+
+    /// Connects one named server, for a retry that must not hold the set.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason it could not be reached, as the startup path does.
+    pub(super) async fn connect_configured(
+        name: &str,
+        config: &McpServerConfig,
+        root: &Path,
+    ) -> Result<McpServer, String> {
+        Self::connect_one(name, config, root).await
+    }
+
     async fn connect_one(
         name: &str,
         config: &McpServerConfig,

@@ -1,0 +1,17 @@
+feat(cli): make /refresh re-read everything it can
+
+Three things can change underneath a running agent: the configuration, the skill
+roots, and an MCP server that failed to start. They were three commands, and
+`/refresh` did one of them, which is not what a person means by the word.
+
+`/refresh` now does all three. `/reload` stays as an alias so a habit keeps
+working, and the two spellings are asserted to parse to the same command rather
+than to look alike by accident.
+
+The retry touches only the servers that failed: one that is connected keeps its
+process and its session, so refreshing cannot disturb it. A server that fails
+again keeps its place with the new reason, and the command says how many are
+still unreachable.
+
+The retry runs without holding the servers lock across an await, which would
+have blocked the runtime; the lock is taken once, to install the result.

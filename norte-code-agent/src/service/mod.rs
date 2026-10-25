@@ -712,6 +712,35 @@ impl Service {
         count
     }
 
+    /// Retries the MCP servers that failed, returning how many answered.
+    ///
+    /// The ones that are connected are left alone: they keep their process and
+    /// their session.
+    pub async fn retry_mcp(&self) -> usize {
+        let root = self.workspace_root.clone();
+        // A `std` lock must not be held across an await, so the config is read
+        // and the retry runs without one; the lock is taken only to install the
+        // result.
+        let configured = self.lock_config().mcp_servers.clone();
+        let pending = match self.mcp_servers.read() {
+            Ok(servers) => servers.failed_to_retry(&configured),
+            Err(_) => return 0,
+        };
+        let mut recovered = Vec::new();
+        let mut still_failed = Vec::new();
+        for (name, config) in pending {
+            match McpServers::connect_configured(&name, &config, &root).await {
+                Ok(server) => recovered.push(server),
+                Err(reason) => still_failed.push((name, reason)),
+            }
+        }
+        let count = recovered.len();
+        if let Ok(mut servers) = self.mcp_servers.write() {
+            servers.install(recovered, still_failed);
+        }
+        count
+    }
+
     /// The skills registry in use.
     #[must_use]
     pub fn skills(&self) -> Arc<SkillRegistry> {
