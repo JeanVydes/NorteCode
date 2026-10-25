@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures_util::StreamExt;
+use norte::harness::GrantScope;
 use norte::harness::{Decision, Policy, PolicyView};
-use norte::{ApprovalId, GrantId, GrantScope, SessionId};
+use norte::{ApprovalId, GrantId, SessionId};
 use norte_code_config::ApprovalMode;
 use norte_code_protocol::{
     GrantInfo, GrantScope as ProtocolGrantScope, ServerEventKind, SessionKey,

@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use norte::{Interception, InterceptionContext, Message, Result, SessionId, TurnInterceptor};
+use norte::harness::{Interception, InterceptionContext, TurnInterceptor};
+use norte::{Message, Result, SessionId};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// A steering message on its way to the model.

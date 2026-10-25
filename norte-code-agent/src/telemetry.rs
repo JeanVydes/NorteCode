@@ -15,9 +15,10 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
+use norte::harness::{EngineEvent, Observer};
 use norte::{
-    Continuation, EngineEvent, Layer, LayerContext, ModelRequest, ModelStream, Observer,
-    ReasoningRequest, StreamEvent, Usage,
+    Continuation, Layer, LayerContext, ModelRequest, ModelStream, ReasoningRequest, StreamEvent,
+    Usage,
 };
 use norte_code_store_sqlite::RequestRecord;
 use serde_json::{Value, json};
@@ -172,7 +173,7 @@ impl Layer for TelemetryLayer {
 
     async fn wrap(
         &self,
-        context: &LayerContext<'_>,
+        context: &LayerContext,
         request: ModelRequest,
         next: &dyn Continuation,
     ) -> norte::Result<ModelStream> {
@@ -445,7 +446,7 @@ mod tests {
     impl Continuation for Next {
         async fn call(
             &self,
-            _context: &LayerContext<'_>,
+            _context: &LayerContext,
             _request: ModelRequest,
         ) -> norte::Result<ModelStream> {
             Ok(Box::pin(futures_util::stream::empty()))
@@ -496,12 +497,9 @@ mod tests {
             cache_boundaries: Vec::new(),
             extensions: std::collections::BTreeMap::new(),
         };
-        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        let sink: &dyn norte::EventSink = &sender;
         let context = LayerContext {
             session: norte::SessionId::new(),
             turn: 1,
-            events: sink,
         };
         let mut stream = layer.wrap(&context, request, &Next).await.expect("stream");
         assert!(stream.next().await.is_none());
@@ -518,7 +516,7 @@ mod tests {
     impl Continuation for OneEventThenPending {
         async fn call(
             &self,
-            _context: &LayerContext<'_>,
+            _context: &LayerContext,
             _request: ModelRequest,
         ) -> norte::Result<ModelStream> {
             let first = self.0.clone();
@@ -559,12 +557,9 @@ mod tests {
             cache_boundaries: Vec::new(),
             extensions: std::collections::BTreeMap::new(),
         };
-        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        let sink: &dyn norte::EventSink = &sender;
         let context = LayerContext {
             session: norte::SessionId::new(),
             turn: 1,
-            events: sink,
         };
         let mut stream = layer
             .wrap(&context, request, &OneEventThenPending(event))

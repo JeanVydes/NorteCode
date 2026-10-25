@@ -194,14 +194,14 @@ impl Service {
         let stored_phase = entry.phase.clone();
         let mut needs_repair = stored_phase == "streaming";
         let phase = match self.store.load(entry.north).await {
-            Ok(session) if session.phase == norte::Phase::Streaming => {
+            Ok(session) if session.phase == norte::harness::Phase::Streaming => {
                 needs_repair = true;
-                let commit = norte::Commit {
+                let commit = norte::harness::Commit {
                     session_id: entry.north,
                     expected_version: Some(session.version),
                     nodes: Vec::new(),
                     head: session.head,
-                    phase: norte::Phase::Idle,
+                    phase: norte::harness::Phase::Idle,
                     turn: session.turn,
                     grants: session.grants.clone(),
                     metadata: Some(session.metadata.clone()),

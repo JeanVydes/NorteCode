@@ -29,12 +29,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, Rw
 use std::time::Duration;
 
 use futures_core::Stream;
+use norte::harness::TurnInterceptor;
 use norte::harness::{
     Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, InMemoryStore, PolicySet, Store,
 };
 use norte::{
     AnyFunction, BlobStore, Layer, LayerStack, Model, ToolArgs, ToolDeclaration, ToolRegistry,
-    TurnInterceptor,
 };
 use norte_code_cost::{BudgetBook, CostRecord};
 use norte_code_skills::{
@@ -410,7 +410,7 @@ impl Service {
             })
             .observers(vec![
                 Arc::new(TelemetryObserver::new(Arc::clone(&self.telemetry)))
-                    as Arc<dyn norte::Observer>,
+                    as Arc<dyn norte::harness::Observer>,
             ])
             .interceptors({
                 // The steering comes first: a message the host holds belongs

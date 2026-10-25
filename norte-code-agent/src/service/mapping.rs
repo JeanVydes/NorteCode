@@ -6,9 +6,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use norte::harness::Harness;
+use norte::harness::StreamDelta;
 use norte::{
     CallId, Continuation, Layer, LayerContext, ModelRef, ModelRequest, ModelStream,
-    ProviderErrorKind, SessionId, ShortCircuitReason, StreamDelta, StreamEvent, Usage,
+    ProviderErrorKind, SessionId, ShortCircuitReason, StreamEvent, Usage,
 };
 use norte_code_config::{BudgetConfig, RetryConfig};
 use norte_code_cost::{BudgetBook, CostRecord};
@@ -211,7 +212,7 @@ impl Layer for BudgetLayer {
 
     async fn wrap(
         &self,
-        context: &LayerContext<'_>,
+        context: &LayerContext,
         request: ModelRequest,
         next: &dyn Continuation,
     ) -> norte::Result<ModelStream> {
@@ -229,14 +230,15 @@ impl Layer for BudgetLayer {
                 "{:?} budget: spent {:.6} of {:.6} {unit}; raise the budget and resume",
                 status.scope, status.spent, status.limit
             );
-            context.short_circuit(
-                "budget",
-                ShortCircuitReason::Custom {
+            // The layer names the refusal; the harness records it as a
+            // `LayerShortCircuited` event and propagates this error unchanged.
+            return Err(norte::Error::ShortCircuited {
+                layer: self.name().to_owned(),
+                reason: ShortCircuitReason::Custom {
                     name: "budget_exceeded".to_owned(),
-                    detail: detail.clone(),
+                    detail,
                 },
-            );
-            return Err(norte::Error::Other(format!("budget exceeded: {detail}")));
+            });
         }
         let model = request.model.clone();
         // The request counts as soon as it is let through, and what it cost
@@ -320,11 +322,11 @@ pub(super) async fn call_arguments(
         .map(|call| call.arguments.clone())
 }
 
-pub(super) fn to_phase(phase: norte::Phase) -> norte_code_protocol::Phase {
+pub(super) fn to_phase(phase: norte::harness::Phase) -> norte_code_protocol::Phase {
     match phase {
-        norte::Phase::Streaming => norte_code_protocol::Phase::Streaming,
-        norte::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
-        norte::Phase::AwaitingApproval => norte_code_protocol::Phase::AwaitingApproval,
+        norte::harness::Phase::Streaming => norte_code_protocol::Phase::Streaming,
+        norte::harness::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
+        norte::harness::Phase::AwaitingApproval => norte_code_protocol::Phase::AwaitingApproval,
         _ => norte_code_protocol::Phase::Idle,
     }
 }

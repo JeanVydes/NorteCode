@@ -10,8 +10,9 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use tokio::sync::{Notify, mpsc};
 
+use norte::harness::EngineEvent;
 use norte::harness::Harness;
-use norte::{EngineEvent, FinishReason, Message, Part, ReasoningRequest, Role, SessionId, Usage};
+use norte::{FinishReason, Message, Part, ReasoningRequest, Role, SessionId, Usage};
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
     Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind, SessionKey,
@@ -143,7 +144,7 @@ impl Service {
         }
         // A resumable park: after a restart the engine will not re-emit the
         // pending approvals, so surface them from the store before the turn.
-        let restored: Vec<ServerEvent> = if state.phase == norte::Phase::AwaitingApproval {
+        let restored: Vec<ServerEvent> = if state.phase == norte::harness::Phase::AwaitingApproval {
             let mut restored = Vec::new();
             for record in engine.pending_approvals(nid).await? {
                 let arguments = call_arguments(&engine, nid, record.call_id).await;
@@ -546,7 +547,7 @@ impl Service {
                     .await;
                     if !compacted_eagerly
                         && !interrupted
-                        && outcome.session.phase == norte::Phase::Idle
+                        && outcome.session.phase == norte::harness::Phase::Idle
                         && self.budget_stopped(key).is_none()
                     {
                         if let Ok((current, spec, _)) = self.require_record(key) {

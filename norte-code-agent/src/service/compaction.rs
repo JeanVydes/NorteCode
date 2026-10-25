@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use norte::harness::EngineEvent;
 use norte::{
-    Continuation, EngineEvent, Layer, LayerContext, Message, ModelRequest, ModelStream,
+    Continuation, Layer, LayerContext, Message, ModelRequest, ModelStream,
     Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role, ShortCircuitReason,
 };
 use norte_code_protocol::{ServerEvent, ServerEventKind, SessionKey};
@@ -42,7 +43,7 @@ impl Service {
         };
         let engine = self.engine(spec)?;
         let state = engine.session(nid).await?;
-        if state.phase != norte::Phase::Idle {
+        if state.phase != norte::harness::Phase::Idle {
             return Ok(false);
         }
         let history = engine.history(nid).await?;
@@ -146,7 +147,7 @@ impl Service {
         let (old, spec, _) = self.require_record(key)?;
         let engine = self.engine(&spec)?;
         let state = engine.session(old).await?;
-        if state.phase != norte::Phase::Idle {
+        if state.phase != norte::harness::Phase::Idle {
             return Err(ServiceError::Compaction(
                 "the Norte session is not idle; resolve the turn first".to_owned(),
             ));
@@ -397,7 +398,7 @@ impl Layer for CompactionLayer {
 
     async fn wrap(
         &self,
-        context: &LayerContext<'_>,
+        context: &LayerContext,
         request: ModelRequest,
         next: &dyn Continuation,
     ) -> norte::Result<ModelStream> {
@@ -407,16 +408,15 @@ impl Layer for CompactionLayer {
                  compacting before the next request",
                 self.gate.threshold
             );
-            context.short_circuit(
-                "compaction",
-                ShortCircuitReason::Custom {
+            // The layer names the refusal; the harness puts it in the audit
+            // trail as `LayerShortCircuited` before propagating this.
+            return Err(norte::Error::ShortCircuited {
+                layer: self.name().to_owned(),
+                reason: ShortCircuitReason::Custom {
                     name: "compaction_due".to_owned(),
-                    detail: detail.clone(),
+                    detail: format!("{COMPACTION_SAFE_POINT}: {detail}"),
                 },
-            );
-            return Err(norte::Error::InvalidInput(format!(
-                "{COMPACTION_SAFE_POINT}: {detail}"
-            )));
+            });
         }
         next.call(context, request).await
     }
