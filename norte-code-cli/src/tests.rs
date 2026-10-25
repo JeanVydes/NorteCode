@@ -620,10 +620,8 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
     use std::sync::Arc;
 
     use futures_util::StreamExt;
-    use norte::{
-        CallId, Capabilities, InMemoryBlobStore, InMemoryStore, Model, ModelId, ModelRef,
-        ProviderId,
-    };
+    use norte::harness::{InMemoryBlobStore, InMemoryStore};
+    use norte::{CallId, Capabilities, Model, ModelId, ModelRef, ProviderId};
     use norte_code_agent::{EventStream, ModelFactory, ModelSpec, Service, ServiceError, Wire};
     use norte_code_catalog::{Catalog, capabilities};
     use norte_code_config::ApiKey;

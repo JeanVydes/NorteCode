@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use norte::{Decision, Policy, PolicyView};
+use norte::harness::{Decision, Policy, PolicyView};
 
 /// Re-roots tool paths into the workspace and refuses an escape.
 ///

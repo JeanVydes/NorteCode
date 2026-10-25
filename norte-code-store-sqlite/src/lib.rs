@@ -17,9 +17,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use norte::harness::{ApprovalRecord, Store};
 use norte::{
-    ApprovalId, ApprovalRecord, BlobId, BlobStore, CallId, Commit, Error, Grant, GrantId,
-    GrantScope, Node, NodeId, Result, Session, SessionId, Store, ToolName,
+    ApprovalId, BlobId, BlobStore, CallId, Commit, Error, Grant, GrantId, GrantScope, Node, NodeId,
+    Result, Session, SessionId, ToolName,
 };
 use norte_code_cost::CostRecord;
 use rusqlite::{Connection, OptionalExtension, params};

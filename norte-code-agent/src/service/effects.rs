@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use norte::{CallId, Decision, Policy, PolicyView, SessionId};
+use norte::harness::{Decision, Policy, PolicyView};
+use norte::{CallId, SessionId};
 use norte_code_store_sqlite::SessionDirectory;
 
 use crate::ServiceError;

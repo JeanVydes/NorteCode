@@ -29,9 +29,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, Rw
 use std::time::Duration;
 
 use futures_core::Stream;
+use norte::harness::{
+    Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, InMemoryStore, PolicySet, Store,
+};
 use norte::{
-    AnyFunction, BlobStore, Engine, EngineBuilder, EngineConfig, InMemoryBlobStore, InMemoryStore,
-    Layer, LayerStack, Model, PolicySet, Store, ToolArgs, ToolDeclaration, ToolRegistry,
+    AnyFunction, BlobStore, Layer, LayerStack, Model, ToolArgs, ToolDeclaration, ToolRegistry,
     TurnInterceptor,
 };
 use norte_code_cost::{BudgetBook, CostRecord};
@@ -364,7 +366,7 @@ impl Service {
     /// Rebuilds the in-memory session map from the durable directory.
     #[allow(clippy::too_many_lines)]
     /// Builds an engine for one spec over the shared stores.
-    fn engine(&self, spec: &ModelSpec) -> Result<Engine, ServiceError> {
+    fn engine(&self, spec: &ModelSpec) -> Result<Harness, ServiceError> {
         self.engine_with_budget(spec, None, None)
     }
 
@@ -375,17 +377,17 @@ impl Service {
         spec: &ModelSpec,
         budget: Option<Arc<Mutex<BudgetBook>>>,
         compaction: Option<Arc<CompactionGate>>,
-    ) -> Result<Engine, ServiceError> {
+    ) -> Result<Harness, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
-        let mut builder = EngineBuilder::new()
+        let mut builder = HarnessBuilder::new()
             .store(Arc::clone(&self.store))
             .blobs(Arc::clone(&self.blobs))
             .model(model)
             .tools(self.tools()?)
             .policies(self.policies())
-            .config(EngineConfig {
+            .config(HarnessConfig {
                 max_iterations: self.config().max_iterations.unwrap_or(usize::MAX),
-                ..EngineConfig::default()
+                ..HarnessConfig::default()
             })
             .tool_metadata({
                 let effects = Arc::clone(&self.effects);

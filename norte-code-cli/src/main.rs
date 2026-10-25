@@ -580,7 +580,7 @@ async fn run_prompt(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
     );
-    let session_store: Arc<dyn norte::Store> = store.clone();
+    let session_store: Arc<dyn norte::harness::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
     let service = Arc::new(
@@ -757,7 +757,7 @@ async fn resume_session(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
     );
-    let session_store: Arc<dyn norte::Store> = store.clone();
+    let session_store: Arc<dyn norte::harness::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
     let service = Arc::new(

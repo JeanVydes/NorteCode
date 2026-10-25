@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use norte::harness::Harness;
 use norte::{
-    CallId, Continuation, Engine, Layer, LayerContext, ModelRef, ModelRequest, ModelStream,
+    CallId, Continuation, Layer, LayerContext, ModelRef, ModelRequest, ModelStream,
     ProviderErrorKind, SessionId, ShortCircuitReason, StreamDelta, StreamEvent, Usage,
 };
 use norte_code_config::{BudgetConfig, RetryConfig};
@@ -92,7 +93,7 @@ pub(super) fn token_rate(
 
 /// The text of a failed tool result, read from the committed history.
 pub(super) async fn tool_error(
-    engine: &Engine,
+    engine: &Harness,
     session: SessionId,
     call_id: &norte::CallId,
 ) -> Option<String> {
@@ -117,7 +118,7 @@ pub(super) async fn tool_error(
 
 /// The text a tool returned, whether it succeeded or failed.
 pub(super) async fn tool_result_text(
-    engine: &Engine,
+    engine: &Harness,
     session: SessionId,
     call_id: &norte::CallId,
 ) -> Option<String> {
@@ -298,7 +299,7 @@ fn account_usage(
 /// Older records predate that field, so history is the fallback. Missing
 /// history is not an error: the fields are optional.
 pub(super) async fn call_arguments(
-    engine: &Engine,
+    engine: &Harness,
     session: SessionId,
     call_id: CallId,
 ) -> Option<serde_json::Value> {

@@ -10,9 +10,8 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use tokio::sync::{Notify, mpsc};
 
-use norte::{
-    Engine, EngineEvent, FinishReason, Message, Part, ReasoningRequest, Role, SessionId, Usage,
-};
+use norte::harness::Harness;
+use norte::{EngineEvent, FinishReason, Message, Part, ReasoningRequest, Role, SessionId, Usage};
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
     Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind, SessionKey,
@@ -245,7 +244,7 @@ impl Service {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_turn(
         &self,
-        mut engine: Engine,
+        mut engine: Harness,
         budget: Option<Arc<Mutex<BudgetBook>>>,
         mut gate: Option<Arc<CompactionGate>>,
         request_id: u64,
@@ -627,7 +626,7 @@ impl Service {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn handle(
         &self,
-        engine: &Engine,
+        engine: &Harness,
         request_id: u64,
         key: &SessionKey,
         nid: SessionId,
@@ -777,7 +776,7 @@ impl Service {
     #[allow(clippy::too_many_arguments)]
     async fn settle(
         &self,
-        engine: &Engine,
+        engine: &Harness,
         request_id: u64,
         key: &SessionKey,
         nid: SessionId,
@@ -957,7 +956,7 @@ impl Service {
         &self,
         request_id: u64,
         key: &SessionKey,
-        engine: &Engine,
+        engine: &Harness,
         nid: SessionId,
         spec: &ModelSpec,
     ) -> Option<ServerEvent> {
@@ -1048,7 +1047,7 @@ const REPLAY_MESSAGES: usize = 100;
 async fn replay_events(
     request_id: u64,
     key: &SessionKey,
-    engine: &Engine,
+    engine: &Harness,
     nid: SessionId,
     ancestors: &[SessionId],
 ) -> Vec<ServerEvent> {
