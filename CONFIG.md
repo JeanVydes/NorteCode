@@ -262,6 +262,35 @@ so a configuration written for another client works here unchanged.
 | `<name>.args` | array of strings | `[]` | Its arguments, in order. |
 | `<name>.env` | object | `{}` | Environment variables for the child. A value named here is registered for redaction, so it never reaches a log or a model event. |
 | `<name>.enabled` | boolean | `true` | Whether the server is started. An entry may be kept disabled while its command is filled in. |
+| `<name>.allow` | array of strings | `[]` | The tools of this server that may reach the model. Empty means every one it publishes. |
+| `<name>.deny` | array of strings | `[]` | The tools of this server that never reach the model. `deny` wins over `allow`. |
+
+Both lists are written as the **server** names its tools, without the
+`mcp__<name>__` prefix the model sees. This is the control that matters in
+practice: every tool rides in each request, so a server with sixteen tools costs
+about 25k characters of schema on every turn, whether the model uses them or
+not.
+
+```json
+{
+    "mcpServers": {
+        "everything": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-everything"],
+            "deny": ["gzip-file-as-resource", "get-tiny-image"],
+            "allow": ["echo", "get-sum", "get-env"]
+        }
+    }
+}
+```
+
+A name in `allow` that the server does not publish is reported at startup rather
+than ignored: the tool the host asked for would otherwise simply be absent.
+
+Inside the interactive prompt, `/mcp` lists the servers with their tools and
+whether they are on, and `/mcp enable <server>` / `/mcp disable <server>`
+switches one. Switching a server off keeps its process running and takes its
+tools out of the next turn, so `/mcp enable` brings them back at once.
 
 Every tool a server publishes is registered as `mcp__<name>__<tool>`, so the
 server keeps its own namespace and a per-tool approval rule still names one

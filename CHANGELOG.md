@@ -23,6 +23,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   model it resolved and the rules granted during the run, which are session
   state; a new session uses the new default. A file that does not parse, or
   names a model that cannot be built, changes nothing.
+- An MCP server's tools are filtered by `allow` and `deny`, written as the
+  server names them. Every tool rides in each request, so the sixteen tools of
+  the reference server cost about 25k characters of schema on every turn; the
+  lists are what turn "the whole server" into "the tools this host asked for".
+  A name the server does not publish is reported at startup instead of being
+  ignored.
+- `/mcp` lists the connected servers with their tools and whether they are on;
+  `/mcp enable|disable <server>` switches one. The process stays up, so turning
+  one back on is instant; what changes is whether its tools reach the model.
 - MCP servers, named in an `mcpServers` block and each started once at
   startup. Every tool a server publishes is registered as
   `mcp__<server>__<tool>`, so the server keeps its own namespace and a per-tool
