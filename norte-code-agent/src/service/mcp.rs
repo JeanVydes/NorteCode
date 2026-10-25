@@ -36,6 +36,14 @@ impl McpServer {
     pub(super) fn label(&self) -> String {
         self.command.clone()
     }
+
+    /// The names of the tools this server published, as the model sees them.
+    pub(super) fn tool_names(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect()
+    }
 }
 
 /// Every server that connected, and the ones that did not.

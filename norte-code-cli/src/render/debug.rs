@@ -300,8 +300,16 @@ pub(crate) fn debug_mcp(style: Style, service: &Service) {
         return;
     }
     let mut panel = DebugPanel::new("server", "tools");
-    for (name, command, tools) in &connected {
-        panel.field(format!("{name} · {command}"), tools.to_string());
+    for server in &connected {
+        panel.field(
+            format!("{} · {}", server.name, server.command),
+            server.tools.len().to_string(),
+        );
+        // One row per tool: the names are what a person asks the model for, and
+        // a count leaves them to be guessed.
+        for tool in &server.tools {
+            panel.field(format!("  {tool}"), "");
+        }
     }
     for (name, reason) in &failures {
         panel.field(name.clone(), format!("failed: {reason}"));

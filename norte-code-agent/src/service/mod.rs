@@ -117,6 +117,17 @@ struct CatalogSettings {
     cache_dir: PathBuf,
 }
 
+/// One MCP server, as the startup block reports it.
+#[derive(Clone, Debug)]
+pub struct McpServerStatus {
+    /// The name the configuration gave it.
+    pub name: String,
+    /// The program that was started.
+    pub command: String,
+    /// The tools it published, by the name the model sees.
+    pub tools: Vec<String>,
+}
+
 /// A configuration that was re-read, with the keys it did not recognise.
 #[derive(Debug)]
 pub struct ReloadedConfig {
@@ -584,14 +595,22 @@ impl Service {
     }
 
     /// The MCP servers that connected, for the startup line.
-    pub fn mcp_status(&self) -> Vec<(String, String, usize)> {
+    ///
+    /// Each one carries the names of the tools it published, because a count
+    /// says the server is up and the names are what a person needs to ask the
+    /// model for one.
+    pub fn mcp_status(&self) -> Vec<McpServerStatus> {
         self.mcp_servers
             .read()
             .map(|servers| {
                 servers
                     .servers
                     .iter()
-                    .map(|server| (server.name.clone(), server.label(), server.tools.len()))
+                    .map(|server| McpServerStatus {
+                        name: server.name.clone(),
+                        command: server.label(),
+                        tools: server.tool_names(),
+                    })
                     .collect()
             })
             .unwrap_or_default()

@@ -199,9 +199,19 @@ async fn a_real_mcp_server_publishes_its_tools_into_the_service() {
 
     let status = service.mcp_status();
     assert_eq!(status.len(), 1, "one server connected: {status:?}");
-    let (name, _command, tools) = &status[0];
-    assert_eq!(name, "everything");
-    assert!(*tools > 0, "the server published tools");
+    let server = &status[0];
+    assert_eq!(server.name, "everything");
+    assert!(!server.tools.is_empty(), "the server published tools");
+    // The names are the point of reporting them: they are what a person asks
+    // the model for, and every one of them carries the namespace.
+    assert!(
+        server
+            .tools
+            .iter()
+            .all(|tool| tool.starts_with("mcp__everything__")),
+        "every tool is namespaced: {:?}",
+        server.tools
+    );
 
     // The tools are in the registry the engine reads, with the namespace.
     let registry = service.tools().expect("registry");
