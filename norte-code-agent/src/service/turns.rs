@@ -654,17 +654,25 @@ impl Service {
                 bytes,
                 last,
                 ..
-            } => Some(ServerEventKind::ToolOutput {
-                turn: stats.turn,
-                call_id: call_id.to_string(),
-                tool: tool.to_string(),
-                stream: stream_label(*stream).to_owned(),
-                // The tool redacted before it stored the bytes; the lossy
-                // conversion is for a chunk that splits a code point, which the
-                // reader already avoids by cutting on character boundaries.
-                text: String::from_utf8_lossy(bytes).into_owned(),
-                last: *last,
-            }),
+            } => {
+                // Kept for a background job, whose caller has already been
+                // answered and can only read its output here. A call that is
+                // not a job is not in the registry, and this is a no-op.
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                self.jobs.write(*call_id, &text);
+                Some(ServerEventKind::ToolOutput {
+                    turn: stats.turn,
+                    call_id: call_id.to_string(),
+                    tool: tool.to_string(),
+                    stream: stream_label(*stream).to_owned(),
+                    // The tool redacted before it stored the bytes; the lossy
+                    // conversion is for a chunk that splits a code point, which
+                    // the reader already avoids by cutting on character
+                    // boundaries.
+                    text,
+                    last: *last,
+                })
+            }
             EngineEvent::ToolCallStarted { call_id, tool, .. } => {
                 let arguments = if let Some(arguments) = self.activity.started(call_id) {
                     Some(arguments)
@@ -687,6 +695,10 @@ impl Service {
                 duration_ms,
                 ..
             } => {
+                // A background call's result is recorded here rather than
+                // returned: the call that would have carried it answered long
+                // ago, and `manage_jobs` is what reads it now.
+                self.jobs.finish(*call_id, None);
                 self.effects
                     .finished(nid, *call_id, tool.as_str(), *is_error);
                 let recorded = self.activity.finished(call_id);

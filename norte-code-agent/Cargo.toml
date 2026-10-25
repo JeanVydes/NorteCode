@@ -24,6 +24,7 @@ futures-util = { workspace = true }
 norte = { workspace = true }
 norte-mcp = { workspace = true }
 norte-tools = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

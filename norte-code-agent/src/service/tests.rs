@@ -3674,6 +3674,55 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
 }
 
 #[tokio::test]
+async fn the_shell_tools_and_the_job_manager_are_registered() {
+    // The three that have to agree with each other: one runs a call and waits,
+    // one runs it and answers with an id, and one is what reads or stops what
+    // the second started. A model that can start a job and cannot read it is
+    // worse off than one that could not start it.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let (service, _store) = persistent_service(model).await;
+    let names: Vec<String> = service
+        .tools()
+        .expect("tools")
+        .specs()
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    for expected in ["shell", "shell_bg", "manage_jobs"] {
+        assert!(
+            names.iter().any(|name| name == expected),
+            "`{expected}` reaches the model; the registry has {names:?}"
+        );
+    }
+    // The background variant describes itself apart from the waited one, or the
+    // model has no way to choose.
+    let waited = service
+        .tools()
+        .expect("tools")
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "shell")
+        .expect("shell");
+    let background = service
+        .tools()
+        .expect("tools")
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name.as_str() == "shell_bg")
+        .expect("shell_bg");
+    assert_ne!(
+        waited.description, background.description,
+        "the two must read differently"
+    );
+    // And their arguments are the same, because they run the same executor.
+    assert_eq!(waited.parameters, background.parameters);
+}
+
+#[tokio::test]
 async fn skills_and_tools_are_listed_over_the_protocol() {
     let service = service();
     let skills = drain(&service, ClientRequestKind::ListSkills).await;

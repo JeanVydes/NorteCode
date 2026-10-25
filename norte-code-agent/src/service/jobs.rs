@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use norte::{CallId, SessionId};
+use norte::{CallId, Cancellation, SessionId};
 
 /// How much of a job's output is kept for `manage_jobs` to read.
 ///
@@ -83,7 +83,7 @@ pub(super) struct JobSummary {
 /// One job, as the registry holds it.
 struct Job {
     summary: JobSummary,
-    cancel: Arc<tokio_util::sync::CancellationToken>,
+    cancel: Arc<Cancellation>,
     started: std::time::Instant,
     bytes: usize,
 }
@@ -96,11 +96,6 @@ pub(super) struct JobRegistry {
 }
 
 impl JobRegistry {
-    /// An empty registry.
-    pub(super) fn new() -> Self {
-        Self::default()
-    }
-
     /// Registers a job that has just been started, and returns the id to hand
     /// the model.
     ///
@@ -111,7 +106,7 @@ impl JobRegistry {
         session: SessionId,
         call_id: CallId,
         script: &str,
-        cancel: Arc<tokio_util::sync::CancellationToken>,
+        cancel: Arc<Cancellation>,
     ) -> String {
         let number = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let id = format!("job-{number}");
@@ -127,8 +122,15 @@ impl JobRegistry {
             output: String::new(),
             dropped: false,
         };
-        self.jobs()
-            .insert(id.clone(), Job { summary, cancel, started: std::time::Instant::now(), bytes: 0 });
+        self.jobs().insert(
+            id.clone(),
+            Job {
+                summary,
+                cancel,
+                started: std::time::Instant::now(),
+                bytes: 0,
+            },
+        );
         id
     }
 
@@ -216,11 +218,6 @@ impl JobRegistry {
             .collect();
         out.sort_by_key(|job| job.id.clone());
         out
-    }
-
-    /// Forgets the jobs that ended, so a long session does not accumulate them.
-    pub(super) fn forget_done(&self) {
-        self.jobs().retain(|_, job| !job.summary.state.is_done());
     }
 
     fn jobs(&self) -> MutexGuard<'_, BTreeMap<String, Job>> {

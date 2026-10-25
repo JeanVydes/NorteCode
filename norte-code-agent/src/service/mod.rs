@@ -6,9 +6,12 @@
 //! model switch a change of model rather than a change of session.
 
 mod approvals;
+mod background;
 mod budgets;
 mod compaction;
 mod effects;
+mod jobs;
+mod manage;
 mod mapping;
 mod mcp;
 mod models;
@@ -58,8 +61,11 @@ use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 use self::sessions::SessionRecord;
 use self::steering::{Steered, Steering, SteeringInterceptor};
 use approvals::{ApprovalModePolicy, ApprovalRules};
+use background::BackgroundShell;
 use compaction::{CompactionGate, CompactionLayer};
 use effects::{EffectJournal, EffectJournalPolicy};
+use jobs::JobRegistry;
+use manage::ManageJobs;
 use mapping::{BudgetLayer, single};
 use mcp::McpServers;
 use models::resolve_reasoning;
@@ -169,6 +175,8 @@ pub struct Service {
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
     /// The steering messages the running turns have not reached.
     steering: Arc<Steering>,
+    /// The shell calls running in the background, by job id.
+    jobs: Arc<JobRegistry>,
     /// The interceptors the host registered, consulted at the safe points of
     /// every turn.
     interceptors: Vec<Arc<dyn TurnInterceptor>>,
@@ -334,6 +342,7 @@ impl Service {
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             steering: Arc::new(Steering::default()),
+            jobs: Arc::new(JobRegistry::default()),
             interceptors: Vec::new(),
             // Connected in `with_directory`, which can await; `new` cannot.
             mcp_servers: RwLock::new(McpServers::none()),
@@ -503,15 +512,13 @@ impl Service {
         Ok(())
     }
 
-    /// The tool registry every engine shares, rebuilt cheaply per turn because
-    /// Norte's registry is immutable and not cloneable.
-    fn tools(&self) -> Result<ToolRegistry, ServiceError> {
-        let mut tools = ToolRegistry::new();
-        self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
-        self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
-        self.register_tool(&mut tools, EditTool::new().into_declaration())?;
-        self.register_tool(&mut tools, BrowserTool::new().into_declaration())?;
-
+    /// The shell tool, the background variant of it, and the job manager.
+    ///
+    /// They are registered together because they share one executor: `shell_bg`
+    /// is the same code under a second name, and that is what keeps the
+    /// sandbox, the secrets and the output bounds identical between a call that
+    /// is waited for and one that is not.
+    fn register_shell(&self, tools: &mut ToolRegistry) -> Result<(), ServiceError> {
         let mut env = BTreeMap::new();
         if let Ok(path) = std::env::var("PATH") {
             env.insert("PATH".to_owned(), path);
@@ -539,7 +546,36 @@ impl Service {
         } else {
             command
         };
-        self.register_tool(&mut tools, command)?;
+        let background = BackgroundShell::declaration(
+            ToolDeclaration {
+                name: command.name,
+                description: command.description,
+                parameters: command.parameters.clone(),
+                executor: Arc::clone(&command.executor),
+                approval: command.approval.clone(),
+            },
+            Arc::clone(&self.jobs),
+            Arc::clone(&self.steering),
+        );
+        self.register_tool(tools, command)?;
+        self.register_tool(tools, background)?;
+        self.register_tool(
+            tools,
+            ManageJobs::new(Arc::clone(&self.jobs)).into_declaration(),
+        )?;
+        Ok(())
+    }
+
+    /// The tool registry every engine shares, rebuilt cheaply per turn because
+    /// Norte's registry is immutable and not cloneable.
+    fn tools(&self) -> Result<ToolRegistry, ServiceError> {
+        let mut tools = ToolRegistry::new();
+        self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
+        self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
+        self.register_tool(&mut tools, EditTool::new().into_declaration())?;
+        self.register_tool(&mut tools, BrowserTool::new().into_declaration())?;
+
+        self.register_shell(&mut tools)?;
         self.register_tool(
             &mut tools,
             GlobTool::new(&self.workspace_root).into_declaration(),
