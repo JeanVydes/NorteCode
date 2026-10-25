@@ -439,6 +439,12 @@ pub enum ServerEventKind {
         input_tokens: u64,
         /// Output tokens summed over the session's reported requests.
         output_tokens: u64,
+        /// Prompt tokens the provider served from its cache, summed.
+        #[serde(default)]
+        cache_read_tokens: u64,
+        /// Prompt tokens the provider wrote to its cache, summed.
+        #[serde(default)]
+        cache_write_tokens: u64,
         /// Provider-reported cost, summed, in USD.
         cost_usd: f64,
         /// Model requests reported for usage.

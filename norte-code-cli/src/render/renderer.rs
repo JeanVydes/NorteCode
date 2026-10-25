@@ -906,6 +906,8 @@ impl Renderer {
                 output_tokens,
                 cost_usd,
                 requests,
+                cache_read_tokens,
+                cache_write_tokens,
                 context_used,
                 context_window,
             } => {
@@ -914,6 +916,11 @@ impl Renderer {
                 self.cost = *cost_usd;
                 self.requests = *requests;
                 self.turn_requests = 0;
+                // The cache share is over the whole session, not the requests
+                // made since the resume.
+                self.cache_read = *cache_read_tokens;
+                self.cache_write = *cache_write_tokens;
+                self.cache_reported = *cache_read_tokens > 0 || *cache_write_tokens > 0;
                 self.context_used = *context_used;
                 self.max_context = *context_window;
                 if self.verbosity.at_least(Verbosity::Medium) && matches!(self.format, Format::Text)

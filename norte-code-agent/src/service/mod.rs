@@ -96,6 +96,8 @@ struct Stats {
     unpriced: u64,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
     /// The request telemetry that has not been matched to a committed message
     /// yet.
     ///

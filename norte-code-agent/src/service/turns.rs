@@ -814,6 +814,8 @@ impl Service {
             }
             stats.input_tokens += origin.usage.input_tokens.unwrap_or(0);
             stats.output_tokens += origin.usage.output_tokens.unwrap_or(0);
+            stats.cache_read_tokens += origin.usage.cache_read_tokens.unwrap_or(0);
+            stats.cache_write_tokens += origin.usage.cache_write_tokens.unwrap_or(0);
             let record = CostRecord {
                 session: key.to_string(),
                 turn: stats.turn,
@@ -959,7 +961,7 @@ impl Service {
         nid: SessionId,
         spec: &ModelSpec,
     ) -> Option<ServerEvent> {
-        let (input_tokens, output_tokens, cost_usd, requests) = {
+        let (input_tokens, output_tokens, cost_usd, requests, cache_read, cache_write) = {
             let sessions = self.lock_sessions();
             let record = sessions.get(key)?;
             (
@@ -967,6 +969,8 @@ impl Service {
                 record.output_tokens,
                 record.cost,
                 record.requests,
+                record.cache_read_tokens,
+                record.cache_write_tokens,
             )
         };
         let context_used = engine
@@ -981,6 +985,8 @@ impl Service {
                 output_tokens,
                 cost_usd,
                 requests,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: cache_write,
                 context_used,
                 context_window: spec.capabilities.max_context,
             },

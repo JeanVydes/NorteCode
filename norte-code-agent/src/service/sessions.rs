@@ -44,6 +44,10 @@ pub(super) struct SessionRecord {
     pub(super) input_tokens: u64,
     /// Output tokens, summed over reported requests.
     pub(super) output_tokens: u64,
+    /// Prompt tokens the provider served from its cache, summed.
+    pub(super) cache_read_tokens: u64,
+    /// Prompt tokens the provider wrote to its cache, summed.
+    pub(super) cache_write_tokens: u64,
     /// The session budget, when one was set.
     pub(super) budget: Option<Budget>,
     /// Tools this session refuses without asking again.
@@ -91,6 +95,8 @@ fn record_from(
         unpriced: number("unpriced").unwrap_or(0),
         input_tokens: number("input_tokens").unwrap_or(0),
         output_tokens: number("output_tokens").unwrap_or(0),
+        cache_read_tokens: number("cache_read_tokens").unwrap_or(0),
+        cache_write_tokens: number("cache_write_tokens").unwrap_or(0),
         budget: stat(stats, "budget"),
         denied_tools: entry.denied_tools.clone(),
         allowed_tools: entry.allowed_tools.clone(),
@@ -299,6 +305,8 @@ impl Service {
             unpriced: 0,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
@@ -344,6 +352,8 @@ impl Service {
             unpriced: 0,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             budget: self.configured_session_budget(),
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
@@ -469,6 +479,8 @@ impl Service {
                 unpriced: 0,
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
                 pending: std::collections::VecDeque::new(),
             },
             |record| Stats {
@@ -479,6 +491,8 @@ impl Service {
                 unpriced: record.unpriced,
                 input_tokens: record.input_tokens,
                 output_tokens: record.output_tokens,
+                cache_read_tokens: record.cache_read_tokens,
+                cache_write_tokens: record.cache_write_tokens,
                 pending: std::collections::VecDeque::new(),
             },
         )
