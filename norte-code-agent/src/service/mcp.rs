@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use norte::AnyFunction;
 use norte_code_config::McpServerConfig;
-use norte_mcp::{ClientCapabilities, ClientOptions, Implementation, McpClient, StdioTransport};
+use norte_mcp::{
+    ClientCapabilities, ClientOptions, Implementation, McpClient, RemoteTool, StdioTransport,
+};
 
 /// A deadline for one MCP request.
 ///
@@ -27,8 +29,19 @@ pub(super) struct McpServer {
     pub(super) name: String,
     /// The program that was started, for the startup line.
     pub(super) command: String,
-    /// The tools the server exposed, wrapped as host tools.
+    /// The tools the server exposed and the filter kept, as host tools.
     pub(super) tools: Vec<Arc<dyn AnyFunction>>,
+    /// Names the configuration asked for that the server does not publish.
+    pub(super) filtered: Vec<String>,
+    /// Whether its tools reach the model right now.
+    pub(super) active: bool,
+}
+
+impl McpServer {
+    /// Whether the server is on.
+    pub(super) fn is_active(&self) -> bool {
+        self.active
+    }
 }
 
 impl McpServer {
@@ -112,23 +125,58 @@ impl McpServers {
             .map_err(|error| format!("handshake failed: {error}"))?,
         );
 
-        let tools = client
-            .tools(name)
+        let published = client
+            .list_tools()
             .await
             .map_err(|error| format!("could not list its tools: {error}"))?;
+        let names: Vec<&str> = published.iter().map(|tool| tool.name.as_str()).collect();
+        let kept: Vec<&str> = config.select(names.iter()).into_iter().copied().collect();
+        // A name in `allow` the server does not publish is a typo, and a silent
+        // one: the tool the host asked for is simply absent.
+        let mut filtered = Vec::new();
+        for wanted in &config.allow {
+            if !names.iter().any(|name| name == wanted) {
+                filtered.push(format!("`{wanted}` is not a tool of this server"));
+            }
+        }
+        let tools = published
+            .iter()
+            .filter(|tool| kept.contains(&tool.name.as_str()))
+            .map(|definition| {
+                RemoteTool::new(Arc::clone(&client), name, definition.clone())
+                    .map(|tool| Arc::new(tool) as Arc<dyn AnyFunction>)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("could not wrap its tools: {error}"))?;
+
         Ok(McpServer {
             name: name.to_owned(),
             command: config.command.clone(),
             tools,
+            filtered,
+            active: true,
         })
     }
 
-    /// Every tool of every connected server, in order.
+    /// Every tool of every server that is on, in order.
     pub(super) fn tools(&self) -> Vec<Arc<dyn AnyFunction>> {
         self.servers
             .iter()
+            .filter(|server| server.active)
             .flat_map(|server| server.tools.iter().cloned())
             .collect()
+    }
+
+    /// Turns one server off or on.
+    ///
+    /// Returns the state it is in afterwards, or `None` when no such server
+    /// connected: a name that was never up is a mistake worth reporting, and
+    /// `Some` for a server already in the asked state keeps the command
+    /// idempotent.
+    pub(super) fn set_active(&mut self, name: &str, active: bool) -> Option<bool> {
+        let server = self.servers.iter_mut().find(|server| server.name == name)?;
+        server.active = active;
+        Some(active)
     }
 
     /// The values every configured server names, for redaction.

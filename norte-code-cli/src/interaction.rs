@@ -51,6 +51,36 @@ pub(crate) fn parse_approval_command(text: &str) -> Option<Result<(bool, String,
 ///
 /// Commands with arguments parse into closed variants. Anything that is not a
 /// known command stays a normal message, so a prompt may still start with `/`.
+/// What `/mcp` was asked to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum McpAction {
+    /// List the connected servers and their tools.
+    List,
+    /// Turn a server on.
+    Enable,
+    /// Turn a server off.
+    Disable,
+}
+
+impl McpAction {
+    /// Whether the action needs a server name.
+    fn needs_server(self) -> bool {
+        match self {
+            Self::List => false,
+            Self::Enable | Self::Disable => true,
+        }
+    }
+
+    /// The word the usage line shows.
+    fn usage(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) enum ChatCommand {
     /// Show the command list.
@@ -61,6 +91,11 @@ pub(crate) enum ChatCommand {
     Refresh,
     /// Re-read the configuration.
     Reload,
+    /// List the MCP servers, or switch one off or on.
+    Mcp {
+        action: McpAction,
+        server: Option<String>,
+    },
     /// Leave the chat.
     Exit,
     /// Change an approval rule.
@@ -94,6 +129,10 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/compact" => Some(ChatCommand::Compact),
         "/refresh" => Some(ChatCommand::Refresh),
         "/reload" => Some(ChatCommand::Reload),
+        "/mcp" => Some(ChatCommand::Mcp {
+            action: McpAction::List,
+            server: None,
+        }),
         "/exit" | "/quit" | "exit" | "quit" => Some(ChatCommand::Exit),
         _ => None,
     };
@@ -122,6 +161,30 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             return Some(Err("usage: /revoke [grant-id-or-tool]".to_owned()));
         }
         return Some(Ok(ChatCommand::Revoke { grant }));
+    }
+    if let Some(rest) = command_rest(text, "/mcp") {
+        let mut parts = rest.split_whitespace();
+        let action = match parts.next() {
+            None | Some("list") => McpAction::List,
+            Some("enable") => McpAction::Enable,
+            Some("disable") => McpAction::Disable,
+            Some(other) => {
+                return Some(Err(format!(
+                    "unknown /mcp action `{other}`; use list, enable or disable"
+                )));
+            }
+        };
+        let server = parts.next().map(str::to_owned);
+        if parts.next().is_some() {
+            return Some(Err("usage: /mcp [list|enable|disable] [server]".to_owned()));
+        }
+        if action.needs_server() && server.is_none() {
+            return Some(Err(format!("usage: /mcp {} <server>", action.usage())));
+        }
+        if !action.needs_server() && server.is_some() {
+            return Some(Err("usage: /mcp list  (it takes no server)".to_owned()));
+        }
+        return Some(Ok(ChatCommand::Mcp { action, server }));
     }
     if let Some(rest) = command_rest(text, "/model") {
         return Some(parse_model_command(rest));
@@ -220,6 +283,7 @@ const CHAT_COMMANDS: &[&str] = &[
     "/revoke",
     "/refresh",
     "/reload",
+    "/mcp",
     "/exit",
     "/quit",
 ];
@@ -313,6 +377,7 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/revoke" => Some("/revoke [grant-id-or-tool]"),
         "/refresh" => Some("/refresh"),
         "/reload" => Some("/reload"),
+        "/mcp" => Some("/mcp [list|enable|disable] [server]"),
         "/exit" => Some("/exit"),
         "/quit" => Some("/quit"),
         _ => None,
@@ -377,6 +442,62 @@ fn report_reload(service: &Arc<Service>, style: Style) {
             "{}",
             style.red(format!("could not reload the configuration: {error}"))
         ),
+    }
+}
+
+/// Reports the MCP servers, or switches one off or on.
+///
+/// A server's tools ride in every prompt, so the count is worth seeing; a server
+/// that is off keeps its process, which is what makes turning it back on
+/// instant.
+fn report_mcp(service: &Arc<Service>, action: McpAction, server: Option<&str>, style: Style) {
+    if let Some(name) = server {
+        let active = action == McpAction::Enable;
+        match service.set_mcp_active(name, active) {
+            Some(state) => {
+                let word = if state { "enabled" } else { "disabled" };
+                eprintln!("{}", style.green(format!("mcp server `{name}` {word}")));
+                if !state {
+                    eprintln!(
+                        "{}",
+                        style.dim("its tools leave the next turn; the process stays up")
+                    );
+                }
+            }
+            None => eprintln!(
+                "{}",
+                style.yellow(format!("no mcp server named `{name}` connected"))
+            ),
+        }
+        return;
+    }
+
+    let status = service.mcp_status();
+    if status.is_empty() {
+        eprintln!("{}", style.dim("no MCP server connected"));
+        return;
+    }
+    for server in &status {
+        let mark = if server.active {
+            style.green("on")
+        } else {
+            style.faint("off")
+        };
+        eprintln!(
+            "{} {} {} {}",
+            mark,
+            style.bold(server.name.clone()),
+            style.dim(server.command.clone()),
+            style.dim(format!("{} tool(s)", server.tools.len()))
+        );
+        if server.active {
+            for tool in &server.tools {
+                eprintln!("  {}", style.dim(tool.clone()));
+            }
+        }
+        for warning in &server.filtered {
+            eprintln!("  {}", style.yellow(warning.clone()));
+        }
     }
 }
 
@@ -487,6 +608,9 @@ pub(crate) async fn interactive_loop(
                     eprintln!("{}", style.green(format!("skills refreshed: {count}")));
                 }
                 ChatCommand::Reload => report_reload(service, style),
+                ChatCommand::Mcp { action, server } => {
+                    report_mcp(service, action, server.as_deref(), style);
+                }
                 ChatCommand::Approval {
                     allow,
                     tool,
@@ -734,6 +858,9 @@ async fn handle_live_command(
             eprintln!("{}", style.green(format!("skills refreshed: {count}")));
         }
         ChatCommand::Reload => report_reload(service, style),
+        ChatCommand::Mcp { action, server } => {
+            report_mcp(service, action, server.as_deref(), style);
+        }
         ChatCommand::Approval {
             allow,
             tool,
@@ -1400,7 +1527,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        BudgetUnit, CHAT_COMMANDS, ChatCommand, Reasoning, ReasoningScope, SignalGuard,
+        BudgetUnit, CHAT_COMMANDS, ChatCommand, McpAction, Reasoning, ReasoningScope, SignalGuard,
         command_suggestion, command_usage, parse_budget_limit, parse_chat_command,
     };
 
@@ -1483,6 +1610,42 @@ mod tests {
         assert!(parse_budget_limit(BudgetUnit::Requests, "1.5").is_err());
         assert!(parse_budget_limit(BudgetUnit::Usd, "0").is_err());
         assert!(parse_budget_limit(BudgetUnit::Tokens, "many").is_err());
+    }
+
+    #[test]
+    fn mcp_lists_switches_and_refuses_a_bad_argument() {
+        // Bare `/mcp` lists.
+        assert_eq!(
+            parse_chat_command("/mcp"),
+            Some(Ok(ChatCommand::Mcp {
+                action: McpAction::List,
+                server: None,
+            }))
+        );
+        // The three actions, with the server they act on.
+        for (text, action) in [
+            ("/mcp enable everything", McpAction::Enable),
+            ("/mcp disable everything", McpAction::Disable),
+        ] {
+            assert_eq!(
+                parse_chat_command(text),
+                Some(Ok(ChatCommand::Mcp {
+                    action,
+                    server: Some("everything".to_owned()),
+                })),
+                "{text}"
+            );
+        }
+        // A switch without a server, and an unknown action, are refused rather
+        // than sent to the model as a message.
+        assert!(matches!(parse_chat_command("/mcp enable"), Some(Err(_))));
+        assert!(matches!(
+            parse_chat_command("/mcp frobnicate x"),
+            Some(Err(_))
+        ));
+        // Prose is still a message.
+        assert!(parse_chat_command("mcp enable everything").is_none());
+        assert!(CHAT_COMMANDS.contains(&"/mcp"), "the list offers it");
     }
 
     #[test]

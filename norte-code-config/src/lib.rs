@@ -105,6 +105,37 @@ pub struct McpServerConfig {
     /// Whether the server is started. Off lets an entry be kept without
     /// paying for its process on every run.
     pub enabled: bool,
+    /// The tools of this server that may reach the model.
+    ///
+    /// Empty means every tool the server publishes, minus the ones in `deny`.
+    /// Names are written as the server names them, without the
+    /// `mcp__<server>__` prefix the model sees.
+    pub allow: Vec<String>,
+    /// The tools of this server that never reach the model.
+    ///
+    /// `deny` wins over `allow`, so naming a tool in both is a way to keep it
+    /// out while leaving it in a copied `allow` list.
+    pub deny: Vec<String>,
+}
+
+impl McpServerConfig {
+    /// The tools of `published` this entry lets through.
+    ///
+    /// A tool is kept when it is not denied and either nothing is allowed or it
+    /// is named in `allow`.
+    #[must_use]
+    pub fn select<'a, T>(&self, published: impl Iterator<Item = &'a T>) -> Vec<&'a T>
+    where
+        T: AsRef<str> + 'a,
+    {
+        published
+            .filter(|tool| {
+                let name = tool.as_ref();
+                !self.deny.iter().any(|denied| denied == name)
+                    && (self.allow.is_empty() || self.allow.iter().any(|allowed| allowed == name))
+            })
+            .collect()
+    }
 }
 
 impl Default for McpServerConfig {
@@ -114,6 +145,8 @@ impl Default for McpServerConfig {
             args: Vec::new(),
             env: BTreeMap::new(),
             enabled: true,
+            allow: Vec::new(),
+            deny: Vec::new(),
         }
     }
 }
@@ -1342,6 +1375,45 @@ mod tests {
             !loaded.config.mcp_servers.get("off").expect("entry").enabled,
             "a disabled entry keeps its place"
         );
+    }
+
+    #[test]
+    fn the_tool_lists_decide_what_reaches_the_model() {
+        let published = ["echo", "get-sum", "get-env"];
+
+        // Nothing named: every tool the server publishes.
+        let open = McpServerConfig::default();
+        assert_eq!(open.select(published.iter()).len(), 3);
+
+        // An allow list is the whole of it.
+        let only = McpServerConfig {
+            allow: vec!["echo".to_owned(), "get-sum".to_owned()],
+            ..McpServerConfig::default()
+        };
+        let kept = only.select(published.iter());
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!(kept.iter().any(|tool| **tool == "echo"), "{kept:?}");
+        assert!(
+            !kept.iter().any(|tool| **tool == "get-env"),
+            "a tool outside the allow list is absent: {kept:?}"
+        );
+
+        // A deny list takes away from everything else.
+        let without = McpServerConfig {
+            deny: vec!["get-env".to_owned()],
+            ..McpServerConfig::default()
+        };
+        let kept = without.select(published.iter());
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!(!kept.iter().any(|tool| **tool == "get-env"), "{kept:?}");
+
+        // Deny wins over allow, so naming a tool in both keeps it out.
+        let both = McpServerConfig {
+            allow: vec!["echo".to_owned()],
+            deny: vec!["echo".to_owned()],
+            ..McpServerConfig::default()
+        };
+        assert!(both.select(published.iter()).is_empty());
     }
 
     #[test]
