@@ -446,6 +446,12 @@ impl Renderer {
     /// Writes answer text, closing reasoning and separating it first.
     pub(crate) fn answer_delta(&mut self, text: &str) {
         let text = crate::text::terminal(text);
+        // The first answer token is the same signal as the first reasoning one.
+        if !text.is_empty() {
+            if let Some(bar) = self.loading_bar.as_ref() {
+                bar.streaming();
+            }
+        }
         if !self.verbosity.at_least(Verbosity::Medium) {
             print!("{text}");
             if let Some(last) = text.chars().last() {
@@ -628,6 +634,12 @@ impl Renderer {
                     Self::tool_result(tool, path.as_deref(), output.as_deref())
                 {
                     self.print_tool_result(&result, *truncated);
+                }
+                // The turn is not over: the model has the result and is being
+                // asked again. Without this the rest of the turn ran with no
+                // signal at all, and a slow continuation looked like a hang.
+                if self.loading_bar.is_none() && !self.failed && !self.cancelled {
+                    self.mark_working();
                 }
                 if self.verbosity.at_least(Verbosity::High) {
                     if *is_error {
@@ -1289,6 +1301,10 @@ impl Renderer {
                 // same keepalive case as an empty text delta.
                 if text.is_empty() {
                     return;
+                }
+                // The provider answered: the bar stops saying it is waiting.
+                if let Some(bar) = self.loading_bar.as_ref() {
+                    bar.streaming();
                 }
                 if self.verbosity.is_quiet() {
                     // `low` is the answer alone: not even the fact that the

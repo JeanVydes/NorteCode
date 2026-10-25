@@ -137,9 +137,15 @@ mod unix {
     use crate::interaction::{CommandSuggestion, command_suggestion};
     use crate::style::Style;
 
-    /// Rows reserved below the scroll region: todo widget, session status,
-    /// command suggestion and the input line.
-    const FOOTER_ROWS: u16 = 4;
+    /// The most rows the input line may occupy, scrolling inside them.
+    ///
+    /// A draft rarely needs more; one that does keeps the row the cursor is on
+    /// in view rather than pushing the transcript off the screen.
+    const INPUT_ROWS: u16 = 6;
+
+    /// Rows reserved below the scroll region: the input line (up to
+    /// [`INPUT_ROWS`]), the command suggestion and the session status.
+    const FOOTER_ROWS: u16 = INPUT_ROWS + 2;
 
     /// How long a drag must pause before its last size is applied.
     const RESIZE_QUIET: Duration = Duration::from_millis(80);
@@ -386,6 +392,65 @@ mod unix {
             true
         }
 
+        /// The range of the line the cursor is on, and its column in it.
+        fn current_line(&self) -> ((usize, usize), usize) {
+            let mut start = 0usize;
+            for index in 0..self.cursor {
+                if self.chars[index] == '\n' {
+                    start = index + 1;
+                }
+            }
+            let mut end = self.chars.len();
+            for (index, character) in self.chars.iter().enumerate().skip(start) {
+                if *character == '\n' {
+                    end = index;
+                    break;
+                }
+            }
+            ((start, end), self.cursor - start)
+        }
+
+        /// Moves the cursor one line up, keeping the column where it can.
+        ///
+        /// Returns whether it moved: at the first line there is nowhere to go,
+        /// which is the caller's signal to walk the history instead.
+        fn up(&mut self) -> bool {
+            let ((start, _), column) = self.current_line();
+            if start == 0 {
+                return false;
+            }
+            // The line above runs from its own newline to the one that ends it.
+            let above_end = start - 1;
+            let mut above_start = 0usize;
+            for index in 0..above_end {
+                if self.chars[index] == '\n' {
+                    above_start = index + 1;
+                }
+            }
+            let width = above_end - above_start;
+            self.cursor = above_start + column.min(width);
+            true
+        }
+
+        /// Moves the cursor one line down, keeping the column where it can.
+        fn down(&mut self) -> bool {
+            let ((_, end), column) = self.current_line();
+            if end >= self.chars.len() {
+                return false;
+            }
+            let start = end + 1;
+            let mut next_end = self.chars.len();
+            for (index, character) in self.chars.iter().enumerate().skip(start) {
+                if *character == '\n' {
+                    next_end = index;
+                    break;
+                }
+            }
+            let width = next_end - start;
+            self.cursor = start + column.min(width);
+            true
+        }
+
         fn clear(&mut self) {
             self.chars.clear();
             self.cursor = 0;
@@ -593,11 +658,17 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Up => {
-                history_previous(buffer, history, history_pos, draft);
+                // Inside a multi-line draft the arrows move the cursor; only
+                // from the first line do they reach the history.
+                if !buffer.up() {
+                    history_previous(buffer, history, history_pos, draft);
+                }
                 KeyOutcome::Continue
             }
             KeyCode::Down => {
-                history_next(buffer, history, history_pos, draft);
+                if !buffer.down() {
+                    history_next(buffer, history, history_pos, draft);
+                }
                 KeyOutcome::Continue
             }
             KeyCode::Tab => {
@@ -669,8 +740,22 @@ mod unix {
         rows.saturating_sub(FOOTER_ROWS).max(1)
     }
 
+    /// The last row the input line may occupy.
+    ///
+    /// The three rows under it hold the pinned widgets, which are laid out from
+    /// the bottom, so the input grows upward from here.
+    fn input_bottom(rows: u16) -> u16 {
+        todo_row(rows).saturating_sub(1).max(1)
+    }
+
     fn status_row(rows: u16) -> u16 {
         rows.saturating_sub(2).max(1)
+    }
+
+    /// An empty line between the input block and the widgets, so the draft does
+    /// not touch the status line.
+    fn input_gap(rows: u16) -> u16 {
+        rows.saturating_sub(3).max(1)
     }
 
     fn suggestion_row(rows: u16) -> u16 {
@@ -678,7 +763,7 @@ mod unix {
     }
 
     fn todo_row(rows: u16) -> u16 {
-        rows.saturating_sub(3).max(1)
+        input_gap(rows)
     }
 
     fn enter_terminal(cols: u16, rows: u16) -> Result<(), String> {
@@ -1011,9 +1096,11 @@ mod unix {
         let available = usize::from(cols).saturating_sub(prompt_width + 1).max(1);
         // The input owns the footer rows below the pinned widgets, so a taller
         // draft grows upward over its own rows instead of the widgets.
-        let window = usize::from(FOOTER_ROWS.saturating_sub(1).max(1));
+        // The input may occupy up to its own rows; the rows after it hold the
+        // suggestion and the status.
+        let window = usize::from(INPUT_ROWS);
         let lines = input_lines(buffer, window, available);
-        let last_row = rows.max(1);
+        let last_row = input_bottom(rows);
         let first_row = last_row
             .saturating_sub(u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
 
@@ -1060,8 +1147,8 @@ mod unix {
 
         use super::{
             FOOTER_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus, clip_visible,
-            handle_key, input_lines, resize_frame, scroll_bottom, status_row, suggestion_row,
-            todo_line, todo_row,
+            handle_key, input_bottom, input_lines, resize_frame, scroll_bottom, status_row,
+            suggestion_row, todo_line, todo_row,
         };
 
         #[test]
@@ -1106,18 +1193,19 @@ mod unix {
         #[test]
         fn resize_frame_clears_each_footer_row_once() {
             let frame = resize_frame(24, 24);
+            let bottom = scroll_bottom(24);
             // The region is set, never released: `\x1b[r` left the renderer free
             // to write over the footer until the new one was set.
             assert!(!frame.contains("\x1b[r"), "{frame:?}");
-            assert!(frame.starts_with("\x1b[1;20r"), "{frame:?}");
-            for row in 21..=24 {
+            assert!(frame.starts_with(&format!("\x1b[1;{bottom}r")), "{frame:?}");
+            for row in bottom + 1..=24 {
                 assert_eq!(
                     frame.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
                     1,
                     "row {row} should be cleared once"
                 );
             }
-            assert!(frame.ends_with("\x1b[20;1H"), "{frame:?}");
+            assert!(frame.ends_with(&format!("\x1b[{bottom};1H")), "{frame:?}");
         }
 
         #[test]
@@ -1138,49 +1226,74 @@ mod unix {
         #[test]
         fn resize_frame_clears_old_and_new_footer_rows() {
             let grown = resize_frame(30, 24);
-            for row in [21, 22, 23, 24, 27, 28, 29, 30] {
+            let old_bottom = scroll_bottom(24);
+            let new_bottom = scroll_bottom(30);
+            let mut cleared: Vec<u16> = (old_bottom + 1..=24).collect();
+            cleared.extend(new_bottom + 1..=30);
+            for row in cleared {
                 assert_eq!(
                     grown.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
                     1,
                     "row {row} should be cleared once"
                 );
             }
-            for row in 25..=26 {
-                assert!(
-                    !grown.contains(&format!("\x1b[{row};1H\x1b[2K")),
-                    "scroll row {row} must be preserved"
-                );
+            // Every row that is neither an old footer row nor a new one is the
+            // scroll area and is left alone.
+            for row in 1..=30u16 {
+                let old_footer = row > old_bottom && row <= 24;
+                let new_footer = row > new_bottom;
+                if !old_footer && !new_footer {
+                    assert!(
+                        !grown.contains(&format!("\x1b[{row};1H\x1b[2K")),
+                        "scroll row {row} must be preserved"
+                    );
+                }
             }
-            assert!(grown.ends_with("\x1b[26;1H"), "{grown:?}");
+            assert!(
+                grown.ends_with(&format!("\x1b[{new_bottom};1H")),
+                "{grown:?}"
+            );
 
             let shrunk = resize_frame(24, 30);
-            for row in 21..=24 {
+            let shrunk_bottom = scroll_bottom(24);
+            for row in shrunk_bottom + 1..=24 {
                 assert_eq!(
                     shrunk.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
                     1,
                     "row {row} should be cleared once"
                 );
             }
-            for row in 28..=30 {
+            for row in 25..=30 {
                 assert!(
                     !shrunk.contains(&format!("\x1b[{row};1H\x1b[2K")),
                     "rows beyond the new height must not be addressed"
                 );
             }
-            assert!(shrunk.ends_with("\x1b[20;1H"), "{shrunk:?}");
+            assert!(
+                shrunk.ends_with(&format!("\x1b[{shrunk_bottom};1H")),
+                "{shrunk:?}"
+            );
         }
 
         #[test]
         fn footer_rows_stay_below_the_scroll_region() {
-            assert_eq!(scroll_bottom(24), 20);
-            assert_eq!(todo_row(24), 21);
-            assert_eq!(status_row(24), 22);
+            // The three widget rows sit at the bottom; above them the input may
+            // occupy its own rows, and the scroll region ends below all of it.
             assert_eq!(suggestion_row(24), 23);
-            // A terminal at the minimum height still yields valid rows.
-            assert_eq!(scroll_bottom(5), 1);
-            assert_eq!(todo_row(5), 2);
-            assert_eq!(status_row(5), 3);
-            assert_eq!(suggestion_row(5), 4);
+            assert_eq!(status_row(24), 22);
+            assert_eq!(todo_row(24), 21);
+            assert_eq!(input_bottom(24), 20);
+            assert_eq!(scroll_bottom(24), 16);
+            assert!(scroll_bottom(24) < input_bottom(24));
+            // A terminal at the minimum height still yields valid rows, and the
+            // rows never cross each other.
+            for rows in 9..=40u16 {
+                let bottom = scroll_bottom(rows);
+                assert!(bottom < input_bottom(rows), "rows {rows}");
+                assert!(input_bottom(rows) < todo_row(rows), "rows {rows}");
+                assert!(todo_row(rows) < status_row(rows), "rows {rows}");
+                assert!(status_row(rows) < suggestion_row(rows), "rows {rows}");
+            }
         }
 
         fn item(content: &str, status: TodoStatus) -> TodoItem {
@@ -1329,6 +1442,31 @@ mod unix {
                 lines[1].contains('e'),
                 "the window follows the cursor to the last line: {lines:?}"
             );
+        }
+
+        #[test]
+        fn the_arrows_move_inside_the_draft_before_the_history() {
+            let mut buffer = LineBuffer::default();
+            // Two lines, the cursor at the end of the second.
+            buffer.insert_text("uno\ndos");
+            assert!(buffer.up(), "there is a line above");
+            assert_eq!(buffer.cursor, 3, "the cursor lands on the line above");
+            assert!(!buffer.up(), "the first line has nowhere above it");
+            assert!(buffer.down(), "there is a line below");
+            assert_eq!(buffer.cursor, 7, "back down to the second line");
+            assert!(!buffer.down(), "the last line has nowhere below it");
+        }
+
+        #[test]
+        fn the_arrows_keep_the_column_where_they_can() {
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("abcdef\nxy");
+            // Move into the first line, column five.
+            buffer.cursor = 5;
+            assert!(buffer.down());
+            // The second line is two wide, so the column is clamped to its end.
+            assert_eq!(buffer.text(), "abcdef\nxy");
+            assert_eq!(buffer.cursor, 9, "clamped to the shorter line");
         }
 
         #[test]
