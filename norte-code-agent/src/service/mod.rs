@@ -808,6 +808,18 @@ impl Service {
         Arc::clone(&self.lock_skills())
     }
 
+    /// The `provider/model` reference a session is on, if it is known.
+    ///
+    /// A client needs it to change one half of the reference while keeping the
+    /// other: `/provider` swaps the provider and keeps the model, and it cannot
+    /// read that from anywhere of its own while a turn is running.
+    #[must_use]
+    pub fn session_model(&self, session: &SessionKey) -> Option<String> {
+        self.lock_sessions()
+            .get(session)
+            .map(|record| record.spec.label())
+    }
+
     /// Whether the session has a background job still running.
     ///
     /// The CLI asks before deciding what `Ctrl-C` means: it ends a job when

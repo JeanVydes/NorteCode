@@ -283,6 +283,32 @@ fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<Scrip
 }
 
 #[tokio::test]
+async fn a_session_reports_the_model_reference_it_is_on() {
+    // `/provider` swaps the provider and keeps the model, so the client has to
+    // read the reference from the session: during a turn the renderer's own name
+    // is the one already in flight, and there is nowhere else to ask.
+    let (service, _model) = scripted_service(spec("scripted"), &["hello"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    assert_eq!(
+        service.session_model(&key).as_deref(),
+        Some("test/scripted"),
+        "a session names the provider and the model it is on"
+    );
+
+    let unknown = SessionKey::new("00000000-0000-0000-0000-000000000000".to_owned());
+    assert_eq!(
+        service.session_model(&unknown),
+        None,
+        "a session that does not exist has no model"
+    );
+}
+
+#[tokio::test]
 async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
     // A private endpoint is declared in `config.json` and nowhere else, so the
     // catalogue does not list its provider. A run resolves one of those without

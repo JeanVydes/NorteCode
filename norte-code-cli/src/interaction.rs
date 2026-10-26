@@ -913,6 +913,17 @@ async fn run_reasoning(
     }
 }
 
+/// The model a session is on, without its provider.
+///
+/// A provider switch keeps the model and replaces the provider, so the name has
+/// to come from the session's own spec rather than from the renderer: during a
+/// turn the renderer is mid-answer and its name is the one already in flight.
+fn model_name_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
+    service
+        .session_model(session)
+        .and_then(|reference| reference.split_once('/').map(|(_, name)| name.to_owned()))
+}
+
 /// Steers a message into the running turn and names it, so the client can
 /// tell it apart when the engine reports it applied.
 async fn steer_text(
@@ -1009,12 +1020,33 @@ async fn handle_live_command(
                 );
             }
         }
+        // A provider switch is a model switch: the same request, with the
+        // provider replaced and the model name kept. During a turn it queues
+        // exactly as `/model` does — the refusal here was the odd one out, and
+        // it meant a person who wanted the next turn on another provider had to
+        // wait for the current one to end and then remember to ask again.
         ChatCommand::Provider { provider } => {
-            let _ = provider;
-            eprintln!(
-                "{}",
-                style.yellow("provider switch is not available during a turn")
-            );
+            if provider.is_empty() {
+                eprintln!(
+                    "{}",
+                    style.yellow("wait until the current turn finishes, then /provider")
+                );
+            } else if let Some(session) = current {
+                let model_name =
+                    model_name_of(service, session).unwrap_or_else(|| "default".to_owned());
+                run_model(
+                    service,
+                    session.clone(),
+                    format!("{provider}/{model_name}"),
+                    style,
+                )
+                .await;
+            } else {
+                eprintln!(
+                    "{}",
+                    style.yellow("the session is not ready yet; try again")
+                );
+            }
         }
         ChatCommand::Revoke { grant } => {
             if let Some(session) = current {
