@@ -95,6 +95,10 @@ that names the field; it is never silently replaced.
     "openrouter/anthropic/claude-sonnet-4": {
       "max_context": 200000,
       "max_output": 64000,
+      "modalities": {
+        "input": ["text", "image"],
+        "output": ["text"]
+      },
       "reasoning": {
         "supported": true,
         "can_disable": true,
@@ -347,9 +351,35 @@ registers the refreshed tools.
 | `reasoning.efforts` | array of strings or `null` | `null` | Effort names to expose, including `xhigh` and `max`. |
 | `reasoning.supports_budget` | boolean or `null` | `null` | Whether a token budget is accepted. |
 | `reasoning.max_budget` | integer or `null` | `null` | Largest accepted budget. |
+| `modalities.input` | array of strings or `null` | `null` | Modalities the model takes in. |
+| `modalities.output` | array of strings or `null` | `null` | Modalities the model produces. |
 
-`null` means “keep the catalogue value”. An override only fills or replaces
-what the catalogue declares; it does not invent capabilities the model lacks.
+`null` means “keep the catalogue value”, and a value set here replaces what
+the catalogue declares. No override invents a capability the model lacks —
+what it changes is what Norte Code *believes* the model does, and a model only
+takes an image if it really does.
+
+Each modality is one of `text`, `image`, `audio`, `video` or `pdf` (`document`
+is accepted as a synonym). A list **replaces** the declared set rather than
+adding to it: it can give a modality to a model the catalogue does not describe
+and take one away from a model it overstates. `input` and `output` are
+independent — leaving one out keeps whatever the catalogue or the fallback said
+for that side.
+
+The model the catalogue does not list needs this. `river` and every other
+private endpoint named only under `providers` has no catalogue entry, so its
+capabilities fall back to text in, text out; without an `input` list naming
+`image`, pasting a picture is refused:
+
+```json
+{
+  "model_overrides": {
+    "river/deepseek-ai/DeepSeek-V4.1-Flash": {
+      "modalities": { "input": ["text", "image"], "output": ["text"] }
+    }
+  }
+}
+```
 
 ## `extensions`
 

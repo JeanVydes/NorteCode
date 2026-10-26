@@ -8,6 +8,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `model_overrides.<provider/model>.modalities` declares what a model accepts
+  on input and produces on output. The catalogue is the source for a model it
+  lists, but `river` and every other private endpoint named only under
+  `providers` has no entry, so its capabilities fell back to text in, text out
+  and an image was refused with nothing in the configuration able to say
+  otherwise. A list replaces the declared set rather than adding to it, so a
+  host can also take a modality away from a model the catalogue overstates; each
+  side falls back on its own. The modalities are `text`, `image`, `audio`,
+  `video` and `pdf` (`document` is accepted for the last), and an unknown name
+  is refused by the parser rather than dropped.
+
 - The session has tabs: `chat` and `todo`, drawn as one row above the
   input. `Ctrl-T` cycles, `Shift-Ctrl-T` goes back, `Ctrl-1` and `Ctrl-2` go
   straight to one, and `/tab [name|number]` does the same for a terminal that

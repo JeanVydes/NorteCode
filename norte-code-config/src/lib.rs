@@ -600,6 +600,47 @@ pub struct ModelOverride {
     pub max_output: Option<u64>,
     /// A reasoning override.
     pub reasoning: Option<ReasoningOverride>,
+    /// An input/output modality override.
+    pub modalities: Option<ModalitiesOverride>,
+}
+
+/// A per-model override of the modalities the model accepts and produces.
+///
+/// A model the catalogue lists carries its own modalities, and a model it does
+/// not — a private endpoint named only under `providers` — has nothing to read
+/// and falls back to text in, text out. This is where a host that knows better
+/// says so: `input` and `output` **replace** what the catalogue or the fallback
+/// declared, so `{"input": ["text", "image"]}` is what lets a model the
+/// catalogue does not describe take an image.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModalitiesOverride {
+    /// The modalities the model accepts on input.
+    pub input: Option<Vec<ModalityKind>>,
+    /// The modalities the model produces on output.
+    pub output: Option<Vec<ModalityKind>>,
+}
+
+/// A kind of content, as the configuration spells it.
+///
+/// Typed and not a `String` for the same reason [`WireKind`] is: a name the
+/// build does not know is refused where it is written, by the parser, instead
+/// of being dropped later and leaving a model declaring less than its host
+/// asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModalityKind {
+    /// Text.
+    Text,
+    /// Images.
+    Image,
+    /// Audio.
+    Audio,
+    /// Video.
+    Video,
+    /// Documents, such as PDFs. The catalogue spells this `pdf`.
+    #[serde(rename = "pdf", alias = "document")]
+    Pdf,
 }
 
 /// A per-model override of the catalogue's reasoning declaration.
@@ -1289,6 +1330,55 @@ mod tests {
     fn unknown_keys_warn_instead_of_failing() {
         let loaded = Config::from_json(r#"{"mystery":true}"#).expect("config");
         assert_eq!(loaded.warnings, vec!["mystery".to_owned()]);
+    }
+
+    #[test]
+    fn a_model_override_declares_the_modalities_a_model_takes() {
+        // The block a model the catalogue does not describe is given the
+        // capabilities it has. `pdf` and `document` are the same modality, and
+        // both spellings are accepted because the catalogue uses the first and
+        // a person writes the second.
+        let loaded = Config::from_json(
+            r#"{"model_overrides":{"river/m":{"modalities":{"input":["text","image","pdf"],"output":["text"]}}}}"#,
+        )
+        .expect("config");
+        let modalities = loaded.config.model_overrides["river/m"]
+            .modalities
+            .as_ref()
+            .expect("modalities");
+        assert_eq!(
+            modalities.input.as_deref(),
+            Some(&[ModalityKind::Text, ModalityKind::Image, ModalityKind::Pdf][..])
+        );
+        assert_eq!(
+            modalities.output.as_deref(),
+            Some(&[ModalityKind::Text][..])
+        );
+
+        let document = Config::from_json(
+            r#"{"model_overrides":{"river/m":{"modalities":{"input":["document"]}}}}"#,
+        )
+        .expect("config");
+        assert_eq!(
+            document.config.model_overrides["river/m"]
+                .modalities
+                .as_ref()
+                .and_then(|modalities| modalities.input.as_deref()),
+            Some(&[ModalityKind::Pdf][..]),
+            "`document` is the same modality as `pdf`"
+        );
+    }
+
+    #[test]
+    fn an_unknown_modality_is_rejected_by_name() {
+        // Refused where it is written, by the parser, and not silently dropped:
+        // a dropped name would leave the model declaring less than its host
+        // asked for, and the image would be refused with no clue why.
+        let error = Config::from_json(
+            r#"{"model_overrides":{"river/m":{"modalities":{"input":["telepathy"]}}}}"#,
+        )
+        .expect_err("unknown modality");
+        assert!(error.to_string().contains("telepathy"), "{error}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub mod map;
 pub mod schema;
 
 pub use cache::{Cache, LoadOptions, Loaded, Source, cache_dir, load_catalog};
-pub use map::{Wire, capabilities, reasoning};
+pub use map::{Wire, capabilities, modality_of_kind, reasoning};
 pub use schema::{
     Catalog, CatalogError, Limit, Modalities, Model, ModelEntry, Provider, ReasoningOption,
 };

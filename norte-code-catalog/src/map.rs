@@ -11,7 +11,7 @@ use norte::{
     CacheMode, Capabilities, Modality, Reasoning, ReasoningEffort, StreamingGranularity,
     StructuredOutputMode, ToolKind,
 };
-use norte_code_config::{ModelOverride, ReasoningOverride, WireKind};
+use norte_code_config::{ModalityKind, ModelOverride, ReasoningOverride, WireKind};
 
 use crate::schema::{Model, ReasoningOption};
 
@@ -121,26 +121,30 @@ pub fn capabilities(model: &Model, wire: Wire, overrides: Option<&ModelOverride>
         .cache(wire.cache_mode())
         .reasoning(declared);
 
-    let mut has_input = false;
-    for name in &model.modalities.input {
-        if let Some(modality) = modality_of(name) {
-            builder = builder.input(modality);
-            has_input = true;
-        }
-    }
-    if !has_input {
-        builder = builder.input(Modality::Text);
+    // The configured modalities win outright: a list replaces what the
+    // catalogue declared rather than adding to it, so a host can take an image
+    // away from a model the catalogue overstates as well as give one to a model
+    // the catalogue does not describe at all. Each key falls back on its own: a
+    // model with an input list and no output one keeps the output the catalogue
+    // declared.
+    let modalities = overrides.and_then(|overrides| overrides.modalities.as_ref());
+    let configured_input = modalities.and_then(|modalities| modalities.input.as_ref());
+    let configured_output = modalities.and_then(|modalities| modalities.output.as_ref());
+
+    let input: Vec<Modality> = match configured_input {
+        Some(configured) => configured.iter().copied().map(modality_of_kind).collect(),
+        None => declared_modalities(&model.modalities.input, Modality::Text).collect(),
+    };
+    for modality in input {
+        builder = builder.input(modality);
     }
 
-    let mut has_output = false;
-    for name in &model.modalities.output {
-        if let Some(modality) = modality_of(name) {
-            builder = builder.output(modality);
-            has_output = true;
-        }
-    }
-    if !has_output {
-        builder = builder.output(Modality::Text);
+    let output: Vec<Modality> = match configured_output {
+        Some(configured) => configured.iter().copied().map(modality_of_kind).collect(),
+        None => declared_modalities(&model.modalities.output, Modality::Text).collect(),
+    };
+    for modality in output {
+        builder = builder.output(modality);
     }
 
     if model.tool_call {
@@ -237,6 +241,40 @@ pub fn reasoning(model: &Model, overrides: Option<&ReasoningOverride>) -> Reason
     result
 }
 
+/// The modalities a catalogue list names, or `fallback` when it names none this
+/// build knows.
+///
+/// A model that declares no input modality at all is taken to take text: an
+/// entry that says nothing is not an entry that says "nothing is accepted", and
+/// a model that refused every part could not hold a conversation either.
+fn declared_modalities(
+    names: &[String],
+    fallback: Modality,
+) -> impl Iterator<Item = Modality> + '_ {
+    let known: Vec<Modality> = names.iter().filter_map(|name| modality_of(name)).collect();
+    if known.is_empty() {
+        return vec![fallback].into_iter();
+    }
+    known.into_iter()
+}
+
+/// The Norte modality a configured one names.
+///
+/// A free function and not a `From` impl: neither [`Modality`] nor
+/// [`ModalityKind`] is local here, so the orphan rule forbids the impl. It lives
+/// in this crate because this is where a provider fact becomes a Norte
+/// capability, and the host uses it too so both paths agree on the spelling.
+#[must_use]
+pub fn modality_of_kind(kind: ModalityKind) -> Modality {
+    match kind {
+        ModalityKind::Text => Modality::Text,
+        ModalityKind::Image => Modality::Image,
+        ModalityKind::Audio => Modality::Audio,
+        ModalityKind::Video => Modality::Video,
+        ModalityKind::Pdf => Modality::Document,
+    }
+}
+
 fn modality_of(name: &str) -> Option<Modality> {
     match name {
         "text" => Some(Modality::Text),
@@ -286,6 +324,7 @@ fn anthropic_can_disable(id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::schema::Catalog;
+    use norte_code_config::ModalitiesOverride;
 
     #[test]
     fn npm_selects_the_wire() {
@@ -382,10 +421,57 @@ mod tests {
                 supported: Some(false),
                 ..ReasoningOverride::default()
             }),
+            ..ModelOverride::default()
         };
         let capabilities = capabilities(model, Wire::GenerateContent, Some(&overrides));
         assert_eq!(capabilities.max_context, Some(1234));
         assert_eq!(capabilities.max_output, Some(99));
         assert!(!capabilities.reasoning.supported);
+    }
+
+    #[test]
+    fn a_configured_modality_gives_a_text_model_an_image() {
+        // The case the whole override exists for: a model the catalogue does not
+        // describe, or describes without an image, takes one because the host
+        // said so. Without this the part is refused as an input modality the
+        // model was believed not to have.
+        let catalog = Catalog::bundled();
+        let model = catalog.find("google", "gemini-2.5-pro").expect("model");
+        let overrides = ModelOverride {
+            modalities: Some(ModalitiesOverride {
+                input: Some(vec![ModalityKind::Text, ModalityKind::Image]),
+                output: None,
+            }),
+            ..ModelOverride::default()
+        };
+        let declared = capabilities(model, Wire::GenerateContent, Some(&overrides));
+        assert!(declared.modalities.supports_input(Modality::Image));
+        assert!(declared.modalities.supports_input(Modality::Text));
+        // The output half was left out, so it keeps what the catalogue said.
+        assert!(declared.modalities.supports_output(Modality::Text));
+    }
+
+    #[test]
+    fn a_configured_modality_takes_one_away_too() {
+        // It replaces, rather than adds: a host that reads the catalogue as
+        // overstating a model has to be able to say so.
+        let catalog = Catalog::bundled();
+        let model = catalog.find("google", "gemini-2.5-pro").expect("model");
+        let overrides = ModelOverride {
+            modalities: Some(ModalitiesOverride {
+                input: Some(vec![ModalityKind::Text]),
+                output: None,
+            }),
+            ..ModelOverride::default()
+        };
+        let declared = capabilities(model, Wire::GenerateContent, Some(&overrides));
+        assert!(declared.modalities.supports_input(Modality::Text));
+        assert!(!declared.modalities.supports_input(Modality::Document));
+    }
+
+    #[test]
+    fn a_pdf_and_a_document_name_the_same_modality() {
+        assert_eq!(modality_of_kind(ModalityKind::Pdf), Modality::Document);
+        assert_eq!(modality_of("pdf"), Some(Modality::Document));
     }
 }

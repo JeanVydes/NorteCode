@@ -23,7 +23,9 @@ use norte::{
 };
 
 pub use norte_code_catalog::Wire;
-use norte_code_catalog::{Catalog, Model as CatalogModel, Provider as CatalogProvider};
+use norte_code_catalog::{
+    Catalog, Model as CatalogModel, Provider as CatalogProvider, modality_of_kind,
+};
 use norte_code_config::{ApiKey, AuthKind, Config, ModelOverride};
 
 use crate::ServiceError;
@@ -532,12 +534,35 @@ fn fallback_capabilities(overrides: Option<&ModelOverride>) -> Capabilities {
     // context window and a reasonable output cap, so compaction and the output
     // limit still work. The host marks these as fallback values in debug output.
     let mut builder = Capabilities::builder()
-        .input(Modality::Text)
-        .output(Modality::Text)
         .streaming(StreamingGranularity::Delta)
         .tool_kind(ToolKind::Function)
         .max_context(200_000)
         .max_output(32_000);
+
+    // A configured list replaces the conservative default the same way it
+    // replaces the catalogue's in `norte_code_catalog::capabilities`, so one
+    // configuration means one thing whether or not the catalogue lists the
+    // model: an input list of `["image"]` on its own leaves the model taking
+    // images and not text. A side that is left out keeps the default, and the
+    // default is text — every model holds a conversation.
+    let configured = overrides.and_then(|overrides| overrides.modalities.as_ref());
+    match configured.and_then(|modalities| modalities.input.as_ref()) {
+        Some(input) => {
+            for modality in input.iter().copied().map(modality_of_kind) {
+                builder = builder.input(modality);
+            }
+        }
+        None => builder = builder.input(Modality::Text),
+    }
+    match configured.and_then(|modalities| modalities.output.as_ref()) {
+        Some(output) => {
+            for modality in output.iter().copied().map(modality_of_kind) {
+                builder = builder.output(modality);
+            }
+        }
+        None => builder = builder.output(Modality::Text),
+    }
+
     if let Some(overrides) = overrides {
         if let Some(max_context) = overrides.max_context {
             builder = builder.max_context(max_context);
@@ -692,6 +717,45 @@ mod tests {
         assert_eq!(spec.capabilities.max_context, Some(200_000));
         assert_eq!(spec.capabilities.max_output, Some(32_000));
         assert!(spec.capabilities.tool_kinds.contains(&ToolKind::Function));
+        let _ = std::fs::remove_file(key_file);
+    }
+
+    #[test]
+    fn a_configured_modality_reaches_a_model_the_catalogue_does_not_list() {
+        // The path `river` and every other private endpoint takes: the provider
+        // is not in the catalogue, so the capabilities come from the fallback
+        // and the model is text in, text out until the host says otherwise.
+        let key_file = std::env::temp_dir().join(format!(
+            "norte-code-provider-{}-modality-key",
+            std::process::id()
+        ));
+        std::fs::write(&key_file, "test-key\n").expect("key file");
+        let config = Config::from_json(
+            &r#"{
+                "providers":{"river":{"api_key_file":"KEY","endpoint":"https://api.river.test/v1","wire":"chat"}},
+                "model_overrides":{"river/m":{"modalities":{"input":["text","image"]}}}
+            }"#
+            .replace("KEY", &key_file.display().to_string()),
+        )
+        .expect("config")
+        .config;
+        let without = ModelSpec::resolve(&config, "river/other", None, &[]).expect("spec");
+        assert!(
+            !without
+                .capabilities
+                .modalities
+                .supports_input(Modality::Image),
+            "a model nothing is known about takes text"
+        );
+
+        // The override is keyed by `provider/model`, not by provider, so it
+        // only lands on the model it names — a second model on the same
+        // endpoint keeps the conservative default.
+        let spec = ModelSpec::resolve(&config, "river/m", None, &[]).expect("spec");
+        assert!(spec.capabilities.modalities.supports_input(Modality::Image));
+        assert!(spec.capabilities.modalities.supports_input(Modality::Text));
+        // The output half was not overridden, so it keeps the fallback's text.
+        assert!(spec.capabilities.modalities.supports_output(Modality::Text));
         let _ = std::fs::remove_file(key_file);
     }
 
