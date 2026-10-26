@@ -10,6 +10,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::tabs::SessionTab;
+
 /// A file pasted into the draft, as the message carries it.
 ///
 /// The bytes are not here: a paste carries a path, and the service is what reads
@@ -67,10 +69,27 @@ pub(crate) struct Pinned {
     resized: AtomicBool,
 }
 
-#[derive(Default)]
+impl Default for PinnedInner {
+    fn default() -> Self {
+        Self {
+            session: String::new(),
+            todos: Vec::new(),
+            tab: SessionTab::Chat,
+            debug: Vec::new(),
+            pending_steers: Vec::new(),
+        }
+    }
+}
+
 struct PinnedInner {
     session: String,
     todos: Vec<TodoItem>,
+    /// Which tab is showing. The conversation is the default because that is
+    /// what a client opens on.
+    tab: SessionTab,
+    /// The startup information, kept to be shown as a tab instead of printed
+    /// once and scrolled away.
+    debug: Vec<String>,
     /// The messages that reached the running request but are not in the
     /// transcript yet, oldest first.
     ///
@@ -129,15 +148,46 @@ impl Pinned {
         self.lock().todos.clone()
     }
 
+    /// The tab that is showing.
+    pub(crate) fn tab(&self) -> SessionTab {
+        self.lock().tab
+    }
+
+    /// Shows another tab, and marks the footer dirty so it repaints.
+    pub(crate) fn set_tab(&self, tab: SessionTab) {
+        let mut inner = self.lock();
+        if inner.tab != tab {
+            inner.tab = tab;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Keeps the startup information for the debug tab.
+    ///
+    /// It used to be printed before the first prompt and scrolled away by the
+    /// first answer, so the one moment it was wanted — working out which model
+    /// or which path is in play — was the moment it was gone.
+    pub(crate) fn set_debug(&self, lines: Vec<String>) {
+        let mut inner = self.lock();
+        if inner.debug != lines {
+            inner.debug = lines;
+        }
+    }
+
+    /// The startup information, as the debug tab shows it.
+    pub(crate) fn debug(&self) -> Vec<String> {
+        self.lock().debug.clone()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn snapshot(&self) -> (String, Vec<TodoItem>) {
+    fn snapshot(&self) -> (String, Vec<TodoItem>, SessionTab) {
         let inner = self.lock();
-        (inner.session.clone(), inner.todos.clone())
+        (inner.session.clone(), inner.todos.clone(), inner.tab)
     }
 
     /// The messages waiting to reach the running request.
@@ -184,6 +234,7 @@ mod unix {
     use super::{Pinned, TodoItem, TodoStatus};
     use crate::interaction::{CommandSuggestion, command_suggestion};
     use crate::style::Style;
+    use crate::tabs::SessionTab;
 
     /// The most rows the input line may occupy, scrolling inside them.
     ///
@@ -750,6 +801,10 @@ mod unix {
         let mut history: Vec<String> = Vec::new();
         let mut history_pos: Option<usize> = None;
         let mut draft = String::new();
+        // Where the keyboard is. `None` is the input line, which is where a
+        // person starts and where every key belongs; `Some(tab)` is the tab row
+        // with that tab selected but not yet applied.
+        let mut focus: Option<SessionTab> = None;
 
         let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
         draw_input(
@@ -760,7 +815,7 @@ mod unix {
             suggestion.as_ref(),
             &pinned.pending(),
         );
-        draw_footer(style, cols, rows, pinned, suggestion.as_ref());
+        draw_footer(style, cols, rows, pinned, suggestion.as_ref(), focus);
         let mut resize = ResizeDebounce::default();
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -773,33 +828,98 @@ mod unix {
                         Ok(Event::Key(key))
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
-                            match handle_key(
-                                key,
-                                &mut buffer,
-                                &mut history,
-                                &mut history_pos,
-                                &mut draft,
-                                sender,
-                            ) {
-                                KeyOutcome::Continue => redraw = true,
-                                KeyOutcome::Exit => break,
-                                // The editor does not act on these: it cannot
-                                // cancel a turn, and it cannot know whether one
-                                // is running. It says what was asked, and the
-                                // reader that has that context does the rest.
-                                KeyOutcome::CancelTurn => {
-                                    let _ =
-                                        sender.send(EditorEvent::Action(EditorAction::CancelTurn));
-                                    redraw = true;
+                            // While the focus is on the tab row the key is the
+                            // row's, not the draft's. A key the row does not
+                            // use drops the focus and falls through, so typing
+                            // brings a person back to the input without
+                            // swallowing the character that did it.
+                            let mut to_input = true;
+                            if let Some(selected) = focus {
+                                match tab_row_key(key, selected) {
+                                    TabRowKey::Select(tab) => {
+                                        focus = Some(tab);
+                                        redraw = true;
+                                        to_input = false;
+                                    }
+                                    TabRowKey::Apply => {
+                                        pinned.set_tab(selected);
+                                        focus = None;
+                                        redraw = true;
+                                        to_input = false;
+                                    }
+                                    // Up and Escape go back to the input
+                                    // without changing anything, which is the
+                                    // one thing that makes the row safe to
+                                    // walk into by accident.
+                                    TabRowKey::Leave => {
+                                        focus = None;
+                                        redraw = true;
+                                        to_input = false;
+                                    }
+                                    // A key the row does not use belongs to the
+                                    // draft: the focus drops and the character
+                                    // that did it is still typed, so a person
+                                    // who starts typing is back in the input
+                                    // without losing the first letter.
+                                    TabRowKey::Input => {
+                                        focus = None;
+                                        redraw = true;
+                                    }
                                 }
-                                KeyOutcome::CancelJobs => {
-                                    let _ =
-                                        sender.send(EditorEvent::Action(EditorAction::CancelJobs));
-                                    redraw = true;
-                                }
-                                KeyOutcome::Detach => {
-                                    let _ = sender.send(EditorEvent::Action(EditorAction::Detach));
-                                    redraw = true;
+                            }
+                            if to_input {
+                                match handle_key(
+                                    key,
+                                    &mut buffer,
+                                    &mut history,
+                                    &mut history_pos,
+                                    &mut draft,
+                                    sender,
+                                ) {
+                                    KeyOutcome::Continue => redraw = true,
+                                    KeyOutcome::Exit => break,
+                                    // The editor does not act on these: it cannot
+                                    // cancel a turn, and it cannot know whether one
+                                    // is running. It says what was asked, and the
+                                    // reader that has that context does the rest.
+                                    KeyOutcome::CancelTurn => {
+                                        let _ = sender
+                                            .send(EditorEvent::Action(EditorAction::CancelTurn));
+                                        redraw = true;
+                                    }
+                                    KeyOutcome::CancelJobs => {
+                                        let _ = sender
+                                            .send(EditorEvent::Action(EditorAction::CancelJobs));
+                                        redraw = true;
+                                    }
+                                    KeyOutcome::Detach => {
+                                        let _ =
+                                            sender.send(EditorEvent::Action(EditorAction::Detach));
+                                        redraw = true;
+                                    }
+                                    // The tab is the editor's to change: it holds
+                                    // the shared state and repaints the footer from
+                                    // it. Asking the reader would need a round trip
+                                    // for something that never leaves this process.
+                                    KeyOutcome::NextTab => {
+                                        pinned.set_tab(pinned.tab().next());
+                                        redraw = true;
+                                    }
+                                    KeyOutcome::ShowTab(tab) => {
+                                        pinned.set_tab(tab);
+                                        redraw = true;
+                                    }
+                                    KeyOutcome::PreviousTab => {
+                                        pinned.set_tab(pinned.tab().previous());
+                                        redraw = true;
+                                    }
+                                    // Down, with the draft at its last line and
+                                    // the history at its newest entry: the only
+                                    // thing under the input is the tab row.
+                                    KeyOutcome::FocusTabs => {
+                                        focus = Some(pinned.tab());
+                                        redraw = true;
+                                    }
                                 }
                             }
                         }
@@ -822,7 +942,7 @@ mod unix {
                             suggestion.as_ref(),
                             &pinned.pending(),
                         );
-                        draw_footer(style, cols, rows, pinned, suggestion.as_ref());
+                        draw_footer(style, cols, rows, pinned, suggestion.as_ref(), focus);
                     }
                 }
                 Ok(false) => {}
@@ -838,7 +958,7 @@ mod unix {
                 resize_terminal(rows, old_rows);
                 pinned.mark_resized();
                 let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
-                draw_footer(style, cols, rows, pinned, suggestion.as_ref());
+                draw_footer(style, cols, rows, pinned, suggestion.as_ref(), focus);
                 draw_input(
                     style,
                     cols,
@@ -850,7 +970,7 @@ mod unix {
             }
             if pinned.take_dirty() {
                 let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
-                draw_footer(style, cols, rows, pinned, suggestion.as_ref());
+                draw_footer(style, cols, rows, pinned, suggestion.as_ref(), focus);
             }
         }
     }
@@ -859,6 +979,18 @@ mod unix {
     enum KeyOutcome {
         Continue,
         Exit,
+        /// The user asked for the next tab. Which one that is depends on the
+        /// current tab, which the editor does not own, so it asks rather than
+        /// deciding.
+        NextTab,
+        /// The user asked for the previous tab.
+        PreviousTab,
+        /// The user pressed Down with nowhere left to go: the draft has no line
+        /// below and the history is already at its newest entry. The focus
+        /// moves to the tab row, which is the one thing under the input.
+        FocusTabs,
+        /// The user asked for one tab by name or number.
+        ShowTab(SessionTab),
         /// The user asked to stop the running turn (Escape).
         CancelTurn,
         /// The user asked to stop the running jobs (Ctrl-C).
@@ -869,6 +1001,48 @@ mod unix {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// What a key means while the tab row has the focus.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TabRowKey {
+        /// Move the selection.
+        Select(SessionTab),
+        /// Show the selected tab and go back to the input.
+        Apply,
+        /// Go back to the input without changing the tab.
+        Leave,
+        /// Not the row's key: drop the focus and let the input handle it.
+        Input,
+    }
+
+    /// Reads one key while the tab row has the focus.
+    ///
+    /// Left and right walk the row, Enter applies and leaves, and up goes back
+    /// without applying — the opposite of the down that came in. Everything
+    /// else is the input's, including Escape and `Ctrl-T`, which keeps the two
+    /// ways of changing tabs from fighting over the same key.
+    ///
+    /// Only the arrows and Tab walk the row: `h` and `l` were here at first,
+    /// by vim habit, and they ate the first letter of anyone who started typing
+    /// from the row — the row is entered by one keypress too many, so the
+    /// letter that follows it is far more likely than an unlabelled j/k.
+    fn tab_row_key(key: KeyEvent, selected: SessionTab) -> TabRowKey {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Left | KeyCode::BackTab => TabRowKey::Select(selected.previous()),
+            KeyCode::Right => TabRowKey::Select(selected.next()),
+            KeyCode::Enter => TabRowKey::Apply,
+            KeyCode::Up if !control => TabRowKey::Leave,
+            KeyCode::Esc => TabRowKey::Leave,
+            // Tab cycles the selection like right, so the row is walkable
+            // without the arrow keys on a keyboard that has none handy.
+            KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                TabRowKey::Select(selected.next())
+            }
+            _ => TabRowKey::Input,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // one arm per key, which is the keymap.
     fn handle_key(
         key: KeyEvent,
         buffer: &mut LineBuffer,
@@ -879,6 +1053,27 @@ mod unix {
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // The tabs: `Ctrl-T` cycles and `Ctrl-1..3` go straight to one. They are
+        // read before the editing keys so a digit never lands in the draft while
+        // a modifier is held.
+        if control && !alt {
+            match key.code {
+                // `Ctrl-Shift-T` walks back the way `Ctrl-T` walks forward.
+                KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    return KeyOutcome::PreviousTab;
+                }
+                KeyCode::Char('t' | 'T') => return KeyOutcome::NextTab,
+                KeyCode::Char(digit @ '1'..='3') => {
+                    if let Some(tab) = digit
+                        .to_digit(10)
+                        .and_then(|n| SessionTab::numbered(n as usize))
+                    {
+                        return KeyOutcome::ShowTab(tab);
+                    }
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 buffer.insert('\n');
@@ -1011,10 +1206,19 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Down => {
-                if !buffer.down() {
-                    history_next(buffer, history, history_pos, draft);
+                if buffer.down() {
+                    return KeyOutcome::Continue;
                 }
-                KeyOutcome::Continue
+                // The draft has no line below. Walking down the history comes
+                // first, because that is what the key has always done; the tab
+                // row is what is left once the history is at its newest entry
+                // and there is nowhere further down to go.
+                if history_pos.is_some() {
+                    history_next(buffer, history, history_pos, draft);
+                    KeyOutcome::Continue
+                } else {
+                    KeyOutcome::FocusTabs
+                }
             }
             KeyCode::Tab => {
                 match command_suggestion(&buffer.text(), buffer.cursor) {
@@ -1207,23 +1411,83 @@ mod unix {
         rows: u16,
         pinned: &Pinned,
         suggestion: Option<&CommandSuggestion>,
+        focus: Option<SessionTab>,
     ) {
-        let (session, todos) = pinned.snapshot();
+        let (session, todos, tab) = pinned.snapshot();
         let width = usize::from(cols).saturating_sub(2);
         let suggestion_text = suggestion.map_or_else(String::new, |suggestion| {
             style.faint(suggestion.hint.clone())
         });
-        let todo_text = todo_line(style, &todos, width);
+        // What the active tab shows. `chat` has no widget of its own: the
+        // conversation is the scroll region above, so that row keeps carrying
+        // the session status it always did. The other two replace it with their
+        // own content, which is what makes them views rather than extras.
+        let body = match tab {
+            SessionTab::Chat => session.clone(),
+            SessionTab::Todo => todo_line(style, &todos, width),
+            SessionTab::Debug => debug_line(style, &pinned.debug()),
+        };
+        let tabs_text = tabs_line(style, focus.unwrap_or(tab), focus.is_some(), width);
         let frame = format!(
             "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
             todo_row(rows),
-            clip_visible(&todo_text, width),
+            clip_visible(&tabs_text, width),
             status_row(rows),
-            clip_visible(&session, width),
+            clip_visible(&body, width),
             suggestion_row(rows),
             clip_visible(&suggestion_text, width)
         );
         write_frame(&frame);
+    }
+
+    /// The row of tabs, with the active one in brackets.
+    ///
+    /// One dim line, because that is all the footer has: the active tab is the
+    /// only name in the foreground and bracketed, so where the person is reads
+    /// at a glance and the rest say what is a keystroke away. The key that
+    /// cycles is named once, at the end, only when it fits.
+    fn tabs_line(style: Style, selected: SessionTab, focused: bool, max: usize) -> String {
+        let mut rendered = String::new();
+        for (index, tab) in SessionTab::ALL.iter().enumerate() {
+            if index > 0 {
+                rendered.push_str(&style.faint(" · "));
+            }
+            let name = tab.name();
+            rendered.push_str(&if *tab == selected && focused {
+                // The focus is on the row: the selection is what Enter would
+                // apply, so it is drawn as the one under the cursor.
+                style.bold(format!("›{name}‹"))
+            } else if *tab == selected {
+                style.bold(format!("[{name}]"))
+            } else {
+                style.faint(name.to_owned())
+            });
+        }
+        // What the keys do depends on where the keyboard is, so the hint says
+        // which row is listening rather than naming a key that would not work.
+        let hint = if focused { "  ←→ enter" } else { "  ^T" };
+        // What is shown, not what is written: the row carries `style` codes,
+        // and counting those made every hint too wide to fit.
+        if visible_width(&rendered) + hint.chars().count() <= max {
+            rendered.push_str(&style.faint(hint));
+        }
+        rendered
+    }
+
+    /// The debug tab's summary, as the one row the footer has room for.
+    ///
+    /// The count and nothing else: the panel is a box several rows tall with
+    /// its escapes already applied, and `style` escapes what it is given, so a
+    /// row of it here would print the escape instead of using it. The panel
+    /// itself is printed above, where there is room for it.
+    fn debug_line(style: Style, debug: &[String]) -> String {
+        if debug.is_empty() {
+            return style.faint("no startup information");
+        }
+        style.dim(format!(
+            "{} line(s) of startup information · printed above",
+            debug.len()
+        ))
     }
 
     /// Builds the one-line todo widget: progress, the current item first, then
@@ -1342,6 +1606,24 @@ mod unix {
     }
 
     /// Clips a styled line to `max` visible columns, keeping ANSI escapes.
+    /// How many columns a string with style codes occupies.
+    fn visible_width(text: &str) -> usize {
+        let mut width = 0usize;
+        let mut chars = text.chars();
+        while let Some(character) = chars.next() {
+            if character == '\x1b' {
+                for next in chars.by_ref() {
+                    if next == 'm' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            width += 1;
+        }
+        width
+    }
+
     fn clip_visible(text: &str, max: usize) -> String {
         let mut out = String::new();
         let mut visible = 0usize;
@@ -1604,11 +1886,176 @@ mod unix {
 
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+        use crate::tabs::SessionTab;
+
         use super::{
-            EditorEvent, FOOTER_ROWS, INPUT_ROWS, KeyOutcome, LineBuffer, ResizeDebounce, TodoItem,
-            TodoStatus, clip_visible, handle_key, input_bottom, input_lines, resize_frame,
-            scroll_bottom, status_row, suggestion_row, todo_line, todo_row,
+            EditorEvent, FOOTER_ROWS, INPUT_ROWS, KeyOutcome, LineBuffer, ResizeDebounce,
+            TabRowKey, TodoItem, TodoStatus, clip_visible, handle_key, input_bottom, input_lines,
+            resize_frame, scroll_bottom, status_row, suggestion_row, tab_row_key, todo_line,
+            todo_row, visible_width,
         };
+
+        #[test]
+        fn the_hint_is_measured_without_its_colour_codes() {
+            // The width of styled text is what is seen, not what is written:
+            // counting the escapes made every hint look too wide to fit, which
+            // is why the row always showed the shorter one.
+            assert_eq!(visible_width("plain"), 5);
+            assert_eq!(
+                visible_width("\x1b[38;5;244mtodo\x1b[0m"),
+                4,
+                "the codes are not columns"
+            );
+            assert_eq!(visible_width(""), 0);
+        }
+
+        #[test]
+        fn the_tab_row_reads_its_own_keys() {
+            // Left and right walk, Enter applies, up leaves. The row is what a
+            // person reaches by pressing down one time too many, so it has to
+            // be walkable and it has to be escapable.
+            let key = |code, modifiers| KeyEvent::new(code, modifiers);
+            assert_eq!(
+                tab_row_key(key(KeyCode::Right, KeyModifiers::NONE), SessionTab::Chat),
+                TabRowKey::Select(SessionTab::Todo)
+            );
+            assert_eq!(
+                tab_row_key(key(KeyCode::Left, KeyModifiers::NONE), SessionTab::Chat),
+                TabRowKey::Select(SessionTab::Debug),
+                "left wraps"
+            );
+            assert_eq!(
+                tab_row_key(key(KeyCode::Enter, KeyModifiers::NONE), SessionTab::Todo),
+                TabRowKey::Apply
+            );
+            assert_eq!(
+                tab_row_key(key(KeyCode::Up, KeyModifiers::NONE), SessionTab::Todo),
+                TabRowKey::Leave
+            );
+            assert_eq!(
+                tab_row_key(key(KeyCode::Esc, KeyModifiers::NONE), SessionTab::Todo),
+                TabRowKey::Leave
+            );
+            // No letter navigates: every one of them drops the focus and is
+            // typed, so starting to write from the row does not swallow the
+            // first character. `h` and `l` were the aliases that did eat it.
+            for character in ['h', 'l', 'j', 'k', 'x', 'q'] {
+                assert_eq!(
+                    tab_row_key(
+                        key(KeyCode::Char(character), KeyModifiers::NONE),
+                        SessionTab::Todo
+                    ),
+                    TabRowKey::Input,
+                    "`{character}` belongs to the draft"
+                );
+            }
+            // Tab walks the row, because a keyboard without arrows still has
+            // to be able to move; backwards is `Shift-Tab`.
+            assert_eq!(
+                tab_row_key(key(KeyCode::Tab, KeyModifiers::NONE), SessionTab::Chat),
+                TabRowKey::Select(SessionTab::Todo)
+            );
+            assert_eq!(
+                tab_row_key(key(KeyCode::BackTab, KeyModifiers::NONE), SessionTab::Chat),
+                TabRowKey::Select(SessionTab::Debug)
+            );
+        }
+
+        #[test]
+        fn down_reaches_the_tab_row_only_with_nowhere_else_to_go() {
+            // Down is the history key first and the tab row second: a draft
+            // with a line below moves the cursor, a history still walking keeps
+            // walking, and only the end of both reaches the row.
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut history = vec!["one".to_owned(), "two".to_owned()];
+            let mut draft = String::new();
+
+            // Walking back through the history: down is still the history's.
+            let mut buffer = LineBuffer::default();
+            let mut position = None;
+            let _ = handle_key(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut position,
+                &mut draft,
+                &sender,
+            );
+            assert!(position.is_some(), "up entered the history");
+            assert_eq!(
+                handle_key(
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    &mut buffer,
+                    &mut history,
+                    &mut position,
+                    &mut draft,
+                    &sender,
+                ),
+                KeyOutcome::Continue,
+                "the history is still walking"
+            );
+            assert!(position.is_none(), "and it reached the newest entry");
+
+            // Now there is nowhere down: the row is what is left.
+            assert_eq!(
+                handle_key(
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                    &mut buffer,
+                    &mut history,
+                    &mut position,
+                    &mut draft,
+                    &sender,
+                ),
+                KeyOutcome::FocusTabs
+            );
+        }
+
+        #[test]
+        fn the_tab_keys_ask_for_a_tab_without_touching_the_draft() {
+            // A modified digit must not land in the draft: the branch is read
+            // before the editing keys for exactly that reason.
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut history = Vec::new();
+            let mut history_pos = None;
+            let mut draft = String::new();
+
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("hola");
+            let outcome = handle_key(
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(outcome, KeyOutcome::NextTab);
+            assert_eq!(buffer.text(), "hola", "the draft keeps its text");
+
+            let mut buffer = LineBuffer::default();
+            let outcome = handle_key(
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::CONTROL),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(outcome, KeyOutcome::ShowTab(SessionTab::Todo));
+            assert_eq!(buffer.text(), "", "the digit never reaches the draft");
+
+            // Without the modifier a digit is just a digit.
+            let mut buffer = LineBuffer::default();
+            let _ = handle_key(
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+            );
+            assert_eq!(buffer.text(), "2");
+        }
 
         #[test]
         fn resize_debounce_waits_for_the_drag_to_pause() {
@@ -2507,6 +2954,8 @@ pub(crate) use unix::{EditorAction, EditorEvent, InteractiveInput};
 mod pinned_tests {
     use super::{Pinned, TodoItem, TodoStatus};
 
+    use crate::tabs::SessionTab;
+
     #[test]
     fn the_pinned_footer_keeps_the_session_and_todos() {
         let pinned = Pinned::new();
@@ -2515,10 +2964,32 @@ mod pinned_tests {
             content: "task".to_owned(),
             status: TodoStatus::Pending,
         }]);
-        let (session, todos) = pinned.snapshot();
+        let (session, todos, tab) = pinned.snapshot();
         assert_eq!(session, "session");
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].content, "task");
+        assert_eq!(tab, SessionTab::Chat, "a session opens on the conversation");
+    }
+
+    #[test]
+    fn the_active_tab_is_shared_and_marks_the_footer_dirty() {
+        // The editor changes it and the footer draws it, and they are two
+        // threads: the shared handle is what keeps them agreeing.
+        let pinned = Pinned::new();
+        assert_eq!(pinned.tab(), SessionTab::Chat);
+        pinned.set_tab(SessionTab::Debug);
+        assert_eq!(pinned.tab(), SessionTab::Debug);
+        assert_eq!(pinned.snapshot().2, SessionTab::Debug);
+    }
+
+    #[test]
+    fn the_debug_tab_keeps_what_used_to_be_printed() {
+        // It was printed at startup and scrolled away by the first answer, so
+        // keeping it is the whole point of the tab.
+        let pinned = Pinned::new();
+        assert!(pinned.debug().is_empty());
+        pinned.set_debug(vec!["model: test/scripted".to_owned()]);
+        assert_eq!(pinned.debug(), ["model: test/scripted"]);
     }
 
     #[test]

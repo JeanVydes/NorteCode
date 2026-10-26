@@ -8,6 +8,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The session has tabs: `chat`, `todo` and `debug`, drawn as one row above the
+  input. `Ctrl-T` cycles, `Shift-Ctrl-T` goes back, `Ctrl-1` to `Ctrl-3` go
+  straight to one, and `/tab [name|number]` does the same for a terminal that
+  will not send a modified key. The row says which one is showing and, at its
+  end, the key that changes it.
+- The debug information is a tab instead of a wall of text before the first
+  prompt. It used to be printed at startup, which is exactly where the first
+  answer scrolls it away — the moment it is wanted is the moment it leaves.
+  Without a terminal there is nowhere to switch to, so a pipe still gets it
+  printed where it always was.
+- The tab row can be driven with the keyboard. Pressing Down when the draft has
+  no line below it and the history is at its newest entry moves the focus to the
+  row; the arrows pick a tab, Enter shows it and returns to the input, and Up
+  or Escape leaves without changing anything. Any other key drops the focus and
+  is typed, so starting to write from the row does not swallow the first
+  character.
 - A pasted paragraph becomes `[Copied: Lorem ipsum dolor…]` in the draft, and the
   text is what is sent. What was pasted is longer than the line it is written on,
   and a paragraph dropped into a sentence buries the sentence; the label is how

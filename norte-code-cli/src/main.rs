@@ -19,6 +19,7 @@ mod models;
 mod prompt;
 mod render;
 mod style;
+mod tabs;
 mod text;
 
 use approval::{clip_text, compact_json};
@@ -563,8 +564,13 @@ async fn run_prompt(
     let max_context = spec.capabilities.max_context;
     let compaction_threshold = config.compaction.threshold;
     let database = database_path();
+    // The startup views are built as text rather than printed: with a terminal
+    // they become a tab the person opens when they want them, and without one
+    // they are printed where the old code put them. Printed at startup they
+    // scroll away under the first answer, which is the moment they are wanted.
+    let mut debug_lines: Vec<String> = Vec::new();
     if debug {
-        debug_start(
+        debug_lines.extend(debug_start(
             style,
             &spec,
             &config,
@@ -573,9 +579,13 @@ async fn run_prompt(
             config_path.as_deref(),
             args.session.as_deref(),
             &catalog,
-        );
-        debug_model(style, &spec, catalog.find(&spec.provider, &spec.model));
-        debug_reasoning(style, &effective);
+        ));
+        debug_lines.extend(debug_model(
+            style,
+            &spec,
+            catalog.find(&spec.provider, &spec.model),
+        ));
+        debug_lines.extend(debug_reasoning(style, &effective));
     }
     let store = Arc::new(
         SqliteStore::open(&database)
@@ -599,12 +609,21 @@ async fn run_prompt(
         .map_err(|e| e.to_string())?,
     );
     if debug {
-        debug_prompt_size(style, &service, system_prompt_source);
-        debug_mcp(style, &service);
+        debug_lines.extend(debug_prompt_size(style, &service, system_prompt_source));
+        debug_lines.extend(debug_mcp(style, &service));
     }
     service.set_config_path(config_path);
-
     let pinned = Pinned::new();
+    // With a terminal the debug views are a tab; without one there is nowhere
+    // to switch to, so they are printed as they always were.
+    if args.interactive {
+        pinned.set_debug(debug_lines);
+    } else {
+        for line in &debug_lines {
+            eprintln!("{line}");
+        }
+    }
+
     let mut renderer = Renderer::new(
         if args.jsonl {
             Format::Jsonl
@@ -734,8 +753,13 @@ async fn resume_session(
     let max_context = spec.capabilities.max_context;
     let compaction_threshold = config.compaction.threshold;
     let database = database_path();
+    // The startup views are built as text rather than printed: with a terminal
+    // they become a tab the person opens when they want them, and without one
+    // they are printed where the old code put them. Printed at startup they
+    // scroll away under the first answer, which is the moment they are wanted.
+    let mut debug_lines: Vec<String> = Vec::new();
     if debug {
-        debug_start(
+        debug_lines.extend(debug_start(
             style,
             &spec,
             &config,
@@ -744,9 +768,13 @@ async fn resume_session(
             config_path.as_deref(),
             Some(args.session.as_str()),
             &catalog,
-        );
-        debug_model(style, &spec, catalog.find(&spec.provider, &spec.model));
-        debug_reasoning(style, &effective);
+        ));
+        debug_lines.extend(debug_model(
+            style,
+            &spec,
+            catalog.find(&spec.provider, &spec.model),
+        ));
+        debug_lines.extend(debug_reasoning(style, &effective));
     }
     let store = Arc::new(
         SqliteStore::open(&database)
@@ -770,11 +798,20 @@ async fn resume_session(
         .map_err(|e| e.to_string())?,
     );
     if debug {
-        debug_prompt_size(style, &service, system_prompt_source);
-        debug_mcp(style, &service);
+        debug_lines.extend(debug_prompt_size(style, &service, system_prompt_source));
+        debug_lines.extend(debug_mcp(style, &service));
     }
     service.set_config_path(config_path);
     let pinned = Pinned::new();
+    // With a terminal the debug views are a tab; without one there is nowhere
+    // to switch to, so they are printed as they always were.
+    if args.interactive {
+        pinned.set_debug(debug_lines);
+    } else {
+        for line in &debug_lines {
+            eprintln!("{line}");
+        }
+    }
     let mut renderer = Renderer::new(
         if args.jsonl {
             Format::Jsonl

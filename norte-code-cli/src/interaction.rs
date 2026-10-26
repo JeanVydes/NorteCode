@@ -14,6 +14,7 @@ use crate::render::{
     BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
     scope_name, unit_name,
 };
+use crate::tabs::SessionTab;
 /// The wire's own attachment, named apart from the editor's: they carry the
 /// same three fields today, and they are not the same type — one is what a
 /// keystroke produced and the other is what goes on the wire.
@@ -126,6 +127,11 @@ pub(crate) enum ChatCommand {
     },
     /// Start a fresh session, leaving this one saved.
     Restart,
+    /// Show another tab of the session, or list them.
+    Tab {
+        /// The tab's name or number; `None` lists them.
+        target: Option<String>,
+    },
 }
 
 /// What `/jobs` was asked to do.
@@ -214,6 +220,12 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             return Some(Err("usage: /mcp list  (it takes no server)".to_owned()));
         }
         return Some(Ok(ChatCommand::Mcp { action, server }));
+    }
+    if let Some(rest) = command_rest(text, "/tab") {
+        let target = rest.trim();
+        return Some(Ok(ChatCommand::Tab {
+            target: (!target.is_empty()).then(|| target.to_owned()),
+        }));
     }
     if let Some(rest) = command_rest(text, "/model") {
         return Some(parse_model_command(rest));
@@ -345,6 +357,7 @@ const CHAT_COMMANDS: &[&str] = &[
     "/mcp",
     "/jobs",
     "/restart",
+    "/tab",
     "/exit",
     "/quit",
 ];
@@ -605,6 +618,7 @@ pub(crate) fn print_chat_help(style: Style) {
     eprintln!("  /allow <tool> [session|global]  allow without asking");
     eprintln!("  /deny <tool> [session|global]   refuse without asking");
     eprintln!("  /reasoning <setting> [session|message]  set reasoning");
+    eprintln!("  /tab [name|number]        switch tab (chat, todo, debug); bare lists them");
     eprintln!("  /model <model>             switch model (uses current provider)");
     eprintln!("  /provider <provider>       switch provider (keeps current model)");
     eprintln!("  /revoke [grant-or-tool]   list or revoke an approval grant");
@@ -735,6 +749,54 @@ pub(crate) async fn interactive_loop(
                             "{}",
                             style.yellow("there is no session yet; send a message first")
                         );
+                    }
+                }
+                // `/tab` is the way to change tabs that does not need a
+                // modified key: `Ctrl-T` cycles, and this one travels where a
+                // terminal will not send the key. Bare, it lists them.
+                ChatCommand::Tab { target } => {
+                    let wanted = match target.as_deref() {
+                        None => {
+                            eprintln!(
+                                "{}",
+                                style.dim(format!(
+                                    "tabs: {}",
+                                    SessionTab::ALL
+                                        .iter()
+                                        .map(|tab| format!(
+                                            "{}{}",
+                                            if *tab == renderer.pinned.tab() {
+                                                "*"
+                                            } else {
+                                                " "
+                                            },
+                                            tab.name()
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join("  ")
+                                ))
+                            );
+                            continue;
+                        }
+                        Some(target) => target
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(SessionTab::numbered)
+                            .or_else(|| SessionTab::named(target)),
+                    };
+                    match wanted {
+                        Some(tab) => renderer.pinned.set_tab(tab),
+                        None => eprintln!(
+                            "{}",
+                            style.yellow(format!(
+                                "no tab `{target:?}`; use {}",
+                                SessionTab::ALL
+                                    .iter()
+                                    .map(|tab| tab.name())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
+                        ),
                     }
                 }
                 ChatCommand::Model { model } => {
@@ -983,6 +1045,11 @@ async fn handle_live_command(
     style: Style,
 ) {
     match command {
+        // Without a terminal there are no tabs to switch: the same command
+        // would change a view nobody can see, so it says so.
+        ChatCommand::Tab { .. } => {
+            eprintln!("{}", style.yellow("tabs need an interactive terminal"));
+        }
         ChatCommand::Exit => eprintln!(
             "{}",
             style.yellow("wait until the current turn finishes, then /exit")

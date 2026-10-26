@@ -55,8 +55,12 @@ impl DebugPanel {
         self
     }
 
-    /// Writes the panel to stderr.
-    fn print(&self, style: Style) {
+    /// The panel as lines, one per row, ready to print or to keep.
+    ///
+    /// Returning them rather than writing them is what lets the same view be
+    /// printed at startup or shown as a tab.
+    fn render(&self, style: Style) -> Vec<String> {
+        let mut lines = Vec::new();
         let left_width = self
             .rows
             .iter()
@@ -81,14 +85,17 @@ impl DebugPanel {
             for row in &self.rows {
                 match row {
                     DebugRow::Row { left, right } => {
-                        eprintln!("  {} {right}", pad(left, left_width));
+                        lines.push(format!("  {} {right}", pad(left, left_width)));
                     }
                     DebugRow::Rule => {
-                        eprintln!("  {}", style.dim("─".repeat(left_width + right_width + 3)));
+                        lines.push(format!(
+                            "  {}",
+                            style.dim("─".repeat(left_width + right_width + 3))
+                        ));
                     }
                 }
             }
-            return;
+            return lines;
         }
         let top = format!(
             "┌{}┬{}┐",
@@ -105,32 +112,33 @@ impl DebugPanel {
             "─".repeat(left_width + 2),
             "─".repeat(right_width + 2)
         );
-        eprintln!("  {}", style.faint(top));
-        eprintln!(
+        lines.push(format!("  {}", style.faint(top)));
+        lines.push(format!(
             "  {} {} {} {} {}",
             style.faint("│"),
             style.bold(pad_title(self.left_title, left_width)),
             style.faint("│"),
             style.bold(pad_title(self.right_title, right_width)),
             style.faint("│")
-        );
-        eprintln!("  {}", style.faint(middle.clone()));
+        ));
+        lines.push(format!("  {}", style.faint(middle.clone())));
         for row in &self.rows {
             match row {
                 DebugRow::Row { left, right } => {
-                    eprintln!(
+                    lines.push(format!(
                         "  {} {} {} {} {}",
                         style.faint("│"),
                         style.dim(pad(left, left_width)),
                         style.faint("│"),
                         pad(right, right_width),
                         style.faint("│")
-                    );
+                    ));
                 }
-                DebugRow::Rule => eprintln!("  {}", style.faint(middle.clone())),
+                DebugRow::Rule => lines.push(format!("  {}", style.faint(middle.clone()))),
             }
         }
-        eprintln!("  {}", style.faint(bottom));
+        lines.push(format!("  {}", style.faint(bottom)));
+        lines
     }
 }
 
@@ -182,7 +190,7 @@ pub(crate) fn debug_start(
     config_path: Option<&Path>,
     session: Option<&str>,
     catalog: &Catalog,
-) {
+) -> Vec<String> {
     let workspace =
         std::env::current_dir().map_or_else(|_| "?".to_owned(), |path| path.display().to_string());
     let config_label =
@@ -286,18 +294,18 @@ pub(crate) fn debug_start(
         .field("project config", &project_config)
         .field("database", database.display().to_string())
         .field("sandbox", &sandbox);
-    panel.print(style);
+    panel.render(style)
 }
 
 /// Prints the MCP servers that connected, and the ones that did not.
 ///
 /// A server that failed to start leaves its tools absent, so the reason is
 /// named here rather than left to the log.
-pub(crate) fn debug_mcp(style: Style, service: &Service) {
+pub(crate) fn debug_mcp(style: Style, service: &Service) -> Vec<String> {
     let connected = service.mcp_status();
     let failures = service.mcp_failures();
     if connected.is_empty() && failures.is_empty() {
-        return;
+        return Vec::new();
     }
     let mut panel = DebugPanel::new("server", "tools");
     for server in &connected {
@@ -314,23 +322,19 @@ pub(crate) fn debug_mcp(style: Style, service: &Service) {
     for (name, reason) in &failures {
         panel.field(name.clone(), format!("failed: {reason}"));
     }
-    panel.print(style);
+    panel.render(style)
 }
 
 /// Prints the static prompt size in characters. Tokens are provider-reported,
 /// so no estimate is made here.
-pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) {
+pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) -> Vec<String> {
     let size = match service.prompt_size() {
         Ok(size) => size,
         Err(error) => {
-            eprintln!(
-                "{}",
-                style.yellow(format!("debug: could not measure the prompt: {error}"))
-            );
-            return;
+            return vec![style.yellow(format!("debug: could not measure the prompt: {error}"))];
         }
     };
-    eprintln!("{}", debug_heading(style, "debug: prompt material"));
+    let mut lines = vec![debug_heading(style, "debug: prompt material")];
     let mut panel = DebugPanel::new("part", "size");
     panel
         .field("source", source)
@@ -344,13 +348,14 @@ pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) {
     panel
         .field("tools", format!("{} chars", size.tool_chars))
         .field("total", format!("{} chars", size.total_chars()));
-    panel.print(style);
+    lines.extend(panel.render(style));
+    lines
 }
 
 /// Prints the selected model's capabilities and catalogue metadata.
-pub(crate) fn debug_model(style: Style, spec: &ModelSpec, model: Option<&Model>) {
+pub(crate) fn debug_model(style: Style, spec: &ModelSpec, model: Option<&Model>) -> Vec<String> {
     let capabilities = &spec.capabilities;
-    eprintln!("{}", debug_heading(style, "debug: model"));
+    let mut lines = vec![debug_heading(style, "debug: model")];
     let mut panel = DebugPanel::new("capability", "value");
     panel.field("reference", spec.label());
     if let Some(model) = model {
@@ -426,15 +431,17 @@ pub(crate) fn debug_model(style: Style, spec: &ModelSpec, model: Option<&Model>)
             panel.rule().field("catalogue", metadata.join(" · "));
         }
     }
-    panel.print(style);
+    lines.extend(panel.render(style));
+    lines
 }
 
 /// Prints the reasoning setting the session is actually using.
-pub(crate) fn debug_reasoning(style: Style, reasoning: &Reasoning) {
-    eprintln!("{}", debug_heading(style, "debug: reasoning"));
+pub(crate) fn debug_reasoning(style: Style, reasoning: &Reasoning) -> Vec<String> {
+    let mut lines = vec![debug_heading(style, "debug: reasoning")];
     let mut panel = DebugPanel::new("field", "value");
     panel.field("effective", reasoning_setting_label(reasoning));
-    panel.print(style);
+    lines.extend(panel.render(style));
+    lines
 }
 
 /// Names the reasoning setting in the words the command line accepts.
