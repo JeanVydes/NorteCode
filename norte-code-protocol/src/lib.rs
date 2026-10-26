@@ -451,6 +451,18 @@ pub enum ServerEventKind {
         /// The message's text, with each part on its own line.
         text: String,
     },
+    /// The session's task list, as the last `todo` call left it.
+    ///
+    /// The list is the model's, written through the `todo` tool and part of the
+    /// conversation, but a client that just attached has not seen that call —
+    /// the replay shows messages, and the list is a widget above the input. This
+    /// is sent once in a resume's prefix, from the same call the model made, so
+    /// the widget comes back with the session instead of starting empty until
+    /// the model happens to write it again.
+    SessionTodos {
+        /// One entry per task, in the model's order.
+        todos: Vec<TodoInfo>,
+    },
     /// Compaction started.
     CompactionStarted {
         /// Why it started: `manual` or `threshold`.
@@ -728,6 +740,28 @@ pub struct SessionInfo {
     pub created_at: Option<String>,
     /// Where it currently is.
     pub phase: Phase,
+}
+
+/// One task in a session's list, as a client renders it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TodoInfo {
+    /// What the task says, as the model wrote it.
+    pub content: String,
+    /// Where it stands.
+    pub status: TodoStatus,
+}
+
+/// The state of one task.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    /// Not started.
+    Pending,
+    /// Being worked on.
+    InProgress,
+    /// Done.
+    Completed,
 }
 
 /// One approval grant, as a client sees it.

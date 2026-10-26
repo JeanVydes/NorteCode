@@ -189,6 +189,23 @@ impl Service {
                 events.push(stats);
             }
             events.extend(replay_events(request_id, &key, &engine, nid, &ancestors).await);
+            // The task list is the model's, written through `todo`, and it lives
+            // in the call it made — which is committed with the conversation and
+            // therefore survived the restart. Reading it back puts the widget on
+            // screen and, just as much, gives the next compaction a list to
+            // summarise instead of nothing.
+            if let Ok(history) = engine.history(nid).await {
+                let todos = restored_todos(&history);
+                if !todos.is_empty() {
+                    self.todo
+                        .restore(nid, todos.iter().map(to_todo_item).collect());
+                    events.push(ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::SessionTodos { todos },
+                    ));
+                }
+            }
             events
         } else {
             Vec::new()
@@ -1135,6 +1152,70 @@ async fn compaction_ancestors(
 /// The most recent messages a resume replays, so a client that starts blank can
 /// show where the conversation was.
 const REPLAY_MESSAGES: usize = 100;
+
+/// A task as the tool's own state holds it, from the wire's copy.
+fn to_todo_item(info: &norte_code_protocol::TodoInfo) -> norte_code_tools::TodoItem {
+    use norte_code_protocol::TodoStatus as Wire;
+    use norte_code_tools::TodoStatus as Stored;
+    norte_code_tools::TodoItem {
+        content: info.content.clone(),
+        status: match info.status {
+            Wire::Pending => Stored::Pending,
+            Wire::InProgress => Stored::InProgress,
+            Wire::Completed => Stored::Completed,
+        },
+    }
+}
+
+/// The task list the session's last `todo` call left, read back from its call.
+///
+/// The list lives in the model's own call, which is committed with the rest of
+/// the conversation, so it survives a process: this is the read that puts it
+/// back. The newest call wins — the model sends the complete list every time —
+/// and a call whose arguments do not parse is skipped rather than guessed at,
+/// which is what the tool would do.
+fn restored_todos(history: &[Message]) -> Vec<norte_code_protocol::TodoInfo> {
+    use norte_code_protocol::{TodoInfo, TodoStatus};
+    let mut latest = Vec::new();
+    for message in history {
+        for call in message.tool_calls() {
+            if call.name != "todo" {
+                continue;
+            }
+            let Some(todos) = call.arguments.get("todos").and_then(|it| it.as_array()) else {
+                continue;
+            };
+            let mut items = Vec::with_capacity(todos.len());
+            let mut ok = true;
+            for todo in todos {
+                let (Some(content), Some(status)) = (
+                    todo.get("content").and_then(|it| it.as_str()),
+                    todo.get("status").and_then(|it| it.as_str()),
+                ) else {
+                    ok = false;
+                    break;
+                };
+                let status = match status {
+                    "pending" => TodoStatus::Pending,
+                    "in_progress" => TodoStatus::InProgress,
+                    "completed" => TodoStatus::Completed,
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                };
+                items.push(TodoInfo {
+                    content: content.to_owned(),
+                    status,
+                });
+            }
+            if ok {
+                latest = items;
+            }
+        }
+    }
+    latest
+}
 
 /// The recent messages of a session, as replay events for a client that is
 /// starting blank.

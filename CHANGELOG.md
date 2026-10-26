@@ -118,6 +118,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   has — answered "not known". A prefix that matches one session now resolves to
   it; one that matches several is refused with the ids, because continuing the
   wrong conversation is silent; and one that matches none still says unknown.
+- A resumed session gets its task list back. The list is the model's, written
+  through `todo` and committed with the conversation, but the state behind the
+  footer's widget is in memory: a session opened in a new process drew no tasks,
+  and a compaction before the model wrote them again summarised the work without
+  the tasks it was tracking. The service reads the last `todo` call back out of
+  the history and sends it in the resume's prefix, and hands the same list to
+  the compactor.
 - A `read` says less at `medium` and nothing at `low`. The page a reader read is
   what the model needs and a person following the work does not: at `medium` a
   long file buried the next call under a screenful nobody asked to see, and at

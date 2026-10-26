@@ -935,6 +935,114 @@ async fn a_permanent_failure_is_not_retried() {
 }
 
 #[tokio::test]
+async fn a_resume_sends_the_task_list_the_session_last_had() {
+    // The list lives in the model's `todo` call, which is committed with the
+    // conversation, so a resumed client can be told what it was. It used to
+    // come back empty: the state behind the widget is in memory, and nothing
+    // read the call back, so a session resuming mid-task drew no tasks and a
+    // compaction before the model wrote them again summarised over the gap.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("done"));
+    let store = Arc::new(SqliteStore::in_memory().expect("store"));
+    let build = |store: Arc<SqliteStore>| {
+        let model = Arc::clone(&model) as Arc<dyn Model>;
+        async move {
+            Service::with_directory(
+                config(),
+                catalog(),
+                spec("scripted"),
+                Arc::new(ScriptedFactory { model }),
+                store.clone(),
+                store.clone(),
+                store,
+                "system",
+            )
+            .await
+            .expect("service")
+        }
+    };
+    let service = Arc::new(build(store.clone()).await);
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("tasks".to_owned()),
+        },
+    )
+    .await;
+    let key = created[0].session.clone().expect("session");
+    let (nid, _, _) = service.require_record(&key).expect("record");
+
+    // Write a list the way the model does: a committed `todo` call.
+    let call = CallId::new();
+    let engine = service.engine(&spec("scripted")).expect("engine");
+    let node = norte::harness::Node::message(
+        Message::new(
+            Role::Assistant,
+            vec![norte::Part::ToolCall(norte::ToolCallPart {
+                call_id: call,
+                name: "todo".to_owned(),
+                arguments: serde_json::json!({
+                    "todos": [
+                        {"content": "first", "status": "completed"},
+                        {"content": "second", "status": "in_progress"},
+                        {"content": "third", "status": "pending"},
+                    ]
+                }),
+                continuity: None,
+            })],
+        ),
+        None,
+    );
+    let session = engine.session(nid).await.expect("session");
+    // The head has to be the node itself: a commit with `head: None` leaves the
+    // session where it was, which for a fresh one is nowhere, and the history
+    // read back below would be empty. `Idle` is what a finished assistant turn
+    // leaves, so the resume reads the history instead of trying to run the call
+    // the model already made.
+    let head = node.id;
+    store
+        .commit(norte::harness::Commit {
+            session_id: nid,
+            expected_version: Some(session.version),
+            nodes: vec![node],
+            head: Some(head),
+            phase: norte::harness::Phase::Idle,
+            turn: session.turn,
+            grants: session.grants.clone(),
+            metadata: None,
+        })
+        .await
+        .expect("commit the todo call");
+
+    // A fresh service over the same store is a relaunch; the resume is what
+    // asks for the list back.
+    let reopened = Arc::new(build(store).await);
+    let events = drain(
+        &reopened,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+    let todos = events.iter().find_map(|event| match &event.kind {
+        ServerEventKind::SessionTodos { todos } => Some(todos.clone()),
+        _ => None,
+    });
+    let todos = todos.expect("a resume sends the list the session last had");
+    assert_eq!(todos.len(), 3, "{todos:?}");
+    assert_eq!(todos[0].content, "first");
+    assert_eq!(
+        todos[1].status,
+        norte_code_protocol::TodoStatus::InProgress,
+        "the status comes across, not just the text"
+    );
+    assert_eq!(todos[2].content, "third");
+}
+
+#[tokio::test]
 async fn a_session_can_be_named_by_the_prefix_the_footer_shows() {
     // The footer draws the first eight characters of the id, and `resume` took
     // the argument straight to the session table: the name on screen answered

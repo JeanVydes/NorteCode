@@ -489,6 +489,17 @@ impl TodoState {
         }
     }
 
+    /// Puts a list back for a session this process has not seen before.
+    ///
+    /// The model writes the list with the `todo` tool, and the call it made is
+    /// part of the conversation, so a host that reopens a session reads the
+    /// last list back out of the history and hands it here. Without this a
+    /// resumed session started with no list, and a compaction before the model
+    /// wrote a new one summarised the work without the tasks it was tracking.
+    pub fn restore(&self, session: SessionId, todos: Vec<TodoItem>) {
+        self.replace(Some(session), todos);
+    }
+
     /// The list rendered as the model sees it.
     #[must_use]
     pub fn text(&self, session: Option<SessionId>) -> String {

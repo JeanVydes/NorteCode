@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::input::{Pinned, TodoItem};
 
-use super::argument::todo_items;
+use super::argument::{todo_item, todo_items};
 use super::dial::{context_dial, token_ratio};
 use super::edit::{
     EditBox, EditPreview, Side, clip_command, clip_plain, edit_box_width, edit_preview, line_range,
@@ -349,6 +349,13 @@ impl Renderer {
             }
             ServerEventKind::MessageReplayed { index, role, text } => {
                 self.replay_message(*index, role, text);
+            }
+            // The list the session already had, sent when a client attaches: the
+            // transcript shows messages, and the task list is a widget the turn's
+            // own `todo` events draw. Without this the widget started empty and a
+            // resumed session looked like it had no tasks in flight.
+            ServerEventKind::SessionTodos { todos } => {
+                self.pinned.set_todos(todos.iter().map(todo_item).collect());
             }
             kind => self.status_event(kind),
         }
