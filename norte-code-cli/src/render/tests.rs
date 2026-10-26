@@ -42,6 +42,66 @@ fn reasoning_renderer(pinned: &Arc<Pinned>) -> Renderer {
     renderer
 }
 
+/// A `ToolStarted` kind for a shell call, with the arguments as the tool sends
+/// them now: flat, `script` at the top level.
+fn shell_started(call_id: &str, arguments: serde_json::Value) -> ServerEventKind {
+    ServerEventKind::ToolStarted {
+        turn: 1,
+        call_id: call_id.to_owned(),
+        tool: "shell".to_owned(),
+        arguments: Some(arguments),
+        source: None,
+    }
+}
+
+#[test]
+fn the_command_that_ran_is_shown_under_the_call() {
+    // `command_summary` read `{"command": {"kind": "shell", "script": …}}`, the
+    // nested shape the tool used before the schema was flattened. Every call
+    // since then missed the lookup, so the transcript showed a command's output
+    // with no line saying what produced it.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.tool_event(&shell_started(
+        "call-1",
+        serde_json::json!({ "script": "cargo test --workspace", "shell": "sh" }),
+    ));
+
+    assert_eq!(
+        Renderer::command_summary(Some(&serde_json::json!({
+            "script": "cargo test --workspace",
+            "shell": "sh"
+        }))),
+        Some("cargo test --workspace".to_owned()),
+        "the flat form is the one the tool sends"
+    );
+    // The nested form still resolves: a transcript replayed from the store was
+    // written by a build that sent it.
+    assert_eq!(
+        Renderer::command_summary(Some(&serde_json::json!({
+            "command": { "kind": "shell", "script": "ls -la" }
+        }))),
+        Some("ls -la".to_owned()),
+        "an old transcript still names its command"
+    );
+    // And a request with no command at all is not invented.
+    assert_eq!(
+        Renderer::command_summary(Some(&serde_json::json!({ "path": "a.rs" }))),
+        None
+    );
+}
+
+#[test]
+fn a_long_command_is_clipped_to_one_line() {
+    // The `$` line is one row of the transcript, so a script with newlines or a
+    // thousand characters cannot be allowed to make the call's header a block.
+    let script = format!("echo {}\n{}\nand more", "x".repeat(400), "y".repeat(400));
+    let summary = Renderer::command_summary(Some(&serde_json::json!({ "script": script })))
+        .expect("a command");
+    assert!(summary.chars().count() <= 161, "one line: {summary:?}");
+    assert!(!summary.contains('\n'), "no newline survives: {summary:?}");
+}
+
 #[test]
 fn the_footer_names_the_session_from_medium_up() {
     // The key was only printed by `--debug` at startup, so returning to a
@@ -220,6 +280,13 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
     let command =
         Renderer::tool_result("shell", None, Some("ok")).expect("a shell shows its output");
     assert_eq!(command, "ok");
+
+    // `shell_bg` is the same executor under another name: its finish carries the
+    // job's own output, and leaving it out showed a background call's start with
+    // no result under it.
+    let background = Renderer::tool_result("shell_bg", None, Some("started"))
+        .expect("a background shell shows its output too");
+    assert_eq!(background, "started");
 
     assert!(
         Renderer::tool_result("todo", None, Some("done")).is_none(),

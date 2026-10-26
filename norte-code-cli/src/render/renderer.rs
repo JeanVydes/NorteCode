@@ -1031,7 +1031,9 @@ impl Renderer {
                 _ => path.to_owned(),
             });
         }
-        if tool == "shell" {
+        // `shell_bg` runs the same script through the same executor, so its
+        // result reads the same way: a job's answer is what it printed.
+        if matches!(tool, "shell" | "shell_bg") {
             return output.map(str::to_owned);
         }
         None
@@ -1213,40 +1215,50 @@ impl Renderer {
         );
     }
 
-    /// Returns the command a `command` tool call ran, clipped to one line.
-    fn command_summary(arguments: Option<&serde_json::Value>) -> Option<String> {
+    /// Returns the command a shell tool call ran, clipped to one line.
+    ///
+    /// The schema is flat — `script` sits at the top level, `shell` beside it —
+    /// and this read the nested `{"command": {"kind": "shell", ...}}` form the
+    /// tool used before it was flattened. The lookup missed, so the `$` line
+    /// under `→ shell` was never printed and a reader could see a command's
+    /// output without ever seeing what produced it. Both shapes are accepted:
+    /// an old transcript replayed from the store still carries the nested one.
+    pub(crate) fn command_summary(arguments: Option<&serde_json::Value>) -> Option<String> {
         let arguments = arguments?;
+        // The flat form first, which is what the tool sends now.
+        if let Some(script) = arguments.get("script").and_then(serde_json::Value::as_str) {
+            return Some(clip_command(script, 160));
+        }
         let command = arguments.get("command")?;
-        let text = if let Some(text) = command.as_str() {
-            text.to_owned()
-        } else {
-            match command.get("kind").and_then(serde_json::Value::as_str) {
-                Some("shell") => command
-                    .get("script")
-                    .and_then(serde_json::Value::as_str)?
-                    .to_owned(),
-                Some("program") => {
-                    let program = command.get("program").and_then(serde_json::Value::as_str)?;
-                    let args = command
-                        .get("args")
-                        .and_then(serde_json::Value::as_array)
-                        .map(|args| {
-                            args.iter()
-                                .filter_map(serde_json::Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        })
-                        .unwrap_or_default();
-                    if args.is_empty() {
-                        program.to_owned()
-                    } else {
-                        format!("{program} {args}")
-                    }
-                }
-                _ => return None,
+        if let Some(text) = command.as_str() {
+            return Some(clip_command(text, 160));
+        }
+        match command.get("kind").and_then(serde_json::Value::as_str) {
+            Some("shell") => {
+                let script = command.get("script").and_then(serde_json::Value::as_str)?;
+                Some(clip_command(script, 160))
             }
-        };
-        Some(clip_command(&text, 160))
+            Some("program") => {
+                let program = command.get("program").and_then(serde_json::Value::as_str)?;
+                let args = command
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                let text = if args.is_empty() {
+                    program.to_owned()
+                } else {
+                    format!("{program} {args}")
+                };
+                Some(clip_command(&text, 160))
+            }
+            _ => None,
+        }
     }
 
     /// Renders usage for one reconstructed request and keeps the run totals.
