@@ -281,12 +281,12 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
         Renderer::tool_result("shell", None, Some("ok")).expect("a shell shows its output");
     assert_eq!(command, "ok");
 
-    // `shell_bg` is the same executor under another name: its finish carries the
-    // job's own output, and leaving it out showed a background call's start with
-    // no result under it.
-    let background = Renderer::tool_result("shell_bg", None, Some("started"))
-        .expect("a background shell shows its output too");
-    assert_eq!(background, "started");
+    // A name the renderer does not know gets no preview: there is one shell, so
+    // a finish carrying another shell's name would be a stale second one.
+    assert!(
+        Renderer::tool_result("shell_bg", None, Some("started")).is_none(),
+        "one shell: a second name is not summarised"
+    );
 
     assert!(
         Renderer::tool_result("todo", None, Some("done")).is_none(),
@@ -295,6 +295,68 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
     assert!(
         Renderer::tool_result("write", None, Some("x")).is_none(),
         "a path is what makes a write's preview useful"
+    );
+}
+
+#[test]
+fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
+    // A shell's process can outlive its call, and its last chunk can arrive
+    // after the finish was drawn: the reader hands over whatever a pipe read
+    // returned, and the detach that ended the call does not stop it. Opening a
+    // second box for the same call reads as two calls, and the output of the one
+    // that is still running belongs to its job rather than to the transcript.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stdout".to_owned(),
+        text: "first\n".to_owned(),
+        last: false,
+    });
+    renderer.tool_event(&ServerEventKind::ToolFinished {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        is_error: true,
+        error: Some("the caller stopped waiting".to_owned()),
+        output: None,
+        truncated: false,
+        duration_ms: 12,
+    });
+    assert!(
+        renderer.output_gutter().is_none(),
+        "the finish closed the box"
+    );
+
+    // The chunk that arrives late: it must not reopen it.
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stdout".to_owned(),
+        text: "late\n".to_owned(),
+        last: false,
+    });
+    assert!(
+        renderer.output_gutter().is_none(),
+        "a finished call's box stays closed"
+    );
+
+    // A different call still gets its own.
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-2".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stdout".to_owned(),
+        text: "other\n".to_owned(),
+        last: false,
+    });
+    assert_eq!(
+        renderer.output_gutter(),
+        Some("call-2"),
+        "another call opens its own box"
     );
 }
 

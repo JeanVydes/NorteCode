@@ -26,7 +26,7 @@ use norte_code_protocol::{
 };
 use norte_code_store_sqlite::SqliteStore;
 use norte_testing::ScriptedModel;
-use norte_tools::ShellRequest;
+use norte_tools::{ShellLimits, ShellRequest, ShellTool};
 
 struct ScriptedFactory {
     model: Arc<dyn Model>,
@@ -3777,10 +3777,10 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
 
 #[tokio::test]
 async fn the_shell_tools_and_the_job_manager_are_registered() {
-    // The three that have to agree with each other: one runs a call and waits,
-    // one runs it and answers with an id, and one is what reads or stops what
-    // the second started. A model that can start a job and cannot read it is
-    // worse off than one that could not start it.
+    // The two that have to agree with each other: one runs a call, waited for or
+    // let go of, and one is what reads or stops what the first left behind. A
+    // model that can start a job and cannot read it is worse off than one that
+    // could not start it.
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
         ModelId::new("scripted").expect("model"),
@@ -3794,65 +3794,100 @@ async fn the_shell_tools_and_the_job_manager_are_registered() {
         .iter()
         .map(|spec| spec.name.to_string())
         .collect();
-    for expected in ["shell", "shell_bg", "manage_jobs"] {
+    for expected in ["shell", "manage_jobs"] {
         assert!(
             names.iter().any(|name| name == expected),
             "`{expected}` reaches the model; the registry has {names:?}"
         );
     }
-    // The background variant describes itself apart from the waited one, or the
-    // model has no way to choose.
-    let waited = service
+    // And there is no second shell: whether a call is waited for is a field on
+    // the request, so a second name would be a second place the same answer has
+    // to be kept in step.
+    assert!(
+        !names.iter().any(|name| name == "shell_bg"),
+        "the tool list has one shell: {names:?}"
+    );
+    // That field has to be in the schema the model reads: a request carrying it
+    // is rejected when the schema does not name it.
+    let shell = service
         .tools()
         .expect("tools")
         .specs()
         .into_iter()
         .find(|spec| spec.name.as_str() == "shell")
         .expect("shell");
-    let background = service
-        .tools()
-        .expect("tools")
-        .specs()
-        .into_iter()
-        .find(|spec| spec.name.as_str() == "shell_bg")
-        .expect("shell_bg");
-    assert_ne!(
-        waited.description, background.description,
-        "the two must read differently"
+    let schema = shell.parameters.to_string();
+    assert!(
+        schema.contains("detach"),
+        "the model can ask to be detached: {schema}"
     );
-    // And their arguments are the same, because they run the same executor.
-    assert_eq!(waited.parameters, background.parameters);
 }
 
-#[test]
-fn only_one_of_the_two_shells_grants_no_time_bound() {
-    // A background call that starts a server has to outlive the turn; a
-    // foreground call with no deadline is one nothing can interrupt. The two
-    // shells are otherwise built from one set of limits, so the flag is the
-    // whole difference.
-    //
-    // The pair is read from the function the service itself calls, in the order
-    // it uses them. A test that built its own pair would pass while the service
-    // handed the wrong one to each, and what the flag does once it reaches the
-    // executor is tested in `norte-tools`, where waiting it out is cheap.
-    let base = ShellLimits::default();
-    let (foreground, background) = shell_limits(base);
-    assert!(
-        !foreground.allow_indefinite,
-        "the shell a turn waits on keeps its bound"
+#[tokio::test]
+async fn a_zero_bound_is_granted_only_to_a_call_nobody_waits_for() {
+    // One shell means one set of limits, so the host grants the zero and says
+    // which shape gets it. The shape is the whole rule: a call nobody waits for
+    // may run unbounded, and the same zero on a call that holds the turn is
+    // dropped before it reaches the executor. What the executor then does with
+    // the field is tested in `norte-tools`, where waiting out a bound is cheap.
+    let keeper = ShellCalls::declaration(
+        ShellTool::new()
+            .with_limits(ShellLimits {
+                default_timeout: std::time::Duration::from_millis(150),
+                grace: std::time::Duration::from_millis(50),
+                allow_indefinite: true,
+                ..ShellLimits::default()
+            })
+            .into_declaration(),
+        Arc::new(JobRegistry::default()),
+        Arc::new(Steering::default()),
+        Arc::new(DetachRegistry::default()),
     );
-    assert!(
-        background.allow_indefinite,
-        "the shell nothing waits on grants none"
-    );
-    // Nothing else moves: a wider difference would mean the two shells had
-    // drifted apart in the way the registry's comment promises they do not.
-    assert_eq!(foreground.default_timeout, background.default_timeout);
-    assert_eq!(foreground.max_timeout, background.max_timeout);
-    assert_eq!(foreground.max_output_bytes, background.max_output_bytes);
+    let context = ToolContext::new()
+        .with_session(SessionId::new())
+        .with_call(CallId::new());
+
+    let held = keeper
+        .executor
+        .call_with_context(
+            &context,
+            serde_json::from_value(serde_json::json!({ "script": "sleep 30", "timeout_ms": 0 }))
+                .expect("request"),
+        )
+        .await
+        .expect("execute");
+    let structured = held.structured.expect("structured");
     assert_eq!(
-        foreground, base,
-        "the foreground shell keeps the base limits"
+        structured["code"], "timeout",
+        "the zero was refused and the host's default applied: {structured:?}"
+    );
+
+    let let_go = keeper
+        .executor
+        .call_with_context(
+            &context,
+            serde_json::from_value(
+                serde_json::json!({ "script": "sleep 30", "timeout_ms": 0, "detach": true }),
+            )
+            .expect("request"),
+        )
+        .await
+        .expect("execute");
+    // The answer to a call let go of from the start is the job's name, not a
+    // shell result: the shell result is what arrives when the process ends, and
+    // the model is told where to find it.
+    let text: String = let_go
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect();
+    assert!(
+        text.contains("job-1"),
+        "a call nobody waits for answers with the job it became: {text}"
+    );
+    assert!(
+        !let_go.is_error,
+        "being let go of is not a failure: it is what was asked for"
     );
 }
 
@@ -4923,7 +4958,7 @@ fn the_job_buffer_keeps_the_tail_and_says_it_dropped_the_rest() {
 }
 
 #[tokio::test]
-async fn shell_bg_answers_at_once_and_reports_when_the_process_ends() {
+async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
     // The real tool, not a stand-in: what is under test is that the job's own
     // sink collects the output and that its end is the stream closing, neither
     // of which a fake executor would exercise.
@@ -4933,8 +4968,12 @@ async fn shell_bg_answers_at_once_and_reports_when_the_process_ends() {
     let jobs = Arc::new(JobRegistry::default());
     let steering = Arc::new(Steering::default());
     let declaration = ShellTool::new().into_declaration();
-    let background =
-        BackgroundShell::declaration(declaration, Arc::clone(&jobs), Arc::clone(&steering));
+    let background = ShellCalls::declaration(
+        declaration,
+        Arc::clone(&jobs),
+        Arc::clone(&steering),
+        Arc::new(DetachRegistry::default()),
+    );
 
     // The process writes, waits, then writes again and touches its marker: the
     // call has to answer long before any of that is done.
@@ -4942,8 +4981,11 @@ async fn shell_bg_answers_at_once_and_reports_when_the_process_ends() {
         "echo first; sleep 1; echo second; touch {}",
         marker.display()
     );
-    let request: ShellRequest =
-        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let request: ShellRequest = serde_json::from_value(serde_json::json!({
+        "script": script,
+        "detach": true
+    }))
+    .expect("request");
     let session = SessionId::new();
     let call = CallId::new();
     let context = ToolContext::new().with_session(session).with_call(call);
@@ -5027,14 +5069,18 @@ async fn stopping_a_job_through_the_registry_ends_its_process() {
     let marker = dir.join("survived");
     let jobs = Arc::new(JobRegistry::default());
     let steering = Arc::new(Steering::default());
-    let background = BackgroundShell::declaration(
+    let background = ShellCalls::declaration(
         ShellTool::new().into_declaration(),
         Arc::clone(&jobs),
         steering,
+        Arc::new(DetachRegistry::default()),
     );
     let script = format!("sleep 3; touch {}", marker.display());
-    let request: ShellRequest =
-        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let request: ShellRequest = serde_json::from_value(serde_json::json!({
+        "script": script,
+        "detach": true
+    }))
+    .expect("request");
     let context = ToolContext::new()
         .with_session(SessionId::new())
         .with_call(CallId::new());
@@ -5053,6 +5099,210 @@ async fn stopping_a_job_through_the_registry_ends_its_process() {
 }
 
 #[tokio::test]
+async fn a_call_detached_from_outside_leaves_a_job_the_model_can_read() {
+    // The `Ctrl-G` answer. The process is made to say nothing after the first
+    // line, so no chunk arrives once the call is let go of: a job registered on
+    // the way past a chunk would never exist, and the model would be handed a
+    // call that went with nothing to read from. What registers it is the
+    // result's own `detached`, whoever asked for it.
+    let dir = std::env::temp_dir().join(format!("norte-detach-user-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let first = dir.join("first");
+    let later = dir.join("later");
+    let jobs = Arc::new(JobRegistry::default());
+    let steering = Arc::new(Steering::default());
+    let detaches = Arc::new(DetachRegistry::default());
+    let declaration = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&jobs),
+        Arc::clone(&steering),
+        Arc::clone(&detaches),
+    );
+
+    let session = SessionId::new();
+    let watched = first.clone();
+    let registry = Arc::clone(&detaches);
+    tokio::spawn(async move {
+        for _ in 0..200 {
+            if watched.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(registry.detach(session), "there is a call to detach");
+    });
+
+    // `echo` puts one line on the pipe and then the process says nothing more
+    // until it touches its marker: no chunk follows the detach.
+    let script = format!(
+        "echo before; touch {}; sleep 2; touch {}",
+        first.display(),
+        later.display()
+    );
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let context = ToolContext::new()
+        .with_session(session)
+        .with_call(CallId::new());
+    let answer = declaration
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("the call answers");
+
+    // The model is told which job owns the rest, because the text it has is only
+    // what arrived before the call went.
+    let text: String = answer
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect();
+    assert!(
+        text.contains("job-1"),
+        "the answer names the job the process became: {text}"
+    );
+    let job = jobs.get("job-1").expect("a job was registered");
+    assert_eq!(job.state, JobState::Running, "the process is still running");
+
+    // And it can be read and stopped, which is what a job is for.
+    assert!(jobs.cancel("job-1"), "the job can be stopped");
+    assert_eq!(jobs.get("job-1").expect("job").state, JobState::Cancelled);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert!(
+        !later.exists(),
+        "the stopped process never reached its marker"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_process_that_ends_after_the_detach_reports_once() {
+    // The two ends can arrive in either order: the process may end before the
+    // call has returned, and then the report would be sent with no job to send
+    // it from — or sent twice, once from each end.
+    let dir = std::env::temp_dir().join(format!("norte-detach-report-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let jobs = Arc::new(JobRegistry::default());
+    let steering = Arc::new(Steering::default());
+    let detaches = Arc::new(DetachRegistry::default());
+    let declaration = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&jobs),
+        Arc::clone(&steering),
+        Arc::clone(&detaches),
+    );
+
+    let session = SessionId::new();
+    let context = ToolContext::new()
+        .with_session(session)
+        .with_call(CallId::new());
+    // It writes, then ends on its own: the closing chunk arrives after the call
+    // is already gone.
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": "echo done", "detach": true }))
+            .expect("request");
+    let _ = declaration
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("the call answers");
+
+    for _ in 0..50 {
+        if steering.is_pending(session, "job:job-1") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        jobs.get("job-1").is_some_and(|job| job.state.is_done()),
+        "the job ended when its streams closed"
+    );
+    let steered = steering.take(session);
+    assert_eq!(steered.len(), 1, "one report per job: {steered:?}");
+    assert!(
+        steered[0].text.contains("done"),
+        "the report carries what the process wrote: {}",
+        steered[0].text
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_process_that_ends_before_the_detached_call_returns_reports_once() {
+    // The two ends meet here. The process ends right after the detach, so the
+    // closing chunk registers the job and reports from there; the call then
+    // returns, and its own end tries to report the same job a second time. One
+    // report is what the model needs, and two would be two messages about one
+    // process.
+    let dir = std::env::temp_dir().join(format!("norte-detach-once-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let first = dir.join("first");
+    let jobs = Arc::new(JobRegistry::default());
+    let steering = Arc::new(Steering::default());
+    let detaches = Arc::new(DetachRegistry::default());
+    let declaration = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&jobs),
+        Arc::clone(&steering),
+        Arc::clone(&detaches),
+    );
+
+    let session = SessionId::new();
+    let watched = first.clone();
+    let registry = Arc::clone(&detaches);
+    let presser = tokio::spawn(async move {
+        for _ in 0..200 {
+            if watched.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        registry.detach(session)
+    });
+
+    // It writes, is detached, and ends at once: the whole life of the process
+    // sits inside the call's own wait.
+    let script = format!("echo before; touch {}; sleep 0.2", first.display());
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let context = ToolContext::new()
+        .with_session(session)
+        .with_call(CallId::new());
+    let answer = declaration
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("the call answers");
+    assert!(presser.await.expect("the presser"), "it was detached");
+
+    let text: String = answer
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect();
+    assert!(text.contains("job-1"), "the answer names the job: {text}");
+
+    // Let the closing chunk land, then look at what was reported.
+    for _ in 0..50 {
+        if jobs.get("job-1").is_some_and(|job| job.state.is_done()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        jobs.get("job-1").is_some_and(|job| job.state.is_done()),
+        "the job ended with its process"
+    );
+    let steered = steering.take(session);
+    assert_eq!(
+        steered.len(),
+        1,
+        "one report for one process, whichever end saw it end: {steered:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn detaching_stops_waiting_and_leaves_the_process_running() {
     // The whole point of the third answer: unlike Ctrl-C, detaching does not
     // kill anything. The call returns with what arrived, the process outlives
@@ -5062,8 +5312,12 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
     let first = dir.join("first");
     let later = dir.join("later");
     let detaches = Arc::new(DetachRegistry::default());
-    let declaration =
-        Detachable::declaration(ShellTool::new().into_declaration(), Arc::clone(&detaches));
+    let declaration = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::new(JobRegistry::default()),
+        Arc::new(Steering::default()),
+        Arc::clone(&detaches),
+    );
 
     // Detaching only once the first line has reached the pipe, so the assertion
     // on the captured output is not a race with startup.

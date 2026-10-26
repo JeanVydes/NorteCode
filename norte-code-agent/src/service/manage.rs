@@ -1,10 +1,10 @@
 //! `manage_jobs`: what the model needs to read or stop a background job.
 //!
-//! `shell_bg` answers with a job id and nothing else, because a tool result is
-//! the wrong place to put output that does not exist yet. This is where that
-//! output is, and the only way to reach it: a job whose result arrived as a
-//! message is gone from the conversation by design, so a model that wants what
-//! a *running* job has written asks here.
+//! A detached `shell` answers with a job id and nothing else, because a tool
+//! result is the wrong place to put output that does not exist yet. This is
+//! where that output is, and the only way to reach it: a job whose result
+//! arrived as a message is gone from the conversation by design, so a model that
+//! wants what a *running* job has written asks here.
 //!
 //! Three actions, and no more. `list` is what a model reaches for when it has
 //! lost the id; `check` reads one; `stop` ends one. Anything else would be the
@@ -63,8 +63,9 @@ impl ManageJobs {
         norte::ToolDeclaration::new(
             "manage_jobs",
             "List the background jobs of this session, read what one has written, or stop one. \
-             `shell_bg` returns the job id a call belongs to; use `check` to read a job that is \
-             still running, and `stop` to end it early. A job that finished reports itself as a \
+             A `shell` call started with `detach: true` returns the job id it became, and so \
+             does one that was detached while it ran; use `check` to read a job that is still \
+             running, and `stop` to end it early. A job that finished reports itself as a \
              message, so there is nothing to read here for one you have already seen.",
             Arc::new(self),
         )

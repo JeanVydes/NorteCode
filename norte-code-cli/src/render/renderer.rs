@@ -179,6 +179,10 @@ pub(crate) struct Renderer {
     /// its stdout line by line would otherwise show it twice, once as it ran and
     /// once in the result block right after.
     streamed_calls: BTreeSet<String>,
+    /// The calls whose finish has already been drawn. A tool that outlives its
+    /// call — a detached shell — can send one more chunk after the box closed,
+    /// and opening a second box for it reads as the same call having two.
+    closed_calls: BTreeSet<String>,
 
     /// The call whose streamed output block is open, if any.
     ///
@@ -258,6 +262,7 @@ impl Renderer {
             compaction_threshold: 1.0,
             pending_todos: BTreeMap::new(),
             streamed_calls: BTreeSet::new(),
+            closed_calls: BTreeSet::new(),
             output_gutter: None,
             output_line_start: true,
             output_pending: BTreeMap::new(),
@@ -607,6 +612,13 @@ impl Renderer {
     /// share this stream, and a frame written in pieces can be broken in half.
     fn output_delta(&mut self, call_id: &str, stream: &str, text: &str) {
         use std::fmt::Write as _;
+        // The call already finished. A tool whose process outlives it can write
+        // once more after that — the last chunk before it was let go of — and it
+        // belongs to the box that closed, not to a second one: the same call
+        // drawn twice reads as two calls.
+        if self.closed_calls.contains(call_id) {
+            return;
+        }
         let mut frame = String::new();
         if self.output_gutter.as_deref() != Some(call_id) {
             if let Some(close) = self.close_output_gutter() {
@@ -903,6 +915,9 @@ impl Renderer {
                 // chunk usually closed it, but a call that died before sending
                 // one would leave the box open and the next line inside it.
                 self.end_output_gutter();
+                // From here the call has no box, and a chunk that arrives after
+                // this one must not open another.
+                self.closed_calls.insert(call_id.clone());
                 if self.verbosity.at_least(Verbosity::Medium) {
                     if *is_error {
                         eprintln!(
@@ -1031,9 +1046,10 @@ impl Renderer {
                 _ => path.to_owned(),
             });
         }
-        // `shell_bg` runs the same script through the same executor, so its
-        // result reads the same way: a job's answer is what it printed.
-        if matches!(tool, "shell" | "shell_bg") {
+        // A shell's result is what it printed, whether it was waited for or let
+        // go of: a detached call answers with the job id instead, which is not
+        // this, and its output never arrives this way.
+        if tool == "shell" {
             return output.map(str::to_owned);
         }
         None

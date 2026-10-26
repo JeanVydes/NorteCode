@@ -1,19 +1,18 @@
 //! Background jobs: a shell call that is not waited for.
 //!
-//! Every `shell_bg` call is a job. Its call answers at once with the job's id,
-//! and the job carries on in the background, reporting its output as
-//! `EngineEvent::ToolOutput` like any other call.
+//! A call is a job when nobody is left waiting for it, which happens two ways.
+//! It asked to be detached — `detach: true`, or a `Ctrl-G` on a call that was
+//! being waited for — and so answered before the process had anything to show.
+//! A call nobody detached is not a job at all, and its result is its own answer.
 //!
 //! The registry is what makes the difference visible: it is where a job's
 //! output is accumulated while it runs, so `manage_jobs` can read it, and where
 //! its cancellation token lives, so `Ctrl-C` and `/jobs stop` can end it.
 //! Nothing else needs to know whether a call was waited for.
 //!
-//! Only `shell_bg` registers here. A waited `shell` call is its own result and
-//! has no id to be reached by, so putting it in the registry would list a job
-//! nobody can name. That is what makes the end of a job unambiguous: it is the
-//! closing of its streams, never the finishing of its call, which for a call
-//! that answered at once happens at the very start.
+//! That is what makes the end of a job unambiguous: it is the closing of its
+//! streams, never the finishing of its call, which for a call that let go
+//! happens at the very start.
 //!
 //! The job ends when its process does. There is no unbounded job: the shell
 //! executor applies the request's timeout either way, so a background call is

@@ -8,13 +8,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `shell_bg` can run a command with no time bound: a `timeout_ms` of zero asks
-  for none, which is what lets a background call start something long-lived — a
-  browser with a debug port, a dev server — and leave it running for the rest of
-  the session. The foreground `shell` ignores the zero and applies the host's
-  default, because a turn waiting on a call with no deadline cannot be
-  interrupted. An unbounded job is still stopped by `manage_jobs`, `/jobs stop`
-  and `Ctrl-C`, and it still dies with the process.
+- A `shell` call can run with no time bound: a `timeout_ms` of zero asks for
+  none, which is what lets a call start something long-lived — a browser with a
+  debug port, a dev server — and leave it running for the rest of the session.
+  The zero is granted to a call nobody waits for, which is the one that ends with
+  `detach`; a call that holds the turn is given the host's default instead,
+  because a turn waiting on a call with no deadline cannot be interrupted. An
+  unbounded call is still stopped by `manage_jobs`, `/jobs stop` and `Ctrl-C`,
+  and it still dies with the process.
 
 ### Changed
 
@@ -40,6 +41,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A detached call is a job the model can reach, whatever the process does next.
+  It was registered only when a chunk of output went past, so a process that said
+  nothing after the detach — which is most of them — left no job at all, and the
+  model was handed the call's own text with nothing to read the rest from. The
+  call's own result registers the job now, so the `Ctrl-G` answer and the
+  `detach: true` one end the same way.
+- A detached process is reported once. The chunk that closes its streams and the
+  call returning are two ends that can see the same process end, and either can
+  be first, so the report could be sent twice — two messages about one process —
+  or, if the chunk arrived before there was a job to attach it to, not at all.
+- The output box of a call that outlives itself stays closed. A detached
+  process's last chunk can arrive after the call finished, and the renderer
+  opened a second box for the same call, so one call read as two.
 - A block of markdown ends where the next one begins. The renderer wrote each
   block as it reached the block's end, and nothing closed the block before it:
   the heading after a paragraph was appended to that paragraph's last line, and
@@ -105,13 +119,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   written into the transcript — where the conversation reached — when
   `SteerApplied` names it. A report from a finishless message the human did not
   type is shown at the same moment, with its time.
-- `shell_bg` runs a shell script in the background and answers at once with a
-  job id; `manage_jobs` lists a session's jobs, reads what one has written, or
-  stops one. A job's output is kept in a bounded buffer while it runs and its
-  result arrives as a message when the process ends, so a long build no longer
-  holds the turn. Only `shell_bg` registers a job: a waited `shell` is its own
-  result, and the job ends when its streams close rather than when its call
-  finishes.
+- There is one `shell`, and whether a call holds the turn or is let go of is
+  the request's `detach` field. `detach: true` answers at once with a job id —
+  the call becomes a job before it has anything to show — and `Ctrl-G` does the
+  same to a call that is already running, from the keyboard. Either way the
+  process keeps going, `manage_jobs` lists the session's jobs, reads what one has
+  written and stops one, and what the process writes from then on reaches the
+  model as a message when it ends, so a long build no longer holds the turn. A
+  job's output is kept in a bounded buffer while it runs, and the job ends when
+  its streams close rather than when its call finishes. `shell_bg` is gone: it
+  was the same executor under a second name, and the two had to be kept in step
+  everywhere they were named.
 - `/jobs [list|check|stop] [job-id]` shows the session's background jobs, reads
   one, or ends one. A job belongs to the session that started it, which is also
   what `Ctrl-C` reaches.
@@ -119,9 +137,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   resumable.
 - `Ctrl-C` stops the session's background jobs while a turn runs, `Escape` asks
   the running turn to stop, and `Ctrl-G` detaches the running call: the turn stops
-  waiting, the process keeps running, and the call answers with what arrived so
-  far. `Ctrl-G` rather than `Ctrl-B`, which readline uses to move the cursor back,
-  and rather than the `Ctrl-Shift-B` the binding started as.
+  waiting, the process keeps running as a job the model can read and stop, and the
+  call answers with what arrived so far and the job's name. `Ctrl-G` rather than
+  `Ctrl-B`, which readline uses to move the cursor back, and rather than the
+  `Ctrl-Shift-B` the binding started as.
 - The terminal is put in raw mode with `ISIG` cleared, so `Ctrl-C` reaches the
   editor as a key instead of being turned into `SIGINT`. Before, the signal
   handler and the key reader raced for the same keystroke and the handler did
