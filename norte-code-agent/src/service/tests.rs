@@ -4982,3 +4982,37 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
     assert!(!detaches.detach(session), "no call is waiting now");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_finished_job_keeps_the_time_its_end_recorded() {
+    // It reported the time since it *started*, so a job that took a second read
+    // as two, then three: the figure grew for as long as anyone looked at it.
+    let (registry, _, call, id) = registry_with_job();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    registry.close(call, true);
+    let at_end = registry.get(&id).expect("job").elapsed_ms;
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert_eq!(
+        registry.get(&id).expect("job").elapsed_ms,
+        at_end,
+        "a job that has ended does not keep running"
+    );
+    assert_eq!(
+        registry.list(None)[0].elapsed_ms,
+        at_end,
+        "nor in a listing"
+    );
+}
+
+#[test]
+fn a_running_job_reports_the_time_it_has_run() {
+    let (registry, _, _, id) = registry_with_job();
+    let first = registry.get(&id).expect("job").elapsed_ms;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let later = registry.get(&id).expect("job").elapsed_ms;
+    assert!(
+        later > first,
+        "a running job's time grows: {first} then {later}"
+    );
+}

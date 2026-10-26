@@ -93,6 +93,20 @@ struct Job {
     bytes: usize,
 }
 
+impl Job {
+    /// Records how long it has run, if it is still running.
+    ///
+    /// A job that has ended keeps the time its end recorded. Without this a
+    /// finished job reported the time since it *started*, which grew every
+    /// time it was read: a build that took eight seconds read as seventeen,
+    /// then twenty-nine, for as long as anyone asked about it.
+    fn refresh_elapsed(&mut self) {
+        if !self.summary.state.is_done() {
+            self.summary.elapsed_ms = millis(self.started.elapsed());
+        }
+    }
+}
+
 /// The jobs a service knows about, oldest last.
 #[derive(Default)]
 pub(super) struct JobRegistry {
@@ -252,7 +266,7 @@ impl JobRegistry {
     pub(super) fn get(&self, id: &str) -> Option<JobSummary> {
         let mut jobs = self.jobs();
         jobs.get_mut(id).map(|job| {
-            job.summary.elapsed_ms = millis(job.started.elapsed());
+            job.refresh_elapsed();
             job.summary.clone()
         })
     }
@@ -264,7 +278,7 @@ impl JobRegistry {
             .values_mut()
             .filter(|job| session.is_none_or(|session| job.summary.session == session))
             .map(|job| {
-                job.summary.elapsed_ms = millis(job.started.elapsed());
+                job.refresh_elapsed();
                 job.summary.clone()
             })
             .collect();
