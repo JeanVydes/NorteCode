@@ -317,6 +317,81 @@ fn a_text_delta_after_reasoning_closes_the_gutter() {
 }
 
 #[test]
+fn the_first_reasoning_token_keeps_the_one_bar_at_medium() {
+    // The bar says "waiting for the first token"; a reasoning token is that
+    // first token, so the bar goes on as "streaming" — one bar, telling the
+    // truth as it changes. A second `thinking…` line used to be printed beside
+    // it without stopping it, so the bar was pushed onto a line of its own and
+    // the old frame stayed on screen.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.mark_working();
+    assert!(
+        renderer.loading_bar.is_some(),
+        "the wait starts with the turn"
+    );
+
+    renderer.delta(&Delta::Reasoning {
+        index: 0,
+        text: "thinking".to_owned(),
+    });
+    assert!(
+        renderer.loading_bar.is_some(),
+        "the bar survives the first token so it can say `streaming`"
+    );
+
+    // The first answer token ends the wait: the bar goes and the answer is what
+    // is left, which is the last of the three states.
+    renderer.delta(&Delta::Text {
+        index: 1,
+        text: "answer".to_owned(),
+    });
+    assert!(
+        renderer.loading_bar.is_none(),
+        "the bar disappears once the answer arrives"
+    );
+}
+
+#[test]
+fn thinking_is_still_announced_when_no_bar_is_running() {
+    // Without a bar there is nothing else saying the model is thinking, so the
+    // line is the only signal and has to be printed.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.delta(&Delta::Reasoning {
+        index: 0,
+        text: "thinking".to_owned(),
+    });
+    assert!(renderer.reasoning_placeholder, "the thought is announced");
+}
+
+#[test]
+fn a_summary_with_no_answer_still_stops_the_bar() {
+    // A turn that only called tools has no answer text, so `block` is `None`
+    // when the request settles. The summary was printed onto the bar's own line
+    // and left there, because the bar was only stopped for a non-empty block.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.mark_working();
+    renderer.usage_event(&ServerEventKind::RequestReconstructed {
+        turn: 1,
+        index: 0,
+        usage: norte_code_protocol::Usage::default(),
+        cost_usd: Some(0.0),
+        truncated: false,
+        duration_ms: 3_000,
+        first_token_ms: Some(2_300),
+        tokens_per_second: None,
+        cache_hit: false,
+        tools: vec!["shell".to_owned()],
+    });
+    assert!(
+        renderer.loading_bar.is_none(),
+        "the summary must not be written onto the bar's line"
+    );
+}
+
+#[test]
 fn the_bar_comes_back_after_a_tool() {
     // The bar stops on the first answer token, which is right; a turn that
     // called a tool then goes on, and it used to do so with no signal at all.

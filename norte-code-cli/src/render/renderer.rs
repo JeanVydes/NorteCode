@@ -315,6 +315,22 @@ impl Renderer {
         self.loading_bar = Some(LoadingBar::start(self.style));
     }
 
+    /// Stops the animated bar, if one is running.
+    ///
+    /// The bar repaints its own line in place, so *every* writer on stderr has
+    /// to stop it first: a line printed while it runs lands at the cursor, on
+    /// the bar's line, and from then on the bar repaints a line of its own below
+    /// the text it was dragging. That is what left `↳ river/…` glued to
+    /// `waiting for the first token`, and what made a second bar appear.
+    ///
+    /// It is idempotent, so a writer that may already have stopped it — the
+    /// answer's first token, a tool's output — can call it without checking.
+    fn stop_bar(&mut self) {
+        if let Some(mut bar) = self.loading_bar.take() {
+            bar.stop();
+        }
+    }
+
     /// Replaces the activity label and redraws the pinned footer.
     fn set_activity(&mut self, activity: Option<String>) {
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
@@ -684,6 +700,7 @@ impl Renderer {
                 // produced is always shown: a write that landed nowhere and a
                 // command that failed are the two things a person must not have
                 // to ask for.
+                self.stop_bar();
                 if self.verbosity.at_least(Verbosity::Medium) {
                     if *is_error {
                         eprintln!(
@@ -1093,6 +1110,10 @@ impl Renderer {
                 if !self.verbosity.at_least(Verbosity::Medium) {
                     return;
                 }
+                // The bar has to go first whatever the block is: with no answer
+                // text and no reasoning, `block` is `None` and the summary below
+                // was printed onto the bar's own line.
+                self.stop_bar();
                 if self.block != Block::None {
                     self.end_blocks();
                 }
@@ -1166,6 +1187,7 @@ impl Renderer {
             ServerEventKind::CostNotReported { requests }
                 if self.verbosity.at_least(Verbosity::Medium) && self.show_cost =>
             {
+                self.stop_bar();
                 eprintln!(
                     "  {}",
                     self.style.yellow(format!(
@@ -1343,6 +1365,7 @@ impl Renderer {
                 limit,
             } => {
                 if self.verbosity.at_least(Verbosity::Medium) {
+                    self.stop_bar();
                     eprintln!(
                         "{} {}",
                         self.style.yellow("budget warning:"),
@@ -1370,6 +1393,7 @@ impl Renderer {
                     spent: *spent,
                     limit: *limit,
                 });
+                self.stop_bar();
                 eprintln!(
                     "{} {}",
                     self.style.red("budget exceeded:"),
@@ -1389,6 +1413,7 @@ impl Renderer {
                 self.budget_stopped = false;
                 self.budget_prompt = None;
                 if self.verbosity.at_least(Verbosity::Medium) {
+                    self.stop_bar();
                     match budget {
                         Some(budget) => eprintln!(
                             "{} {}",
@@ -1402,6 +1427,7 @@ impl Renderer {
             ServerEventKind::ModelQueued { model }
                 if self.verbosity.at_least(Verbosity::Medium) =>
             {
+                self.stop_bar();
                 eprintln!(
                     "{} {}",
                     self.style.dim("model switch queued:"),
@@ -1411,11 +1437,13 @@ impl Renderer {
             ServerEventKind::ModelChanged { model }
                 if self.verbosity.at_least(Verbosity::Medium) =>
             {
+                self.stop_bar();
                 eprintln!("{} {}", self.style.dim("model set:"), self.style.dim(model));
             }
             ServerEventKind::TurnStopped { reason } => {
                 self.stopped = Some(reason.clone());
                 if self.verbosity.at_least(Verbosity::Medium) {
+                    self.stop_bar();
                     eprintln!(
                         "{}",
                         self.style.yellow(format!("the turn was stopped: {reason}"))
@@ -1443,8 +1471,14 @@ impl Renderer {
                     // `low` is the answer alone: not even the fact that the
                     // model is thinking is shown.
                 } else if !self.verbosity.at_least(Verbosity::High) {
-                    // `medium` says that it is thinking, without the thought.
-                    if !self.reasoning_placeholder {
+                    // `medium` says the model is thinking without drawing the
+                    // thought. When the bar is running it is already saying
+                    // that, on its own line, and it was told `streaming` a line
+                    // above: a second `thinking…` line said it twice and, printed
+                    // while the bar ran, pushed the bar onto a line of its own so
+                    // the old frame stayed on screen. With no bar there is
+                    // nothing else saying it, so the line is printed.
+                    if !self.reasoning_placeholder && self.loading_bar.is_none() {
                         self.reasoning_placeholder = true;
                         eprintln!("  {}", self.style.dim("thinking…"));
                     }

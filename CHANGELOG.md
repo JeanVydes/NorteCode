@@ -135,6 +135,13 @@ log file gets the plain rows instead of the box drawing.
 
 ### Fixed
 
+- The working bar no longer leaves `waiting for the first token` on screen for
+  the whole turn, with a stray copy under it. The bar repaints its own line in
+  place, so every writer has to stop it first; two did not — the `thinking…`
+  line at `medium` and the request summary — and both wrote onto the bar's line,
+  which then repainted a line of its own below. The bar stops before either, so
+  it now says `waiting` and then `streaming` on one line and disappears when the
+  answer arrives. A shell that streamed its output could glue the same way.
 - OpenAI Responses now honors the host's `no_prompt_cache_key` quirk and the
   `--disable-prompt-cache-key` flag. It sent `prompt_cache_key`
   unconditionally, so a gateway that rejects the field could not be used.
