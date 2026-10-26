@@ -17,6 +17,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   SHIFT and CONTROL — the keyboard protocol sends the *unshifted* codepoint — and
   the branch looked for `Char('B')`, so the key fell through to plain `Ctrl-B`
   and moved the cursor while the call kept running.
+- A command's streamed lines are joined before they are shown. A pipe read ends
+  wherever it ended, so one row arrives in pieces — `stdout[01] p` and
+  `arcial... completa` — and writing each piece as it came put half a word on a
+  row of its own. Each stream buffers until it has a whole line. A line that
+  never ends, like a progress bar, is shown once it grows past half a kilobyte.
+- The output box has a height. Past its rows a command's output is counted
+  rather than printed, so a build that prints thousands of lines cannot push the
+  transcript off the screen, and the count says how many were left out.
 - A command's stdout and stderr are no longer spliced into one row. The two are
   read by separate tasks and arrive chopped at whatever a pipe read returned, so
   a chunk can end mid-word; whichever stream was mid-line is ended first now, and

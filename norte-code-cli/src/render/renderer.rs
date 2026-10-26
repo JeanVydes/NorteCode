@@ -30,6 +30,19 @@ pub(crate) enum Format {
     Jsonl,
 }
 
+/// How many characters of a line without a newline may wait before it is
+/// written anyway.
+///
+/// A line that never ends is a progress bar or a prompt, and holding it for a
+/// newline that never comes would show nothing at all while the tool runs.
+const MAX_PARTIAL_LINE_CHARS: usize = 512;
+
+/// How many rows the output box shows before it drops the oldest.
+///
+/// A command that prints thousands of lines would push the transcript off the
+/// screen; the box keeps its last rows and counts what it dropped.
+const MAX_OUTPUT_ROWS: usize = 12;
+
 /// How much of the conversation the renderer shows.
 ///
 /// One axis, not two flags: `low` is what `--quiet` used to be, `high` what
@@ -179,13 +192,20 @@ pub(crate) struct Renderer {
     /// Whether the open output block has written a row yet.
     output_line_start: bool,
 
-    /// The stream whose line is open, when one is.
+    /// How many rows the open output box has printed.
     ///
-    /// A command's stdout and stderr are read by two tasks and arrive chopped
-    /// at whatever a pipe read returned, so a chunk can end mid-word. Letting
-    /// the other stream write there interleaved the two into one unreadable
-    /// line; whichever stream is mid-line is ended first instead.
-    output_open_stream: Option<String>,
+    /// Past [`MAX_OUTPUT_ROWS`] a row is not printed, so a command that prints
+    /// thousands of lines cannot push the transcript off the screen. The count
+    /// is what says how many were left out.
+    output_rows_seen: usize,
+
+    /// What has arrived from each stream without a newline yet, by stream.
+    ///
+    /// A chunk ends wherever a pipe read ended, which is usually mid-line: the
+    /// reader hands over `stdout[01] p` and `arcial... completa` as two chunks
+    /// of one row. A row is written only once its line is whole, so the two are
+    /// joined instead of landing on rows of their own.
+    output_pending: BTreeMap<String, String>,
 }
 
 impl Renderer {
@@ -240,7 +260,8 @@ impl Renderer {
             streamed_calls: BTreeSet::new(),
             output_gutter: None,
             output_line_start: true,
-            output_open_stream: None,
+            output_pending: BTreeMap::new(),
+            output_rows_seen: 0,
         }
     }
 
@@ -595,35 +616,34 @@ impl Renderer {
             self.output_gutter = Some(call_id.to_owned());
             self.output_line_start = true;
         }
-        // The other stream is mid-line: end its row before this one writes, so
-        // the two are never spliced together. Each keeps its own rows, which is
-        // what makes interleaved output readable.
-        if self
-            .output_open_stream
-            .as_deref()
-            .is_some_and(|open| open != stream)
+        // The buffer is filled and read in one borrow, and the rows are written
+        // after it ends: writing needs `self`, mutably.
+        let mut whole: Vec<String> = Vec::new();
+        let mut leftover = String::new();
         {
-            frame.push('\n');
-            self.output_line_start = true;
+            let pending = self.output_pending.entry(stream.to_owned()).or_default();
+            pending.push_str(text);
+            // Whole lines only: what follows the last newline waits for the rest
+            // of its line, whenever that arrives. A line that grows past the cap
+            // without one is taken anyway, so a progress bar still moves.
+            while let Some(index) = pending.find('\n') {
+                let line: String = pending.drain(..=index).collect();
+                whole.push(line[..line.len() - 1].to_owned());
+            }
+            if pending.chars().count() >= MAX_PARTIAL_LINE_CHARS {
+                leftover = std::mem::take(pending);
+            }
+            // An empty buffer is no buffer: leaving the entry behind makes a
+            // stream look like it is mid-line when it has nothing pending.
+            if pending.is_empty() {
+                self.output_pending.remove(stream);
+            }
         }
-        let mut rest = text;
-        while !rest.is_empty() {
-            if self.output_line_start {
-                let _ = write!(frame, "  {} ", self.style.faint("│"));
-                self.output_line_start = false;
-            }
-            if let Some(index) = rest.find('\n') {
-                let (line, tail) = rest.split_at(index);
-                frame.push_str(&self.style.dim(crate::text::terminal(line)));
-                frame.push('\n');
-                self.output_line_start = true;
-                self.output_open_stream = None;
-                rest = &tail[1..];
-            } else {
-                frame.push_str(&self.style.dim(crate::text::terminal(rest)));
-                self.output_open_stream = Some(stream.to_owned());
-                rest = "";
-            }
+        for line in whole {
+            self.write_output_row(&mut frame, &line);
+        }
+        if !leftover.is_empty() {
+            self.write_partial_row(&mut frame, &leftover);
         }
         self.last_char = None;
         if !frame.is_empty() {
@@ -633,13 +653,74 @@ impl Renderer {
         }
     }
 
+    /// Writes one whole line of tool output, inside the box.
+    ///
+    /// Rows are written as they come and never redrawn: redrawing the box to
+    /// make it scroll would need cursor movement over rows the renderer does not
+    /// own, and every other writer on this stream shares it. What bounds the box
+    /// is [`MAX_OUTPUT_ROWS`]: past it the oldest rows are no longer printed, and
+    /// the count of what was left out is printed in their place.
+    fn write_output_row(&mut self, frame: &mut String, line: &str) {
+        use std::fmt::Write as _;
+        self.output_rows_seen += 1;
+        let kept = self.output_rows_seen <= MAX_OUTPUT_ROWS;
+        if !kept {
+            // The oldest rows are already on screen; this one is not shown, and
+            // the count above said how many in total were left out.
+            return;
+        }
+        if self.output_line_start {
+            let _ = write!(frame, "  {} ", self.style.faint("│"));
+            self.output_line_start = false;
+        }
+        frame.push_str(&self.style.dim(crate::text::terminal(line)));
+        frame.push('\n');
+        self.output_line_start = true;
+    }
+
+    /// Writes a line that has not ended yet, ending it for the moment.
+    ///
+    /// A chunk can stop mid-line and the rest may never come (a progress bar),
+    /// so the row is shown whole and the next chunk starts its own. Joining them
+    /// would need the box redrawn, which is the thing this rendering cannot do.
+    fn write_partial_row(&mut self, frame: &mut String, text: &str) {
+        use std::fmt::Write as _;
+        let _ = write!(frame, "  {} ", self.style.faint("│"));
+        let _ = writeln!(frame, "{}", self.style.dim(crate::text::terminal(text)));
+        self.output_line_start = true;
+    }
+
+    /// Keeps what was left of a stream that ended without a newline.
+    fn flush_output_pending(&mut self, frame: &mut String) {
+        for text in std::mem::take(&mut self.output_pending).into_values() {
+            if !text.is_empty() {
+                self.write_partial_row(frame, &text);
+            }
+        }
+    }
+
     /// The rows that close the open output box, if one is open.
     fn close_output_gutter(&mut self) -> Option<String> {
+        use std::fmt::Write as _;
         self.output_gutter.take()?;
-        self.output_open_stream = None;
-        let newline = if self.output_line_start { "" } else { "\n" };
+        let mut frame = String::new();
+        self.flush_output_pending(&mut frame);
+        // What the box did not print, said once, where the reader looks last.
+        let hidden = self.output_rows_seen.saturating_sub(MAX_OUTPUT_ROWS);
+        if hidden > 0 {
+            let _ = writeln!(
+                frame,
+                "  {} {}",
+                self.style.faint("│"),
+                self.style.yellow(format!(
+                    "… {hidden} more line(s), the box shows the first {MAX_OUTPUT_ROWS}"
+                ))
+            );
+        }
+        let _ = writeln!(frame, "  {}", self.style.faint("╰"));
+        self.output_rows_seen = 0;
         self.output_line_start = true;
-        Some(format!("{newline}  {}\n", self.style.faint("╰")))
+        Some(frame)
     }
 
     /// Closes the open streamed-output box, if there is one.
@@ -915,10 +996,19 @@ impl Renderer {
         self.output_gutter.as_deref()
     }
 
-    /// The stream whose row is open, for a test.
+    /// How many rows the open box has printed, for a test.
     #[cfg(test)]
-    pub(crate) fn output_open_stream(&self) -> Option<&str> {
-        self.output_open_stream.as_deref()
+    pub(crate) fn output_rows_seen(&self) -> usize {
+        self.output_rows_seen
+    }
+
+    /// What is waiting for a newline, for a test.
+    #[cfg(test)]
+    pub(crate) fn output_pending(&self) -> Vec<(String, String)> {
+        self.output_pending
+            .iter()
+            .map(|(stream, text)| (stream.clone(), text.clone()))
+            .collect()
     }
 
     /// The short result of a finished tool, when one is worth showing.

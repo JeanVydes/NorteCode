@@ -808,10 +808,10 @@ fn a_finished_call_closes_the_box_and_its_result_is_not_repeated() {
 }
 
 #[test]
-fn two_streams_mid_line_are_not_spliced_together() {
-    // A command's stdout and stderr are read by two tasks and arrive chopped at
-    // whatever a pipe read returned, so a chunk can end mid-word. Writing the
-    // other stream there spliced the two into one unreadable row.
+fn a_line_split_across_chunks_waits_until_it_is_whole() {
+    // A pipe read ends wherever it ends, so one row arrives as two chunks:
+    // `stdout[01] p` then `arcial... completa`. Writing each chunk as it came
+    // put half a word on a row of its own, which is what the screen showed.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     let chunk = |renderer: &mut Renderer, stream: &str, text: &str| {
@@ -824,22 +824,94 @@ fn two_streams_mid_line_are_not_spliced_together() {
             last: false,
         });
     };
-    // stdout stops mid-line, then stderr writes: the partial line is ended
-    // first, so stderr starts its own row.
-    chunk(&mut renderer, "stdout", "parcial... ");
+
+    // Half a line waits in its own stream's buffer.
+    chunk(&mut renderer, "stdout", "stdout[01] p");
     assert_eq!(
-        renderer.output_open_stream(),
-        Some("stdout"),
-        "the row is open and belongs to stdout"
+        renderer.output_pending(),
+        [("stdout".to_owned(), "stdout[01] p".to_owned())],
+        "a line without a newline waits for the rest of itself"
     );
-    chunk(&mut renderer, "stderr", "aviso\n");
+
+    // The rest joins it, and the buffer is emptied rather than left at "".
+    chunk(&mut renderer, "stdout", "arcial... completa\n");
+    assert!(
+        renderer.output_pending().is_empty(),
+        "the line was whole, so nothing waits now"
+    );
+
+    // Each stream keeps its own half-line: they are read by two tasks.
+    chunk(&mut renderer, "stdout", "uno ");
+    chunk(&mut renderer, "stderr", "dos ");
+    let mut waiting = renderer.output_pending();
+    waiting.sort();
     assert_eq!(
-        renderer.output_open_stream(),
-        None,
-        "stderr closed its own row, so nothing is open now"
+        waiting,
+        [
+            ("stderr".to_owned(), "dos ".to_owned()),
+            ("stdout".to_owned(), "uno ".to_owned()),
+        ],
+        "each stream waits on its own line"
     );
-    // The same stream continuing does not break the row.
-    chunk(&mut renderer, "stderr", "otra ");
-    chunk(&mut renderer, "stderr", "parte\n");
-    assert_eq!(renderer.output_open_stream(), None);
+}
+
+#[test]
+fn a_line_that_never_ends_is_shown_once_it_is_long_enough() {
+    // A progress bar writes without newlines. Holding it for a newline that
+    // never comes would show nothing at all while the tool runs.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    let chunk = |renderer: &mut Renderer, text: &str| {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: "stdout".to_owned(),
+            text: text.to_owned(),
+            last: false,
+        });
+    };
+    chunk(&mut renderer, &"#".repeat(500));
+    assert!(
+        !renderer.output_pending().is_empty(),
+        "half a kilobyte is not enough to give up waiting"
+    );
+    chunk(&mut renderer, &"#".repeat(100));
+    assert!(
+        renderer.output_pending().is_empty(),
+        "past the cap the line is shown rather than held"
+    );
+}
+
+#[test]
+fn the_box_stops_printing_rows_past_its_height() {
+    // Without a bound, a command that prints thousands of lines pushes the
+    // transcript off the screen: the box shows its first rows and counts the
+    // rest rather than growing with the output.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    for index in 0..40 {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: "stdout".to_owned(),
+            text: format!("line {index}\n"),
+            last: false,
+        });
+    }
+    assert_eq!(
+        renderer.output_rows_seen(),
+        40,
+        "every line that arrived is counted, whether shown or not"
+    );
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stdout".to_owned(),
+        text: String::new(),
+        last: true,
+    });
+    assert_eq!(renderer.output_rows_seen(), 0, "closing resets the count");
 }
