@@ -6,6 +6,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A block of markdown ends where the next one begins. The renderer wrote each
+  block as it reached the block's end, and nothing closed the block before it:
+  the heading after a paragraph was appended to that paragraph's last line, and
+  one paragraph ran into the next. A paragraph had no arm at all, so its text was
+  never followed by a break.
+- A list item the source puts on the next line stays there. A nested list opened
+  with no break before it and put the inner bullet on the outer item's line; a
+  blank line between items in the source printed as two.
+
 ### Added
 
 - The input line no longer erases the transcript while a tool prints. The

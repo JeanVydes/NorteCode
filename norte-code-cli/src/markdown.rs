@@ -96,13 +96,22 @@ pub fn render(text: &str) -> String {
             Event::End(TagEnd::CodeBlock) => {
                 in_code_block = false;
                 code_lang.clear();
-                out.push('\n');
+                end_block(&mut out);
             }
             Event::Start(Tag::List(_)) => {
+                // A nested list starts inside the item above it, and the item's
+                // text has no break of its own before it: without this the inner
+                // bullet lands on the outer item's line.
+                if list_depth > 0 {
+                    out.push('\n');
+                }
                 list_depth += 1;
             }
             Event::End(TagEnd::List(_)) => {
                 list_depth = list_depth.saturating_sub(1);
+                if list_depth == 0 {
+                    end_block(&mut out);
+                }
             }
             Event::Start(Tag::Item) => {
                 let indent = "  ".repeat(list_depth.saturating_sub(1));
@@ -128,7 +137,7 @@ pub fn render(text: &str) -> String {
             Event::End(TagEnd::Table) => {
                 render_table(&mut out, &rows);
                 rows.clear();
-                out.push('\n');
+                end_block(&mut out);
             }
             Event::Start(Tag::TableCell) => cell = Some(String::new()),
             Event::End(TagEnd::TableCell) => {
@@ -143,11 +152,15 @@ pub fn render(text: &str) -> String {
                 });
             }
             Event::End(TagEnd::Heading(_)) => {
-                let _ = writeln!(out, "{RESET}");
+                out.push_str(RESET);
+                end_block(&mut out);
             }
+            // The block a paragraph is. pulldown ends one here without ever
+            // saying it started, and this arm is what keeps two of them apart.
+            Event::End(TagEnd::Paragraph) => end_block(&mut out),
             Event::End(TagEnd::BlockQuote(_)) => {
                 quote_depth = quote_depth.saturating_sub(1);
-                out.push('\n');
+                end_block(&mut out);
             }
             Event::End(
                 TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link,
@@ -191,9 +204,19 @@ pub fn render(text: &str) -> String {
                     out.push('\n');
                 }
             }
-            Event::End(TagEnd::Item) | Event::HardBreak => out.push('\n'),
+            Event::End(TagEnd::Item) => {
+                // A tight item ends on its text with nothing after it, so the
+                // break is owed here; a loose one holds a paragraph that already
+                // left the gap, and adding another put a blank line between every
+                // pair of items.
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Event::HardBreak => out.push('\n'),
             Event::Rule => {
                 let _ = writeln!(out, "{DIM}────────────────{RESET}");
+                end_block(&mut out);
             }
             Event::TaskListMarker(done) => {
                 let mark = if done { "[x]" } else { "[ ]" };
@@ -205,8 +228,29 @@ pub fn render(text: &str) -> String {
             _ => {}
         }
     }
-
+    // The last block closed itself with a blank line; the caller adds the one
+    // separator it wants, so the result ends on a single newline.
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
     out
+}
+
+/// Ends the block being written, leaving one blank line after it.
+///
+/// pulldown reports a block by its end and gives no start event for a paragraph
+/// or a rule, so without this the next block begins on the last line of the one
+/// before it: a heading ran into the paragraph above it, every paragraph into the
+/// next, and a list into whatever followed. Trailing newlines are dropped first,
+/// so a block that already ended the line does not leave a taller gap for it.
+fn end_block(out: &mut String) {
+    if out.is_empty() {
+        return;
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out.push_str("\n\n");
 }
 
 /// Writes a sequence either into the cell being buffered or straight out.
@@ -344,6 +388,113 @@ fn clip_padded(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::render;
+
+    /// The document a block-separation test renders: every kind of block in a
+    /// row, so the one after a given block lands somewhere it can be checked.
+    const DOC: &str = "intro paragraph\n\n# Heading\n\nsecond paragraph\n\n- one\n- two\n\n> quoted\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```rust\nlet x = 1;\n```\n\nafter the fence\n\n---\n\nlast";
+
+    /// The rendered text with its SGR sequences stripped, so a test reads the
+    /// text rather than the colour.
+    fn plain(out: &str) -> String {
+        let mut text = String::new();
+        let mut in_escape = false;
+        for character in out.chars() {
+            match character {
+                '\x1b' => in_escape = true,
+                'm' if in_escape => in_escape = false,
+                _ if !in_escape => text.push(character),
+                _ => {}
+            }
+        }
+        text
+    }
+
+    /// The line a needle is on, with the styling stripped.
+    fn line_with(out: &str, needle: &str) -> String {
+        plain(out)
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[test]
+    fn a_block_is_separated_from_the_one_after_it() {
+        // The renderer handles a block by its end, and it had no arm for a
+        // paragraph and no arm that closed the block before it, so `## Heading`
+        // was appended to the paragraph above and read as part of that line.
+        // The document is compared whole: the defect is a line that is missing
+        // between two blocks, and a test that reads one line at a time by name
+        // cannot see a line it never asked to be there.
+        let plain = plain(&render(DOC));
+        let expected = [
+            "intro paragraph",
+            "",
+            "# Heading",
+            "",
+            "second paragraph",
+            "",
+            "• one",
+            "• two",
+            "",
+            "quoted",
+            "",
+            "│ a │ b │",
+            "────┼───",
+            "│ 1 │ 2 │",
+            "",
+            "── rust ──",
+            "  let x = 1;",
+            "",
+            "after the fence",
+            "",
+            "────────────────",
+            "",
+            "last",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(plain, expected, "a block runs into the one after it");
+    }
+
+    #[test]
+    fn a_tight_list_does_not_leave_a_blank_line_between_items() {
+        // An item ends by writing a break, and a paragraph already wrote one:
+        // two breaks between every pair of items is a list with air between the
+        // rows, which is not how the source was written.
+        let out = render("- one\n- two\n- three");
+        let lines: Vec<&str> = out.lines().collect();
+        let first = lines.iter().position(|line| line.contains("one")).unwrap();
+        let second = lines.iter().position(|line| line.contains("two")).unwrap();
+        assert_eq!(second - first, 1, "the items are not adjacent: {out:?}");
+    }
+
+    #[test]
+    fn a_nested_item_does_not_land_on_the_outer_items_line() {
+        // A nested list starts inside the item above it and the outer item has no
+        // break before it, so the inner bullet was written on the outer line.
+        let out = render("- one\n  - inner\n- two");
+        assert_eq!(
+            line_with(&out, "inner").trim(),
+            "• inner",
+            "the inner item shares the outer item's line: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_loose_list_still_separates_its_items() {
+        // The opposite of the tight case: a blank line between items in the
+        // source is a blank line in the output, not one dropped or tripled.
+        let out = render("- one\n\n- two");
+        let lines: Vec<&str> = out.lines().collect();
+        let first = lines.iter().position(|line| line.contains("one")).unwrap();
+        let second = lines.iter().position(|line| line.contains("two")).unwrap();
+        assert_eq!(
+            second - first,
+            2,
+            "the loose list's gap is not one line: {out:?}"
+        );
+    }
 
     #[test]
     fn bold_italic_and_strikethrough_carry_their_own_style() {
