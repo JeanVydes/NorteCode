@@ -457,6 +457,35 @@ impl Service {
             .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))
     }
 
+    /// The session a client named, which may be a prefix of its id.
+    ///
+    /// The footer names a session by the first eight characters of its id, and
+    /// that is not enough to ask for it back: `resume 801605a1` answered
+    /// "session `801605a1` is not known" while the footer on screen showed
+    /// exactly those eight. A name that matches one session resolves to it; one
+    /// that matches several is an error naming them, because silently taking
+    /// the first would continue the wrong conversation; and one that matches
+    /// none stays unknown, so the message people already know is unchanged.
+    pub(super) fn resolve_key(&self, key: &SessionKey) -> Result<SessionKey, ServiceError> {
+        let sessions = self.lock_sessions();
+        if sessions.contains_key(key) {
+            return Ok(key.clone());
+        }
+        let prefix = key.as_str();
+        let matches: Vec<&SessionKey> = sessions
+            .keys()
+            .filter(|candidate| candidate.as_str().starts_with(prefix))
+            .collect();
+        match matches.as_slice() {
+            [only] => Ok((*only).clone()),
+            [] => Err(ServiceError::UnknownSession(prefix.to_owned())),
+            many => Err(ServiceError::AmbiguousSession {
+                prefix: prefix.to_owned(),
+                matches: many.iter().map(ToString::to_string).collect(),
+            }),
+        }
+    }
+
     /// The sessions the service holds.
     pub(super) fn lock_sessions(&self) -> MutexGuard<'_, BTreeMap<SessionKey, SessionRecord>> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)

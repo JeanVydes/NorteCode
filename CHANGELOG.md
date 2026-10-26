@@ -112,6 +112,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   failed on every load and the store stayed `Streaming` for the life of the
   session. The repair now leaves the head where it is, which is what a
   phase-only commit means.
+- A session can be named by the prefix the footer shows. The footer draws the
+  first eight characters of the session id and `resume` took its argument
+  straight to the session table, so the name on screen — the only one a person
+  has — answered "not known". A prefix that matches one session now resolves to
+  it; one that matches several is refused with the ids, because continuing the
+  wrong conversation is silent; and one that matches none still says unknown.
 - A `read` says less at `medium` and nothing at `low`. The page a reader read is
   what the model needs and a person following the work does not: at `medium` a
   long file buried the next call under a screenful nobody asked to see, and at

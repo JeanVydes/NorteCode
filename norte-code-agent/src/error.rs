@@ -31,6 +31,18 @@ pub enum ServiceError {
     /// The named session is not known.
     #[error("session `{0}` is not known")]
     UnknownSession(String),
+    /// A name matched more than one session.
+    ///
+    /// The footer shows a session by a prefix of its id, so a client may send
+    /// one; when two sessions share it the service says so instead of picking,
+    /// because the wrong session is silent and the right one is not.
+    #[error("`{prefix}` matches {} session(s): {}", .matches.len(), .matches.join(", "))]
+    AmbiguousSession {
+        /// The prefix the client sent.
+        prefix: String,
+        /// The ids it matches.
+        matches: Vec<String>,
+    },
     /// No running turn is waiting on that question.
     #[error("question `{0}` is not pending for this session")]
     UnknownQuestion(String),

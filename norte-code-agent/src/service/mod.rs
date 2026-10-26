@@ -996,6 +996,145 @@ impl Service {
         Arc::clone(&self.lock_catalog())
     }
 
+    /// Replaces every session name in a request with the session it names.
+    ///
+    /// The only place a short name becomes a full one. It is a match over the
+    /// request rather than a method on it so the protocol crate stays free of
+    /// the service's session table, and every arm that carries a
+    /// [`SessionKey`] is listed: one that is missed would keep answering
+    /// "unknown" for a name the footer shows.
+    #[allow(clippy::too_many_lines)] // one arm per request variant, which is the enum.
+    fn canonical(
+        &self,
+        kind: norte_code_protocol::ClientRequestKind,
+    ) -> Result<norte_code_protocol::ClientRequestKind, ServiceError> {
+        use norte_code_protocol::ClientRequestKind as Kind;
+        let resolve = |key: SessionKey| self.resolve_key(&key);
+        Ok(match kind {
+            Kind::SwitchSession { session } => Kind::SwitchSession {
+                session: resolve(session)?,
+            },
+            Kind::ForkSession { session, title } => Kind::ForkSession {
+                session: resolve(session)?,
+                title,
+            },
+            Kind::RenameSession { session, title } => Kind::RenameSession {
+                session: resolve(session)?,
+                title,
+            },
+            Kind::DeleteSession { session } => Kind::DeleteSession {
+                session: resolve(session)?,
+            },
+            Kind::SendMessage {
+                session,
+                text,
+                attachments,
+                budget,
+                reasoning,
+                replay,
+            } => Kind::SendMessage {
+                session: session.map(resolve).transpose()?,
+                text,
+                attachments,
+                budget,
+                reasoning,
+                replay,
+            },
+            Kind::Steer { session, text, id } => Kind::Steer {
+                session: resolve(session)?,
+                text,
+                id,
+            },
+            Kind::CancelTurn { session } => Kind::CancelTurn {
+                session: resolve(session)?,
+            },
+            Kind::StopJobs { session, id } => Kind::StopJobs {
+                session: resolve(session)?,
+                id,
+            },
+            Kind::DetachTurn { session } => Kind::DetachTurn {
+                session: resolve(session)?,
+            },
+            Kind::ListJobs { session } => Kind::ListJobs {
+                session: resolve(session)?,
+            },
+            Kind::Resume { session } => Kind::Resume {
+                session: resolve(session)?,
+            },
+            Kind::Approve {
+                session,
+                approval,
+                arguments,
+                scope,
+                remember,
+            } => Kind::Approve {
+                session: resolve(session)?,
+                approval,
+                arguments,
+                scope,
+                remember,
+            },
+            Kind::Deny {
+                session,
+                approval,
+                reason,
+                scope,
+            } => Kind::Deny {
+                session: resolve(session)?,
+                approval,
+                reason,
+                scope,
+            },
+            Kind::Revoke {
+                session,
+                approval,
+                grant,
+            } => Kind::Revoke {
+                session: resolve(session)?,
+                approval,
+                grant,
+            },
+            Kind::ListGrants { session } => Kind::ListGrants {
+                session: resolve(session)?,
+            },
+            Kind::AnswerQuestion {
+                session,
+                question,
+                answer,
+            } => Kind::AnswerQuestion {
+                session: resolve(session)?,
+                question,
+                answer,
+            },
+            Kind::SetModel { session, model } => Kind::SetModel {
+                session: resolve(session)?,
+                model,
+            },
+            Kind::SetReasoning {
+                session,
+                scope,
+                reasoning,
+            } => Kind::SetReasoning {
+                session: resolve(session)?,
+                scope,
+                reasoning,
+            },
+            Kind::SetBudget { session, budget } => Kind::SetBudget {
+                session: resolve(session)?,
+                budget,
+            },
+            Kind::Compact { session } => Kind::Compact {
+                session: resolve(session)?,
+            },
+            Kind::CostReport { session } => Kind::CostReport {
+                session: session.map(resolve).transpose()?,
+            },
+            // Every other request names no session, so there is nothing to
+            // resolve and it is returned as it arrived.
+            other => other,
+        })
+    }
+
     /// Answers one client request.
     ///
     /// # Errors
@@ -1006,9 +1145,15 @@ impl Service {
     #[allow(clippy::too_many_lines)]
     pub async fn submit(
         self: &Arc<Self>,
-        request: norte_code_protocol::ClientRequest,
+        mut request: norte_code_protocol::ClientRequest,
     ) -> Result<EventStream, ServiceError> {
         use norte_code_protocol::ClientRequestKind as Kind;
+        // A session may be named by a prefix of its id: the footer shows eight
+        // characters and a person types back what they can see. Resolve it once
+        // here, at the one door every request comes through, so no handler has
+        // to know a name may be short — it is handed the canonical key or the
+        // error that says why it is not one.
+        request.kind = self.canonical(request.kind)?;
         let request_id = request.request_id;
         match request.kind {
             Kind::CreateSession { title } => {

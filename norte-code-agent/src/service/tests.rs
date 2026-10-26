@@ -935,6 +935,98 @@ async fn a_permanent_failure_is_not_retried() {
 }
 
 #[tokio::test]
+async fn a_session_can_be_named_by_the_prefix_the_footer_shows() {
+    // The footer draws the first eight characters of the id, and `resume` took
+    // the argument straight to the session table: the name on screen answered
+    // "not known". A prefix that matches one session resolves to it; one that
+    // matches several is refused with the ids, because continuing the wrong
+    // conversation is silent; and one that matches none still says unknown.
+    let service = service();
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("named by a prefix".to_owned()),
+        },
+    )
+    .await;
+    let key = created[0].session.clone().expect("session");
+    let prefix: String = key.as_str().chars().take(8).collect();
+
+    let listed = drain(
+        &service,
+        ClientRequestKind::SwitchSession {
+            session: SessionKey::new(prefix.clone()),
+        },
+    )
+    .await;
+    assert!(
+        matches!(listed[0].kind, ServerEventKind::SessionSwitched),
+        "the footer's eight characters name the session: {listed:#?}"
+    );
+
+    // A name nothing starts with is still unknown, with the message people
+    // already know, so this is a widening and not a new failure mode.
+    let result = service
+        .submit(ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::SwitchSession {
+                session: SessionKey::new("ffffffff".to_owned()),
+            },
+        })
+        .await;
+    assert!(
+        matches!(result, Err(ServiceError::UnknownSession(name)) if name == "ffffffff"),
+        "an unmatched prefix is unknown"
+    );
+}
+
+#[tokio::test]
+async fn a_prefix_that_matches_two_sessions_is_refused_by_name() {
+    // Two sessions sharing a prefix cannot be told apart, and taking the first
+    // would continue one of them without saying which. The error names both, so
+    // the person can pick.
+    let service = service();
+    let mut keys = Vec::new();
+    for title in ["one", "two"] {
+        let created = drain(
+            &service,
+            ClientRequestKind::CreateSession {
+                title: Some(title.to_owned()),
+            },
+        )
+        .await;
+        keys.push(created[0].session.clone().expect("session"));
+    }
+    // Two ids from the same table share a leading hex digit often enough that a
+    // one-character prefix is the honest way to write this test; when it does
+    // not, the two are the same length and the empty prefix still matches both.
+    let first = keys[0].as_str();
+    let second = keys[1].as_str();
+    let shared = first
+        .chars()
+        .zip(second.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let prefix: String = first.chars().take(shared).collect();
+
+    let result = service
+        .submit(ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::SwitchSession {
+                session: SessionKey::new(prefix.clone()),
+            },
+        })
+        .await;
+    match result {
+        Err(ServiceError::AmbiguousSession { matches, .. }) => {
+            assert_eq!(matches.len(), 2, "both sessions are named: {matches:?}");
+        }
+        Err(other) => panic!("expected an ambiguous name, got {other}"),
+        Ok(_) => panic!("two sessions under one prefix must not resolve"),
+    }
+}
+
+#[tokio::test]
 async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
     // The provider fails for good: no retry is scheduled, and the turn ends
     // with an error. The engine left the session `Streaming` so a resume could
