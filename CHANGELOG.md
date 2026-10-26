@@ -19,9 +19,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The shell tool is registered twice with one set of limits between them, so
-  only the flag differs; the sandbox, the secrets and the output caps stay
-  identical for a call that is waited for and one that is not.
+- A detached call is drawn as what it is: `◌ shell let go of in 1200 ms`, not
+  `✗ shell failed in 1200 ms`. It stays an error in what the model sees — the
+  call did not run to the end — but it did not fail, and a person reading a
+  transcript acts on the mark. Which ending it was travels on the wire now,
+  instead of the client guessing from the tool's own text, so a timeout, a
+  cancellation and a detach stay three different things.
+- The shell is one tool with one set of limits: the sandbox, the secrets, the
+  output caps and the time bound are the same whether a call is waited for or let
+  go of, and `detach` on the request is what says which. There is no second
+  declaration to keep in step, and the flag no longer doubles as a per-tool
+  limit.
 
 ### Fixed
 

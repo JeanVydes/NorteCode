@@ -10,7 +10,7 @@ use crate::render::argument::todo_items;
 use crate::render::dial::context_dial;
 use crate::render::edit::{EditPreview, build_edit_preview, edit_preview};
 use crate::render::loading::{LOADING_BAR_WIDTH, Phase, loading_frame};
-use crate::render::renderer::{Block, Format, Renderer, Verbosity, tool_sections};
+use crate::render::renderer::{Block, Format, Renderer, Verbosity, call_ending, tool_sections};
 use crate::style::Style;
 
 fn renderer(pinned: &Arc<Pinned>) -> Renderer {
@@ -212,6 +212,7 @@ fn tool_finished(call_id: &str, tool: &str, is_error: bool) -> ServerEvent {
             error: None,
             output: None,
             truncated: false,
+            detached: false,
             duration_ms: 0,
         },
     }
@@ -299,6 +300,45 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
 }
 
 #[test]
+fn a_detached_call_is_not_drawn_as_a_failure() {
+    // The three endings of a call, told apart by their mark. A detach is an
+    // error the model is right to see — it did not run to the end — and it is
+    // not a failure: the process is still running as a job. Drawing it as
+    // `✗ failed` reads as something having gone wrong at the moment something
+    // went right, and it is the one ending a person would act on by mistake.
+    let style = Style::plain();
+    let detached = call_ending(style, "shell", true, true, 1200);
+    let failed = call_ending(style, "shell", true, false, 1200);
+    let done = call_ending(style, "shell", false, false, 1200);
+
+    assert!(
+        detached.contains("let go of"),
+        "a detached call says what it was: {detached}"
+    );
+    assert!(
+        detached.contains('◌'),
+        "and it does not carry the failure mark: {detached}"
+    );
+    assert!(
+        !detached.contains('✗') && !detached.contains("failed"),
+        "nothing about it reads as a failure: {detached}"
+    );
+
+    // The other two are unchanged.
+    assert!(
+        failed.contains('✗') && failed.contains("failed"),
+        "{failed}"
+    );
+    assert!(done.contains('✓') && !done.contains("failed"), "{done}");
+
+    // The three are told apart by their mark alone, which is what a person
+    // scans for.
+    assert_ne!(detached, failed);
+    assert_ne!(detached, done);
+    assert_ne!(failed, done);
+}
+
+#[test]
 fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
     // A shell's process can outlive its call, and its last chunk can arrive
     // after the finish was drawn: the reader hands over whatever a pipe read
@@ -321,8 +361,9 @@ fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
         tool: "shell".to_owned(),
         is_error: true,
         error: Some("the caller stopped waiting".to_owned()),
-        output: None,
+        output: Some("what arrived".to_owned()),
         truncated: false,
+        detached: true,
         duration_ms: 12,
     });
     assert!(
@@ -924,6 +965,7 @@ fn a_finished_call_closes_the_box_and_its_result_is_not_repeated() {
         error: None,
         output: Some("output\n".to_owned()),
         truncated: false,
+        detached: false,
         duration_ms: 5,
     });
     assert!(

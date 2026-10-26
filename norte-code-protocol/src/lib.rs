@@ -358,6 +358,15 @@ pub enum ServerEventKind {
         /// Whether `output` was shortened for the wire.
         #[serde(default)]
         truncated: bool,
+        /// Whether the call was let go of rather than finished.
+        ///
+        /// A detached call is reported as an error like any other — it did not
+        /// run to the end, and the model is told so — but it did not fail: it
+        /// was asked to stop waiting. A client that draws every error as a
+        /// failure needs the difference, and reading it out of the text would be
+        /// guessing at a string the tool owns.
+        #[serde(default)]
+        detached: bool,
         /// How long it ran, in milliseconds.
         duration_ms: u64,
     },

@@ -212,6 +212,29 @@ pub(crate) struct Renderer {
     output_pending: BTreeMap<String, String>,
 }
 
+/// How a finished call is announced: a mark, the tool, and how long it took.
+///
+/// Three endings, not two. A detached call is an error the model is right to
+/// see, and it is not a failure: it was asked to stop waiting and the process is
+/// still running as a job, so drawing it as `✗ failed` reads as something having
+/// gone wrong at the exact moment something went right.
+pub(crate) fn call_ending(
+    style: Style,
+    tool: &str,
+    is_error: bool,
+    detached: bool,
+    duration_ms: u64,
+) -> String {
+    let (mark, word) = if detached {
+        (style.yellow("◌"), format!("let go of in {duration_ms} ms"))
+    } else if is_error {
+        (style.red("✗"), format!("failed in {duration_ms} ms"))
+    } else {
+        (style.green("✓"), format!("in {duration_ms} ms"))
+    };
+    format!("{mark} {} {}", style.bold(tool), style.dim(word))
+}
+
 impl Renderer {
     /// A renderer with empty counters for a new run.
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -883,6 +906,7 @@ impl Renderer {
                 error,
                 output,
                 truncated,
+                detached,
                 duration_ms,
                 ..
             } => {
@@ -919,26 +943,26 @@ impl Renderer {
                 // this one must not open another.
                 self.closed_calls.insert(call_id.clone());
                 if self.verbosity.at_least(Verbosity::Medium) {
-                    if *is_error {
-                        eprintln!(
-                            "{} {} {}",
-                            self.style.red("✗"),
-                            self.style.bold(tool),
-                            self.style.dim(format!("failed in {duration_ms} ms"))
-                        );
-                    } else {
-                        eprintln!(
-                            "{} {} {}",
-                            self.style.green("✓"),
-                            self.style.bold(tool),
-                            self.style.dim(format!("in {duration_ms} ms"))
-                        );
-                    }
+                    eprintln!(
+                        "{}",
+                        call_ending(self.style, tool, *is_error, *detached, *duration_ms)
+                    );
                 }
-                if *is_error && tool.as_str() != "edit" {
-                    // A failure needs its reason whatever the verbosity.
+                if *is_error && !*detached && tool.as_str() != "edit" {
+                    // A failure needs its reason whatever the verbosity. A
+                    // detached call's text is not a reason — it is the answer the
+                    // model got, naming the job the process became — and it is
+                    // shown below like any other result.
                     if let Some(error) = error {
                         self.print_tool_result(error, *truncated);
+                    }
+                } else if *detached && !self.streamed_calls.remove(call_id) {
+                    // The call answered with what it had and the name of the job
+                    // the rest belongs to, so its result is what the model saw.
+                    if let Some(result) =
+                        Self::tool_result(tool, path.as_deref(), output.as_deref())
+                    {
+                        self.print_tool_result(&result, *truncated);
                     }
                 } else if !self.streamed_calls.remove(call_id) {
                     // The output was printed as it arrived, so showing the
