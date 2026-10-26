@@ -3824,6 +3824,38 @@ async fn the_shell_tools_and_the_job_manager_are_registered() {
     assert_eq!(waited.parameters, background.parameters);
 }
 
+#[test]
+fn only_one_of_the_two_shells_grants_no_time_bound() {
+    // A background call that starts a server has to outlive the turn; a
+    // foreground call with no deadline is one nothing can interrupt. The two
+    // shells are otherwise built from one set of limits, so the flag is the
+    // whole difference.
+    //
+    // The pair is read from the function the service itself calls, in the order
+    // it uses them. A test that built its own pair would pass while the service
+    // handed the wrong one to each, and what the flag does once it reaches the
+    // executor is tested in `norte-tools`, where waiting it out is cheap.
+    let base = ShellLimits::default();
+    let (foreground, background) = shell_limits(base);
+    assert!(
+        !foreground.allow_indefinite,
+        "the shell a turn waits on keeps its bound"
+    );
+    assert!(
+        background.allow_indefinite,
+        "the shell nothing waits on grants none"
+    );
+    // Nothing else moves: a wider difference would mean the two shells had
+    // drifted apart in the way the registry's comment promises they do not.
+    assert_eq!(foreground.default_timeout, background.default_timeout);
+    assert_eq!(foreground.max_timeout, background.max_timeout);
+    assert_eq!(foreground.max_output_bytes, background.max_output_bytes);
+    assert_eq!(
+        foreground, base,
+        "the foreground shell keeps the base limits"
+    );
+}
+
 #[tokio::test]
 async fn skills_and_tools_are_listed_over_the_protocol() {
     let service = service();

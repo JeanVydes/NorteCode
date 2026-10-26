@@ -8,6 +8,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `shell_bg` can run a command with no time bound: a `timeout_ms` of zero asks
+  for none, which is what lets a background call start something long-lived — a
+  browser with a debug port, a dev server — and leave it running for the rest of
+  the session. The foreground `shell` ignores the zero and applies the host's
+  default, because a turn waiting on a call with no deadline cannot be
+  interrupted. An unbounded job is still stopped by `manage_jobs`, `/jobs stop`
+  and `Ctrl-C`, and it still dies with the process.
+
+### Changed
+
+- The shell tool is registered twice with one set of limits between them, so
+  only the flag differs; the sandbox, the secrets and the output caps stay
+  identical for a call that is waited for and one that is not.
+
+### Fixed
+
 - A fenced code block is coloured by language and drawn in a box. The fence's
   token — `rust`, `sh`, `python` — selects the grammar; an unknown token is left
   plain rather than guessed at, and a language nothing matches is drawn in the

@@ -48,7 +48,9 @@ use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredSession
 use norte_code_tools::{
     AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
 };
-use norte_tools::{BrowserTool, EditTool, ReadTool, ShellLimits, ShellTool, WriteTool};
+use norte_tools::{
+    BrowserTool, EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
+};
 use tokio::sync::Notify;
 
 use norte_code_catalog::Catalog;
@@ -190,6 +192,34 @@ pub struct Service {
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
     telemetry: Arc<Telemetry>,
+}
+
+/// The limits for the foreground shell and the background one, in that order.
+///
+/// One function rather than two struct literals at the call site, because the
+/// flag is the whole difference between the two shells and a pair is what makes
+/// it checkable: a test that built the pair itself would pass while the service
+/// handed the wrong one to each.
+///
+/// The flag is the point. Nothing waits for a background call, so a server it
+/// starts can outlive the turn and be read through `manage_jobs`; a foreground
+/// call with no deadline is one neither the model nor the person at the keyboard
+/// can interrupt, because nothing ends a turn on its own.
+///
+/// What the flag *does* once it reaches the executor is tested where it lives,
+/// in `norte-tools`: that a host which allows it runs a zero-bounded call to the
+/// end, that one which does not applies its default, and that an unbounded call
+/// is still cancelled and its group killed. Distinguishing the two shells by
+/// behaviour here would mean waiting out the host's 120-second default, so what
+/// this pins is which one gets what.
+#[must_use]
+fn shell_limits(base: ShellLimits) -> (ShellLimits, ShellLimits) {
+    let foreground = base;
+    let background = ShellLimits {
+        allow_indefinite: true,
+        ..base
+    };
+    (foreground, background)
 }
 
 impl Service {
@@ -519,50 +549,59 @@ impl Service {
 
     /// The shell tool, the background variant of it, and the job manager.
     ///
-    /// They are registered together because they share one executor: `shell_bg`
-    /// is the same code under a second name, and that is what keeps the
-    /// sandbox, the secrets and the output bounds identical between a call that
-    /// is waited for and one that is not.
+    /// The two shells are built from one set of limits, so the sandbox, the
+    /// secrets and the output bounds are identical between a call that is waited
+    /// for and one that is not. They differ in exactly one place, and on
+    /// purpose: `shell_bg` grants a `timeout_ms` of zero, which asks for no time
+    /// bound, and the foreground `shell` does not.
+    ///
+    /// That difference is the point of the flag. Nothing waits for a background
+    /// call, so a server it starts can outlive the turn and be read through
+    /// `manage_jobs`; a foreground call with no bound is one neither the model
+    /// nor the person at the keyboard can interrupt, because nothing ends a turn
+    /// on its own.
     fn register_shell(&self, tools: &mut ToolRegistry) -> Result<(), ServiceError> {
         let mut env = BTreeMap::new();
         if let Ok(path) = std::env::var("PATH") {
             env.insert("PATH".to_owned(), path);
         }
-        let command = ShellTool::new()
-            .with_limits(ShellLimits {
-                max_model_bytes: self.config().tools.command_max_model_bytes,
-                ..ShellLimits::default()
-            })
-            .with_env(env)
-            .with_secrets(
-                self.secrets
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-            )
-            .with_blobs(Arc::clone(&self.blobs))
-            .into_declaration();
-        let command = if self.config().tools.confinement.sandbox.enabled {
-            sandboxed_command(
-                command,
-                &self.workspace_root,
-                &self.config().tools.confinement.sandbox,
-            )
-        } else {
-            command
+        let limits = ShellLimits {
+            max_model_bytes: self.config().tools.command_max_model_bytes,
+            ..ShellLimits::default()
         };
+        let secrets = self
+            .secrets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        // One builder for both, so nothing but the flag can drift apart.
+        let build = |limits: ShellLimits| -> ToolDeclaration<ShellRequest> {
+            let declaration = ShellTool::new()
+                .with_limits(limits)
+                .with_env(env.clone())
+                .with_secrets(secrets.clone())
+                .with_blobs(Arc::clone(&self.blobs))
+                .into_declaration();
+            if self.config().tools.confinement.sandbox.enabled {
+                sandboxed_command(
+                    declaration,
+                    &self.workspace_root,
+                    &self.config().tools.confinement.sandbox,
+                )
+            } else {
+                declaration
+            }
+        };
+        let (foreground_limits, background_limits) = shell_limits(limits);
+        let command = build(foreground_limits);
+        let background_shell = build(background_limits);
+
         // The foreground shell is the one a turn can be stuck on, so it is the
         // one that carries a detach token. `shell_bg` answers at once and needs
         // none; the manager is not a shell at all.
         let command = Detachable::declaration(command, Arc::clone(&self.detaches));
         let background = BackgroundShell::declaration(
-            ToolDeclaration {
-                name: command.name,
-                description: command.description,
-                parameters: command.parameters.clone(),
-                executor: Arc::clone(&command.executor),
-                approval: command.approval.clone(),
-            },
+            background_shell,
             Arc::clone(&self.jobs),
             Arc::clone(&self.steering),
         );
