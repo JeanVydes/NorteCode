@@ -307,17 +307,20 @@ impl Service {
             .as_ref()
             .map_or(0, |project| project.text.chars().count());
         let secrets = collect_secrets(&config, &catalog);
-        // Discovered before the prompt is composed, so their names and
-        // descriptions can go into it: a model cannot activate a skill it has
-        // no way of knowing about.
+        // Discovered before the prompt is composed, so their names can go into
+        // it: a model cannot activate a skill it has no way of knowing about.
+        // Only the names: the descriptions are what `skill(action: list)`
+        // returns, and paying for them on every request to pick one out of a
+        // list the session most often does not need is the cost the prompt
+        // block stays clear of.
         let skills = Arc::new(discover_skills(&config, &workspace_root));
         // By precedence, not by name: the prompt's budget is spent on the
         // skills closest to this workspace first, so a bundled set cannot crowd
         // out the one the session was set up for.
-        let skill_index: Vec<(String, String)> = skills
+        let skill_index: Vec<String> = skills
             .skills_by_precedence()
             .iter()
-            .map(|skill| (skill.name.clone(), skill.description.clone()))
+            .map(|skill| skill.name.clone())
             .collect();
         let system_prompt =
             compose_system_prompt(&system_prompt.into(), project.as_ref(), &skill_index);

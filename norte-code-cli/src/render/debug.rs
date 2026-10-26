@@ -365,11 +365,13 @@ pub(crate) fn report_prompt(style: Style, service: &Service, source: &str) -> Ve
 }
 
 /// The reasoning setting the session is actually using.
-pub(crate) fn report_reasoning(style: Style, reasoning: &Reasoning) -> Vec<String> {
-    vec![
-        heading(style, "reasoning"),
-        fact("effective", reasoning_setting_label(reasoning)),
-    ]
+///
+/// The label is the one the footer shows, not one computed here: the two are the
+/// same fact, and computing it twice is how they came to disagree — the footer
+/// resolved the command line's setting and this resolved the session's override,
+/// which is empty in a session started with `--reasoning`.
+pub(crate) fn report_reasoning(style: Style, label: &str) -> Vec<String> {
+    vec![heading(style, "reasoning"), fact("effective", label)]
 }
 
 /// Names the reasoning setting in the words the command line accepts.

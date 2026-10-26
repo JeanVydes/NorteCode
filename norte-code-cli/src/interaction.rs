@@ -852,7 +852,7 @@ pub(crate) async fn interactive_loop(
                             format!("{provider}/{model}")
                         };
                         renderer.model_name = Some(full_model.clone());
-                        run_model(service, current, full_model, style).await;
+                        run_model(service, current, full_model, renderer, style).await;
                     } else {
                         eprintln!(
                             "{}",
@@ -888,7 +888,7 @@ pub(crate) async fn interactive_loop(
                             .unwrap_or_else(|| "default".to_owned());
                         let full = format!("{provider}/{model_name}");
                         renderer.model_name = Some(full.clone());
-                        run_model(service, current, full, style).await;
+                        run_model(service, current, full, renderer, style).await;
                     } else {
                         eprintln!(
                             "{}",
@@ -1119,7 +1119,7 @@ async fn handle_live_command(
         }
         ChatCommand::Model { model } => {
             if let Some(session) = current {
-                run_model(service, session.clone(), model, style).await;
+                run_model(service, session.clone(), model, renderer, style).await;
             } else {
                 eprintln!(
                     "{}",
@@ -1145,6 +1145,7 @@ async fn handle_live_command(
                     service,
                     session.clone(),
                     format!("{provider}/{model_name}"),
+                    renderer,
                     style,
                 )
                 .await;
@@ -1215,17 +1216,15 @@ fn report_debug(
     if let Some(host) = host {
         lines.extend(report_prompt(style, service, host.prompt_source));
     }
-    // The session's override when it has one; otherwise the config default as
-    // the model resolves it, which is what the next turn will actually send.
-    let session_override = session.and_then(|session| service.session_reasoning(session));
-    match norte_code_agent::effective_reasoning(
-        session_override.as_ref(),
-        &config.reasoning.default,
-        &spec.capabilities.reasoning,
-    ) {
-        Ok(effective) => lines.extend(report_reasoning(style, &effective)),
-        Err(error) => lines.push(format!("  reasoning: could not resolve it: {error}")),
-    }
+    // The same value the footer shows, and for the same reason: it is the
+    // setting the next turn will send, already resolved once. Reading it here
+    // instead of resolving it again is what keeps the report and the footer from
+    // disagreeing.
+    let effort = renderer
+        .reasoning
+        .clone()
+        .unwrap_or_else(|| "(not resolved yet)".to_owned());
+    lines.extend(report_reasoning(style, &effort));
     for line in lines {
         eprintln!("{line}");
     }
@@ -1296,7 +1295,35 @@ fn parse_budget_limit(unit: BudgetUnit, value: &str) -> Result<f64, String> {
     Ok(limit)
 }
 
-async fn run_model(service: &Arc<Service>, session: SessionKey, model: String, style: Style) {
+/// Recomputes the effort the footer shows from the session's own state.
+///
+/// The setting is resolved once, where it is decided, and the footer and
+/// `/debug` both read that: computing it twice is how they came to disagree.
+fn refresh_effort(service: &Arc<Service>, session: &SessionKey, renderer: &mut Renderer) {
+    let label = service.session_spec(session).and_then(|spec| {
+        let override_reasoning = service.session_reasoning(session);
+        norte_code_agent::effective_reasoning(
+            override_reasoning.as_ref(),
+            &service.config().reasoning.default,
+            &spec.capabilities.reasoning,
+        )
+        .ok()
+        .map(|effective| reasoning_setting_label(&effective))
+    });
+    if let Some(label) = label {
+        renderer.set_reasoning(label);
+    }
+}
+
+async fn run_model(
+    service: &Arc<Service>,
+    session: SessionKey,
+    model: String,
+    renderer: &mut Renderer,
+    style: Style,
+) {
+    // Cloned: the refresh below needs the key after the request consumed it.
+    let key = session.clone();
     match drain_request(service, ClientRequestKind::SetModel { session, model }).await {
         Ok(events) => {
             let mut reported = false;
@@ -1305,6 +1332,11 @@ async fn run_model(service: &Arc<Service>, session: SessionKey, model: String, s
                     ServerEventKind::ModelChanged { model } => {
                         reported = true;
                         eprintln!("{}", style.green(format!("model set to {model}")));
+                        // A new model can refuse the effort in force — the
+                        // service downgrades it to one the model declares — so
+                        // the value the footer shows is recomputed rather than
+                        // left describing the old model.
+                        refresh_effort(service, &key, renderer);
                     }
                     ServerEventKind::ModelQueued { model } => {
                         reported = true;

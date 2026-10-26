@@ -2,7 +2,7 @@ use super::compaction::recent_start;
 use super::jobs::{JOB_BUFFER_BYTES, JobRegistry, JobState};
 use super::mapping::retry_plan;
 #[cfg(test)]
-use super::prompt::{MAX_SKILL_DESCRIPTION_CHARS, MAX_SKILLS_BLOCK_CHARS, clip};
+use super::prompt::MAX_SKILLS_BLOCK_CHARS;
 use super::sandbox::sandbox_name;
 use super::*;
 use norte::{FinishReason, Role};
@@ -3318,16 +3318,9 @@ async fn the_request_table_records_usage_latency_and_metadata() {
 
 #[test]
 fn the_skills_block_is_bounded_and_says_what_it_left_out() {
-    // The real shape of the problem: a directory of AWS skills whose
-    // descriptions are written for a model to read, and none of which a given
-    // session is likely to need.
-    // Each description caps at the limit, so enough skills still overflow the
-    // block: 200 chars each against a 4 KB budget.
-    let description = "Builds generative AI applications on Amazon Bedrock. ".to_owned()
-        + &"and more detail the opening sentence does not need. ".repeat(20);
-    let skills: Vec<(String, String)> = (0..40)
-        .map(|n| (format!("skill-number-{n:02}"), description.clone()))
-        .collect();
+    // Only names go in now, so the block only overflows when there are genuinely
+    // many skills: each line is about twenty characters, and the budget is 4 KB.
+    let skills: Vec<String> = (0..400).map(|n| format!("skill-number-{n:03}")).collect();
 
     let block = skills_block(&skills);
     assert!(
@@ -3339,28 +3332,31 @@ fn the_skills_block_is_bounded_and_says_what_it_left_out() {
         block.contains("more not listed"),
         "the skills that did not fit are counted, not dropped in silence: {block}"
     );
-    // A name that fits is complete, and its description is capped.
-    assert!(block.contains("`skill-number-00`"), "{block}");
+    assert!(block.contains("`skill-number-000`"), "{block}");
+    // The name, and nothing that has to be read for every request.
     let line = block
         .lines()
-        .find(|line| line.starts_with("- `skill-number-00`"))
+        .find(|line| line.starts_with("- `skill-number-000`"))
         .expect("the first skill is listed");
-    assert!(
-        line.chars().count() < MAX_SKILL_DESCRIPTION_CHARS + 40,
-        "one skill cannot fill the block: {} chars",
-        line.chars().count()
+    assert_eq!(
+        line.trim(),
+        "- `skill-number-000`",
+        "the name alone: {line}"
     );
-    assert!(
-        line.contains("Bedrock."),
-        "the opening sentence is kept: {line}"
-    );
-    assert!(!line.contains("xxxx"), "the tail is not: {line}");
 }
 
 #[test]
-fn a_short_description_reaches_the_model_whole() {
-    let block = skills_block(&[("tiny".to_owned(), "Does one thing.".to_owned())]);
-    assert!(block.contains("- `tiny`: Does one thing."), "{block}");
+fn the_names_go_in_and_the_descriptions_do_not() {
+    // A description is long — the AWS set alone is nineteen thousand characters —
+    // and `skill(action: list)` hands the same text back when it is asked for.
+    // The prompt carries what a model needs to know a skill exists.
+    let skills = vec!["tiny".to_owned()];
+    let block = skills_block(&skills);
+    assert!(block.contains("- `tiny`"), "{block}");
+    assert!(
+        !block.contains("Does one thing."),
+        "no description is paid for per request: {block}"
+    );
     assert!(
         !block.contains("more not listed"),
         "nothing was left out: {block}"
@@ -3368,40 +3364,20 @@ fn a_short_description_reaches_the_model_whole() {
 }
 
 #[test]
-fn the_first_sentence_is_preferred_over_a_hard_cut() {
-    let description = "Reads a PDF and reports its tables. It also handles images, \
-                       and a good deal more that does not fit in the opening line.";
-    let clipped = clip(description, 60);
-    assert!(
-        clipped.ends_with("tables."),
-        "cut at the sentence: {clipped}"
-    );
-    assert!(clipped.chars().count() <= 60, "{clipped}");
-}
-
-#[test]
 fn the_skills_block_names_every_installed_skill() {
     // A model cannot activate a skill it has no way of knowing about, so the
-    // name and description go into the prompt. The body does not: it is what
-    // `skill(activate)` returns.
-    let skills = vec![
-        (
-            "pdf-extract".to_owned(),
-            "Read text out of a PDF.".to_owned(),
-        ),
-        (
-            "commit-style".to_owned(),
-            "Write a Conventional Commit.".to_owned(),
-        ),
-    ];
+    // names go into the prompt. Neither the description nor the body does: one
+    // is a listing request and the other is what `skill(activate)` returns.
+    let skills = vec!["pdf-extract".to_owned(), "commit-style".to_owned()];
     let prompt = compose_system_prompt("base", None, &skills);
     assert!(prompt.contains("# Skills"), "{prompt}");
-    assert!(
-        prompt.contains("`pdf-extract`: Read text out of a PDF."),
-        "{prompt}"
-    );
+    assert!(prompt.contains("`pdf-extract`"), "{prompt}");
     assert!(prompt.contains("`commit-style`"), "{prompt}");
     assert!(prompt.contains("activate"), "the prompt says how: {prompt}");
+    assert!(
+        prompt.contains("action: list"),
+        "and how to see what each is for: {prompt}"
+    );
     assert!(prompt.starts_with("base"), "the base prompt comes first");
 
     // No skills, no block: a session that has none pays nothing for it.

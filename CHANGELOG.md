@@ -58,6 +58,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The skills block in the prompt lists names only, not descriptions. A skill's
+  description is written for a model to read and they are long — the AWS set
+  alone is nineteen thousand characters — and `skill(action: list)` returns the
+  same text when it is asked for, so paying for it on every request, every turn
+  and every retry, to pick one out of a list a session most often does not need,
+  was the largest single item in the prompt that changed nothing. The block says
+  how to see what each is for and how to activate one; a session with a big
+  installed set cuts its prompt by tens of thousands of characters.
 - A detached call is drawn as what it is: `◌ shell let go of in 1200 ms`, not
   `✗ shell failed in 1200 ms`. It stays an error in what the model sees — the
   call did not run to the end — but it did not fail, and a person reading a
@@ -72,6 +80,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The footer and `/debug` name the same reasoning effort. They disagreed because
+  each resolved it separately: the footer used the setting from the command line
+  and `/debug` the session's override, which is empty in a session started with
+  `--reasoning`, so the footer read `think high` while the report said
+  `effective: medium`. The setting is resolved once and both read that value, and
+  a `/model` recomputes it because a new model can refuse the effort in force.
 - The editor does not panic when a chip is typed in front of. A chip's range is
   an index into the draft, and inserting text moves every character after the
   cursor; the range stayed where it was, so `[Image: photo.png]` with a letter

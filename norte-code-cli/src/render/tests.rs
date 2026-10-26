@@ -135,6 +135,26 @@ fn the_footer_names_the_session_from_medium_up() {
 }
 
 #[test]
+fn the_report_and_the_footer_name_the_same_effort() {
+    // They disagreed when each resolved it separately: the footer used the
+    // command line's setting and `/debug` the session's override, which is empty
+    // in a session started with `--reasoning`. One value, read twice.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.set_reasoning("high".to_owned());
+    let report = crate::render::report_reasoning(Style::plain(), "high");
+    assert!(
+        report.join("\n").contains("effective: high"),
+        "the report names it: {report:?}"
+    );
+    assert!(
+        renderer.session_status().contains("think high"),
+        "and the footer agrees: {}",
+        renderer.session_status()
+    );
+}
+
+#[test]
 fn the_reasoning_effort_is_on_the_footer_and_goes_when_it_is_unset() {
     // Nothing else on screen names the effort, so this row is the only place a
     // `/reasoning` or a downgrade to fit a new model is visible.

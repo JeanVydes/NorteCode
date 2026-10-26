@@ -39,13 +39,6 @@ pub(super) const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 /// one it inherits from its directory layout.
 pub(super) const MAX_SKILLS_BLOCK_CHARS: usize = 4096;
 
-/// How much of one skill's description reaches the prompt.
-///
-/// A description says what the skill is for and when to reach for it, and the
-/// useful part of that is the opening sentence. The rest is detail the model
-/// reads after activating, which is where it belongs.
-pub(super) const MAX_SKILL_DESCRIPTION_CHARS: usize = 200;
-
 /// Instructions loaded from `AGENTS.md`.
 #[derive(Clone, Debug)]
 pub(super) struct ProjectInstructions {
@@ -87,34 +80,35 @@ pub(super) fn load_project_instructions(root: &Path) -> Option<ProjectInstructio
     Some(ProjectInstructions { path, text })
 }
 
-/// The skills block: what is installed, so a model can decide to activate one.
+/// The skills block: the names that are installed, so a model can ask for one.
 ///
-/// Only the name and the description go in. The body is what `skill(activate)`
-/// returns, and it is deliberately not here: a session that never needs a skill
-/// should not pay for its instructions on every request.
+/// Only the names go in. A description says what a skill is for and when to
+/// reach for it, and being written for a model to read they are long — the AWS
+/// set alone is nineteen thousand characters — while `skill(action: list)` hands
+/// the same descriptions back on demand. Paying for them on every request, to
+/// pick one out of a list the model most often does not need, is the cost this
+/// keeps off the prompt; what the prompt needs is that a model can tell a skill
+/// exists and name it.
 ///
 /// The block is bounded, and a skill that does not fit is named in a count
 /// rather than dropped in silence: a model that cannot see a skill it needs has
 /// no way to ask for it, so the prompt has to say that there are more.
-pub(super) fn skills_block(skills: &[(String, String)]) -> String {
+pub(super) fn skills_block(skills: &[String]) -> String {
     if skills.is_empty() {
         return String::new();
     }
     let mut block = String::from(
-        "# Skills\n\nThe following skills are installed. When a task matches one, \
-         call the `skill` tool with `action: activate` and its name; the result \
-         carries the full instructions and a listing of the skill's resources. \
-         Do not guess at a skill's contents from its description.\n\n",
+        "# Skills\n\nThe following skills are installed. Call the `skill` tool with \
+         `action: list` for what each is for, or `action: activate` and a name to \
+         load its full instructions and a listing of its resources. Do not guess \
+         at a skill's contents from its name.\n\n",
     );
     let mut listed = 0;
     // The count line is written after the loop and its length varies, so room is
     // left for a generous one.
     let budget = MAX_SKILLS_BLOCK_CHARS.saturating_sub(80);
-    for (name, description) in skills {
-        let line = format!(
-            "- `{name}`: {}\n",
-            clip(description, MAX_SKILL_DESCRIPTION_CHARS)
-        );
+    for name in skills {
+        let line = format!("- `{name}`\n");
         if block.len() + line.len() > budget {
             break;
         }
@@ -131,30 +125,12 @@ pub(super) fn skills_block(skills: &[(String, String)]) -> String {
     block.trim_end().to_owned()
 }
 
-/// `text`, cut to `limit` characters at a sentence or word boundary.
-pub(super) fn clip(text: &str, limit: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= limit {
-        return trimmed.to_owned();
-    }
-    // Prefer the last sentence that fits: a description's first sentence is the
-    // one that says what the skill is for.
-    let head: String = trimmed.chars().take(limit).collect();
-    if let Some(end) = head.rfind(". ") {
-        return format!("{}.", head[..end].trim_end_matches('.'));
-    }
-    match head.rfind(' ') {
-        Some(space) if space > limit / 2 => format!("{}…", head[..space].trim_end()),
-        _ => format!("{head}…"),
-    }
-}
-
 /// Appends project instructions to the base prompt. They are repository
 /// guidance, not a replacement for the user's request or the safety rules.
 pub(super) fn compose_system_prompt(
     base: &str,
     project: Option<&ProjectInstructions>,
-    skills: &[(String, String)],
+    skills: &[String],
 ) -> String {
     let base = base.trim_end();
     let skills = skills_block(skills);
