@@ -44,7 +44,6 @@ const BLUE: (u8, u8, u8) = (0x61, 0xAF, 0xEF);
 const MAGENTA: (u8, u8, u8) = (0xC6, 0x78, 0xDD);
 const MUTED: (u8, u8, u8) = (0x9A, 0xA0, 0xA6);
 const FAINT: (u8, u8, u8) = (0x7A, 0x78, 0x74);
-
 impl Style {
     /// Styling that never emits escape sequences.
     #[must_use]
@@ -70,6 +69,13 @@ impl Style {
         Self {
             colors: colors::Environment::current(is_terminal).colors(),
         }
+    }
+
+    /// Styling with the palette forced, so a test reads colours without a tty.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn for_tests(colors: Colors) -> Self {
+        Self { colors }
     }
 
     /// Wraps `text` in the given SGR codes.
@@ -112,6 +118,39 @@ impl Style {
         match self.colors {
             Colors::None => text.into_owned(),
             _ => format!("{}{text}{RESET}", ansi(codes)),
+        }
+    }
+
+    /// Paints with a fixed colour, degrading to what the terminal can show.
+    ///
+    /// The same three-step fallback as [`color`], exposed because the syntax
+    /// highlighting paints colours it chose itself rather than ones a named
+    /// method already carries.
+    ///
+    /// [`color`]: Style::color
+    #[must_use]
+    pub(crate) fn paint_color(
+        self,
+        rgb: (u8, u8, u8),
+        ansi256: u8,
+        ansi16: &str,
+        text: &str,
+    ) -> String {
+        self.paint_raw(&self.color_codes(rgb, ansi256, ansi16), text)
+    }
+
+    /// The SGR codes for a colour at the depth this style can show.
+    fn color_codes(self, rgb: (u8, u8, u8), ansi256: u8, ansi16: &str) -> String {
+        match self.colors {
+            // Nothing paints, so the code is the empty one and `paint_raw`
+            // returns the text untouched.
+            Colors::None => String::new(),
+            Colors::True => {
+                let (r, g, b) = rgb;
+                format!("38;2;{r};{g};{b}")
+            }
+            Colors::Ansi256 => format!("38;5;{ansi256}"),
+            Colors::Ansi16 => ansi16.to_owned(),
         }
     }
 
@@ -200,7 +239,6 @@ impl Style {
     pub fn faint(self, text: impl Display) -> String {
         self.color(FAINT, 244, "90", text)
     }
-
     /// Bold blue, for a tool call and its name.
     #[must_use]
     pub fn tool(self, text: impl Display) -> String {

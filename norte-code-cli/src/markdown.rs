@@ -8,6 +8,8 @@ use std::fmt::Write as _;
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+use crate::style::Style;
+
 /// The SGR sequence that ends any styling.
 const RESET: &str = "\x1b[0m";
 /// Bold.
@@ -22,14 +24,11 @@ const UNDERLINE: &str = "\x1b[4m";
 const STRIKE: &str = "\x1b[9m";
 /// Bold cyan, the heading colour.
 const HEADING: &str = "\x1b[1;36m";
-/// Characters a line may occupy before it is left as the terminal draws it.
-const MAX_WIDTH: usize = 200;
-
 /// Renders markdown text to ANSI-styled terminal output.
 // One arm per pulldown event, so the length is the event vocabulary rather than
 // tangled control flow.
 #[allow(clippy::too_many_lines)]
-pub fn render(text: &str) -> String {
+pub fn render(style: Style, text: &str) -> String {
     // The markup is trusted, the text inside it is not: the model writes it, so a
     // control character or a bidi override in it must not reach the terminal raw.
     let text = crate::text::terminal(text);
@@ -49,7 +48,9 @@ pub fn render(text: &str) -> String {
     let mut row: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut in_head = false;
-    let mut in_code_block = false;
+    // A fence is buffered whole: the box has to be drawn around it, and its
+    // border and width are only known once every line of the block has arrived.
+    let mut code_block: Option<String> = None;
     let mut code_lang = String::new();
     let mut list_depth: usize = 0;
     let mut quote_depth: usize = 0;
@@ -78,23 +79,26 @@ pub fn render(text: &str) -> String {
                 quote_depth += 1;
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                in_code_block = true;
                 code_lang = match kind {
                     CodeBlockKind::Fenced(lang) => lang.to_string(),
                     CodeBlockKind::Indented => String::new(),
                 };
-                if code_lang.is_empty() {
-                    let _ = writeln!(out, "{DIM}──{RESET}");
-                } else if code_lang.eq_ignore_ascii_case("mermaid") {
-                    // A diagram is a picture in text: the source is shown with
-                    // its own label so it reads as one, not as runnable code.
-                    let _ = writeln!(out, "{DIM}── mermaid diagram ──{RESET}");
-                } else {
-                    let _ = writeln!(out, "{DIM}── {code_lang} ──{RESET}");
-                }
+                code_block = Some(String::new());
             }
             Event::End(TagEnd::CodeBlock) => {
-                in_code_block = false;
+                if let Some(code) = code_block.take() {
+                    let code = code.strip_suffix('\n').unwrap_or(&code);
+                    // A diagram is a picture in text: the source is shown with
+                    // its own label so it reads as one, not as runnable code.
+                    // The label is what the syntax lookup then fails on, which
+                    // is right — there is no mermaid syntax to colour with.
+                    let label = if code_lang.eq_ignore_ascii_case("mermaid") {
+                        "mermaid diagram".to_owned()
+                    } else {
+                        code_lang.clone()
+                    };
+                    out.push_str(&crate::code::block(style, &label, code));
+                }
                 code_lang.clear();
                 end_block(&mut out);
             }
@@ -171,13 +175,8 @@ pub fn render(text: &str) -> String {
             // cannot become an escape here just because it was written that way.
             Event::Text(t) => {
                 let t = crate::text::terminal(&t);
-                if in_code_block {
-                    for line in t.lines() {
-                        let _ = writeln!(out, "  {}", clip(line));
-                    }
-                    if t == "\n" {
-                        out.push('\n');
-                    }
+                if let Some(code) = code_block.as_mut() {
+                    code.push_str(&t);
                 } else {
                     // A newline inside a cell would end the row, so it is folded
                     // away there; outside one it is kept as written.
@@ -272,16 +271,6 @@ fn push_cell_or_out(cell: &mut Option<String>, out: &mut String, text: &str) {
         }
         None => out.push_str(&crate::text::terminal(text)),
     }
-}
-
-/// Clips one line so a long code line cannot wrap the whole terminal.
-fn clip(line: &str) -> String {
-    let visible = line.chars().count();
-    if visible <= MAX_WIDTH {
-        return line.to_owned();
-    }
-    let kept: String = line.chars().take(MAX_WIDTH.saturating_sub(1)).collect();
-    format!("{kept}…")
 }
 
 /// Draws the collected rows as a bordered table with aligned columns.
@@ -388,6 +377,13 @@ fn clip_padded(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::render;
+    use crate::style::{Colors, Style};
+
+    /// Renders with no colour: the assertions here read the text and the
+    /// structure, and the syntax colour has tests of its own in `code.rs`.
+    fn rendered(text: &str) -> String {
+        render(Style::for_tests(Colors::None), text)
+    }
 
     /// The document a block-separation test renders: every kind of block in a
     /// row, so the one after a given block lands somewhere it can be checked.
@@ -426,7 +422,10 @@ mod tests {
         // The document is compared whole: the defect is a line that is missing
         // between two blocks, and a test that reads one line at a time by name
         // cannot see a line it never asked to be there.
-        let plain = plain(&render(DOC));
+        // Rendered with the styling on, then stripped, so this reads the
+        // structure of the real thing: a table and a fence draw escapes of
+        // their own, and comparing a plain-only render would not see them.
+        let stripped = plain(&render(Style::for_tests(Colors::True), DOC));
         let expected = [
             "intro paragraph",
             "",
@@ -443,8 +442,9 @@ mod tests {
             "────┼───",
             "│ 1 │ 2 │",
             "",
-            "── rust ──",
-            "  let x = 1;",
+            "  ╭─ rust",
+            "  │ let x = 1;",
+            "  ╰─",
             "",
             "after the fence",
             "",
@@ -454,7 +454,7 @@ mod tests {
             "",
         ]
         .join("\n");
-        assert_eq!(plain, expected, "a block runs into the one after it");
+        assert_eq!(stripped, expected, "a block runs into the one after it");
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod tests {
         // An item ends by writing a break, and a paragraph already wrote one:
         // two breaks between every pair of items is a list with air between the
         // rows, which is not how the source was written.
-        let out = render("- one\n- two\n- three");
+        let out = rendered("- one\n- two\n- three");
         let lines: Vec<&str> = out.lines().collect();
         let first = lines.iter().position(|line| line.contains("one")).unwrap();
         let second = lines.iter().position(|line| line.contains("two")).unwrap();
@@ -473,7 +473,7 @@ mod tests {
     fn a_nested_item_does_not_land_on_the_outer_items_line() {
         // A nested list starts inside the item above it and the outer item has no
         // break before it, so the inner bullet was written on the outer line.
-        let out = render("- one\n  - inner\n- two");
+        let out = rendered("- one\n  - inner\n- two");
         assert_eq!(
             line_with(&out, "inner").trim(),
             "• inner",
@@ -485,7 +485,7 @@ mod tests {
     fn a_loose_list_still_separates_its_items() {
         // The opposite of the tight case: a blank line between items in the
         // source is a blank line in the output, not one dropped or tripled.
-        let out = render("- one\n\n- two");
+        let out = rendered("- one\n\n- two");
         let lines: Vec<&str> = out.lines().collect();
         let first = lines.iter().position(|line| line.contains("one")).unwrap();
         let second = lines.iter().position(|line| line.contains("two")).unwrap();
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn bold_italic_and_strikethrough_carry_their_own_style() {
-        let out = render("**bold** and *italic* and ~~gone~~");
+        let out = rendered("**bold** and *italic* and ~~gone~~");
         assert!(out.contains("\x1b[1mbold\x1b[0m"), "{out:?}");
         assert!(out.contains("\x1b[3mitalic\x1b[0m"), "{out:?}");
         assert!(out.contains("\x1b[9mgone\x1b[0m"), "{out:?}");
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn a_heading_is_marked_and_coloured() {
-        let out = render("## Title\n\nbody");
+        let out = rendered("## Title\n\nbody");
         assert!(out.contains("\x1b[1;36m## Title\x1b[0m"), "{out:?}");
         assert!(out.contains("body"), "{out:?}");
     }
@@ -515,21 +515,21 @@ mod tests {
     fn bold_inside_a_table_cell_keeps_its_style() {
         // The cell is buffered and joined with its neighbours, so an SGR written
         // straight to the output landed outside the row and the emphasis vanished.
-        let out = render("| a | b |\n|---|---|\n| **bold** | plain |");
+        let out = rendered("| a | b |\n|---|---|\n| **bold** | plain |");
         assert!(out.contains("\x1b[1mbold\x1b[0m"), "{out:?}");
         assert!(out.contains("plain"), "{out:?}");
     }
 
     #[test]
     fn a_table_has_borders_and_a_rule_under_the_header() {
-        let out = render("| left | right |\n|---|---|\n| 1 | 2 |");
+        let out = rendered("| left | right |\n|---|---|\n| 1 | 2 |");
         assert!(out.contains('│'), "the columns are divided: {out:?}");
         assert!(out.contains('┼'), "the header rule crosses them: {out:?}");
     }
 
     #[test]
     fn a_table_pads_its_cells_to_the_column_width() {
-        let out = render("| a | longer |\n|---|---|\n| x | y |");
+        let out = rendered("| a | longer |\n|---|---|\n| x | y |");
         let widths: Vec<usize> = out
             .lines()
             .filter(|line| line.contains('│'))
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn html_is_shown_as_text_and_never_interpreted() {
-        let out = render("<div class=\"x\">hi</div>");
+        let out = rendered("<div class=\"x\">hi</div>");
         assert!(out.contains("<div"), "{out:?}");
         assert!(out.contains("hi"), "{out:?}");
         assert!(out.contains("\x1b[2m"), "the markup is dimmed: {out:?}");
@@ -551,21 +551,21 @@ mod tests {
 
     #[test]
     fn a_mermaid_block_is_labelled_as_a_diagram() {
-        let out = render("```mermaid\ngraph TD;\n  A-->B;\n```");
+        let out = rendered("```mermaid\ngraph TD;\n  A-->B;\n```");
         assert!(out.contains("mermaid diagram"), "{out:?}");
         assert!(out.contains("graph TD;"), "the source is shown: {out:?}");
     }
 
     #[test]
     fn a_link_shows_its_destination() {
-        let out = render("[docs](https://example.com/x)");
+        let out = rendered("[docs](https://example.com/x)");
         assert!(out.contains("https://example.com/x"), "{out:?}");
         assert!(out.contains("docs"), "{out:?}");
     }
 
     #[test]
     fn an_image_names_its_source() {
-        let out = render("![alt](https://example.com/a.png)");
+        let out = rendered("![alt](https://example.com/a.png)");
         assert!(
             out.contains("[image: https://example.com/a.png]"),
             "{out:?}"
@@ -576,26 +576,43 @@ mod tests {
     fn a_control_character_in_the_text_cannot_become_an_escape() {
         // The model writes the text, so an escape it spells out must stay spelled
         // out rather than reach the terminal as a real sequence.
-        let out = render("safe\\u{1b}[2Jowned");
+        let out = rendered("safe\\u{1b}[2Jowned");
         assert!(!out.contains("\x1b[2J"), "{out:?}");
         assert!(out.contains("owned"), "{out:?}");
     }
 
     #[test]
-    fn a_long_code_line_is_clipped() {
-        let long = "x".repeat(500);
-        let out = render(&format!("```\n{long}\n```"));
-        assert!(out.contains('…'), "the line is marked as clipped: {out:?}");
+    fn a_fence_is_drawn_as_a_box_around_its_code() {
+        // The fence used to be a `── lang ──` header with nothing under the
+        // code, so a reader could not see where the block ended.
+        let out = rendered("```rust\nlet x = 1;\n```");
+        assert!(out.contains('╭'), "the box opens: {out:?}");
+        assert!(out.contains('╰'), "the box closes: {out:?}");
+        assert!(out.contains("rust"), "the language is named: {out:?}");
+        assert!(out.contains("let x = 1;"), "the code is inside: {out:?}");
         assert!(
-            out.lines().all(|line| line.chars().count() <= 220),
-            "no line runs away: {}",
-            out.lines().map(|l| l.chars().count()).max().unwrap_or(0)
+            !out.contains("── rust ──"),
+            "the old header is gone: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_code_block_is_left_out_of_the_running_text() {
+        // The block is drawn after the paragraph, not appended to its last line.
+        let stripped = rendered("before\n\n```rust\nlet x = 1;\n```");
+        let before = stripped
+            .lines()
+            .find(|line| line.contains("before"))
+            .unwrap_or_default();
+        assert_eq!(
+            before, "before",
+            "the block joins the paragraph: {stripped:?}"
         );
     }
 
     #[test]
     fn a_task_list_keeps_its_boxes() {
-        let out = render("- [x] done\n- [ ] todo");
+        let out = rendered("- [x] done\n- [ ] todo");
         assert!(out.contains("[x]"), "{out:?}");
         assert!(out.contains("[ ]"), "{out:?}");
     }

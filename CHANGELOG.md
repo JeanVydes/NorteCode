@@ -6,6 +6,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A fenced code block is coloured by language and drawn in a box. The fence's
+  token — `rust`, `sh`, `python` — selects the grammar; an unknown token is left
+  plain rather than guessed at, and a language nothing matches is drawn in the
+  box's grey. The colours come from a palette of this project's own, so a
+  terminal without truecolour gets a 256-colour or 16-colour code instead of an
+  RGB sequence it cannot show.
+
+### Changed
+
+- A code block is dimmer than the answer around it and its box closes under the
+  code. It used to open with a `── lang ──` header and never close, which left a
+  reader guessing where the block ended, and it was painted in the terminal's own
+  foreground, which made it the brightest thing on screen.
+
 ### Fixed
 
 - A block of markdown ends where the next one begins. The renderer wrote each

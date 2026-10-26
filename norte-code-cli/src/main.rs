@@ -10,6 +10,7 @@
 //! tool calling or reasoning.
 
 mod approval;
+mod code;
 mod commands;
 mod input;
 mod interaction;

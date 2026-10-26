@@ -419,7 +419,7 @@ impl Renderer {
         self.end_reasoning();
         if self.block == Block::Answer {
             if !self.answer_buffer.is_empty() && self.verbosity.at_least(Verbosity::Medium) {
-                let rendered = crate::markdown::render(&self.answer_buffer);
+                let rendered = crate::markdown::render(self.style, &self.answer_buffer);
                 print!("{rendered}");
                 if !rendered.ends_with('\n') {
                     println!();
@@ -542,7 +542,7 @@ impl Renderer {
                 }
             }
             "assistant" => {
-                let rendered = crate::markdown::render(text);
+                let rendered = crate::markdown::render(self.style, text);
                 eprint!("{rendered}");
                 if !rendered.ends_with('\n') {
                     eprintln!();
