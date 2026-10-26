@@ -788,8 +788,16 @@ impl Service {
                 // in the session is no longer pending.
                 let applied = self.steering.applied(nid, *messages);
                 let ids: Vec<String> = applied.iter().map(|steered| steered.id.clone()).collect();
+                // The text travels with the ids so a client can print what
+                // reached the request, which for a message the human did not
+                // type (a finished job's report) is the only way to see it.
+                let texts: Vec<String> =
+                    applied.iter().map(|steered| steered.text.clone()).collect();
                 self.clear_applied_steers(key, &applied).await;
-                Some(ServerEventKind::SteerApplied { ids })
+                Some(ServerEventKind::SteerApplied {
+                    ids,
+                    messages: texts,
+                })
             }
             _ => None,
         };

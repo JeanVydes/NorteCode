@@ -8,6 +8,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A command's output is shown as it arrives. The renderer had no branch for
+  `ToolOutput`, so a streaming `shell` handed its chunks to the wire and the
+  client dropped every one of them: the tool looked stuck until it finished and
+  printed its whole result at once. Each line is now written as it is read, and
+  the result block at the end no longer repeats text that was already shown.
+- A background job's report is written into the transcript when it arrives,
+  with the time it arrived. It reaches the model as a steering message the
+  human never typed, so nothing printed it before; `SteerApplied` now carries
+  the messages beside their ids, which is what lets a client that never saw the
+  text show it.
+- A message typed while a turn runs waits above the input until the engine
+  applies it, instead of being printed as sent. It is not in the history before
+  that, so showing it as sent claimed something that had not happened; it is
+  written into the transcript — where the conversation reached — when
+  `SteerApplied` names it. A report from a finishless message the human did not
+  type is shown at the same moment, with its time.
 - `shell_bg` runs a shell script in the background and answers at once with a
   job id; `manage_jobs` lists a session's jobs, reads what one has written, or
   stops one. A job's output is kept in a bounded buffer while it runs and its

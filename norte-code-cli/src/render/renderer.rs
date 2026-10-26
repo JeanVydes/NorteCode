@@ -1,5 +1,6 @@
 //! The event renderer: streamed text, tool activity, usage and the footer.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::input::{Pinned, TodoItem};
@@ -158,6 +159,13 @@ pub(crate) struct Renderer {
     /// A `todo` call whose arguments arrived but whose result has not, keyed by
     /// call id. The footer changes only after the tool succeeds.
     pending_todos: BTreeMap<String, Vec<TodoItem>>,
+
+    /// The calls whose output was already streamed to the terminal, by call id.
+    ///
+    /// Their finish must not print the same text again: a shell that streamed
+    /// its stdout line by line would otherwise show it twice, once as it ran and
+    /// once in the result block right after.
+    streamed_calls: BTreeSet<String>,
 }
 
 impl Renderer {
@@ -209,6 +217,7 @@ impl Renderer {
             max_context: None,
             compaction_threshold: 1.0,
             pending_todos: BTreeMap::new(),
+            streamed_calls: BTreeSet::new(),
         }
     }
 
@@ -256,7 +265,9 @@ impl Renderer {
         }
         match &event.kind {
             ServerEventKind::Delta { delta, .. } => self.delta(delta),
-            ServerEventKind::ToolStarted { .. } | ServerEventKind::ToolFinished { .. } => {
+            ServerEventKind::ToolStarted { .. }
+            | ServerEventKind::ToolFinished { .. }
+            | ServerEventKind::ToolOutput { .. } => {
                 self.tool_event(&event.kind);
             }
             ServerEventKind::RequestReconstructed { .. }
@@ -374,6 +385,71 @@ impl Renderer {
         }
         eprintln!();
         self.last_char = Some('\n');
+    }
+
+    /// Writes a message the human typed into the transcript, where the
+    /// conversation reached.
+    ///
+    /// It is the echo that used to happen when the line was sent: a steering
+    /// message is not in the history until the engine applies it, and printing
+    /// it earlier claimed something that had not happened. It keeps the live
+    /// prompt's marker, so it reads as the same message it always was.
+    pub(crate) fn arrived_message(&mut self, text: &str) {
+        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        if let Some(mut bar) = self.loading_bar.take() {
+            bar.stop();
+        }
+        self.end_blocks();
+        let escaped = crate::text::terminal(text);
+        let mut lines = escaped.lines();
+        let first = lines.next().unwrap_or_default();
+        eprintln!("{} {first}", self.style.cyan("›"));
+        for line in lines {
+            eprintln!("  {line}");
+        }
+        self.last_char = Some('\n');
+        if !self.failed && !self.cancelled {
+            self.mark_working();
+        }
+    }
+
+    /// Shows a message that reached the running request without the human
+    /// typing it, with the time it arrived.
+    ///
+    /// A background job reports this way: its result has no tool call left to
+    /// answer, so it reaches the model as a steering message. The time is the
+    /// point — a job started minutes ago answers now, and a line without one
+    /// leaves the reader wondering when the work it asked for came back.
+    pub(crate) fn steer_arrived(&mut self, text: &str) {
+        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        // The bar and the answer share this stream, so both are closed before a
+        // line is written onto it.
+        if let Some(mut bar) = self.loading_bar.take() {
+            bar.stop();
+        }
+        self.end_blocks();
+        let when = chrono::Local::now().format("%H:%M:%S").to_string();
+        let escaped = crate::text::terminal(text);
+        let mut lines = escaped.lines();
+        let first = lines.next().unwrap_or_default();
+        eprintln!(
+            "{} {}",
+            self.style.faint(when),
+            self.style.cyan(format!("◀ {first}"))
+        );
+        for line in lines {
+            eprintln!("    {line}");
+        }
+        self.last_char = Some('\n');
+        // The turn goes on: the request that just took the message is still
+        // being answered.
+        if !self.failed && !self.cancelled {
+            self.mark_working();
+        }
     }
 
     /// Writes one past message of a resumed session, so the client shows where
@@ -630,10 +706,15 @@ impl Renderer {
                     if let Some(error) = error {
                         self.print_tool_result(error, *truncated);
                     }
-                } else if let Some(result) =
-                    Self::tool_result(tool, path.as_deref(), output.as_deref())
-                {
-                    self.print_tool_result(&result, *truncated);
+                } else if !self.streamed_calls.remove(call_id) {
+                    // The output was printed as it arrived, so showing the
+                    // result would print the same text twice. A failure is the
+                    // exception above: its reason is not part of the stream.
+                    if let Some(result) =
+                        Self::tool_result(tool, path.as_deref(), output.as_deref())
+                    {
+                        self.print_tool_result(&result, *truncated);
+                    }
                 }
                 // The turn is not over: the model has the result and is being
                 // asked again. Without this the rest of the turn ran with no
@@ -653,8 +734,53 @@ impl Renderer {
                     }
                 }
             }
+            ServerEventKind::ToolOutput {
+                call_id,
+                text,
+                stream,
+                last,
+                ..
+            } => {
+                if text.is_empty() {
+                    return;
+                }
+                // A tool that streams says what it is doing while it does it:
+                // a command that takes a minute must report as it runs, not
+                // once it is over. The call is remembered so its finish does
+                // not print the same text again in the result block.
+                self.streamed_calls.insert(call_id.clone());
+                // The bar owns the line under the message and is written by the
+                // same stream, so a streamed line stops it first, like every
+                // other writer.
+                if let Some(mut bar) = self.loading_bar.take() {
+                    bar.stop();
+                }
+                self.end_reasoning();
+                self.block = Block::None;
+                let gutter = self.style.faint(format!("{stream} · "));
+                let mut first = true;
+                for line in crate::text::terminal(text).lines() {
+                    if first {
+                        eprintln!("  {gutter}{line}");
+                        first = false;
+                    } else {
+                        eprintln!("    {line}");
+                    }
+                }
+                self.last_char = Some('\n');
+                // The `last` chunk only says this stream closed, not that the
+                // call is over, so the bar is left to `ToolFinished`, which is
+                // the event that knows: the call reports and the turn may go on.
+                let _ = last;
+            }
             _ => {}
         }
+    }
+
+    /// Whether a call streamed its output, for a test.
+    #[cfg(test)]
+    pub(crate) fn streamed_calls(&self) -> Vec<String> {
+        self.streamed_calls.iter().cloned().collect()
     }
 
     /// The short result of a finished tool, when one is worth showing.

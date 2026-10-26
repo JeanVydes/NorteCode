@@ -57,12 +57,38 @@ pub(crate) struct Pinned {
 struct PinnedInner {
     session: String,
     todos: Vec<TodoItem>,
+    /// The messages that reached the running request but are not in the
+    /// transcript yet, oldest first.
+    ///
+    /// A message the human types while a turn runs is not in the history until
+    /// the engine applies it, so showing it as sent would claim something that
+    /// has not happened, and showing it nowhere would hide that the typing
+    /// landed. It waits here instead, above the input, until the engine reports
+    /// it applied and the transcript prints it where it belongs.
+    pending_steers: Vec<String>,
 }
-
 impl Pinned {
     /// A shared handle for the input editor and the event renderer.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Records the messages waiting to reach the running request.
+    ///
+    /// They are shown above the input until the engine reports them applied,
+    /// which is when they start being part of the conversation.
+    pub(crate) fn set_pending_steers(&self, steers: Vec<String>) {
+        let mut inner = self.lock();
+        if inner.pending_steers != steers {
+            inner.pending_steers = steers;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The pending steering messages, oldest first.
+    #[cfg(test)]
+    pub(crate) fn pending_steers(&self) -> Vec<String> {
+        self.lock().pending_steers.clone()
     }
 
     /// Replaces the session status line.
@@ -98,6 +124,11 @@ impl Pinned {
     fn snapshot(&self) -> (String, Vec<TodoItem>) {
         let inner = self.lock();
         (inner.session.clone(), inner.todos.clone())
+    }
+
+    /// The messages waiting to reach the running request.
+    fn pending(&self) -> Vec<String> {
+        self.lock().pending_steers.clone()
     }
 
     fn take_dirty(&self) -> bool {
@@ -147,6 +178,12 @@ mod unix {
     /// Rows reserved below the scroll region: the input line (up to
     /// [`INPUT_ROWS`]), the command suggestion and the session status.
     const FOOTER_ROWS: u16 = INPUT_ROWS + 2;
+
+    /// How many rows the waiting steering messages may take above the draft.
+    ///
+    /// A handful, not all of them: past this the draft itself would have nowhere
+    /// to go, and the count beside the last line says how many did not fit.
+    const MAX_STEER_ROWS: u16 = 3;
 
     /// How long a drag must pause before its last size is applied.
     const RESIZE_QUIET: Duration = Duration::from_millis(80);
@@ -532,6 +569,7 @@ mod unix {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn run_editor(
         style: Style,
         mut cols: u16,
@@ -546,7 +584,14 @@ mod unix {
         let mut draft = String::new();
 
         let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
-        draw_input(style, cols, rows, &buffer, suggestion.as_ref());
+        draw_input(
+            style,
+            cols,
+            rows,
+            &buffer,
+            suggestion.as_ref(),
+            &pinned.pending(),
+        );
         draw_footer(style, cols, rows, pinned, suggestion.as_ref());
         let mut resize = ResizeDebounce::default();
         loop {
@@ -601,7 +646,14 @@ mod unix {
                     }
                     if redraw {
                         let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
-                        draw_input(style, cols, rows, &buffer, suggestion.as_ref());
+                        draw_input(
+                            style,
+                            cols,
+                            rows,
+                            &buffer,
+                            suggestion.as_ref(),
+                            &pinned.pending(),
+                        );
                         draw_footer(style, cols, rows, pinned, suggestion.as_ref());
                     }
                 }
@@ -619,7 +671,14 @@ mod unix {
                 pinned.mark_resized();
                 let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
                 draw_footer(style, cols, rows, pinned, suggestion.as_ref());
-                draw_input(style, cols, rows, &buffer, suggestion.as_ref());
+                draw_input(
+                    style,
+                    cols,
+                    rows,
+                    &buffer,
+                    suggestion.as_ref(),
+                    &pinned.pending(),
+                );
             }
             if pinned.take_dirty() {
                 let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
@@ -1187,17 +1246,20 @@ mod unix {
         rows: u16,
         buffer: &LineBuffer,
         suggestion: Option<&CommandSuggestion>,
+        pending: &[String],
     ) {
         let prompt = format!("{} ", style.cyan("›"));
         let prompt_width = 2usize;
         let available = usize::from(cols).saturating_sub(prompt_width + 1).max(1);
-        // The input owns the footer rows below the pinned widgets, so a taller
-        // draft grows upward over its own rows instead of the widgets.
-        // The input may occupy up to its own rows; the rows after it hold the
-        // suggestion and the status.
-        let window = usize::from(INPUT_ROWS);
-        let lines = input_lines(buffer, window, available);
         let last_row = input_bottom(rows);
+        let block_top = last_row.saturating_sub(INPUT_ROWS).saturating_add(1).max(1);
+
+        // A message waiting to reach the running request is shown above the
+        // draft, on rows the input reserves and rarely fills. The draft's window
+        // shrinks by as many rows as they take, so the two never overlap.
+        let shown = pending.len().min(usize::from(MAX_STEER_ROWS));
+        let window = usize::from(INPUT_ROWS).saturating_sub(shown).max(1);
+        let lines = input_lines(buffer, window, available);
         let first_row = last_row
             .saturating_sub(u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
 
@@ -1207,9 +1269,27 @@ mod unix {
         // taller draft had used on screen, so deleting a line left copies of it
         // behind; and the first row moves down as the draft shrinks, so the row
         // it used to start on would not even be addressed.
-        let block_top = last_row.saturating_sub(INPUT_ROWS).saturating_add(1).max(1);
         for row in block_top..=last_row {
             let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+        }
+        // The waiting messages lead, because they are the oldest thing on screen
+        // and the one that will move into the transcript first. The last shown
+        // carries a count of the ones that did not fit, so a hidden message is
+        // never silent.
+        for (index, text) in pending.iter().take(shown).enumerate() {
+            let row = block_top.saturating_add(u16::try_from(index).unwrap_or(0));
+            let tail = if index + 1 == shown && pending.len() > shown {
+                format!("  +{}", pending.len() - shown)
+            } else {
+                String::new()
+            };
+            let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let label = style.faint(format!("⋯ {one}{tail}"));
+            let _ = write!(frame, "\x1b[{row};1H");
+            frame.push_str(&clip_visible(
+                &label,
+                usize::from(cols).saturating_sub(1).max(1),
+            ));
         }
         for (offset, line) in lines.iter().enumerate() {
             let row = first_row.saturating_add(u16::try_from(offset).unwrap_or(0));
@@ -1829,5 +1909,19 @@ mod pinned_tests {
         assert_eq!(session, "session");
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].content, "task");
+    }
+
+    #[test]
+    fn the_waiting_steers_are_what_the_footer_draws() {
+        // The list the editor draws comes from the same handle the repl writes,
+        // so a message stays on screen until it is applied and leaves then.
+        let pinned = Pinned::new();
+        assert!(pinned.pending_steers().is_empty());
+        pinned.set_pending_steers(vec!["first".to_owned(), "second".to_owned()]);
+        assert_eq!(pinned.pending_steers(), ["first", "second"]);
+        pinned.set_pending_steers(vec!["second".to_owned()]);
+        assert_eq!(pinned.pending_steers(), ["second"]);
+        pinned.set_pending_steers(Vec::new());
+        assert!(pinned.pending_steers().is_empty());
     }
 }

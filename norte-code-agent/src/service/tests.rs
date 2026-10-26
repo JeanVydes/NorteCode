@@ -3879,7 +3879,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
         if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
             asked = Some(question.clone());
         }
-        if let ServerEventKind::SteerApplied { ids } = &event.kind {
+        if let ServerEventKind::SteerApplied { ids, .. } = &event.kind {
             applied = Some(ids.clone());
         }
         if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {

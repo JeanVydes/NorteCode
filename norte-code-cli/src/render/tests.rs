@@ -231,6 +231,40 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
     );
 }
 
+#[test]
+fn a_streamed_call_is_remembered_so_its_finish_does_not_repeat_it() {
+    // A shell streams its output while it runs; the finish event carries the
+    // same text. Without the record the transcript would show it twice, once as
+    // it arrived and once in the result block right after.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stdout".to_owned(),
+        text: "building…\n".to_owned(),
+        last: false,
+    });
+    assert_eq!(renderer.streamed_calls(), ["call-1"]);
+
+    // A chunk of a call that never streamed is not recorded, so its result is
+    // still printed: an empty chunk is not output and must not claim otherwise.
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-2".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stderr".to_owned(),
+        text: String::new(),
+        last: true,
+    });
+    assert_eq!(
+        renderer.streamed_calls(),
+        ["call-1"],
+        "an empty chunk is not output"
+    );
+}
+
 fn item(content: &str, status: TodoStatus) -> TodoItem {
     TodoItem {
         content: content.to_owned(),

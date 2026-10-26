@@ -1554,10 +1554,10 @@ pub(crate) async fn drive_turns(
     let mut current: Option<SessionKey> = None;
     let mut parked = false;
     let mut cancel_requested = false;
-    // The steering messages the human sent while the turn was running. The
-    // service applies them to the request in flight and names them when it
-    // does; the ones still waiting need the next turn to start.
-    let mut steered: Vec<String> = Vec::new();
+    // The steering messages the human sent while the turn was running, with
+    // their text. The service applies them to the request in flight and names
+    // them when it does; the ones still waiting need the next turn to start.
+    let mut steered: Vec<(String, String)> = Vec::new();
     // Whether the last turn closed normally. A cancelled or budget-stopped
     // turn leaves the session in a state a resume cannot pick up.
     let mut committed = false;
@@ -1684,24 +1684,32 @@ pub(crate) async fn drive_turns(
                             }
                             Some(Err(message)) => eprintln!("{}", style.yellow(message)),
                             None => {
-                                if let Some(session) = current.clone() {
-                                    echo_user_message(style, &text);
-                                    if let Some(id) = steer_text(
-                                        service,
-                                        session,
-                                        text,
-                                        style,
-                                        !renderer.verbosity.at_least(Verbosity::Medium),
-                                    )
-                                    .await
-                                    {
-                                        steered.push(id);
-                                    }
-                                } else {
+                                let Some(session) = current.clone() else {
                                     eprintln!(
                                         "{}",
                                         style.yellow("the session is not ready yet; try again")
                                     );
+                                    continue;
+                                };
+                                // The message is not in the history until the
+                                // engine applies it, so it is not printed as if
+                                // it were: it waits above the input, where the
+                                // human can still see what they sent, and moves
+                                // into the transcript when the engine reports
+                                // that it landed.
+                                if let Some(id) = steer_text(
+                                    service,
+                                    session,
+                                    text.clone(),
+                                    style,
+                                    !renderer.verbosity.at_least(Verbosity::Medium),
+                                )
+                                .await
+                                {
+                                    steered.push((id, text));
+                                    let waiting: Vec<String> =
+                                        steered.iter().map(|(_, text)| text.clone()).collect();
+                                    renderer.pinned.set_pending_steers(waiting);
                                 }
                             }
                         }
@@ -1727,8 +1735,24 @@ pub(crate) async fn drive_turns(
                         parked = *phase == Phase::AwaitingApproval;
                         committed = *done;
                     }
-                    ServerEventKind::SteerApplied { ids } => {
-                        steered.retain(|id| !ids.contains(id));
+                    ServerEventKind::SteerApplied { ids, messages } => {
+                        // Every applied message now belongs to the transcript.
+                        // One the human typed is written where the conversation
+                        // reached, which is where it belongs; one they did not
+                        // (a finished job's report) is shown with the time it
+                        // arrived, because there is nowhere else to see it.
+                        for (id, text) in ids.iter().zip(messages.iter()) {
+                            let typed = steered.iter().find(|(name, _)| name == id).is_some();
+                            if typed {
+                                renderer.arrived_message(text);
+                            } else {
+                                renderer.steer_arrived(text);
+                            }
+                        }
+                        steered.retain(|(id, _)| !ids.contains(id));
+                        let waiting: Vec<String> =
+                            steered.iter().map(|(_, text)| text.clone()).collect();
+                        renderer.pinned.set_pending_steers(waiting);
                     }
                     _ => {}
                 }
@@ -1877,7 +1901,10 @@ pub(crate) async fn drive_turns(
         if parked || renderer.budget_stopped || !committed {
             break;
         }
-        steered.clear();
+        // The waiting messages are not forgotten here: a resume is the turn
+        // that will reach them, and they must stay above the input until the
+        // engine says it did. Clearing the list would hide a message that is
+        // still on its way to the model.
         let request = ClientRequest {
             request_id: 0,
             kind: ClientRequestKind::Resume { session },
@@ -1895,6 +1922,12 @@ pub(crate) async fn drive_turns(
                 break;
             }
         }
+    }
+    // Nothing is waiting any more: the turn ended, whatever is left was never
+    // applied, and leaving it above the input would promise a delivery that is
+    // not coming.
+    if !steered.is_empty() {
+        renderer.pinned.set_pending_steers(Vec::new());
     }
     Ok(DriveOutcome {
         session: current,

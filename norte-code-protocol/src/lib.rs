@@ -542,6 +542,15 @@ pub enum ServerEventKind {
     SteerApplied {
         /// The names of the messages that reached the request.
         ids: Vec<String>,
+        /// The messages themselves, in the order they were applied.
+        ///
+        /// A client shows them where the conversation reached, so the text has
+        /// to travel with the notice: without it the client learns that its own
+        /// message landed but has nothing to print, and a message it never saw
+        /// (a finished job's report, which the human did not type) can only be
+        /// shown by the client that is told its text.
+        #[serde(default)]
+        messages: Vec<String>,
     },
     /// The session's model changed.
     ModelChanged {
@@ -1067,13 +1076,15 @@ mod tests {
             Some(SessionKey::new("s")),
             ServerEventKind::SteerApplied {
                 ids: vec!["one".to_owned()],
+                messages: vec!["hello".to_owned()],
             },
         );
         let json = serde_json::to_string(&event).expect("serialize");
         let back: ServerEvent = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(
             back.kind,
-            ServerEventKind::SteerApplied { ids } if ids == ["one"]
+            ServerEventKind::SteerApplied { ids, messages }
+                if ids == ["one"] && messages == ["hello"]
         ));
     }
 
