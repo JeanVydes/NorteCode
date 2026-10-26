@@ -959,18 +959,24 @@ impl Renderer {
                 } else if *detached && !self.streamed_calls.remove(call_id) {
                     // The call answered with what it had and the name of the job
                     // the rest belongs to, so its result is what the model saw.
-                    if let Some(result) =
-                        Self::tool_result(tool, path.as_deref(), output.as_deref())
-                    {
+                    if let Some(result) = Self::tool_result_for(
+                        tool,
+                        self.verbosity,
+                        path.as_deref(),
+                        output.as_deref(),
+                    ) {
                         self.print_tool_result(&result, *truncated);
                     }
                 } else if !self.streamed_calls.remove(call_id) {
                     // The output was printed as it arrived, so showing the
                     // result would print the same text twice. A failure is the
                     // exception above: its reason is not part of the stream.
-                    if let Some(result) =
-                        Self::tool_result(tool, path.as_deref(), output.as_deref())
-                    {
+                    if let Some(result) = Self::tool_result_for(
+                        tool,
+                        self.verbosity,
+                        path.as_deref(),
+                        output.as_deref(),
+                    ) {
                         self.print_tool_result(&result, *truncated);
                     }
                 }
@@ -1077,6 +1083,31 @@ impl Renderer {
             return output.map(str::to_owned);
         }
         None
+    }
+
+    /// What a finished call's result shows at a verbosity.
+    ///
+    /// `read` returns a page of a file: the model needs it and a person
+    /// following the work does not. At `high` the page is shown; at `medium`
+    /// the read is named — the path, its kind and how much it holds — and the
+    /// page is left out; at `low` neither, because `low` is the answer alone.
+    /// Every other tool keeps [`Self::tool_result`], since a write that landed
+    /// nowhere and a command that failed are the two things a person must not
+    /// have to ask for.
+    pub(crate) fn tool_result_for(
+        tool: &str,
+        verbosity: Verbosity,
+        path: Option<&str>,
+        output: Option<&str>,
+    ) -> Option<String> {
+        if tool == "read" {
+            return match verbosity {
+                Verbosity::Low => None,
+                Verbosity::Medium => read_summary(path, output),
+                Verbosity::High => Self::tool_result(tool, path, output),
+            };
+        }
+        Self::tool_result(tool, path, output)
     }
 
     /// Prints a tool result as a short, dimmed, indented block.
@@ -1946,6 +1977,24 @@ pub(crate) struct ToolSection {
     pub(crate) name: Option<String>,
     /// The lines the section holds.
     pub(crate) lines: Vec<String>,
+}
+
+/// One line naming a read, without the page it returned.
+///
+/// The read tool's result opens with `read <path> (<kind>, <n> line(s), <m>
+/// bytes)` and the page follows it; the first line is the whole of what
+/// `medium` shows. The output is the authority on the counts — the tool writes
+/// them — so it is read from there and not recomputed, and a result that does
+/// not carry the header falls back to the path alone rather than inventing one.
+fn read_summary(path: Option<&str>, output: Option<&str>) -> Option<String> {
+    let path = path?;
+    let first = output?.lines().next()?;
+    let rest = first.strip_prefix("read ")?;
+    let named = rest.strip_prefix(path)?;
+    let counts = named
+        .strip_prefix(' ')
+        .filter(|rest| rest.starts_with('('))?;
+    Some(format!("{path} {counts}"))
 }
 
 /// Splits a tool result into the sections its own text declares.

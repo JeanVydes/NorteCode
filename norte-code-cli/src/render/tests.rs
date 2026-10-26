@@ -300,6 +300,48 @@ fn the_tool_result_preview_names_the_file_for_a_write_and_a_read() {
 }
 
 #[test]
+fn a_read_shows_its_page_only_at_high() {
+    // The page a reader read is what the model needs and a person following the
+    // work does not: it buries the next `→` under a screenful of a file they did
+    // not ask to see. `medium` names the read — the file, its kind and how much
+    // it holds — and leaves the page out; `low` is the answer alone and shows
+    // neither; `high` is the transcript and shows the whole thing.
+    let output =
+        "read src/lib.rs (utf8, 42 line(s), 1200 bytes)\n  1- fn main() {}\n  2-     println!();\n";
+    let path = Some("src/lib.rs");
+
+    let high = Renderer::tool_result_for("read", Verbosity::High, path, Some(output))
+        .expect("high shows the page");
+    assert!(high.contains("fn main() {}"), "{high}");
+
+    let medium = Renderer::tool_result_for("read", Verbosity::Medium, path, Some(output))
+        .expect("medium names the read");
+    assert_eq!(medium, "src/lib.rs (utf8, 42 line(s), 1200 bytes)");
+    assert!(
+        !medium.contains("fn main() {}"),
+        "the page stays out of medium: {medium}"
+    );
+
+    assert!(
+        Renderer::tool_result_for("read", Verbosity::Low, path, Some(output)).is_none(),
+        "low is the answer alone"
+    );
+
+    // The tools whose result a person must not have to ask for are untouched:
+    // a failed command, a command's output, a write's landed content.
+    assert!(
+        Renderer::tool_result_for("shell", Verbosity::Medium, None, Some("ok"))
+            .is_some_and(|text| text == "ok"),
+        "a command still shows its output at medium"
+    );
+    assert!(
+        Renderer::tool_result_for("write", Verbosity::Low, Some("a.rs"), Some("fn x() {}"))
+            .is_some_and(|text| text.contains("fn x() {}")),
+        "a write still names what landed"
+    );
+}
+
+#[test]
 fn a_detached_call_is_not_drawn_as_a_failure() {
     // The three endings of a call, told apart by their mark. A detach is an
     // error the model is right to see — it did not run to the end — and it is
