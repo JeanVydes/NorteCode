@@ -259,7 +259,7 @@ mod unix {
         CancelTurn,
         /// Ctrl-C, when the session has background jobs: stop them.
         CancelJobs,
-        /// Ctrl-Shift-B, on a running turn: stop waiting for the call, leave the
+        /// Ctrl-G, on a running turn: stop waiting for the call, leave the
         /// process running.
         Detach,
     }
@@ -703,7 +703,7 @@ mod unix {
         /// The user asked to stop the running jobs (Ctrl-C).
         CancelJobs,
         /// The user asked to stop waiting for the running call and leave its
-        /// process running (Ctrl-Shift-B).
+        /// process running (Ctrl-G).
         Detach,
     }
 
@@ -753,14 +753,25 @@ mod unix {
             // service, which it cannot.
             KeyCode::Char('c') if control => KeyOutcome::CancelJobs,
             KeyCode::Char('l') if control => KeyOutcome::Continue,
-            // Ctrl-Shift-B stops waiting for the running call; plain Ctrl-B stays
-            // where readline put it, one character back.
+            // Ctrl-G stops waiting for the running call and leaves the process
+            // running. Ctrl-Shift-B is what it used to be, and stays an alias.
             //
-            // The code is `'b'`, whatever the shift: with the keyboard protocol
-            // a modified key is sent as `CSI <codepoint>;<mask>u`, where the
-            // codepoint is the unshifted key. A branch on `Char('B')` never
-            // matched, so Ctrl-Shift-B fell through to the plain Ctrl-B below and
-            // moved the cursor instead of detaching.
+            // Ctrl-Shift-B did nothing here. It arrived as `Char('b')` carrying
+            // SHIFT and CONTROL — the keyboard protocol sends the *unshifted*
+            // codepoint — while the branch looked for `Char('B')`, so the key fell
+            // through to plain Ctrl-B and moved the cursor while the call kept
+            // running. Reading crossterm's parser did not settle whether the
+            // terminal or crossterm dropped the shift, and a key that does nothing
+            // is not something a person can diagnose from the outside. Ctrl-G is
+            // asked for as an ordinary control key, and crossterm reaches
+            // `Char('g')` with CONTROL on both of its paths: the legacy byte
+            // (`\x07`, matched by `b'\x01'..=b'\x1A'` in
+            // `event/sys/unix/parse.rs`) and the keyboard protocol's `CSI 103;5u`.
+            // Neither depends on the shift being reported, and neither does the
+            // pattern below, which is why `'G'` is in it: a terminal that encodes
+            // a modified key with the shifted codepoint reaches the same branch.
+            KeyCode::Char('g' | 'G') if control => KeyOutcome::Detach,
+            // The original binding, kept for a terminal that reports the shift.
             KeyCode::Char('b' | 'B') if control && key.modifiers.contains(KeyModifiers::SHIFT) => {
                 KeyOutcome::Detach
             }
@@ -1593,13 +1604,12 @@ mod unix {
         }
 
         #[test]
-        fn ctrl_shift_b_detaches_and_plain_ctrl_b_moves_the_cursor() {
-            // With the keyboard protocol a modified key arrives as
-            // `CSI <codepoint>;<mask>u`, and the codepoint is the *unshifted*
-            // one: Ctrl-Shift-B comes through as `Char('b')` with SHIFT and
-            // CONTROL, not as `Char('B')`. A branch on the uppercase form never
-            // matched, so the key fell through to plain Ctrl-B and moved the
-            // cursor while the call kept running.
+        fn ctrl_g_detaches_and_the_keys_around_it_do_not() {
+            // Detaching sits on a plain Ctrl-G. Ctrl-Shift-B is what it was, and
+            // did nothing: it arrived as `Char('b')` with SHIFT and CONTROL — the
+            // keyboard protocol sends the *unshifted* codepoint — while the branch
+            // looked for `Char('B')`, so it fell through to plain Ctrl-B and moved
+            // the cursor while the call kept running.
             let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
             let mut buffer = LineBuffer::default();
             buffer.insert_text("abc");
@@ -1607,6 +1617,41 @@ mod unix {
             let mut history_pos = None;
             let mut draft = String::new();
 
+            // Every one of these is a key a terminal can send for Ctrl-G, and
+            // all of them mean the same thing here. The shift is not part of the
+            // request: the legacy byte `\x07` cannot carry one.
+            let detaching = [
+                (KeyCode::Char('g'), KeyModifiers::CONTROL),
+                (
+                    KeyCode::Char('g'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+                (
+                    KeyCode::Char('G'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+            ];
+            for (code, modifiers) in detaching {
+                assert_eq!(
+                    handle_key(
+                        KeyEvent::new(code, modifiers),
+                        &mut buffer,
+                        &mut history,
+                        &mut history_pos,
+                        &mut draft,
+                        &sender,
+                    ),
+                    KeyOutcome::Detach,
+                    "{code:?} with {modifiers:?} asks to detach"
+                );
+            }
+            // Nothing was typed and the cursor did not move: that is what the
+            // keys below are for, and a detach that also edited the line would
+            // lose the draft the human was in the middle of.
+            assert_eq!(buffer.text(), "abc", "detaching types no g");
+            assert_eq!(buffer.cursor, 3, "detaching is not a cursor move");
+
+            // The alias still detaches, and still does not move the cursor.
             assert_eq!(
                 handle_key(
                     KeyEvent::new(
@@ -1620,11 +1665,11 @@ mod unix {
                     &sender,
                 ),
                 KeyOutcome::Detach,
-                "ctrl-shift-b asks to detach"
+                "ctrl-shift-b stays an alias"
             );
-            // The cursor did not move: that is the plain key's job.
             assert_eq!(buffer.cursor, 3, "detaching is not a cursor move");
 
+            // The keys the rebinding must not have swallowed.
             assert_eq!(
                 handle_key(
                     KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
@@ -1638,6 +1683,20 @@ mod unix {
                 "plain ctrl-b stays where readline put it"
             );
             assert_eq!(buffer.cursor, 2, "and it moves the cursor back");
+
+            assert_eq!(
+                handle_key(
+                    KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+                    &mut buffer,
+                    &mut history,
+                    &mut history_pos,
+                    &mut draft,
+                    &sender,
+                ),
+                KeyOutcome::Continue,
+                "plain g is still a letter"
+            );
+            assert_eq!(buffer.text(), "abgc", "and it is typed at the cursor");
         }
 
         #[test]
@@ -1906,7 +1965,7 @@ mod fallback {
         CancelTurn,
         /// Ctrl-C, when the session has background jobs: stop them.
         CancelJobs,
-        /// Ctrl-Shift-B, on a running turn: stop waiting for the call.
+        /// Ctrl-G, on a running turn: stop waiting for the call.
         Detach,
     }
 

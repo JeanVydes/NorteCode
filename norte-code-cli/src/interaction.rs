@@ -1546,7 +1546,7 @@ impl Drop for SignalGuard {
 enum Wake {
     /// Ctrl-C or another interrupt.
     Interrupt,
-    /// Escape, Ctrl-C or Ctrl-Shift-B reached the editor and asked for
+    /// Escape, Ctrl-C or Ctrl-G reached the editor and asked for
     /// something that is not a line.
     Action(EditorAction),
     /// A line completed in the input box.

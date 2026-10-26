@@ -56,10 +56,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   row count stopped at the suggestion row and skipped the todo row and its gap.
   Every keypress cleared those two rows of streamed output to redraw the draft,
   which made the log flicker and vanish, leaving a hole.
-- `Ctrl-Shift-B` detaches the running call. It arrived as `Char('b')` carrying
-  SHIFT and CONTROL — the keyboard protocol sends the *unshifted* codepoint — and
-  the branch looked for `Char('B')`, so the key fell through to plain `Ctrl-B`
-  and moved the cursor while the call kept running.
+- `Ctrl-G` detaches the running call. The binding was `Ctrl-Shift-B`, and it did
+  nothing: it arrived as `Char('b')` carrying SHIFT and CONTROL — the keyboard
+  protocol sends the *unshifted* codepoint — while the branch looked for
+  `Char('B')`, so the key fell through to plain `Ctrl-B` and moved the cursor
+  while the call kept running. Looking for the unshifted form was the first
+  attempt at a fix and it did not settle the question either, because whether the
+  terminal reports the shift at all, and what it reports, cannot be seen from a
+  key that does nothing. `Ctrl-G` is asked for as an ordinary control key:
+  crossterm reaches `Char('g')` with CONTROL on both of its paths, the legacy byte
+  `\x07` and the keyboard protocol's `CSI 103;5u`. `Ctrl-Shift-B` stays an alias.
 - A command's streamed lines are joined before they are shown. A pipe read ends
   wherever it ended, so one row arrives in pieces — `stdout[01] p` and
   `arcial... completa` — and writing each piece as it came put half a word on a
@@ -112,10 +118,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - `/restart` starts a fresh session and leaves the previous one saved and
   resumable.
 - `Ctrl-C` stops the session's background jobs while a turn runs, `Escape` asks
-  the running turn to stop, and `Ctrl-Shift-B` detaches the running call: the
-  turn stops waiting, the process keeps running, and the call answers with what
-  arrived so far. `Ctrl-Shift-B` rather than `Ctrl-B`, which readline uses to
-  move the cursor back.
+  the running turn to stop, and `Ctrl-G` detaches the running call: the turn stops
+  waiting, the process keeps running, and the call answers with what arrived so
+  far. `Ctrl-G` rather than `Ctrl-B`, which readline uses to move the cursor back,
+  and rather than the `Ctrl-Shift-B` the binding started as.
 - The terminal is put in raw mode with `ISIG` cleared, so `Ctrl-C` reaches the
   editor as a key instead of being turned into `SIGINT`. Before, the signal
   handler and the key reader raced for the same keystroke and the handler did

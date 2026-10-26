@@ -131,7 +131,7 @@ pub(crate) enum PromptInput {
 
 /// Prints a prompt and waits for one line or Ctrl-C.
 ///
-/// The actions a keystroke asks for — Escape, Ctrl-C, Ctrl-Shift-B — have no
+/// The actions a keystroke asks for — Escape, Ctrl-C, Ctrl-G — have no
 /// meaning while a prompt owns the line, so they are skipped rather than
 /// mistaken for input: a prompt wants a line, and taking one is the answer.
 pub(crate) async fn prompt_input(
