@@ -8,6 +8,24 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A pasted paragraph becomes `[Copied: Lorem ipsum dolor…]` in the draft, and the
+  text is what is sent. What was pasted is longer than the line it is written on,
+  and a paragraph dropped into a sentence buries the sentence; the label is how
+  the draft stays readable without changing a word of what the model gets. A
+  paste short enough to be its own label is left alone. Removing the label — with
+  a backspace, a delete, `Ctrl-U` or `Ctrl-K` — takes the whole paste with it,
+  because half a paragraph is not a smaller paragraph, and typing inside one
+  lands after it rather than splitting it.
+- A pasted path to an image is attached to the message and shown as
+  `[Image: photo.png]`. A terminal pastes a file's path — kitty does, and so does
+  a drag-and-drop — so pasting a picture is how one gets here, and the model is
+  handed the image itself: the message carries a `Part::Media` beside its text,
+  the bytes are stored in the blob store, and the media adapter resolves them to
+  what the provider takes. A path to a file that is not an image is shown as
+  `[Path: build.sh]` and attached to nothing — the model can open it with `read`.
+  An image pasted while a turn runs is said rather than sent: steering reaches a
+  request that is already built, and a request has no place for a part that was
+  not in it.
 - A `shell` call can run with no time bound: a `timeout_ms` of zero asks for
   none, which is what lets a call start something long-lived — a browser with a
   debug port, a dev server — and leave it running for the rest of the session.

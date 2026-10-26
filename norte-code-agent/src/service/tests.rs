@@ -444,6 +444,7 @@ async fn a_turn_streams_text_and_commits() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "hi".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -501,6 +502,7 @@ async fn a_transient_failure_retries_the_same_session() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -603,6 +605,7 @@ async fn cancelling_a_turn_stops_a_running_command() {
             kind: ClientRequestKind::SendMessage {
                 session: None,
                 text: "run it".to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -667,6 +670,7 @@ async fn retries_report_increasing_attempts_and_backoff() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -722,6 +726,7 @@ async fn a_permanent_failure_is_not_retried() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -959,6 +964,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
         ClientRequestKind::SendMessage {
             session: Some(source_key.clone()),
             text: "hello".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1063,6 +1069,7 @@ async fn two_sessions_run_turns_concurrently() {
             kind: ClientRequestKind::SendMessage {
                 session: Some(keys[0].clone()),
                 text: "one".to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -1076,6 +1083,7 @@ async fn two_sessions_run_turns_concurrently() {
             kind: ClientRequestKind::SendMessage {
                 session: Some(keys[1].clone()),
                 text: "two".to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -1474,6 +1482,7 @@ async fn set_reasoning_applies_to_the_session() {
         ClientRequestKind::SendMessage {
             session: Some(key),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1515,6 +1524,7 @@ async fn a_message_reasoning_override_is_used_once() {
             ClientRequestKind::SendMessage {
                 session: Some(key.clone()),
                 text: text.to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -1599,6 +1609,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "one".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1626,6 +1637,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
         ClientRequestKind::SendMessage {
             session: Some(key),
             text: "three".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1649,6 +1661,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "one".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1720,6 +1733,7 @@ async fn a_queued_model_that_cannot_be_honoured_does_not_break_the_session() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1782,6 +1796,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
         ClientRequestKind::SendMessage {
             session: None,
             text: "first".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1801,6 +1816,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "second".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1819,6 +1835,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "third".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1884,6 +1901,7 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -1982,6 +2000,7 @@ async fn the_budget_stops_the_next_request_every_time() {
             ClientRequestKind::SendMessage {
                 session: None,
                 text: "work".to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -2064,6 +2083,7 @@ async fn reasoning_and_steering_survive_a_restart() {
         ClientRequestKind::SendMessage {
             session: Some(key),
             text: "hello".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2187,6 +2207,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "first".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2233,6 +2254,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "second".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2302,6 +2324,7 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2390,6 +2413,7 @@ async fn a_failed_eager_summary_stops_at_the_safe_point() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2450,6 +2474,7 @@ async fn manual_compaction_links_the_new_session_and_keeps_the_old_one() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2533,6 +2558,7 @@ async fn a_failed_summary_leaves_the_session_unchanged() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2618,6 +2644,7 @@ async fn the_request_table_records_usage_latency_and_metadata() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "hi".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2816,6 +2843,7 @@ async fn a_reconstructed_request_carries_its_tools_and_timing() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2867,6 +2895,7 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "one".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2879,6 +2908,7 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "two".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -2936,6 +2966,7 @@ async fn a_session_budget_stops_the_next_request() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3025,6 +3056,7 @@ async fn vendor_extensions_reach_the_model_request() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "hello".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3058,6 +3090,7 @@ async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "one".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3128,6 +3161,7 @@ async fn a_write_parks_for_approval_and_resumes() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3255,6 +3289,7 @@ async fn a_model_switch_while_parked_is_applied_at_the_next_turn_boundary() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3316,6 +3351,7 @@ async fn a_model_switch_while_parked_is_applied_at_the_next_turn_boundary() {
         ClientRequestKind::SendMessage {
             session: Some(session.clone()),
             text: "next".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3379,6 +3415,7 @@ async fn grants_are_listed_and_can_be_revoked() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3509,6 +3546,7 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "edit it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3610,6 +3648,7 @@ async fn a_global_allow_skips_the_approval_prompt() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3664,6 +3703,7 @@ async fn a_global_deny_refuses_without_asking() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3724,6 +3764,7 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "hello".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -3774,6 +3815,74 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
+    // The end of the paste path. A client pastes a file, the draft carries its
+    // path, and the message the model is asked about has to hold the image as a
+    // part of the same message — not a second one, and not a path the model
+    // would have to go and open.
+    let dir = std::env::temp_dir().join(format!("norte-attach-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let photo = dir.join("photo.png");
+    // A one-pixel PNG: small, real, and enough for the part to be built.
+    std::fs::write(&photo, ONE_PIXEL_PNG).expect("png");
+
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(call, "read", &serde_json::json!({ "path": "x" }))
+            .turn_text("ok"),
+    );
+    let (service, _store) = persistent_service(model).await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "what is in this picture?".to_owned(),
+            attachments: vec![norte_code_protocol::Attachment {
+                path: photo.display().to_string(),
+                mime: "image/png".to_owned(),
+                name: "photo.png".to_owned(),
+            }],
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    // The turn ran: the proof is that it did not stop with an error about the
+    // attachment. A part the service could not read would come back as one.
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::Error { message, .. } if message.contains("attachment")
+        )),
+        "the attachment was accepted: {:?}",
+        events.iter().map(|event| &event.kind).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A one-pixel PNG, as bytes.
+const ONE_PIXEL_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
 
 #[tokio::test]
 async fn the_shell_tools_and_the_job_manager_are_registered() {
@@ -3940,6 +4049,7 @@ async fn ask_user_parks_the_turn_until_the_client_answers() {
         kind: ClientRequestKind::SendMessage {
             session: None,
             text: "do the work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4028,6 +4138,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
         kind: ClientRequestKind::SendMessage {
             session: None,
             text: "do the work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4127,6 +4238,7 @@ async fn an_unknown_session_is_an_error() {
             kind: ClientRequestKind::SendMessage {
                 session: Some(SessionKey::new("missing")),
                 text: "hi".to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -4180,6 +4292,7 @@ async fn a_parked_approval_survives_a_restart() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4304,6 +4417,7 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "write it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4405,6 +4519,7 @@ async fn a_pending_question_survives_a_restart() {
         kind: ClientRequestKind::SendMessage {
             session: None,
             text: "go".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4569,6 +4684,7 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "read it".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4620,6 +4736,7 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "first".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4633,6 +4750,7 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "second".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: true,
@@ -4653,6 +4771,7 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
         ClientRequestKind::SendMessage {
             session: Some(key),
             text: "third".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4690,6 +4809,7 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "first question".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4765,6 +4885,7 @@ async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "first question".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4814,6 +4935,7 @@ async fn a_resume_replays_the_recent_messages() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "hi".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -4859,6 +4981,7 @@ async fn a_resume_replays_the_recent_messages() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "again".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -5448,6 +5571,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
         ClientRequestKind::SendMessage {
             session: None,
             text: "work".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,
@@ -5463,6 +5587,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "more".to_owned(),
+            attachments: Vec::new(),
             budget: None,
             reasoning: None,
             replay: false,

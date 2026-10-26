@@ -37,8 +37,10 @@ use norte::harness::TurnInterceptor;
 use norte::harness::{
     Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, InMemoryStore, PolicySet, Store,
 };
+use norte::http::{HttpClient, HttpMedia};
 use norte::{
-    AnyFunction, BlobStore, Layer, LayerStack, Model, ToolArgs, ToolDeclaration, ToolRegistry,
+    AnyFunction, BlobStore, Layer, LayerStack, MediaAdapter, Model, ToolArgs, ToolDeclaration,
+    ToolRegistry,
 };
 use norte_code_cost::{BudgetBook, CostRecord};
 use norte_code_skills::{
@@ -409,9 +411,17 @@ impl Service {
         compaction: Option<Arc<CompactionGate>>,
     ) -> Result<Harness, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
+        // The adapter is what turns a `Blob` back into bytes on the way out. A
+        // message may carry media the client stored — a pasted image — and the
+        // wire only takes inline bytes or a URL, so without this the part
+        // reaches the provider as a blob id it has never heard of. The engine
+        // resolves it here, and always the same way, so a cached prefix does not
+        // move (FR-RECON-4).
+        let media: Arc<dyn MediaAdapter> = Arc::new(HttpMedia::new(&HttpClient::new()?));
         let mut builder = HarnessBuilder::new()
             .store(Arc::clone(&self.store))
             .blobs(Arc::clone(&self.blobs))
+            .media_adapter(media)
             .model(model)
             .tools(self.tools()?)
             .policies(self.policies())
@@ -1051,6 +1061,7 @@ impl Service {
             Kind::SendMessage {
                 session,
                 text,
+                attachments,
                 budget,
                 reasoning,
                 replay,
@@ -1059,6 +1070,7 @@ impl Service {
                     request_id,
                     session,
                     Some(text),
+                    attachments,
                     Some(budget),
                     reasoning,
                     replay,
@@ -1067,8 +1079,16 @@ impl Service {
             }
             Kind::Resume { session } => {
                 // A resume exists to show where the conversation was.
-                self.start_turn(request_id, Some(session), None, None, None, true)
-                    .await
+                self.start_turn(
+                    request_id,
+                    Some(session),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    true,
+                )
+                .await
             }
             Kind::CancelTurn { session } => {
                 if let Some(notify) = self.lock_cancels().get(&session).cloned() {

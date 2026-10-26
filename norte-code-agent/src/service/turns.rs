@@ -12,10 +12,14 @@ use tokio::sync::{Notify, mpsc};
 
 use norte::harness::EngineEvent;
 use norte::harness::Harness;
-use norte::{FinishReason, Message, Part, ReasoningRequest, Role, SessionId, Usage};
+use norte::{
+    FinishReason, MediaKind, MediaPart, MediaSource, Message, MimeType, Part, ReasoningRequest,
+    Role, SessionId, Usage,
+};
 use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
-    Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind, SessionKey,
+    Attachment, Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind,
+    SessionKey,
 };
 
 use norte_code_store_sqlite::SessionDirectory;
@@ -50,6 +54,7 @@ impl Service {
         request_id: u64,
         session: Option<SessionKey>,
         input: Option<String>,
+        attachments: Vec<Attachment>,
         message_budget: Option<Option<Budget>>,
         reasoning: Option<ProtocolReasoning>,
         replay: bool,
@@ -215,6 +220,7 @@ impl Service {
                     nid,
                     turn,
                     input,
+                    attachments,
                     reasoning,
                     spec.capabilities.max_output,
                     &tx,
@@ -254,6 +260,7 @@ impl Service {
         nid: SessionId,
         turn: u64,
         input: Option<String>,
+        attachments: Vec<Attachment>,
         reasoning: ReasoningRequest,
         max_output: Option<u64>,
         tx: &mpsc::Sender<ServerEvent>,
@@ -272,7 +279,28 @@ impl Service {
                 turn_builder = turn_builder.max_output_tokens(max_output);
             }
             if let Some(text) = input.take() {
-                turn_builder = turn_builder.input(Message::user(text));
+                // Text and media are one message, not two: the model reads the
+                // sentence and sees the image it is about in the same turn, which
+                // is what makes a line naming the image mean something.
+                let mut message = Message::user(text);
+                for attachment in &attachments {
+                    match self.media_part(attachment).await {
+                        Ok(Some(media)) => message.parts.push(Part::Media(media)),
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = tx
+                                .send(ServerEvent::error(
+                                    request_id,
+                                    Some(key.clone()),
+                                    ErrorCode::InvalidRequest,
+                                    error,
+                                ))
+                                .await;
+                            return Ok(());
+                        }
+                    }
+                }
+                turn_builder = turn_builder.input(message);
             }
             for (key, value) in &self.config().extensions {
                 turn_builder = turn_builder.extension(key.clone(), value.clone());
@@ -1138,6 +1166,55 @@ async fn replay_events(
 }
 
 /// The wire name of a message's role.
+///
+/// The catch-all is not a guess: `Role` is `non_exhaustive`, so a role this
+/// build does not know has to name itself something.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::Developer => "developer",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+        _ => "unknown",
+    }
+}
+
+impl Service {
+    /// One attachment as the media part the model sees.
+    ///
+    /// The bytes never travel on the wire: the client that pasted them put them
+    /// in the blob store both ends share and named the blob. This reads the id
+    /// back and hands the engine a part whose source is that blob; the media
+    /// adapter is what turns it into bytes on the way to the provider.
+    ///
+    /// A blob the store does not hold is refused rather than sent: a part nobody
+    /// can resolve would reach the provider as an id it never heard of.
+    async fn media_part(
+        &self,
+        attachment: &Attachment,
+    ) -> std::result::Result<Option<MediaPart>, String> {
+        let mime = MimeType::new(attachment.mime.clone())
+            .map_err(|_| format!("attachment: `{}` is not a media type", attachment.mime))?;
+        let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
+            format!("attachment: could not read `{}`: {error}", attachment.path)
+        })?;
+        // The bytes go where the model's own media would: the host stores them
+        // and sends a reference, so the graph holds one blob and the provider is
+        // handed bytes on the way out (the adapter resolves it).
+        let id = self
+            .blobs
+            .put(&bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some(MediaPart::new(
+            MediaKind::Image,
+            MediaSource::Blob(id),
+            mime,
+        )))
+    }
+}
+
 /// Whether a tool's own result says it was let go of.
 ///
 /// The shell renders `code: detached` into the structured value it returns, so a
@@ -1150,17 +1227,6 @@ fn is_detached(output: &norte::ToolOutput) -> bool {
         .and_then(|value| value.get("code"))
         .and_then(serde_json::Value::as_str)
         .is_some_and(|code| code == "detached")
-}
-
-fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::System => "system",
-        Role::Developer => "developer",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-        _ => "unknown",
-    }
 }
 
 /// The text of a message for the replay: each text, reasoning, tool call and

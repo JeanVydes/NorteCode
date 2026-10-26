@@ -644,6 +644,7 @@ async fn run_prompt(
             kind: ClientRequestKind::SendMessage {
                 session: session.clone(),
                 text: prompt,
+                attachments: Vec::new(),
                 budget: message_budget.clone(),
                 reasoning: reasoning.clone(),
                 replay: attaching,

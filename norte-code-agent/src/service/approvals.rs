@@ -291,7 +291,15 @@ impl Service {
             },
         );
         let resumed = self
-            .start_turn(request_id, Some(session), None, None, None, true)
+            .start_turn(
+                request_id,
+                Some(session),
+                None,
+                Vec::new(),
+                None,
+                None,
+                true,
+            )
             .await?;
         Ok(Box::pin(head.chain(resumed)))
     }
@@ -340,7 +348,15 @@ impl Service {
             },
         );
         let resumed = self
-            .start_turn(request_id, Some(session), None, None, None, true)
+            .start_turn(
+                request_id,
+                Some(session),
+                None,
+                Vec::new(),
+                None,
+                None,
+                true,
+            )
             .await?;
         Ok(Box::pin(head.chain(resumed)))
     }

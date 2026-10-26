@@ -7,12 +7,17 @@ use super::{
     ServerEventKind, Service, SessionKey, StreamExt, Style, VecDeque, mpsc, short,
 };
 use crate::approval::{ApprovalChoice, ApprovalOutcome, approval_request, ask_approval};
-use crate::input::{EditorAction, EditorEvent, InteractiveInput};
+use crate::input::{Attachment, EditorAction, EditorEvent, InteractiveInput};
+
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
     BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
     scope_name, unit_name,
 };
+/// The wire's own attachment, named apart from the editor's: they carry the
+/// same three fields today, and they are not the same type — one is what a
+/// keystroke produced and the other is what goes on the wire.
+use norte_code_protocol::Attachment as ProtocolAttachment;
 
 /// Parses `/allow` and `/deny` into `(allow, tool, global)`.
 ///
@@ -654,7 +659,9 @@ pub(crate) async fn interactive_loop(
     }
     let mut request_id = 2_u64;
     loop {
-        let Some(text) = read_repl_line(service, session.as_ref(), input, style).await? else {
+        let Some((text, attachments)) =
+            read_repl_line(service, session.as_ref(), input, style).await?
+        else {
             break;
         };
         let command = match parse_chat_command(&text) {
@@ -856,6 +863,14 @@ pub(crate) async fn interactive_loop(
                 kind: ClientRequestKind::SendMessage {
                     session: session.clone(),
                     text,
+                    attachments: attachments
+                        .iter()
+                        .map(|attachment| ProtocolAttachment {
+                            path: attachment.path.clone(),
+                            mime: attachment.mime.clone(),
+                            name: attachment.name.clone(),
+                        })
+                        .collect(),
                     budget: message_budget.clone(),
                     reasoning: reasoning.clone(),
                     // The transcript is already on screen; replaying it would
@@ -1451,7 +1466,7 @@ pub(crate) async fn read_repl_line(
     session: Option<&SessionKey>,
     input: &mut InteractiveInput,
     style: Style,
-) -> Result<Option<String>, String> {
+) -> Result<Option<(String, Vec<Attachment>)>, String> {
     let _ = style;
     loop {
         let event = tokio::select! {
@@ -1464,8 +1479,8 @@ pub(crate) async fn read_repl_line(
             }
             event = input.recv() => event,
         };
-        let line = match event {
-            Some(EditorEvent::Line(line)) => line,
+        let (line, attachments) = match event {
+            Some(EditorEvent::Line(line, attachments)) => (line, attachments),
             Some(EditorEvent::End) | None => {
                 eprintln!();
                 return Ok(None);
@@ -1491,7 +1506,7 @@ pub(crate) async fn read_repl_line(
         if matches!(line, "/exit" | "/quit" | "exit" | "quit") {
             return Ok(None);
         }
-        return Ok(Some(line.to_owned()));
+        return Ok(Some((line.to_owned(), attachments)));
     }
 }
 
@@ -1549,8 +1564,8 @@ enum Wake {
     /// Escape, Ctrl-C or Ctrl-G reached the editor and asked for
     /// something that is not a line.
     Action(EditorAction),
-    /// A line completed in the input box.
-    Line(String),
+    /// A line completed in the input box, with the files its draft attached.
+    Line(String, Vec<Attachment>),
     /// End of input.
     Eof,
     /// The next server event.
@@ -1601,7 +1616,9 @@ pub(crate) async fn drive_turns(
                         biased;
                         Some(()) = interrupt_rx.recv() => Wake::Interrupt,
                         event = receiver.recv() => match event {
-                            Some(EditorEvent::Line(line)) => Wake::Line(line),
+                            Some(EditorEvent::Line(line, attachments)) => {
+                                Wake::Line(line, attachments)
+                            }
                             Some(EditorEvent::Action(action)) => Wake::Action(action),
                             Some(EditorEvent::End) | None => Wake::Eof,
                         },
@@ -1704,10 +1721,23 @@ pub(crate) async fn drive_turns(
                         }
                         continue;
                     }
-                    Wake::Line(line) => {
+                    Wake::Line(line, attachments) => {
                         let text = line.trim().to_owned();
                         if text.is_empty() {
                             continue;
+                        }
+                        // Steering reaches the request in flight, and a request
+                        // already built has no place for a part that was not in
+                        // it. An attachment typed mid-turn is said rather than
+                        // dropped: the next message can carry it.
+                        if !attachments.is_empty() {
+                            eprintln!(
+                                "{}",
+                                style.yellow(
+                                    "an attached file cannot be steered into a running turn; \
+                                     send it with the next message"
+                                )
+                            );
                         }
                         match parse_chat_command(&text) {
                             Some(Ok(command)) => {

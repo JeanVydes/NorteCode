@@ -99,6 +99,15 @@ pub enum ClientRequestKind {
         session: Option<SessionKey>,
         /// The user message.
         text: String,
+        /// Media to send beside the text, in the order it should appear.
+        ///
+        /// The bytes are the host's to store: a client puts them in the blob
+        /// store it shares with the service and names the blob here, which is
+        /// what the engine does with media the vendor returns. That keeps a
+        /// pasted photo out of the wire *and* out of the session: what is
+        /// stored is one blob, named from both sides.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
         /// A budget for this message only.
         budget: Option<Budget>,
         /// A reasoning override for this message only.
@@ -684,6 +693,27 @@ pub enum ServerEventKind {
     },
 }
 
+/// One piece of media travelling with a message.
+///
+/// It is a path, not the bytes: the client and the service share a filesystem,
+/// and a pasted photo is a file either way. The service reads it where its blob
+/// store is and files it there, so the bytes never travel on the wire.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attachment {
+    /// The path to the file, as the client named it.
+    ///
+    /// A path and not bytes: the client and the service share a filesystem as
+    /// well as a blob store, and a pasted photo is a file either way. Reading it
+    /// where the store is keeps the bytes off the wire and out of the editor's
+    /// thread, and the service is what files it.
+    pub path: String,
+    /// The media type, as `type/subtype`.
+    pub mime: String,
+    /// What the client called it, for a person reading the transcript.
+    pub name: String,
+}
+
 /// A session as the client sees it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1050,6 +1080,7 @@ mod tests {
             kind: ClientRequestKind::SendMessage {
                 session: Some(SessionKey::new("abc")),
                 text: "hi".to_owned(),
+                attachments: Vec::new(),
                 budget: Some(Budget {
                     unit: BudgetUnit::Usd,
                     limit: 1.0,

@@ -10,6 +10,20 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// A file pasted into the draft, as the message carries it.
+///
+/// The bytes are not here: a paste carries a path, and the service is what reads
+/// the file and files it in the blob store both ends share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Attachment {
+    /// Where the file is.
+    pub(crate) path: String,
+    /// Its media type, from its extension.
+    pub(crate) mime: String,
+    /// What to call it, for the line and for the model.
+    pub(crate) name: String,
+}
+
 /// One item in the session's todo list, as the footer renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TodoItem {
@@ -149,6 +163,8 @@ impl Pinned {
 
 #[cfg(unix)]
 mod unix {
+    use super::Attachment;
+
     use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::io::{self, IsTerminal, Write};
@@ -244,8 +260,8 @@ mod unix {
     /// would wait behind an unfinished line.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) enum EditorEvent {
-        /// A line was submitted.
-        Line(String),
+        /// A line was submitted, with the files its draft asked to attach.
+        Line(String, Vec<Attachment>),
         /// A keystroke asked for something that is not a line.
         Action(EditorAction),
         /// The editor ended: end of input.
@@ -359,7 +375,7 @@ mod unix {
         pub(crate) async fn recv_line(&mut self) -> Option<Option<String>> {
             loop {
                 match self.events.recv().await {
-                    Some(EditorEvent::Line(line)) => return Some(Some(line)),
+                    Some(EditorEvent::Line(line, _)) => return Some(Some(line)),
                     Some(EditorEvent::Action(_)) => {}
                     Some(EditorEvent::End) | None => return Some(None),
                 }
@@ -390,51 +406,181 @@ mod unix {
     struct LineBuffer {
         chars: Vec<char>,
         cursor: usize,
+        /// The runs that are shown as a label but carry other text.
+        ///
+        /// A pasted paragraph is one of these: the line shows `[Copied: …]` and
+        /// what is sent is the paragraph. Anything that edits the run removes it
+        /// whole, because half a paragraph is not a smaller paragraph — it is a
+        /// sentence nobody wrote.
+        chips: Vec<Chip>,
     }
+
+    /// A run of the buffer that stands for something else.
+    #[derive(Debug)]
+    struct Chip {
+        /// Where it is in `chars`, which holds what is shown.
+        range: std::ops::Range<usize>,
+        /// What is sent in its place: the pasted text, or the path of a pasted
+        /// file, which is what the model is given.
+        original: String,
+        /// The attachment this chip asks for, when it stands for a file.
+        attachment: Option<Attachment>,
+    }
+
+    /// How many characters of a pasted text the label shows.
+    const CHIP_LABEL_CHARS: usize = 24;
+
+    /// The shortest paste that is worth hiding behind a label.
+    ///
+    /// Below this the pasted text is its own label: `[Copied: hello]` is longer
+    /// than `hello`, and a chip that saves nothing costs a keystroke to remove.
+    const CHIP_MIN_CHARS: usize = 32;
 
     impl LineBuffer {
         fn insert(&mut self, character: char) {
+            self.settle_cursor();
             self.chars.insert(self.cursor, character);
             self.cursor += 1;
         }
 
+        /// A paste, which may be worth hiding behind a label.
+        ///
+        /// A long one is shown as `[Copied: …]` and travels whole: the line is
+        /// for reading, and a paragraph pasted into it buries the draft the
+        /// human is writing. What is sent is what was pasted.
+        fn insert_paste(&mut self, text: &str) {
+            let cleaned = clean_paste(text);
+            // A terminal that pastes a file pastes its path — kitty does, and so
+            // does a drag-and-drop. That is the only way an image gets here: the
+            // clipboard's bytes never reach the application over the wire.
+            if let Some(attachment) = image_attachment(&cleaned) {
+                let label = format!("[Image: {}]", attachment.name);
+                let path = attachment.path.clone();
+                self.insert_attachment(&label, path, Some(attachment));
+                return;
+            }
+            // A long path is not a paragraph: it is a path, and a chip says so
+            // without pretending the file is attached. A paste too short to be
+            // worth a label is its own label.
+            if let Some(name) = existing_path_name(&cleaned) {
+                let label = format!("[Path: {name}]");
+                self.insert_chip(&label, cleaned);
+                return;
+            }
+            if cleaned.chars().count() < CHIP_MIN_CHARS {
+                self.insert_text(&cleaned);
+                return;
+            }
+            let head: String = cleaned
+                .chars()
+                .take(CHIP_LABEL_CHARS)
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let label = format!("[Copied: {head}…]");
+            self.insert_chip(&label, cleaned);
+        }
+
+        /// Puts a label in the draft, carrying `original` for the model.
+        fn insert_chip(&mut self, label: &str, original: String) {
+            self.insert_attachment(label, original, None);
+        }
+
+        /// Puts a label in the draft that also asks for a file to be attached.
+        fn insert_attachment(
+            &mut self,
+            label: &str,
+            original: String,
+            attachment: Option<Attachment>,
+        ) {
+            self.settle_cursor();
+            let start = self.cursor;
+            for character in label.chars() {
+                self.chars.insert(self.cursor, character);
+                self.cursor += 1;
+            }
+            self.chips.push(Chip {
+                range: start..self.cursor,
+                original,
+                attachment,
+            });
+        }
+
+        /// The files the draft asks to send beside its text, in order.
+        fn attachments(&self) -> Vec<Attachment> {
+            self.chips
+                .iter()
+                .filter_map(|chip| chip.attachment.clone())
+                .collect()
+        }
+
         fn insert_text(&mut self, text: &str) {
-            let mut chars = text.chars().peekable();
-            while let Some(character) = chars.next() {
-                match character {
-                    '\r' => {
-                        if chars.peek() == Some(&'\n') {
-                            chars.next();
-                        }
-                        self.insert('\n');
-                    }
-                    '\n' => self.insert('\n'),
-                    '\t' => {
-                        for _ in 0..4 {
-                            self.insert(' ');
-                        }
-                    }
-                    control if control.is_control() => {}
-                    other => self.insert(other),
+            for character in clean_paste(text).chars() {
+                self.insert(character);
+            }
+        }
+
+        /// Moves the cursor out of any chip it is inside.
+        ///
+        /// A chip is not editable: typing in the middle of one would leave the
+        /// label and what it stands for disagreeing, which is the state the
+        /// whole thing exists to prevent. The cursor lands at its end, so typing
+        /// after a chip does what it looks like.
+        fn settle_cursor(&mut self) {
+            if let Some(chip) = self
+                .chips
+                .iter()
+                .find(|chip| chip.range.start < self.cursor && self.cursor < chip.range.end)
+            {
+                self.cursor = chip.range.end;
+            }
+        }
+
+        /// Removes `chars[from..to]`, taking any chip it touches whole.
+        fn remove_range(&mut self, from: usize, to: usize) -> bool {
+            if from >= to || to > self.chars.len() {
+                return false;
+            }
+            let (mut lo, mut hi) = (from, to);
+            let mut kept: Vec<Chip> = Vec::new();
+            for chip in std::mem::take(&mut self.chips) {
+                if chip.range.start < to && from < chip.range.end {
+                    lo = lo.min(chip.range.start);
+                    hi = hi.max(chip.range.end);
+                } else {
+                    kept.push(chip);
                 }
             }
+            self.chars.drain(lo..hi);
+            let removed = hi - lo;
+            for chip in &mut kept {
+                if chip.range.start >= hi {
+                    chip.range.start -= removed;
+                    chip.range.end -= removed;
+                }
+            }
+            self.chips = kept;
+            self.cursor = if self.cursor > hi {
+                self.cursor - removed
+            } else {
+                lo
+            };
+            true
         }
 
         fn backspace(&mut self) -> bool {
             if self.cursor == 0 {
                 return false;
             }
-            self.cursor -= 1;
-            self.chars.remove(self.cursor);
-            true
+            self.remove_range(self.cursor - 1, self.cursor)
         }
 
         fn delete(&mut self) -> bool {
             if self.cursor >= self.chars.len() {
                 return false;
             }
-            self.chars.remove(self.cursor);
-            true
+            self.remove_range(self.cursor, self.cursor + 1)
         }
 
         fn left(&mut self) -> bool {
@@ -469,17 +615,14 @@ mod unix {
             if self.cursor == 0 {
                 return false;
             }
-            self.chars.drain(..self.cursor);
-            self.cursor = 0;
-            true
+            self.remove_range(0, self.cursor)
         }
 
         fn kill_to_end(&mut self) -> bool {
             if self.cursor >= self.chars.len() {
                 return false;
             }
-            self.chars.truncate(self.cursor);
-            true
+            self.remove_range(self.cursor, self.chars.len())
         }
 
         fn kill_word(&mut self) -> bool {
@@ -493,9 +636,7 @@ mod unix {
             while start > 0 && !self.chars[start - 1].is_whitespace() {
                 start -= 1;
             }
-            self.chars.drain(start..self.cursor);
-            self.cursor = start;
-            true
+            self.remove_range(start, self.cursor)
         }
 
         /// The range of the line the cursor is on, and its column in it.
@@ -559,16 +700,36 @@ mod unix {
 
         fn clear(&mut self) {
             self.chars.clear();
+            self.chips.clear();
             self.cursor = 0;
         }
 
         fn replace(&mut self, text: &str) {
             self.chars = text.chars().collect();
+            self.chips.clear();
             self.cursor = self.chars.len();
         }
 
-        fn text(&self) -> String {
+        /// The draft as it is drawn: the labels, not what they stand for.
+        #[cfg(test)]
+        fn text_without_chips(&self) -> String {
             self.chars.iter().collect()
+        }
+
+        /// The draft as it is sent: every chip stands for what it carries.
+        fn text(&self) -> String {
+            let mut out = String::new();
+            let mut index = 0usize;
+            for chip in &self.chips {
+                if chip.range.start > self.chars.len() {
+                    continue;
+                }
+                out.extend(self.chars[index..chip.range.start].iter());
+                out.push_str(&chip.original);
+                index = chip.range.end.min(self.chars.len());
+            }
+            out.extend(self.chars[index..].iter());
+            out
         }
 
         fn is_empty(&self) -> bool {
@@ -643,7 +804,7 @@ mod unix {
                             }
                         }
                         Ok(Event::Paste(text)) => {
-                            buffer.insert_text(&text);
+                            buffer.insert_paste(&text);
                             redraw = true;
                         }
                         Ok(Event::Resize(width, height)) => {
@@ -732,7 +893,8 @@ mod unix {
                     history_pos.take();
                     draft.clear();
                 }
-                if sender.send(EditorEvent::Line(line)).is_err() {
+                let attachments = buffer.attachments();
+                if sender.send(EditorEvent::Line(line, attachments)).is_err() {
                     return KeyOutcome::Exit;
                 }
                 buffer.clear();
@@ -1211,6 +1373,90 @@ mod unix {
     /// A logical line (one separated by `\n`) becomes as many rows as it needs
     /// at `width`, and the window keeps the row the cursor is on in view: a
     /// draft longer than the terminal wraps, it does not lose its tail.
+    /// A pasted path that names an image, as the attachment to carry.
+    ///
+    /// Only a path that exists and whose extension is one a model can look at makes
+    /// an attachment: anything else is text, and pasting a path to a script is still
+    /// pasting text.
+    fn image_attachment(text: &str) -> Option<Attachment> {
+        let path = text.trim();
+        // A terminal may wrap a path in quotes, and a path with a newline in it is
+        // not one a paste can carry.
+        let path = path
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .or_else(|| {
+                path.strip_prefix('\'')
+                    .and_then(|rest| rest.strip_suffix('\''))
+            })
+            .unwrap_or(path);
+        if path.is_empty() || path.contains('\n') {
+            return None;
+        }
+        let mime = image_mime(path)?;
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        Some(Attachment {
+            path: path.to_owned(),
+            mime: mime.to_owned(),
+            name,
+        })
+    }
+
+    /// The file name of a pasted path that exists, when it is long enough to hide.
+    ///
+    /// A path to a file the model cannot look at is still a path: showing it whole
+    /// puts a directory listing in the middle of a sentence, and calling it
+    /// `[Copied: …]` says it is text when it is a reference.
+    fn existing_path_name(text: &str) -> Option<String> {
+        let path = text.trim();
+        if path.chars().count() < CHIP_MIN_CHARS || path.contains('\n') || path.contains(' ') {
+            return None;
+        }
+        if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+            return None;
+        }
+        Some(path.rsplit('/').next().unwrap_or(path).to_owned())
+    }
+
+    /// The media type of an image by its extension, or `None` when it is not one.
+    fn image_mime(path: &str) -> Option<&'static str> {
+        let extension = path.rsplit('.').next()?.to_ascii_lowercase();
+        match extension.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "gif" => Some("image/gif"),
+            "webp" => Some("image/webp"),
+            "bmp" => Some("image/bmp"),
+            _ => None,
+        }
+    }
+
+    /// A pasted text as it enters the draft: line endings to `\n`, a tab to
+    /// spaces, and control characters dropped.
+    fn clean_paste(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(character) = chars.next() {
+            match character {
+                '\r' => {
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    out.push('\n');
+                }
+                '\n' => out.push('\n'),
+                '\t' => out.push_str("    "),
+                control if control.is_control() => {}
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
     fn input_lines(buffer: &LineBuffer, window: usize, width: usize) -> Vec<String> {
         let width = width.max(1);
         // Where each logical line starts and ends in the buffer.
@@ -1729,6 +1975,237 @@ mod unix {
         }
 
         #[test]
+        fn a_pasted_path_to_an_image_becomes_an_attachment() {
+            // A terminal pastes a file's *path* — kitty does, and so does a
+            // drag-and-drop — so this is the only way an image can arrive. What
+            // the draft shows is a label; what the message carries is the file.
+            let dir = std::env::temp_dir().join(format!("norte-paste-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let photo = dir.join("holiday.png");
+            std::fs::write(&photo, b"\x89PNG\r\n\x1a\n").expect("png");
+
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste(&photo.display().to_string());
+
+            let shown = buffer.text_without_chips();
+            assert_eq!(
+                shown, "[Image: holiday.png]",
+                "the draft shows a label, not a path"
+            );
+            let attachments = buffer.attachments();
+            assert_eq!(attachments.len(), 1, "and it asks for the file");
+            assert_eq!(attachments[0].mime, "image/png");
+            assert_eq!(attachments[0].path, photo.display().to_string());
+            assert_eq!(
+                buffer.text(),
+                photo.display().to_string(),
+                "the path is what the model is given"
+            );
+
+            // One keystroke takes the label and the attachment together.
+            assert!(buffer.backspace());
+            assert_eq!(buffer.text(), "");
+            assert!(
+                buffer.attachments().is_empty(),
+                "and the attachment goes with it"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_path_that_is_not_an_image_is_a_path_and_not_an_attachment() {
+            // A file the model cannot look at is still a file, and a long path
+            // is shown as one: `[Path: build.sh]`, not eighty characters of
+            // directory and not `[Copied: …]`, which would call a reference
+            // text. Nothing is attached — the path is what the model gets, and
+            // it can open it itself with `read`.
+            let dir = std::env::temp_dir().join(format!("norte-paste-txt-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let script = dir.join("build.sh");
+            std::fs::write(&script, b"echo hi\n").expect("script");
+
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste(&script.display().to_string());
+            assert_eq!(
+                buffer.text_without_chips(),
+                "[Path: build.sh]",
+                "a long path is shown by its name"
+            );
+            assert_eq!(
+                buffer.text(),
+                script.display().to_string(),
+                "and the path is what the draft sends"
+            );
+            assert!(buffer.attachments().is_empty(), "nothing is attached");
+
+            // A missing file is text: a path that is not there may arrive later,
+            // and the draft must not claim a file it cannot see.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste("/tmp/not-there-at-all.png");
+            assert!(
+                buffer.attachments().is_empty(),
+                "a missing file is not an attachment"
+            );
+            assert_eq!(buffer.text_without_chips(), "/tmp/not-there-at-all.png");
+
+            // A short path is short enough to show whole.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste("/tmp/a.sh");
+            assert_eq!(buffer.text_without_chips(), "/tmp/a.sh");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_long_paste_becomes_a_label_and_sends_what_it_hid() {
+            // What the human sees is a label; what the model gets is the text.
+            // That is the whole point: a paragraph pasted into the draft buries
+            // the sentence being written, and the model must not receive the
+            // label in its place.
+            let mut buffer = LineBuffer::default();
+            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+            buffer.insert_paste(pasted);
+            let shown = buffer.text_without_chips();
+            assert!(
+                shown.starts_with("[Copied: "),
+                "the draft shows a label: {shown:?}"
+            );
+            assert!(shown.ends_with(']'), "and the label closes: {shown:?}");
+            assert!(
+                !shown.contains("consectetur"),
+                "the pasted text is not in the draft: {shown:?}"
+            );
+            assert_eq!(buffer.text(), pasted, "but it is what the draft sends");
+        }
+
+        #[test]
+        fn a_short_paste_is_its_own_label() {
+            // A chip that saves nothing costs a keystroke to remove, and
+            // `[Copied: hi]` is longer than `hi`.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste("hi");
+            assert_eq!(buffer.text(), "hi");
+            assert_eq!(buffer.text_without_chips(), "hi");
+        }
+
+        #[test]
+        fn a_keystroke_on_a_label_takes_the_whole_paste() {
+            // `]` removes the chip, and with it everything the chip stands for.
+            // Half a paragraph is not a smaller paragraph.
+            let mut buffer = LineBuffer::default();
+            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+            buffer.insert_paste(pasted);
+            let label_chars = buffer.text_without_chips().chars().count();
+            assert_eq!(buffer.cursor, label_chars, "the cursor is after the label");
+
+            assert!(buffer.backspace(), "a backspace removed something");
+            assert_eq!(buffer.text(), "", "the whole paste went with the label");
+            assert_eq!(buffer.text_without_chips(), "");
+        }
+
+        #[test]
+        fn deleting_a_label_from_the_left_takes_it_whole() {
+            let mut buffer = LineBuffer::default();
+            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+            buffer.insert_paste(pasted);
+            assert!(buffer.home());
+            assert!(buffer.delete(), "the delete removed something");
+            assert_eq!(buffer.text(), "", "the whole paste went with the label");
+        }
+
+        #[test]
+        fn killing_the_line_takes_the_chips_whole() {
+            // Ctrl-U and Ctrl-K are how a draft is cleared, and a chip in the
+            // way must not survive them half-formed: what is removed is either
+            // the chip or nothing, never a piece of the label with its text
+            // still attached.
+            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+
+            // Ctrl-K from the top: the chip and the tail go together.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste(pasted);
+            buffer.insert_text("tail");
+            assert!(buffer.home());
+            assert!(buffer.kill_to_end());
+            assert_eq!(buffer.text(), "", "the chip went whole with the rest");
+            assert_eq!(buffer.text_without_chips(), "");
+
+            // Ctrl-U with the cursor after the chip: the same.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste(pasted);
+            buffer.insert_text("tail");
+            assert!(buffer.kill_to_start());
+            assert_eq!(buffer.text(), "", "the chip and the tail both went");
+            assert_eq!(buffer.text_without_chips(), "");
+        }
+
+        #[test]
+        fn typing_inside_a_label_lands_after_it() {
+            // A chip is not editable: a character inserted in the middle would
+            // leave the label and what it stands for disagreeing.
+            let mut buffer = LineBuffer::default();
+            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+            buffer.insert_paste(pasted);
+            assert!(buffer.home());
+            buffer.right();
+            buffer.insert('X');
+            let shown = buffer.text_without_chips();
+            assert!(
+                !shown.contains("[X"),
+                "nothing lands inside the label: {shown:?}"
+            );
+            assert!(
+                shown.starts_with("[Copied: ") && shown.ends_with("]X"),
+                "it lands after it: {shown:?}"
+            );
+            assert_eq!(buffer.text(), format!("{pasted}X"));
+        }
+
+        #[test]
+        fn two_pastes_are_two_chips() {
+            let mut buffer = LineBuffer::default();
+            let first = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+            let second = "Sed ut perspiciatis unde omnis iste natus error sit voluptatem";
+            buffer.insert_paste(first);
+            buffer.insert_text(" and ");
+            buffer.insert_paste(second);
+            assert_eq!(
+                buffer.text(),
+                format!("{first} and {second}"),
+                "both pastes reach the model, in order"
+            );
+            assert_eq!(
+                buffer.text_without_chips().matches("[Copied: ").count(),
+                2,
+                "and the draft shows two labels: {:?}",
+                buffer.text_without_chips()
+            );
+        }
+
+        #[test]
+        fn removing_one_chip_leaves_the_other_where_it_was() {
+            let mut buffer = LineBuffer::default();
+            let first = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
+            let second = "Sed ut perspiciatis unde omnis iste natus error sit voluptatem";
+            buffer.insert_paste(first);
+            buffer.insert_text(" and ");
+            buffer.insert_paste(second);
+            // The cursor is already at the end, so the backspace takes the
+            // second chip from its right edge.
+            let shown = buffer.text_without_chips();
+            assert!(buffer.backspace());
+            let left = buffer.text_without_chips();
+            assert!(
+                left.starts_with("[Copied: "),
+                "the first chip is intact: {left:?}"
+            );
+            assert_eq!(
+                buffer.text(),
+                format!("{first} and "),
+                "and the second one's text went with it ({shown:?} -> {left:?})"
+            );
+        }
+
+        #[test]
         fn pasted_newlines_become_line_breaks() {
             let mut buffer = LineBuffer::default();
             buffer.insert_text("one\r\ntwo\tthree");
@@ -1883,7 +2360,7 @@ mod unix {
             assert_eq!(buffer.text(), "", "a plain enter clears the buffer");
             assert_eq!(
                 receiver.try_recv().expect("the message was sent"),
-                EditorEvent::Line("first\nsecond".to_owned()),
+                EditorEvent::Line("first\nsecond".to_owned(), Vec::new()),
                 "a plain enter submits the whole multi-line message"
             );
         }
@@ -1932,6 +2409,8 @@ mod unix {
 
 #[cfg(not(unix))]
 mod fallback {
+    use super::Attachment;
+
     use std::io;
     use std::sync::Arc;
 
@@ -1947,8 +2426,8 @@ mod fallback {
     /// What the editor handed the repl; the same shape as the Unix build.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) enum EditorEvent {
-        /// A line was submitted.
-        Line(String),
+        /// A line was submitted, with the files its draft asked to attach.
+        Line(String, Vec<Attachment>),
         /// A keystroke asked for something that is not a line.
         Action(EditorAction),
         /// The editor ended: end of input.
@@ -1983,7 +2462,7 @@ mod fallback {
                         }
                         Ok(_) => {
                             if sender
-                                .send(EditorEvent::Line(line.trim_end().to_owned()))
+                                .send(EditorEvent::Line(line.trim_end().to_owned(), Vec::new()))
                                 .is_err()
                             {
                                 break;
@@ -2010,7 +2489,7 @@ mod fallback {
         pub(crate) async fn recv_line(&mut self) -> Option<Option<String>> {
             loop {
                 match self.events.recv().await {
-                    Some(EditorEvent::Line(line)) => return Some(Some(line)),
+                    Some(EditorEvent::Line(line, _)) => return Some(Some(line)),
                     Some(EditorEvent::Action(_)) => continue,
                     Some(EditorEvent::End) | None => return Some(None),
                 }

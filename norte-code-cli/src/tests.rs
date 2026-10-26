@@ -747,6 +747,7 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
             kind: ClientRequestKind::SendMessage {
                 session: None,
                 text: "write it".to_owned(),
+                attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
                 replay: false,
@@ -766,7 +767,7 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
     let responder = tokio::spawn(async move {
         approval_rx.recv().await.expect("approval event");
         input_tx
-            .send(crate::input::EditorEvent::Line("y".to_owned()))
+            .send(crate::input::EditorEvent::Line("y".to_owned(), Vec::new()))
             .expect("approval input");
     });
 
