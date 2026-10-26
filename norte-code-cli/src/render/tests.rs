@@ -806,3 +806,40 @@ fn a_finished_call_closes_the_box_and_its_result_is_not_repeated() {
         "and its result was already shown, so it is not kept to repeat"
     );
 }
+
+#[test]
+fn two_streams_mid_line_are_not_spliced_together() {
+    // A command's stdout and stderr are read by two tasks and arrive chopped at
+    // whatever a pipe read returned, so a chunk can end mid-word. Writing the
+    // other stream there spliced the two into one unreadable row.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    let chunk = |renderer: &mut Renderer, stream: &str, text: &str| {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: stream.to_owned(),
+            text: text.to_owned(),
+            last: false,
+        });
+    };
+    // stdout stops mid-line, then stderr writes: the partial line is ended
+    // first, so stderr starts its own row.
+    chunk(&mut renderer, "stdout", "parcial... ");
+    assert_eq!(
+        renderer.output_open_stream(),
+        Some("stdout"),
+        "the row is open and belongs to stdout"
+    );
+    chunk(&mut renderer, "stderr", "aviso\n");
+    assert_eq!(
+        renderer.output_open_stream(),
+        None,
+        "stderr closed its own row, so nothing is open now"
+    );
+    // The same stream continuing does not break the row.
+    chunk(&mut renderer, "stderr", "otra ");
+    chunk(&mut renderer, "stderr", "parte\n");
+    assert_eq!(renderer.output_open_stream(), None);
+}

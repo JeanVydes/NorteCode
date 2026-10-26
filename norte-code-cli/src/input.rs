@@ -175,9 +175,16 @@ mod unix {
     /// in view rather than pushing the transcript off the screen.
     const INPUT_ROWS: u16 = 6;
 
-    /// Rows reserved below the scroll region: the input line (up to
-    /// [`INPUT_ROWS`]), the command suggestion and the session status.
-    const FOOTER_ROWS: u16 = INPUT_ROWS + 2;
+    /// Rows reserved below the scroll region.
+    ///
+    /// The layout is built up from the bottom: the command suggestion, the
+    /// session status, the todo widget, the blank row under the todo widget,
+    /// and then the input block of up to [`INPUT_ROWS`]. The count has to cover
+    /// all of them, and it used to stop at the suggestion row: the region ended
+    /// two rows inside the input block, so every keypress cleared two rows of
+    /// the transcript to redraw the draft. That is what made the log vanish and
+    /// leave a hole while a tool was printing.
+    const FOOTER_ROWS: u16 = INPUT_ROWS + 4;
 
     /// How many rows the waiting steering messages may take above the draft.
     ///
@@ -687,6 +694,7 @@ mod unix {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum KeyOutcome {
         Continue,
         Exit,
@@ -745,9 +753,17 @@ mod unix {
             // service, which it cannot.
             KeyCode::Char('c') if control => KeyOutcome::CancelJobs,
             KeyCode::Char('l') if control => KeyOutcome::Continue,
-            // Ctrl-Shift-B stops waiting for the running call. Plain Ctrl-B
-            // stays where readline put it: one character back.
-            KeyCode::Char('B') if control => KeyOutcome::Detach,
+            // Ctrl-Shift-B stops waiting for the running call; plain Ctrl-B stays
+            // where readline put it, one character back.
+            //
+            // The code is `'b'`, whatever the shift: with the keyboard protocol
+            // a modified key is sent as `CSI <codepoint>;<mask>u`, where the
+            // codepoint is the unshifted key. A branch on `Char('B')` never
+            // matched, so Ctrl-Shift-B fell through to the plain Ctrl-B below and
+            // moved the cursor instead of detaching.
+            KeyCode::Char('b' | 'B') if control && key.modifiers.contains(KeyModifiers::SHIFT) => {
+                KeyOutcome::Detach
+            }
             KeyCode::Char('a') if control => {
                 buffer.home();
                 KeyOutcome::Continue
@@ -1332,9 +1348,9 @@ mod unix {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         use super::{
-            EditorEvent, FOOTER_ROWS, INPUT_ROWS, LineBuffer, ResizeDebounce, TodoItem, TodoStatus,
-            clip_visible, handle_key, input_bottom, input_lines, resize_frame, scroll_bottom,
-            status_row, suggestion_row, todo_line, todo_row,
+            EditorEvent, FOOTER_ROWS, INPUT_ROWS, KeyOutcome, LineBuffer, ResizeDebounce, TodoItem,
+            TodoStatus, clip_visible, handle_key, input_bottom, input_lines, resize_frame,
+            scroll_bottom, status_row, suggestion_row, todo_line, todo_row,
         };
 
         #[test]
@@ -1463,19 +1479,27 @@ mod unix {
 
         #[test]
         fn footer_rows_stay_below_the_scroll_region() {
-            // The three widget rows sit at the bottom; above them the input may
-            // occupy its own rows, and the scroll region ends below all of it.
+            // The widget rows sit at the bottom, the todo row and its gap
+            // above them, and the input's own rows above those. The scroll
+            // region ends below all of it.
             assert_eq!(suggestion_row(24), 23);
             assert_eq!(status_row(24), 22);
             assert_eq!(todo_row(24), 21);
             assert_eq!(input_bottom(24), 20);
-            assert_eq!(scroll_bottom(24), 16);
-            assert!(scroll_bottom(24) < input_bottom(24));
-            // A terminal at the minimum height still yields valid rows, and the
-            // rows never cross each other.
-            for rows in 9..=40u16 {
-                let bottom = scroll_bottom(rows);
-                assert!(bottom < input_bottom(rows), "rows {rows}");
+            assert_eq!(scroll_bottom(24), 14);
+            // The first row the input clears is the top of its own block, and it
+            // must be *below* the region: the region is where the transcript is
+            // written, so a repaint that reached into it erased streamed output
+            // on every keypress.
+            for rows in 11..=60u16 {
+                let block_top = input_bottom(rows)
+                    .saturating_sub(INPUT_ROWS)
+                    .saturating_add(1);
+                assert!(
+                    scroll_bottom(rows) < block_top,
+                    "rows {rows}: the region ends at {} but the input clears from {block_top}",
+                    scroll_bottom(rows)
+                );
                 assert!(input_bottom(rows) < todo_row(rows), "rows {rows}");
                 assert!(todo_row(rows) < status_row(rows), "rows {rows}");
                 assert!(status_row(rows) < suggestion_row(rows), "rows {rows}");
@@ -1566,6 +1590,54 @@ mod unix {
             assert!(buffer.end());
             buffer.insert('!');
             assert_eq!(buffer.text(), "0aXbc!");
+        }
+
+        #[test]
+        fn ctrl_shift_b_detaches_and_plain_ctrl_b_moves_the_cursor() {
+            // With the keyboard protocol a modified key arrives as
+            // `CSI <codepoint>;<mask>u`, and the codepoint is the *unshifted*
+            // one: Ctrl-Shift-B comes through as `Char('b')` with SHIFT and
+            // CONTROL, not as `Char('B')`. A branch on the uppercase form never
+            // matched, so the key fell through to plain Ctrl-B and moved the
+            // cursor while the call kept running.
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut buffer = LineBuffer::default();
+            buffer.insert_text("abc");
+            let mut history = Vec::new();
+            let mut history_pos = None;
+            let mut draft = String::new();
+
+            assert_eq!(
+                handle_key(
+                    KeyEvent::new(
+                        KeyCode::Char('b'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    ),
+                    &mut buffer,
+                    &mut history,
+                    &mut history_pos,
+                    &mut draft,
+                    &sender,
+                ),
+                KeyOutcome::Detach,
+                "ctrl-shift-b asks to detach"
+            );
+            // The cursor did not move: that is the plain key's job.
+            assert_eq!(buffer.cursor, 3, "detaching is not a cursor move");
+
+            assert_eq!(
+                handle_key(
+                    KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                    &mut buffer,
+                    &mut history,
+                    &mut history_pos,
+                    &mut draft,
+                    &sender,
+                ),
+                KeyOutcome::Continue,
+                "plain ctrl-b stays where readline put it"
+            );
+            assert_eq!(buffer.cursor, 2, "and it moves the cursor back");
         }
 
         #[test]

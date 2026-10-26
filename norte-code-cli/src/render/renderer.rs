@@ -178,6 +178,14 @@ pub(crate) struct Renderer {
 
     /// Whether the open output block has written a row yet.
     output_line_start: bool,
+
+    /// The stream whose line is open, when one is.
+    ///
+    /// A command's stdout and stderr are read by two tasks and arrive chopped
+    /// at whatever a pipe read returned, so a chunk can end mid-word. Letting
+    /// the other stream write there interleaved the two into one unreadable
+    /// line; whichever stream is mid-line is ended first instead.
+    output_open_stream: Option<String>,
 }
 
 impl Renderer {
@@ -232,6 +240,7 @@ impl Renderer {
             streamed_calls: BTreeSet::new(),
             output_gutter: None,
             output_line_start: true,
+            output_open_stream: None,
         }
     }
 
@@ -575,7 +584,7 @@ impl Renderer {
     /// pipe read returned — so a partial last line is left open for the next
     /// chunk to finish. The chunk is assembled and written once: two writers
     /// share this stream, and a frame written in pieces can be broken in half.
-    fn output_delta(&mut self, call_id: &str, text: &str) {
+    fn output_delta(&mut self, call_id: &str, stream: &str, text: &str) {
         use std::fmt::Write as _;
         let mut frame = String::new();
         if self.output_gutter.as_deref() != Some(call_id) {
@@ -584,6 +593,17 @@ impl Renderer {
             }
             let _ = writeln!(frame, "  {}", self.style.faint("╭"));
             self.output_gutter = Some(call_id.to_owned());
+            self.output_line_start = true;
+        }
+        // The other stream is mid-line: end its row before this one writes, so
+        // the two are never spliced together. Each keeps its own rows, which is
+        // what makes interleaved output readable.
+        if self
+            .output_open_stream
+            .as_deref()
+            .is_some_and(|open| open != stream)
+        {
+            frame.push('\n');
             self.output_line_start = true;
         }
         let mut rest = text;
@@ -597,9 +617,11 @@ impl Renderer {
                 frame.push_str(&self.style.dim(crate::text::terminal(line)));
                 frame.push('\n');
                 self.output_line_start = true;
+                self.output_open_stream = None;
                 rest = &tail[1..];
             } else {
                 frame.push_str(&self.style.dim(crate::text::terminal(rest)));
+                self.output_open_stream = Some(stream.to_owned());
                 rest = "";
             }
         }
@@ -614,6 +636,7 @@ impl Renderer {
     /// The rows that close the open output box, if one is open.
     fn close_output_gutter(&mut self) -> Option<String> {
         self.output_gutter.take()?;
+        self.output_open_stream = None;
         let newline = if self.output_line_start { "" } else { "\n" };
         self.output_line_start = true;
         Some(format!("{newline}  {}\n", self.style.faint("╰")))
@@ -874,8 +897,7 @@ impl Renderer {
                 self.stop_bar();
                 self.end_reasoning();
                 self.block = Block::None;
-                let _ = stream;
-                self.output_delta(call_id, text);
+                self.output_delta(call_id, stream, text);
             }
             _ => {}
         }
@@ -891,6 +913,12 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) fn output_gutter(&self) -> Option<&str> {
         self.output_gutter.as_deref()
+    }
+
+    /// The stream whose row is open, for a test.
+    #[cfg(test)]
+    pub(crate) fn output_open_stream(&self) -> Option<&str> {
+        self.output_open_stream.as_deref()
     }
 
     /// The short result of a finished tool, when one is worth showing.

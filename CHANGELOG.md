@@ -8,6 +8,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The input line no longer erases the transcript while a tool prints. The
+  scroll region ended two rows *inside* the input block, because the reserved
+  row count stopped at the suggestion row and skipped the todo row and its gap.
+  Every keypress cleared those two rows of streamed output to redraw the draft,
+  which made the log flicker and vanish, leaving a hole.
+- `Ctrl-Shift-B` detaches the running call. It arrived as `Char('b')` carrying
+  SHIFT and CONTROL — the keyboard protocol sends the *unshifted* codepoint — and
+  the branch looked for `Char('B')`, so the key fell through to plain `Ctrl-B`
+  and moved the cursor while the call kept running.
+- A command's stdout and stderr are no longer spliced into one row. The two are
+  read by separate tasks and arrive chopped at whatever a pipe read returned, so
+  a chunk can end mid-word; whichever stream was mid-line is ended first now, and
+  each keeps its own rows.
 - A command's streamed output is drawn in a box of its own, grey and shaped
   like a terminal session, instead of a `stdout ·` label on every line. It is
   read while it runs:
