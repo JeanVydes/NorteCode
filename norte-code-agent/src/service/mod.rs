@@ -871,9 +871,8 @@ impl Service {
 
         // Everything that can fail happens before the live service is touched.
         let catalog = self.catalog();
-        let reference = next.default_model.clone();
-        let spec = match reference {
-            Some(reference) => ModelSpec::from_catalog(&next, &catalog, &reference, None)?,
+        let spec = match next.default_model.clone() {
+            Some(reference) => Self::default_spec_for(&next, &catalog, &reference)?,
             // No default model: keep the one in force rather than fail, since a
             // config that only changes unrelated settings must still reload.
             None => self.default_spec(),
@@ -903,6 +902,46 @@ impl Service {
             config: next,
             warnings: loaded.warnings,
         })
+    }
+
+    /// Resolves a `provider/model` reference the way a run does.
+    ///
+    /// [`ModelSpec::from_catalog`] only knows the catalogue, and a configured
+    /// provider is not in it: `river` and every other private endpoint is
+    /// declared in `config.json` and nowhere else. A reload that went straight
+    /// to the catalogue therefore failed on a default model that a run resolves
+    /// without complaint — `run --provider river` worked while `/refresh` said
+    /// the provider was unknown, which is the same reference answered two ways.
+    ///
+    /// So the catalogue is tried first and a configured provider falls back the
+    /// same way the command line does. A reference that is neither — a typo, or
+    /// a catalogue model that does not exist — is still an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when the reference is not `provider/model`, or
+    /// when it names neither a catalogue provider nor a configured one.
+    fn default_spec_for(
+        config: &Config,
+        catalog: &Catalog,
+        reference: &str,
+    ) -> Result<ModelSpec, ServiceError> {
+        match ModelSpec::from_catalog(config, catalog, reference, None) {
+            Err(ServiceError::UnknownProvider(provider)) => {
+                // A provider the catalogue does not list has to be one the host
+                // configured, or there is nothing to resolve a key or an
+                // endpoint from.
+                if !config.providers.contains_key(&provider) {
+                    return Err(ServiceError::UnknownProvider(provider));
+                }
+                // No fallback environment names: a configured provider names its
+                // key variable in `api_key_env`, and `api_key_for` reads that
+                // before it reaches this list. Passing guesses here would let a
+                // provider resolve a key from a variable it never declared.
+                ModelSpec::resolve(config, reference, None, &[])
+            }
+            other => other,
+        }
     }
 
     /// The default spec in force.
