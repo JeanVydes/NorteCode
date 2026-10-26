@@ -1,11 +1,13 @@
 //! The tabs inside one session, and which one is showing.
 //!
-//! The client shows several things about one session — the conversation, the
-//! task list, and the debug information that used to be dumped before the first
-//! prompt. They used to be one stream: debug information was printed at startup
-//! and scrolled away, and the task list shared the pinned row with the session
-//! status. A tab is a named view of one of them, and the row above the input
-//! says where the person is and what else there is.
+//! The client shows two things about one session: the conversation, and the
+//! task list that used to share a single pinned row with the session status. A
+//! tab is a named view of one of them, and the row above the input says where
+//! the person is and what else there is.
+//!
+//! The startup information is not a tab: it is thirty lines of panels and the
+//! row has one, so it is `/debug`, which prints it into the transcript where
+//! there is room for it.
 //!
 //! The state is small and lives here rather than in the input editor, because
 //! both the editor (which draws the footer) and the loop (which decides what a
@@ -20,20 +22,17 @@ pub(crate) enum SessionTab {
     Chat,
     /// The model's task list.
     Todo,
-    /// What the process learned at startup: the model, the paths, the servers.
-    Debug,
 }
 
 impl SessionTab {
     /// Every tab, in the order the footer lists them.
-    pub(crate) const ALL: [SessionTab; 3] = [SessionTab::Chat, SessionTab::Todo, SessionTab::Debug];
+    pub(crate) const ALL: [SessionTab; 2] = [SessionTab::Chat, SessionTab::Todo];
 
     /// The bare name, for the footer and the tests.
     pub(crate) fn name(self) -> &'static str {
         match self {
             SessionTab::Chat => "chat",
             SessionTab::Todo => "todo",
-            SessionTab::Debug => "debug",
         }
     }
 
@@ -76,14 +75,13 @@ mod tests {
     #[test]
     fn the_tabs_cycle_both_ways_and_wrap() {
         assert_eq!(SessionTab::Chat.next(), SessionTab::Todo);
-        assert_eq!(SessionTab::Todo.next(), SessionTab::Debug);
         assert_eq!(
-            SessionTab::Debug.next(),
+            SessionTab::Todo.next(),
             SessionTab::Chat,
             "the last wraps to the first"
         );
-        assert_eq!(SessionTab::Chat.previous(), SessionTab::Debug);
-        assert_eq!(SessionTab::Debug.previous(), SessionTab::Todo);
+        assert_eq!(SessionTab::Chat.previous(), SessionTab::Todo);
+        assert_eq!(SessionTab::Todo.previous(), SessionTab::Chat);
         // Every tab is reachable from every other by cycling, which is what
         // makes `Ctrl-T` enough on its own.
         let mut seen = Vec::new();
@@ -98,12 +96,15 @@ mod tests {
     #[test]
     fn a_tab_is_named_by_a_number_or_a_word() {
         assert_eq!(SessionTab::numbered(1), Some(SessionTab::Chat));
-        assert_eq!(SessionTab::numbered(3), Some(SessionTab::Debug));
+        assert_eq!(SessionTab::numbered(2), Some(SessionTab::Todo));
         assert_eq!(SessionTab::numbered(0), None, "numbers count from one");
-        assert_eq!(SessionTab::numbered(4), None, "there is no fourth tab");
+        assert_eq!(SessionTab::numbered(3), None, "there is no third tab");
 
         assert_eq!(SessionTab::named("todo"), Some(SessionTab::Todo));
-        assert_eq!(SessionTab::named(" Debug "), Some(SessionTab::Debug));
+        assert_eq!(SessionTab::named(" Chat "), Some(SessionTab::Chat));
         assert_eq!(SessionTab::named("nothing"), None);
+        // `debug` was a tab and is a command now: asking for it by name is an
+        // error that names the tabs that do exist.
+        assert_eq!(SessionTab::named("debug"), None);
     }
 }

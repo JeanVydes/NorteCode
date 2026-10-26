@@ -18,7 +18,9 @@ mod tests;
 
 pub(crate) use argument::approval_label;
 pub(crate) use debug::reasoning_setting_label;
-pub(crate) use debug::{debug_mcp, debug_model, debug_prompt_size, debug_reasoning, debug_start};
+pub(crate) use debug::{
+    HostFacts, report_mcp, report_prompt, report_reasoning, report_start, report_tools,
+};
 pub(crate) use dial::{reasoning_label, source_label, token_ratio};
 pub(crate) use helpers::{cache_percent_label, fallback_env, find_project_config, human_tokens};
 #[cfg(test)]

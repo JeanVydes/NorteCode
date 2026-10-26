@@ -57,7 +57,7 @@ use tokio::sync::Notify;
 
 use norte_code_catalog::Catalog;
 use norte_code_config::Config;
-use norte_code_protocol::{ServerEvent, ServerEventKind, SessionKey};
+use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
@@ -596,7 +596,15 @@ impl Service {
 
     /// The tool registry every engine shares, rebuilt cheaply per turn because
     /// Norte's registry is immutable and not cloneable.
-    fn tools(&self) -> Result<ToolRegistry, ServiceError> {
+    ///
+    /// Public so a host can report what the model can reach without asking the
+    /// engine, which is what `/debug` shows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when a declaration is invalid or a name is
+    /// already taken.
+    pub fn tools(&self) -> Result<ToolRegistry, ServiceError> {
         let mut tools = ToolRegistry::new();
         self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
         self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
@@ -752,6 +760,18 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner) = path;
     }
 
+    /// The config file the process was pointed at, if any.
+    ///
+    /// Kept here rather than threaded through every caller, so a report can say
+    /// which file is in force. `None` means the platform default path is used.
+    #[must_use]
+    pub fn config_path(&self) -> Option<PathBuf> {
+        self.config_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Writes one tool-wide rule to the user config and applies it in memory.
     fn remember_global_rule(&self, tool: &str, allow: bool) -> Result<(), ServiceError> {
         let path = self
@@ -837,6 +857,30 @@ impl Service {
         self.lock_sessions()
             .get(session)
             .map(|record| record.spec.label())
+    }
+
+    /// The model a session is on right now, with its capabilities.
+    ///
+    /// The whole spec and not just its label: `/debug` reports what the model in
+    /// play can do, and after a `/model` those are the new model's capabilities,
+    /// not the ones the process started with.
+    #[must_use]
+    pub fn session_spec(&self, session: &SessionKey) -> Option<ModelSpec> {
+        self.lock_sessions()
+            .get(session)
+            .map(|record| record.spec.clone())
+    }
+
+    /// The reasoning override a session carries, if it has one.
+    ///
+    /// `None` is not "no reasoning": it means the session set none, so the
+    /// answer is the config's default as the model resolves it — a different
+    /// thing, because a model that cannot reason turns `auto` into `off`.
+    #[must_use]
+    pub fn session_reasoning(&self, session: &SessionKey) -> Option<Reasoning> {
+        self.lock_sessions()
+            .get(session)
+            .and_then(|record| record.reasoning.clone())
     }
 
     /// Whether the session has a background job still running.
@@ -976,7 +1020,11 @@ impl Service {
     }
 
     /// The default spec in force.
-    pub(super) fn default_spec(&self) -> ModelSpec {
+    ///
+    /// The model a new session opens on, and the one `/debug` reports when it
+    /// is asked before any message has named a session.
+    #[must_use]
+    pub fn default_spec(&self) -> ModelSpec {
         self.default_spec
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

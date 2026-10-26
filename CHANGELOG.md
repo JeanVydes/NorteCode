@@ -8,16 +8,21 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- The session has tabs: `chat`, `todo` and `debug`, drawn as one row above the
-  input. `Ctrl-T` cycles, `Shift-Ctrl-T` goes back, `Ctrl-1` to `Ctrl-3` go
+- The session has tabs: `chat` and `todo`, drawn as one row above the
+  input. `Ctrl-T` cycles, `Shift-Ctrl-T` goes back, `Ctrl-1` and `Ctrl-2` go
   straight to one, and `/tab [name|number]` does the same for a terminal that
   will not send a modified key. The row says which one is showing and, at its
   end, the key that changes it.
-- The debug information is a tab instead of a wall of text before the first
-  prompt. It used to be printed at startup, which is exactly where the first
-  answer scrolls it away — the moment it is wanted is the moment it leaves.
-  Without a terminal there is nowhere to switch to, so a pipe still gets it
-  printed where it always was.
+- `/debug` prints what the process knows about itself, built when it is asked
+  for: the session, its paths, the catalogue, the model's capabilities, every
+  tool it can reach (the MCP servers' included) and the prompt's size. It
+  replaces the `--debug` flag, whose output was captured at startup and printed
+  where the first answer scrolls it away; a report built at the prompt has the
+  tools registered then, the model switched to then, and the servers connected
+  then.
+- The footer names the reasoning effort the session will ask for, next to the
+  session and the token totals. Nothing else on screen says it, so a
+  `/reasoning`, a downgrade to fit a new model and a resume were all invisible.
 - The tab row can be driven with the keyboard. Pressing Down when the draft has
   no line below it and the history is at its newest entry moves the focus to the
   row; the arrows pick a tab, Enter shows it and returns to the input, and Up
@@ -67,6 +72,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The editor does not panic when a chip is typed in front of. A chip's range is
+  an index into the draft, and inserting text moves every character after the
+  cursor; the range stayed where it was, so `[Image: photo.png]` with a letter
+  before it pointed `[Image: photo.png]`'s range at the letter and the next
+  submit walked backwards over the two. Every chip after the cursor shifts with
+  the text now.
 - A fenced code block is coloured by language and drawn in a box. The fence's
   token — `rust`, `sh`, `python` — selects the grammar; an unknown token is left
   plain rather than guessed at, and a language nothing matches is drawn in the

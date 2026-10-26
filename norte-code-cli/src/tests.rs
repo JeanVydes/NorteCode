@@ -775,7 +775,6 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
         Format::Text,
         Verbosity::Low,
         false,
-        false,
         Style::plain(),
         Pinned::new(),
     );

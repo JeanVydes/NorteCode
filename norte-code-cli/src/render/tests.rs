@@ -17,7 +17,6 @@ fn renderer(pinned: &Arc<Pinned>) -> Renderer {
     Renderer::new(
         Format::Text,
         Verbosity::Low,
-        false,
         true,
         Style::plain(),
         Arc::clone(pinned),
@@ -28,7 +27,6 @@ fn visible_renderer(pinned: &Arc<Pinned>) -> Renderer {
     Renderer::new(
         Format::Text,
         Verbosity::Medium,
-        false,
         true,
         Style::plain(),
         Arc::clone(pinned),
@@ -133,6 +131,25 @@ fn the_footer_names_the_session_from_medium_up() {
     assert!(
         !quiet.contains("801605a1"),
         "low keeps the footer free of the key: {quiet}"
+    );
+}
+
+#[test]
+fn the_reasoning_effort_is_on_the_footer_and_goes_when_it_is_unset() {
+    // Nothing else on screen names the effort, so this row is the only place a
+    // `/reasoning` or a downgrade to fit a new model is visible.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    assert!(
+        !renderer.session_status().contains("think"),
+        "an unset effort says nothing: {}",
+        renderer.session_status()
+    );
+    renderer.set_reasoning("high".to_owned());
+    assert!(
+        renderer.session_status().contains("think high"),
+        "the effort is shown: {}",
+        renderer.session_status()
     );
 }
 

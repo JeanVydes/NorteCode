@@ -17,8 +17,8 @@ use super::labels::{
 };
 use super::loading::LoadingBar;
 use super::{
-    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, Phase, ServerEvent, ServerEventKind,
-    Style, Write, clip_text, compact_json, duration_label,
+    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, HostFacts, Phase, ServerEvent,
+    ServerEventKind, Style, Write, clip_text, compact_json, duration_label,
 };
 
 /// How events are written.
@@ -115,11 +115,11 @@ pub(crate) struct BudgetPrompt {
 pub(crate) struct Renderer {
     pub(crate) format: Format,
     pub(crate) verbosity: Verbosity,
-    pub(crate) debug: bool,
-    pub(crate) debug_session: bool,
     /// The session key, for the footer. The server sends it on every event.
     pub(crate) session: Option<String>,
     pub(crate) show_cost: bool,
+    /// The facts only the host knows, printed by `/debug`.
+    pub(crate) host_facts: Option<HostFacts>,
     /// The provider never reports cost, so a missing figure is the expected
     /// state and is not printed as if it were missing.
     pub(crate) cost_silent: bool,
@@ -137,6 +137,10 @@ pub(crate) struct Renderer {
     /// The path a `write` or `read` is working on, by call, until it finishes.
     pending_paths: BTreeMap<String, String>,
     pub(crate) model_name: Option<String>,
+    /// The reasoning effort the session is actually using, as `/reasoning`
+    /// names it. `None` until a turn has settled it, because before that the
+    /// setting is whatever the next turn resolves.
+    pub(crate) reasoning: Option<String>,
     /// Animated loading bar shown while working.
     pub(crate) loading_bar: Option<LoadingBar>,
     pub(crate) failed: bool,
@@ -241,7 +245,6 @@ impl Renderer {
     pub(crate) fn new(
         format: Format,
         verbosity: Verbosity,
-        debug: bool,
         show_cost: bool,
         style: Style,
         pinned: Arc<Pinned>,
@@ -249,9 +252,8 @@ impl Renderer {
         Self {
             format,
             verbosity,
-            debug,
-            debug_session: false,
             session: None,
+            host_facts: None,
             show_cost,
             cost_silent: false,
             style,
@@ -263,6 +265,7 @@ impl Renderer {
             answer_buffer: String::new(),
             pending_paths: BTreeMap::new(),
             model_name: None,
+            reasoning: None,
             loading_bar: None,
             failed: false,
             cancelled: false,
@@ -295,18 +298,6 @@ impl Renderer {
 
     pub(crate) fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
         self.session = event.session.as_ref().map(ToString::to_string);
-        if self.debug && !self.debug_session {
-            if let Some(session) = &event.session {
-                // The loading bar owns a line on stderr; a diagnostic that lands
-                // on it would interleave with the animation, so the bar stops
-                // first, like every other writer on that stream.
-                if let Some(mut bar) = self.loading_bar.take() {
-                    bar.stop();
-                }
-                eprintln!("{}", self.style.dim(format!("debug: session {session}")));
-                self.debug_session = true;
-            }
-        }
         if self.pinned.take_resized() {
             // The input thread moved the main cursor to a fresh line after the
             // resize. Forget the column we thought we were on so the next
@@ -408,6 +399,26 @@ impl Renderer {
         if let Some(mut bar) = self.loading_bar.take() {
             bar.stop();
         }
+    }
+
+    /// Records the reasoning effort the footer shows, and repaints it.
+    ///
+    /// The footer is the only place it appears, so the repaint is part of the
+    /// update rather than something the caller has to remember.
+    pub(crate) fn set_reasoning(&mut self, label: String) {
+        if self.reasoning.as_deref() != Some(label.as_str()) {
+            self.reasoning = Some(label);
+            self.refresh_footer();
+        }
+    }
+
+    /// Repaints the pinned footer from the state the renderer holds.
+    fn refresh_footer(&mut self) {
+        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        let status = self.session_status();
+        self.pinned.set_session(status);
     }
 
     /// Replaces the activity label and redraws the pinned footer.
@@ -1906,6 +1917,12 @@ impl Renderer {
                     parts.push(self.style.yellow(format!("{} not reported", self.unpriced)));
                 }
             }
+        }
+        // The reasoning effort the session will ask for, which nothing else on
+        // screen shows: after `/reasoning`, a downgrade to fit a new model, or a
+        // resume, the transcript alone cannot say what the next turn sends.
+        if let Some(effort) = &self.reasoning {
+            parts.push(self.style.magenta(format!("think {effort}")));
         }
         let prefix = self.activity.as_ref().map_or_else(
             || self.style.faint("session"),

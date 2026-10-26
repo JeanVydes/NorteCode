@@ -75,7 +75,6 @@ impl Default for PinnedInner {
             session: String::new(),
             todos: Vec::new(),
             tab: SessionTab::Chat,
-            debug: Vec::new(),
             pending_steers: Vec::new(),
         }
     }
@@ -87,9 +86,6 @@ struct PinnedInner {
     /// Which tab is showing. The conversation is the default because that is
     /// what a client opens on.
     tab: SessionTab,
-    /// The startup information, kept to be shown as a tab instead of printed
-    /// once and scrolled away.
-    debug: Vec<String>,
     /// The messages that reached the running request but are not in the
     /// transcript yet, oldest first.
     ///
@@ -160,23 +156,6 @@ impl Pinned {
             inner.tab = tab;
             self.dirty.store(true, Ordering::Relaxed);
         }
-    }
-
-    /// Keeps the startup information for the debug tab.
-    ///
-    /// It used to be printed before the first prompt and scrolled away by the
-    /// first answer, so the one moment it was wanted — working out which model
-    /// or which path is in play — was the moment it was gone.
-    pub(crate) fn set_debug(&self, lines: Vec<String>) {
-        let mut inner = self.lock();
-        if inner.debug != lines {
-            inner.debug = lines;
-        }
-    }
-
-    /// The startup information, as the debug tab shows it.
-    pub(crate) fn debug(&self) -> Vec<String> {
-        self.lock().debug.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
@@ -490,8 +469,28 @@ mod unix {
     impl LineBuffer {
         fn insert(&mut self, character: char) {
             self.settle_cursor();
+            self.shift_chips(1);
             self.chars.insert(self.cursor, character);
             self.cursor += 1;
+        }
+
+        /// Moves every chip at or after the cursor forward by `delta`.
+        ///
+        /// A chip's range is recorded in the same indices as `chars`, so text
+        /// inserted in front of a chip moves that chip's characters and its
+        /// range has to move with them. A range that is left behind points at a
+        /// different run than the label it stands for, and `text()` then walks
+        /// backwards through the two — which is the panic, not a cosmetic
+        /// drift. Only ranges at or after the insertion point move: the chips
+        /// before it are unaffected, and the cursor was already stepped out of
+        /// any chip it was inside.
+        fn shift_chips(&mut self, delta: usize) {
+            for chip in &mut self.chips {
+                if chip.range.start >= self.cursor {
+                    chip.range.start += delta;
+                    chip.range.end += delta;
+                }
+            }
         }
 
         /// A paste, which may be worth hiding behind a label.
@@ -547,6 +546,9 @@ mod unix {
         ) {
             self.settle_cursor();
             let start = self.cursor;
+            // The label goes in front of whatever follows, so every chip after
+            // the cursor shifts by its length before the characters land.
+            self.shift_chips(label.chars().count());
             for character in label.chars() {
                 self.chars.insert(self.cursor, character);
                 self.cursor += 1;
@@ -1420,12 +1422,11 @@ mod unix {
         });
         // What the active tab shows. `chat` has no widget of its own: the
         // conversation is the scroll region above, so that row keeps carrying
-        // the session status it always did. The other two replace it with their
-        // own content, which is what makes them views rather than extras.
+        // the session status it always did. `todo` replaces it with its list,
+        // which is what makes it a view rather than an extra.
         let body = match tab {
             SessionTab::Chat => session.clone(),
             SessionTab::Todo => todo_line(style, &todos, width),
-            SessionTab::Debug => debug_line(style, &pinned.debug()),
         };
         let tabs_text = tabs_line(style, focus.unwrap_or(tab), focus.is_some(), width);
         let frame = format!(
@@ -1472,22 +1473,6 @@ mod unix {
             rendered.push_str(&style.faint(hint));
         }
         rendered
-    }
-
-    /// The debug tab's summary, as the one row the footer has room for.
-    ///
-    /// The count and nothing else: the panel is a box several rows tall with
-    /// its escapes already applied, and `style` escapes what it is given, so a
-    /// row of it here would print the escape instead of using it. The panel
-    /// itself is printed above, where there is room for it.
-    fn debug_line(style: Style, debug: &[String]) -> String {
-        if debug.is_empty() {
-            return style.faint("no startup information");
-        }
-        style.dim(format!(
-            "{} line(s) of startup information · printed above",
-            debug.len()
-        ))
     }
 
     /// Builds the one-line todo widget: progress, the current item first, then
@@ -1921,7 +1906,7 @@ mod unix {
             );
             assert_eq!(
                 tab_row_key(key(KeyCode::Left, KeyModifiers::NONE), SessionTab::Chat),
-                TabRowKey::Select(SessionTab::Debug),
+                TabRowKey::Select(SessionTab::Todo),
                 "left wraps"
             );
             assert_eq!(
@@ -1957,7 +1942,7 @@ mod unix {
             );
             assert_eq!(
                 tab_row_key(key(KeyCode::BackTab, KeyModifiers::NONE), SessionTab::Chat),
-                TabRowKey::Select(SessionTab::Debug)
+                TabRowKey::Select(SessionTab::Todo)
             );
         }
 
@@ -2419,6 +2404,31 @@ mod unix {
             assert_eq!(buffer.text(), "hello brave ");
             assert!(buffer.kill_to_start());
             assert_eq!(buffer.text(), "");
+        }
+
+        /// A second label typed before the first must not fold the two chips
+        /// together.
+        ///
+        /// Inserting into `chars` moves every character after the cursor, but a
+        /// chip's range is recorded in those same indices. A range that is not
+        /// moved with them ends up pointing at a different run than the label it
+        /// stands for, and the next `text()` walks backwards through the two.
+        #[test]
+        fn inserting_before_a_chip_keeps_its_range_in_place() {
+            let mut buffer = LineBuffer::default();
+            buffer.insert_chip("[one]", "one".to_owned());
+            assert_eq!(buffer.text(), "one");
+            // Type in front of the chip: every character of the chip shifts by
+            // one, so its range has to shift too.
+            buffer.home();
+            buffer.insert_text("x");
+            assert_eq!(buffer.text(), "xone", "the label still stands for `one`");
+            assert_eq!(buffer.text_without_chips(), "x[one]");
+            // And the same the other way round: a chip after a chip.
+            buffer.end();
+            buffer.insert_chip("[two]", "two".to_owned());
+            assert_eq!(buffer.text(), "xonetwo");
+            assert_eq!(buffer.text_without_chips(), "x[one][two]");
         }
 
         #[test]
@@ -2977,19 +2987,9 @@ mod pinned_tests {
         // threads: the shared handle is what keeps them agreeing.
         let pinned = Pinned::new();
         assert_eq!(pinned.tab(), SessionTab::Chat);
-        pinned.set_tab(SessionTab::Debug);
-        assert_eq!(pinned.tab(), SessionTab::Debug);
-        assert_eq!(pinned.snapshot().2, SessionTab::Debug);
-    }
-
-    #[test]
-    fn the_debug_tab_keeps_what_used_to_be_printed() {
-        // It was printed at startup and scrolled away by the first answer, so
-        // keeping it is the whole point of the tab.
-        let pinned = Pinned::new();
-        assert!(pinned.debug().is_empty());
-        pinned.set_debug(vec!["model: test/scripted".to_owned()]);
-        assert_eq!(pinned.debug(), ["model: test/scripted"]);
+        pinned.set_tab(SessionTab::Todo);
+        assert_eq!(pinned.tab(), SessionTab::Todo);
+        assert_eq!(pinned.snapshot().2, SessionTab::Todo);
     }
 
     #[test]

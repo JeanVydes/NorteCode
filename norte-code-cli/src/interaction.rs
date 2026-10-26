@@ -12,6 +12,7 @@ use crate::input::{Attachment, EditorAction, EditorEvent, InteractiveInput};
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
     BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
+    report_mcp as render_mcp, report_prompt, report_reasoning, report_start, report_tools,
     scope_name, unit_name,
 };
 use crate::tabs::SessionTab;
@@ -132,6 +133,11 @@ pub(crate) enum ChatCommand {
         /// The tab's name or number; `None` lists them.
         target: Option<String>,
     },
+
+    /// Report what the process knows about itself: the model, its
+    /// capabilities, the tools, the servers, the paths. Built when it is asked
+    /// for, not captured at startup, so the tools are the ones registered now.
+    Debug,
 }
 
 /// What `/jobs` was asked to do.
@@ -166,6 +172,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             action: JobListAction::List,
             id: None,
         }),
+        "/debug" => Some(ChatCommand::Debug),
         _ => None,
     };
     if let Some(rest) = command_rest(text, "/jobs") {
@@ -358,6 +365,7 @@ const CHAT_COMMANDS: &[&str] = &[
     "/jobs",
     "/restart",
     "/tab",
+    "/debug",
     "/exit",
     "/quit",
 ];
@@ -456,6 +464,7 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/mcp" => Some("/mcp [list|enable|disable] [server]"),
         "/jobs" => Some("/jobs [list|check|stop] [job-id]"),
         "/restart" => Some("/restart"),
+        "/debug" => Some("/debug"),
         "/exit" => Some("/exit"),
         "/quit" => Some("/quit"),
         _ => None,
@@ -618,7 +627,8 @@ pub(crate) fn print_chat_help(style: Style) {
     eprintln!("  /allow <tool> [session|global]  allow without asking");
     eprintln!("  /deny <tool> [session|global]   refuse without asking");
     eprintln!("  /reasoning <setting> [session|message]  set reasoning");
-    eprintln!("  /tab [name|number]        switch tab (chat, todo, debug); bare lists them");
+    eprintln!("  /tab [name|number]        switch tab (chat, todo); bare lists them");
+    eprintln!("  /debug                    what the process knows: model, tools, paths");
     eprintln!("  /model <model>             switch model (uses current provider)");
     eprintln!("  /provider <provider>       switch provider (keeps current model)");
     eprintln!("  /revoke [grant-or-tool]   list or revoke an approval grant");
@@ -690,6 +700,10 @@ pub(crate) async fn interactive_loop(
             match command {
                 ChatCommand::Exit => break,
                 ChatCommand::Help => print_chat_help(style),
+                // The report is built now, not at startup: the tools, the model
+                // and the servers are all things that change while the process
+                // runs, so the useful moment to ask is after they have.
+                ChatCommand::Debug => report_debug(service, session.as_ref(), renderer, style),
                 ChatCommand::Compact => {
                     let Some(current) = session.clone() else {
                         eprintln!(
@@ -743,7 +757,7 @@ pub(crate) async fn interactive_loop(
                 },
                 ChatCommand::Reasoning { scope, reasoning } => {
                     if let Some(current) = session.clone() {
-                        run_reasoning(service, current, scope, reasoning, style).await;
+                        run_reasoning(service, current, scope, reasoning, renderer, style).await;
                     } else {
                         eprintln!(
                             "{}",
@@ -958,6 +972,7 @@ async fn run_reasoning(
     session: SessionKey,
     scope: ReasoningScope,
     reasoning: Reasoning,
+    renderer: &mut Renderer,
     style: Style,
 ) {
     let kind = ClientRequestKind::SetReasoning {
@@ -973,17 +988,22 @@ async fn run_reasoning(
                     style.red(format!("could not set reasoning: {message}"))
                 );
             } else {
-                let scope = match scope {
+                let label = match scope {
                     ReasoningScope::Session => "for this session",
                     ReasoningScope::Message => "for the next message",
                 };
                 eprintln!(
                     "{}",
                     style.green(format!(
-                        "reasoning set to {} {scope}",
+                        "reasoning set to {} {label}",
                         reasoning_setting_label(&reasoning)
                     ))
                 );
+                // The footer carries the effort, so setting it and not showing
+                // it would leave the one place it appears saying the old value.
+                if scope == ReasoningScope::Session {
+                    renderer.set_reasoning(reasoning_setting_label(&reasoning));
+                }
             }
         }
         Err(error) => eprintln!("{}", style.red(format!("could not set reasoning: {error}"))),
@@ -1038,10 +1058,12 @@ async fn steer_text(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_live_command(
     service: &Arc<Service>,
     command: ChatCommand,
     current: Option<&SessionKey>,
+    renderer: &mut Renderer,
     style: Style,
 ) {
     match command {
@@ -1055,6 +1077,9 @@ async fn handle_live_command(
             style.yellow("wait until the current turn finishes, then /exit")
         ),
         ChatCommand::Help => print_chat_help(style),
+        // The report needs no turn boundary: it reads state that is already
+        // settled, so it is the one command that works mid-turn.
+        ChatCommand::Debug => report_debug(service, current, renderer, style),
         ChatCommand::Compact => eprintln!(
             "{}",
             style.yellow("wait until the current turn finishes, then /compact")
@@ -1084,7 +1109,7 @@ async fn handle_live_command(
         },
         ChatCommand::Reasoning { scope, reasoning } => {
             if let Some(session) = current {
-                run_reasoning(service, session.clone(), scope, reasoning, style).await;
+                run_reasoning(service, session.clone(), scope, reasoning, renderer, style).await;
             } else {
                 eprintln!(
                     "{}",
@@ -1150,6 +1175,59 @@ async fn handle_live_command(
             "{}",
             style.yellow("wait until the current turn finishes, then /restart")
         ),
+    }
+}
+
+/// Prints what the process knows about itself.
+///
+/// Built when it is asked for: the tools, the model and the servers all change
+/// while the process runs, so a report captured at startup would describe the
+/// wrong moment — the tools the model could reach before an MCP server dropped,
+/// the model before a `/model`. Everything is read here and printed to stderr,
+/// where the rest of the diagnostics live, so it does not land in the answer.
+fn report_debug(
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    renderer: &Renderer,
+    style: Style,
+) {
+    let config = service.config();
+    let catalog = service.catalog();
+    // The session's own spec once it has one: after a `/model` the model in play
+    // is the session's, not the one the process started with. Before the first
+    // message there is no session, so the default is what the next turn opens on.
+    let spec = session
+        .and_then(|session| service.session_spec(session))
+        .unwrap_or_else(|| service.default_spec());
+    let host = renderer.host_facts.as_ref();
+
+    let mut lines = report_start(
+        style,
+        &spec,
+        &config,
+        service.config_path().as_deref(),
+        session.map(SessionKey::as_str),
+        &catalog,
+        host,
+    );
+    lines.extend(report_tools(style, service));
+    lines.extend(render_mcp(style, service));
+    if let Some(host) = host {
+        lines.extend(report_prompt(style, service, host.prompt_source));
+    }
+    // The session's override when it has one; otherwise the config default as
+    // the model resolves it, which is what the next turn will actually send.
+    let session_override = session.and_then(|session| service.session_reasoning(session));
+    match norte_code_agent::effective_reasoning(
+        session_override.as_ref(),
+        &config.reasoning.default,
+        &spec.capabilities.reasoning,
+    ) {
+        Ok(effective) => lines.extend(report_reasoning(style, &effective)),
+        Err(error) => lines.push(format!("  reasoning: could not resolve it: {error}")),
+    }
+    for line in lines {
+        eprintln!("{line}");
     }
 }
 
@@ -1808,8 +1886,14 @@ pub(crate) async fn drive_turns(
                         }
                         match parse_chat_command(&text) {
                             Some(Ok(command)) => {
-                                handle_live_command(service, command, current.as_ref(), style)
-                                    .await;
+                                handle_live_command(
+                                    service,
+                                    command,
+                                    current.as_ref(),
+                                    renderer,
+                                    style,
+                                )
+                                .await;
                             }
                             Some(Err(message)) => eprintln!("{}", style.yellow(message)),
                             None => {
@@ -2114,6 +2198,19 @@ mod tests {
             parse_chat_command("/reasoning budget:0"),
             Some(Err(_))
         ));
+    }
+
+    #[test]
+    fn debug_is_a_command_and_takes_no_argument() {
+        assert_eq!(parse_chat_command("/debug"), Some(Ok(ChatCommand::Debug)));
+        // The command list and the completion both know it, so it is reachable
+        // by typing `/deb` and pressing Tab.
+        assert!(CHAT_COMMANDS.contains(&"/debug"));
+        assert_eq!(command_usage("/debug"), Some("/debug"));
+        // A word after it is not an argument it knows, so it is a message: the
+        // parser leaves it alone rather than inventing a subcommand.
+        assert_eq!(parse_chat_command("/debug now"), None);
+        assert_eq!(parse_chat_command("/debugs"), None);
     }
 
     #[test]

@@ -28,10 +28,10 @@ use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, echo_user_message, interactive_loop};
 use models::{list_models, resolve_spec};
 use render::{
-    Format, Renderer, Verbosity, approval_label, cache_percent_label, debug_mcp, debug_model,
-    debug_prompt_size, debug_reasoning, debug_start, fallback_env, find_project_config,
-    human_tokens, parse_budget_action, parse_budget_unit, parse_reasoning_setting, reasoning_label,
-    select_system_prompt, short, source_label, token_ratio,
+    Format, HostFacts, Renderer, Verbosity, approval_label, cache_percent_label, fallback_env,
+    find_project_config, human_tokens, parse_budget_action, parse_budget_unit,
+    parse_reasoning_setting, reasoning_label, reasoning_setting_label, select_system_prompt, short,
+    source_label, token_ratio,
 };
 
 #[cfg(test)]
@@ -100,9 +100,6 @@ struct Cli {
     /// (the reasoning, what each tool was asked and what it returned).
     #[arg(long, global = true, value_name = "LEVEL", default_value = "medium")]
     verbose: String,
-    /// Print startup details, model metadata, paths and extensions.
-    #[arg(long, global = true)]
-    debug: bool,
     /// What to do.
     #[command(subcommand)]
     command: Command,
@@ -471,7 +468,6 @@ async fn run_prompt(
     source: Source,
     args: RunArgs,
     verbosity: &str,
-    debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let spec = resolve_spec(
@@ -564,29 +560,6 @@ async fn run_prompt(
     let max_context = spec.capabilities.max_context;
     let compaction_threshold = config.compaction.threshold;
     let database = database_path();
-    // The startup views are built as text rather than printed: with a terminal
-    // they become a tab the person opens when they want them, and without one
-    // they are printed where the old code put them. Printed at startup they
-    // scroll away under the first answer, which is the moment they are wanted.
-    let mut debug_lines: Vec<String> = Vec::new();
-    if debug {
-        debug_lines.extend(debug_start(
-            style,
-            &spec,
-            &config,
-            source,
-            &database,
-            config_path.as_deref(),
-            args.session.as_deref(),
-            &catalog,
-        ));
-        debug_lines.extend(debug_model(
-            style,
-            &spec,
-            catalog.find(&spec.provider, &spec.model),
-        ));
-        debug_lines.extend(debug_reasoning(style, &effective));
-    }
     let store = Arc::new(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
@@ -608,21 +581,8 @@ async fn run_prompt(
         .await
         .map_err(|e| e.to_string())?,
     );
-    if debug {
-        debug_lines.extend(debug_prompt_size(style, &service, system_prompt_source));
-        debug_lines.extend(debug_mcp(style, &service));
-    }
     service.set_config_path(config_path);
     let pinned = Pinned::new();
-    // With a terminal the debug views are a tab; without one there is nowhere
-    // to switch to, so they are printed as they always were.
-    if args.interactive {
-        pinned.set_debug(debug_lines);
-    } else {
-        for line in &debug_lines {
-            eprintln!("{line}");
-        }
-    }
 
     let mut renderer = Renderer::new(
         if args.jsonl {
@@ -631,7 +591,6 @@ async fn run_prompt(
             Format::Text
         },
         verbosity,
-        debug,
         show_cost,
         style,
         Arc::clone(&pinned),
@@ -640,6 +599,18 @@ async fn run_prompt(
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
+    // The facts `/debug` reports that only the CLI knows: which file the
+    // catalogue came from, the database it opened and where the system prompt
+    // came from. Set once here, like the model name and the context window.
+    renderer.host_facts = Some(HostFacts {
+        catalogue_source: source,
+        database: database.clone(),
+        prompt_source: system_prompt_source,
+    });
+    // The effort the next turn will ask for, on the footer where the session
+    // and the totals are: nothing else on screen says it, and after a resume it
+    // is not the flag that was passed but what the config and the model resolve.
+    renderer.set_reasoning(reasoning_setting_label(&effective));
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
@@ -702,7 +673,6 @@ async fn resume_session(
     source: Source,
     args: ResumeArgs,
     verbosity: &str,
-    debug: bool,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let mut config = config;
@@ -753,29 +723,6 @@ async fn resume_session(
     let max_context = spec.capabilities.max_context;
     let compaction_threshold = config.compaction.threshold;
     let database = database_path();
-    // The startup views are built as text rather than printed: with a terminal
-    // they become a tab the person opens when they want them, and without one
-    // they are printed where the old code put them. Printed at startup they
-    // scroll away under the first answer, which is the moment they are wanted.
-    let mut debug_lines: Vec<String> = Vec::new();
-    if debug {
-        debug_lines.extend(debug_start(
-            style,
-            &spec,
-            &config,
-            source,
-            &database,
-            config_path.as_deref(),
-            Some(args.session.as_str()),
-            &catalog,
-        ));
-        debug_lines.extend(debug_model(
-            style,
-            &spec,
-            catalog.find(&spec.provider, &spec.model),
-        ));
-        debug_lines.extend(debug_reasoning(style, &effective));
-    }
     let store = Arc::new(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
@@ -797,21 +744,8 @@ async fn resume_session(
         .await
         .map_err(|e| e.to_string())?,
     );
-    if debug {
-        debug_lines.extend(debug_prompt_size(style, &service, system_prompt_source));
-        debug_lines.extend(debug_mcp(style, &service));
-    }
     service.set_config_path(config_path);
     let pinned = Pinned::new();
-    // With a terminal the debug views are a tab; without one there is nowhere
-    // to switch to, so they are printed as they always were.
-    if args.interactive {
-        pinned.set_debug(debug_lines);
-    } else {
-        for line in &debug_lines {
-            eprintln!("{line}");
-        }
-    }
     let mut renderer = Renderer::new(
         if args.jsonl {
             Format::Jsonl
@@ -819,7 +753,6 @@ async fn resume_session(
             Format::Text
         },
         verbosity,
-        debug,
         show_cost,
         style,
         Arc::clone(&pinned),
@@ -828,6 +761,12 @@ async fn resume_session(
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
+    renderer.host_facts = Some(HostFacts {
+        catalogue_source: source,
+        database: database.clone(),
+        prompt_source: system_prompt_source,
+    });
+    renderer.set_reasoning(reasoning_setting_label(&effective));
     let session = SessionKey::new(args.session);
     let interactive = args.interactive;
     let mut input = if interactive {

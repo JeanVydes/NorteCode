@@ -1,5 +1,17 @@
-//! The `--debug` views: what is running, what it can do and where it comes
-//! from, laid out as aligned panels.
+//! `/debug`: what the process knows about itself, laid out to be read.
+//!
+//! Plain text, one fact per line: no boxes, no fixed widths, nothing that
+//! breaks when the terminal is narrow or a path is long. A box needs a fixed
+//! width and a terminal does not have one, so a panel that lined up at 120
+//! columns wrapped into noise at 60. This is a list instead — indented under a
+//! heading — and it reads the same at any width.
+//!
+//! Everything here is built when it is asked for: the tools, the model the
+//! session is on and the servers that are connected are all things that change
+//! while the process runs, so a report captured at startup would be a snapshot
+//! of the wrong moment.
+
+use std::path::PathBuf;
 
 use norte_code_catalog::{Catalog, Model};
 
@@ -11,185 +23,47 @@ use super::names::{
 use super::{Config, ModelSpec, Path, Reasoning, Service, Source, Style};
 use super::{approval_label, source_label};
 
-/// One line of a debug panel: either a row or a rule.
-enum DebugRow {
-    /// A field or a heading, laid out in the panel's columns.
-    Row { left: String, right: String },
-    /// A horizontal rule that spans both columns.
-    Rule,
-}
-
-/// Collects rows and prints them as one aligned panel.
+/// The facts only the host knows, set once at startup.
 ///
-/// The columns are sized from the rows, so a long path never breaks the frame
-/// and every panel lines up whatever it holds. The frame is drawn only when the
-/// destination takes escapes: cloning it for a pipe or a log file would be
-/// noise, so those get the plain rows instead.
-struct DebugPanel {
-    left_title: &'static str,
-    right_title: &'static str,
-    rows: Vec<DebugRow>,
+/// The service cannot derive them: which file the catalogue came from, where
+/// the session database is, and whether the system prompt was given on the
+/// command line or read from the config are all decisions the CLI made before
+/// the service existed. They travel together so `/debug` can report them
+/// without the whole CLI being plumbed through every caller.
+#[derive(Clone, Debug)]
+pub(crate) struct HostFacts {
+    /// Where the catalogue was loaded from.
+    pub(crate) catalogue_source: Source,
+    /// The session database the process opened.
+    pub(crate) database: PathBuf,
+    /// Where the system prompt came from: `flag`, `config` or `default`.
+    pub(crate) prompt_source: &'static str,
 }
 
-impl DebugPanel {
-    fn new(left_title: &'static str, right_title: &'static str) -> Self {
-        Self {
-            left_title,
-            right_title,
-            rows: Vec::new(),
-        }
-    }
-
-    /// Adds a `left` to `right` row.
-    fn field(&mut self, left: impl Into<String>, right: impl Into<String>) -> &mut Self {
-        self.rows.push(DebugRow::Row {
-            left: left.into(),
-            right: right.into(),
-        });
-        self
-    }
-
-    /// Adds a rule, so two kinds of fact can be told apart.
-    fn rule(&mut self) -> &mut Self {
-        self.rows.push(DebugRow::Rule);
-        self
-    }
-
-    /// The panel as lines, one per row, ready to print or to keep.
-    ///
-    /// Returning them rather than writing them is what lets the same view be
-    /// printed at startup or shown as a tab.
-    fn render(&self, style: Style) -> Vec<String> {
-        let mut lines = Vec::new();
-        let left_width = self
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                DebugRow::Row { left, .. } => Some(display_width(left)),
-                DebugRow::Rule => None,
-            })
-            .chain(std::iter::once(display_width(self.left_title)))
-            .max()
-            .unwrap_or(0);
-        let right_width = self
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                DebugRow::Row { right, .. } => Some(display_width(right)),
-                DebugRow::Rule => None,
-            })
-            .chain(std::iter::once(display_width(self.right_title)))
-            .max()
-            .unwrap_or(0);
-        if !style.paints() {
-            for row in &self.rows {
-                match row {
-                    DebugRow::Row { left, right } => {
-                        lines.push(format!("  {} {right}", pad(left, left_width)));
-                    }
-                    DebugRow::Rule => {
-                        lines.push(format!(
-                            "  {}",
-                            style.dim("─".repeat(left_width + right_width + 3))
-                        ));
-                    }
-                }
-            }
-            return lines;
-        }
-        let top = format!(
-            "┌{}┬{}┐",
-            "─".repeat(left_width + 2),
-            "─".repeat(right_width + 2)
-        );
-        let middle = format!(
-            "├{}┼{}┤",
-            "─".repeat(left_width + 2),
-            "─".repeat(right_width + 2)
-        );
-        let bottom = format!(
-            "└{}┴{}┘",
-            "─".repeat(left_width + 2),
-            "─".repeat(right_width + 2)
-        );
-        lines.push(format!("  {}", style.faint(top)));
-        lines.push(format!(
-            "  {} {} {} {} {}",
-            style.faint("│"),
-            style.bold(pad_title(self.left_title, left_width)),
-            style.faint("│"),
-            style.bold(pad_title(self.right_title, right_width)),
-            style.faint("│")
-        ));
-        lines.push(format!("  {}", style.faint(middle.clone())));
-        for row in &self.rows {
-            match row {
-                DebugRow::Row { left, right } => {
-                    lines.push(format!(
-                        "  {} {} {} {} {}",
-                        style.faint("│"),
-                        style.dim(pad(left, left_width)),
-                        style.faint("│"),
-                        pad(right, right_width),
-                        style.faint("│")
-                    ));
-                }
-                DebugRow::Rule => lines.push(format!("  {}", style.faint(middle.clone()))),
-            }
-        }
-        lines.push(format!("  {}", style.faint(bottom)));
-        lines
-    }
-}
-
-/// How many columns a string occupies, ignoring escapes and refusing to split a
-/// character: the panel aligns on what the terminal shows, not on bytes.
-fn display_width(text: &str) -> usize {
-    crate::text::terminal(text).chars().count()
-}
-
-/// Pads a value to the column width it was measured at.
-fn pad(text: &str, width: usize) -> String {
-    let text = crate::text::terminal(text);
-    let shown = text.chars().count();
-    format!("{text}{}", " ".repeat(width.saturating_sub(shown)))
-}
-
-/// Pads a panel title, which is trusted chrome and is not escaped.
-fn pad_title(title: &str, width: usize) -> String {
-    format!(
-        "{title}{}",
-        " ".repeat(width.saturating_sub(title.chars().count()))
-    )
-}
-
-/// One `debug:` section title, so every block reads as a heading.
+/// One line of the report: a fact about something.
 ///
-/// The title is escaped like any other text, then wrapped in the codes: the
-/// escaping runs before the escapes are added, so the heading is not turned
-/// into `\u{1b}[1m`.
-fn debug_heading(style: Style, title: &str) -> String {
-    let title = crate::text::terminal(title);
-    // Both codes go on in one run: nesting `cyan(bold(..))` would escape the
-    // inner codes and print them instead of styling the title.
-    if style.paints() {
-        style.paint_raw("1;36", title.as_ref())
-    } else {
-        title.into_owned()
-    }
+/// The left side is the name and the right side is the value; they are joined
+/// with a colon rather than padded into columns, because padding needs a width
+/// and the terminal has one only at the moment it is drawn.
+fn fact(label: &str, value: impl std::fmt::Display) -> String {
+    format!("  {label}: {value}")
 }
 
-/// Prints the startup facts that make a run or resume reproducible.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) fn debug_start(
+/// The heading that opens a section.
+fn heading(style: Style, title: &str) -> String {
+    style.bold(title.to_owned())
+}
+
+/// The first line of every run: where it is, what it is on, where it writes.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn report_start(
     style: Style,
     spec: &ModelSpec,
     configuration: &Config,
-    source: Source,
-    database: &Path,
     config_path: Option<&Path>,
     session: Option<&str>,
     catalog: &Catalog,
+    host: Option<&HostFacts>,
 ) -> Vec<String> {
     let workspace =
         std::env::current_dir().map_or_else(|_| "?".to_owned(), |path| path.display().to_string());
@@ -234,11 +108,12 @@ pub(crate) fn debug_start(
     let max_iterations = configuration
         .max_iterations
         .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
-    let mut panel = DebugPanel::new("session", "value");
-    panel
-        .field("key", session.unwrap_or("(new; shown on first event)"))
-        .field("model", spec.label())
-        .field(
+
+    let mut lines = vec![
+        heading(style, "session"),
+        fact("key", session.unwrap_or("(new; shown on the first event)")),
+        fact("model", spec.label()),
+        fact(
             "provider",
             format!(
                 "{}{}",
@@ -246,14 +121,14 @@ pub(crate) fn debug_start(
                 if catalog.provider(&spec.provider).is_some() {
                     String::new()
                 } else {
-                    "  (not in catalogue; using config/fallback)".to_owned()
+                    "  (not in the catalogue; from the config)".to_owned()
                 }
             ),
-        )
-        .field("wire", spec.wire.family())
-        .field("approval", approval_label(configuration.approval_mode))
-        .field("iterations", &max_iterations)
-        .field(
+        ),
+        fact("wire", spec.wire.family()),
+        fact("approval", approval_label(configuration.approval_mode)),
+        fact("iterations", &max_iterations),
+        fact(
             "compaction",
             format!(
                 "{}%{}{}",
@@ -269,141 +144,107 @@ pub(crate) fn debug_start(
                     " (idle)"
                 }
             ),
-        )
-        .field(
+        ),
+        fact(
             "keep recent",
             format!(
                 "{} message(s) after a compaction",
                 configuration.compaction.keep_recent
             ),
-        )
-        .field(
-            "catalogue",
-            format!("{provider_count} providers · {model_count} models"),
-        )
-        .field("catalogue source", source_label(source))
-        .field(
+        ),
+        fact(
             "reasoning",
             format!(
                 "{} effort(s) available",
                 spec.capabilities.reasoning.efforts.len()
             ),
-        )
-        .field("workspace", &workspace)
-        .field("config", &config_label)
-        .field("project config", &project_config)
-        .field("database", database.display().to_string())
-        .field("sandbox", &sandbox);
-    panel.render(style)
-}
-
-/// Prints the MCP servers that connected, and the ones that did not.
-///
-/// A server that failed to start leaves its tools absent, so the reason is
-/// named here rather than left to the log.
-pub(crate) fn debug_mcp(style: Style, service: &Service) -> Vec<String> {
-    let connected = service.mcp_status();
-    let failures = service.mcp_failures();
-    if connected.is_empty() && failures.is_empty() {
-        return Vec::new();
-    }
-    let mut panel = DebugPanel::new("server", "tools");
-    for server in &connected {
-        panel.field(
-            format!("{} · {}", server.name, server.command),
-            server.tools.len().to_string(),
-        );
-        // One row per tool: the names are what a person asks the model for, and
-        // a count leaves them to be guessed.
-        for tool in &server.tools {
-            panel.field(format!("  {tool}"), "");
-        }
-    }
-    for (name, reason) in &failures {
-        panel.field(name.clone(), format!("failed: {reason}"));
-    }
-    panel.render(style)
-}
-
-/// Prints the static prompt size in characters. Tokens are provider-reported,
-/// so no estimate is made here.
-pub(crate) fn debug_prompt_size(style: Style, service: &Service, source: &str) -> Vec<String> {
-    let size = match service.prompt_size() {
-        Ok(size) => size,
-        Err(error) => {
-            return vec![style.yellow(format!("debug: could not measure the prompt: {error}"))];
-        }
-    };
-    let mut lines = vec![debug_heading(style, "debug: prompt material")];
-    let mut panel = DebugPanel::new("part", "size");
-    panel
-        .field("source", source)
-        .field("system", format!("{} chars", size.system_chars));
-    if let Some(path) = &size.project_path {
-        panel.field(
-            "project",
-            format!("{} chars ({})", size.project_chars, path.display()),
-        );
-    }
-    panel
-        .field("tools", format!("{} chars", size.tool_chars))
-        .field("total", format!("{} chars", size.total_chars()));
-    lines.extend(panel.render(style));
+        ),
+        String::new(),
+        heading(style, "paths"),
+        fact("workspace", &workspace),
+        fact("config", &config_label),
+        fact("project config", &project_config),
+        fact(
+            "database",
+            host.map_or_else(
+                || "(unknown)".to_owned(),
+                |host| host.database.display().to_string(),
+            ),
+        ),
+        fact("sandbox", &sandbox),
+        String::new(),
+        heading(style, "catalogue"),
+        fact(
+            "source",
+            host.map_or_else(
+                || "(unknown)".to_owned(),
+                |host| source_label(host.catalogue_source).to_owned(),
+            ),
+        ),
+        fact(
+            "models",
+            format!("{provider_count} provider(s) · {model_count} model(s)"),
+        ),
+    ];
+    lines.extend(model_lines(
+        style,
+        spec,
+        catalog.find(&spec.provider, &spec.model),
+    ));
     lines
 }
 
-/// Prints the selected model's capabilities and catalogue metadata.
-pub(crate) fn debug_model(style: Style, spec: &ModelSpec, model: Option<&Model>) -> Vec<String> {
+/// What the model itself can do, from the catalogue entry when there is one.
+pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>) -> Vec<String> {
     let capabilities = &spec.capabilities;
-    let mut lines = vec![debug_heading(style, "debug: model")];
-    let mut panel = DebugPanel::new("capability", "value");
-    panel.field("reference", spec.label());
+    let mut lines = vec![String::new(), heading(style, "model")];
     if let Some(model) = model {
         if !model.name.is_empty() {
-            panel.field("name", &model.name);
+            lines.push(fact("name", &model.name));
         }
         if let Some(family) = &model.family {
-            panel.field("family", family);
+            lines.push(fact("family", family));
         }
         if let Some(description) = &model.description {
-            panel.rule().field("about", description);
+            lines.push(fact("about", description));
         }
     } else {
-        panel.rule().field(
+        lines.push(fact(
             "catalogue",
-            "not found; the capabilities below are the config/fallback ones",
-        );
+            "not found; the values below are the config's",
+        ));
     }
-    panel
-        .rule()
-        .field(
-            "wire",
-            format!("{} · provider {}", spec.wire.family(), spec.provider),
-        )
-        .field("context", token_limit_label(capabilities.max_context))
-        .field("output", token_limit_label(capabilities.max_output))
-        .field(
-            "modalities",
-            format!(
-                "input {} · output {}",
-                modality_set(capabilities.modalities.input.keys()),
-                modality_set(capabilities.modalities.output.iter())
-            ),
-        )
-        .field("tools", tool_kind_set(&capabilities.tool_kinds))
-        .field("reasoning", reasoning_capabilities(&capabilities.reasoning))
-        .field(
-            "streaming",
-            capabilities
-                .streaming
-                .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned()),
-        )
-        .field("cache", cache_name(capabilities.cache))
-        .field("features", feature_set(&capabilities.features))
-        .field(
-            "structured",
-            structured_set(&capabilities.structured_output),
-        );
+    lines.push(fact(
+        "wire",
+        format!("{} · provider {}", spec.wire.family(), spec.provider),
+    ));
+    lines.push(fact("context", token_limit_label(capabilities.max_context)));
+    lines.push(fact("output", token_limit_label(capabilities.max_output)));
+    lines.push(fact(
+        "modalities",
+        format!(
+            "input {} · output {}",
+            modality_set(capabilities.modalities.input.keys()),
+            modality_set(capabilities.modalities.output.iter())
+        ),
+    ));
+    lines.push(fact("tools", tool_kind_set(&capabilities.tool_kinds)));
+    lines.push(fact(
+        "reasoning",
+        reasoning_capabilities(&capabilities.reasoning),
+    ));
+    lines.push(fact(
+        "streaming",
+        capabilities
+            .streaming
+            .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned()),
+    ));
+    lines.push(fact("cache", cache_name(capabilities.cache)));
+    lines.push(fact("features", feature_set(&capabilities.features)));
+    lines.push(fact(
+        "structured",
+        structured_set(&capabilities.structured_output),
+    ));
     if let Some(model) = model {
         let mut metadata = Vec::new();
         if let Some(status) = &model.status {
@@ -428,20 +269,107 @@ pub(crate) fn debug_model(style: Style, spec: &ModelSpec, model: Option<&Model>)
             metadata.push(format!("temperature {}", yes_no(temperature)));
         }
         if !metadata.is_empty() {
-            panel.rule().field("catalogue", metadata.join(" · "));
+            lines.push(fact("catalogue", metadata.join(" · ")));
         }
     }
-    lines.extend(panel.render(style));
     lines
 }
 
-/// Prints the reasoning setting the session is actually using.
-pub(crate) fn debug_reasoning(style: Style, reasoning: &Reasoning) -> Vec<String> {
-    let mut lines = vec![debug_heading(style, "debug: reasoning")];
-    let mut panel = DebugPanel::new("field", "value");
-    panel.field("effective", reasoning_setting_label(reasoning));
-    lines.extend(panel.render(style));
+/// The tools the model can reach, one per line, with what each is for.
+///
+/// Built from the registry rather than from a list kept beside it, so a tool
+/// that was registered a moment ago is in the report and a tool that failed to
+/// register is not. The first line of a description is enough to say what the
+/// tool is; the whole text is the model's, and it is long.
+pub(crate) fn report_tools(style: Style, service: &Service) -> Vec<String> {
+    let mut lines = vec![heading(style, "tools")];
+    match service.tools() {
+        Ok(registry) => {
+            let specs = registry.specs();
+            lines.push(fact("registered", specs.len()));
+            for spec in &specs {
+                let summary = spec
+                    .description
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                lines.push(format!(
+                    "  {} — {}",
+                    style.bold(spec.name.to_string()),
+                    style.dim(summary)
+                ));
+            }
+        }
+        Err(error) => lines.push(fact("error", error)),
+    }
     lines
+}
+
+/// The MCP servers, connected or not, with their tools.
+pub(crate) fn report_mcp(style: Style, service: &Service) -> Vec<String> {
+    let connected = service.mcp_status();
+    let failures = service.mcp_failures();
+    if connected.is_empty() && failures.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![heading(style, "mcp servers")];
+    for server in &connected {
+        lines.push(fact(
+            &server.name,
+            format!(
+                "{} · {} tool(s){}",
+                server.command,
+                server.tools.len(),
+                if server.active { "" } else { " (off)" }
+            ),
+        ));
+        for tool in &server.tools {
+            lines.push(format!("    {tool}"));
+        }
+        for warning in &server.filtered {
+            lines.push(format!("    {}", style.yellow(warning.clone())));
+        }
+    }
+    for (name, reason) in &failures {
+        lines.push(fact(&style.red(name.clone()), format!("failed: {reason}")));
+    }
+    lines
+}
+
+/// The static prompt size in characters. Tokens are provider-reported, so no
+/// estimate is made here.
+pub(crate) fn report_prompt(style: Style, service: &Service, source: &str) -> Vec<String> {
+    let size = match service.prompt_size() {
+        Ok(size) => size,
+        Err(error) => {
+            return vec![fact(
+                "prompt",
+                style.yellow(format!("could not measure it: {error}")),
+            )];
+        }
+    };
+    let mut lines = vec![heading(style, "prompt material")];
+    lines.push(fact("source", source));
+    lines.push(fact("system", format!("{} chars", size.system_chars)));
+    if let Some(path) = &size.project_path {
+        lines.push(fact(
+            "project",
+            format!("{} chars ({})", size.project_chars, path.display()),
+        ));
+    }
+    lines.push(fact("tools", format!("{} chars", size.tool_chars)));
+    lines.push(fact("total", format!("{} chars", size.total_chars())));
+    lines
+}
+
+/// The reasoning setting the session is actually using.
+pub(crate) fn report_reasoning(style: Style, reasoning: &Reasoning) -> Vec<String> {
+    vec![
+        heading(style, "reasoning"),
+        fact("effective", reasoning_setting_label(reasoning)),
+    ]
 }
 
 /// Names the reasoning setting in the words the command line accepts.
