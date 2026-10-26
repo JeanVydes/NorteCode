@@ -135,6 +135,15 @@ log file gets the plain rows instead of the box drawing.
 
 ### Fixed
 
+- A resumed session reports the cache share it already had. The session record
+  was never given back the two cache counters — the six other fields were — so a
+  resuming client computed the share over only the requests made since the
+  restart: a session whose prompts had almost all been served from cache showed
+  `cache 2.52%` against 5425 requests.
+- At `--verbose high`, a compaction shows the summary it produced. It is what
+  the fresh session was seeded with and the only record of what the history
+  became, so `CompactionFinished` now carries it and the renderer shows it
+  bounded and escaped, in a `markdown` block.
 - The working bar no longer leaves `waiting for the first token` on screen for
   the whole turn, with a stray copy under it. The bar repaints its own line in
   place, so every writer has to stop it first; two did not — the `thinking…`

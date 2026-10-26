@@ -82,12 +82,13 @@ impl Service {
             },
         )];
         match result {
-            Ok((_old, new)) => events.push(ServerEvent::new(
+            Ok(compaction) => events.push(ServerEvent::new(
                 request_id,
                 Some(key.clone()),
                 ServerEventKind::CompactionFinished {
                     compacted: true,
-                    north_session: Some(new.to_string()),
+                    north_session: Some(compaction.fresh.to_string()),
+                    summary: Some(compaction.summary),
                     error: None,
                 },
             )),
@@ -98,6 +99,7 @@ impl Service {
                     ServerEventKind::CompactionFinished {
                         compacted: false,
                         north_session: None,
+                        summary: None,
                         error: Some(error.to_string()),
                     },
                 ));
@@ -140,10 +142,12 @@ impl Service {
     /// The algorithm: summarise with the old transcript as the prefix, then
     /// seed a fresh Norte session with the summary, the todo list and the last
     /// `keep_recent` messages. The old session is never modified.
-    pub(super) async fn compact_core(
-        &self,
-        key: &SessionKey,
-    ) -> Result<(norte::SessionId, norte::SessionId), ServiceError> {
+    ///
+    /// The summary comes back with the new session id: it is what the fresh
+    /// session was seeded with, and it is the only record of what the history
+    /// became, so a client that shows it is showing the replacement rather than
+    /// guessing at it.
+    pub(super) async fn compact_core(&self, key: &SessionKey) -> Result<Compaction, ServiceError> {
         let (old, spec, _) = self.require_record(key)?;
         let engine = self.engine(&spec)?;
         let state = engine.session(old).await?;
@@ -224,7 +228,10 @@ impl Service {
         }
         self.todo.carry(old, fresh.id);
         self.persist(key).await?;
-        Ok((old, fresh.id))
+        Ok(Compaction {
+            fresh: fresh.id,
+            summary,
+        })
     }
 
     fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
@@ -294,6 +301,18 @@ the user's latest request. Do not invent facts and do not call tools. Output onl
 the summary.";
 
 /// The marker the compaction layer puts on the error that stops a request.
+/// What a compaction produced.
+///
+/// The summary is carried, not dropped: it is what the fresh session was seeded
+/// with, so a client that shows it is showing what the history became.
+#[derive(Clone, Debug)]
+pub(super) struct Compaction {
+    /// The fresh session, seeded with the summary.
+    pub(super) fresh: norte::SessionId,
+    /// The summary the model produced.
+    pub(super) summary: String,
+}
+
 pub(super) const COMPACTION_SAFE_POINT: &str = "norte-code: compaction safe point";
 
 /// The context a session currently occupies, in tokens.

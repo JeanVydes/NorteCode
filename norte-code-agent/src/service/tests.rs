@@ -2042,6 +2042,13 @@ fn usage(input: u64, output: u64, cost: Option<f64>) -> Usage {
     usage
 }
 
+/// The same, with the prompt tokens the provider served from its cache.
+fn cached_usage(input: u64, output: u64, cache_read: u64, cost: Option<f64>) -> Usage {
+    let mut usage = usage(input, output, cost);
+    usage.cache_read_tokens = Some(cache_read);
+    usage
+}
+
 async fn persistent_service(model: Arc<ScriptedModel>) -> (Arc<Service>, Arc<SqliteStore>) {
     persistent_service_with_config(config(), model).await
 }
@@ -2399,6 +2406,22 @@ async fn manual_compaction_links_the_new_session_and_keeps_the_old_one() {
     });
     let (compacted, north) = finished.expect("finished event");
     assert!(compacted);
+    // The summary travels with the event: it is what the fresh session was
+    // seeded with, and it is the only way a client can show what the history
+    // became. The model was scripted to answer it, so it must come back whole.
+    let summary = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::CompactionFinished { summary, .. } => summary.clone(),
+            _ => None,
+        })
+        .expect("the summary reaches the client");
+    assert_eq!(summary, "the user wants a compacted handoff");
+    // The events told the truth in order: it started, then it finished.
+    assert!(matches!(
+        events[0].kind,
+        ServerEventKind::CompactionStarted { .. }
+    ));
     let after = store
         .sessions()
         .await
@@ -4508,7 +4531,7 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
         ModelId::new("scripted").expect("model"),
     );
     let model = Arc::new(ScriptedModel::new(reference).turn(vec![
-        norte::StreamEvent::Usage(usage(120, 30, Some(0.02))),
+        norte::StreamEvent::Usage(cached_usage(120, 30, 90, Some(0.02))),
         norte::StreamEvent::TextDelta {
             index: 0,
             text: "first answer".to_owned(),
@@ -4547,12 +4570,17 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
                 input_tokens,
                 output_tokens,
                 requests,
+                cache_read_tokens,
                 ..
-            } => Some((*input_tokens, *output_tokens, *requests)),
+            } => Some((*input_tokens, *output_tokens, *requests, *cache_read_tokens)),
             _ => None,
         })
         .expect("the resume reports the session usage");
-    assert_eq!(stats, (120, 30, 1), "the spent usage comes back: {stats:?}");
+    assert_eq!(
+        stats,
+        (120, 30, 1, 90),
+        "the spent usage comes back, cache included: {stats:?}"
+    );
 }
 
 #[tokio::test]

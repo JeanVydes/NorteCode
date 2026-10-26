@@ -1217,10 +1217,16 @@ impl Renderer {
             ServerEventKind::CompactionFinished {
                 compacted,
                 north_session,
+                summary,
                 error,
             } => {
                 self.end_blocks();
                 if *compacted {
+                    // At `high`, what the history was replaced by: the summary
+                    // is what the fresh session holds, and reading it is the
+                    // only way to know whether the compaction kept what
+                    // mattered. It is bounded and escaped like any other text
+                    // the model wrote.
                     let detail = if self.verbosity.is_quiet() {
                         String::new()
                     } else {
@@ -1233,6 +1239,19 @@ impl Renderer {
                         self.style.green("✓ context compacted"),
                         self.style.dim(detail)
                     );
+                    if self.verbosity.at_least(Verbosity::High) {
+                        if let Some(summary) = summary {
+                            let escaped = crate::text::terminal(summary);
+                            let (text, truncated) = clip_text(&escaped, 8_000);
+                            self.code_block("markdown", &text);
+                            if truncated {
+                                eprintln!(
+                                    "  {}",
+                                    self.style.yellow("summary shortened for display")
+                                );
+                            }
+                        }
+                    }
                 } else {
                     let detail = error
                         .as_ref()

@@ -509,6 +509,13 @@ impl Service {
             record.unpriced = stats.unpriced;
             record.input_tokens = stats.input_tokens;
             record.output_tokens = stats.output_tokens;
+            // The cache counters are the session's, like the token totals, and
+            // live in the same record. They were the two the record never took
+            // back, so a resumed session reported a cache share over only the
+            // requests it had made since the restart: the footer showed 2.5%
+            // for a session whose prompts had almost all been served cached.
+            record.cache_read_tokens = stats.cache_read_tokens;
+            record.cache_write_tokens = stats.cache_write_tokens;
         }
         if let Err(error) = self.persist(key).await {
             tracing::warn!(session = %key, %error, "could not persist session counters");

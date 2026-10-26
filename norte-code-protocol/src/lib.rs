@@ -447,6 +447,12 @@ pub enum ServerEventKind {
         /// The new Norte session id, when one was created.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         north_session: Option<String>,
+        /// The summary the model produced, which is what the fresh session is
+        /// seeded with. Sent so a client can show what the history was replaced
+        /// by, which is the only way to judge a summary after the fact; a
+        /// client that does not care ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
         /// Why it failed, when it did. History is unchanged in that case.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
