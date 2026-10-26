@@ -135,6 +135,12 @@ log file gets the plain rows instead of the box drawing.
 
 ### Fixed
 
+- A session's cache share survives a compaction. Three places wrote the
+  session's counters from the turn's and none of them carried the two cache
+  ones: the write-back after a turn, the reload after a compaction, and the
+  summary request's own counters. The telemetry was always right — it records a
+  row per request straight from the provider — while the footer, which reads the
+  session record, showed the share of a session whose record had been zeroed.
 - A resumed session reports the cache share it already had. The session record
   was never given back the two cache counters — the six other fields were — so a
   resuming client computed the share over only the requests made since the

@@ -5044,3 +5044,104 @@ fn a_running_job_reports_the_time_it_has_run() {
         "a running job's time grows: {first} then {later}"
     );
 }
+
+#[tokio::test]
+async fn a_compaction_does_not_reset_the_session_cache_share() {
+    // Two paths wrote the session's counters: `settle` after a turn, and the
+    // block that reloads them when a compaction replaces the session behind the
+    // record. The second copied every counter but the two cache ones, so the
+    // first compaction zeroed a session's cache share and no later turn could
+    // bring it back — the record was the thing that was wrong.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    // Two turns that both hit the cache, then the summary request itself.
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::Usage(cached_usage(100, 10, 90, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "first".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn(vec![
+                norte::StreamEvent::Usage(cached_usage(80, 10, 70, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "second".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn_text("the handoff summary"),
+    );
+    let (service, _store) = persistent_service(model).await;
+
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "more".to_owned(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    let before = drain(
+        &service,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+    let cached = |events: &[ServerEvent]| {
+        events.iter().find_map(|event| match &event.kind {
+            ServerEventKind::SessionStats {
+                cache_read_tokens, ..
+            } => Some(*cache_read_tokens),
+            _ => None,
+        })
+    };
+    let before = cached(&before).expect("stats before");
+    assert!(before > 0, "the turns hit the cache: {before}");
+
+    drain(
+        &service,
+        ClientRequestKind::Compact {
+            session: key.clone(),
+        },
+    )
+    .await;
+
+    let after = drain(
+        &service,
+        ClientRequestKind::Resume {
+            session: key.clone(),
+        },
+    )
+    .await;
+    let after = cached(&after).expect("stats after");
+    assert!(
+        after >= before,
+        "a compaction summarises, it does not un-cache: {after} < {before}"
+    );
+}

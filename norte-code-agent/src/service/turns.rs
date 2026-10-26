@@ -444,6 +444,13 @@ impl Service {
                     stats.unpriced = record.unpriced;
                     stats.input_tokens = record.input_tokens;
                     stats.output_tokens = record.output_tokens;
+                    // The cache counters come across too. A compaction replaces
+                    // the session behind the record and the counters are reloaded
+                    // from it, so leaving these two out reset the session's cache
+                    // share to zero at every compaction — and a turn that
+                    // compacted kept reporting it as zero afterwards.
+                    stats.cache_read_tokens = record.cache_read_tokens;
+                    stats.cache_write_tokens = record.cache_write_tokens;
                 }
                 engine = self.engine_with_budget(&new_spec, budget.clone(), None)?;
                 current_nid = new_nid;

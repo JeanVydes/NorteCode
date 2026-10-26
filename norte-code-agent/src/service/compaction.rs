@@ -270,6 +270,12 @@ impl Service {
             }
             record.input_tokens += origin.usage.input_tokens.unwrap_or(0);
             record.output_tokens += origin.usage.output_tokens.unwrap_or(0);
+            // The summary request is a request like any other, so its prompt
+            // cache counts with the session's. It was the one counter this path
+            // did not carry, and the two paths that write the record have to
+            // agree or the session's cache share depends on which ran last.
+            record.cache_read_tokens += origin.usage.cache_read_tokens.unwrap_or(0);
+            record.cache_write_tokens += origin.usage.cache_write_tokens.unwrap_or(0);
             record.requests
         };
         let ledger = CostRecord {
