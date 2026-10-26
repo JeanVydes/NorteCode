@@ -2072,6 +2072,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_message_with_an_image_is_stored_and_comes_back() {
+        // The node's message is written to a JSON column, so a media part has to
+        // survive `serde_json`. It did not: an internally tagged `MediaSource`
+        // cannot serialize a `Blob`, so the commit failed with "cannot serialize
+        // tagged newtype variant" and the message that carried a pasted image was
+        // never stored. This is the store that does the encoding, so this is
+        // where the failure was visible.
+        use norte::{MediaKind, MediaPart, MediaSource, MimeType};
+
+        let store = SqliteStore::in_memory().expect("open");
+        let session_id = SessionId::new();
+        store
+            .commit(Commit {
+                session_id,
+                expected_version: None,
+                nodes: Vec::new(),
+                head: None,
+                phase: Phase::Idle,
+                turn: 0,
+                grants: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("create");
+
+        let mime = MimeType::new("image/png").expect("mime");
+        let blob = store.put(b"\x89PNG\r\n\x1a\n").await.expect("blob");
+        let message = Message::new(
+            norte::Role::User,
+            vec![
+                norte::Part::text("what is this?"),
+                norte::Part::Media(MediaPart::new(
+                    MediaKind::Image,
+                    MediaSource::Blob(blob),
+                    mime,
+                )),
+            ],
+        );
+        let node = Node::message(message.clone(), None);
+        store
+            .commit(Commit {
+                session_id,
+                expected_version: Some(1),
+                nodes: vec![node.clone()],
+                head: Some(node.id),
+                phase: Phase::Idle,
+                turn: 1,
+                grants: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("a node carrying an image is committed");
+
+        let read_back = store.node(node.id).await.expect("node");
+        assert_eq!(read_back.message, message, "the media part came back whole");
+    }
+
+    #[tokio::test]
     async fn reopens_the_same_database() {
         let directory = std::env::temp_dir().join(format!(
             "norte-code-sqlite-{}-{}",
