@@ -87,3 +87,70 @@ was exercised.
 - Provider probe runs for OpenAI, Anthropic and Gemini once keys are available.
 - A macOS runner in CI to execute the seatbelt path instead of only testing its
   profile.
+
+## Next work: the browser tool
+
+Two things are open, and the second depends on the first.
+
+**A CDP bug, reproduced live and not yet diagnosed.** `filter` and
+`max_elements` reach the host but not the tool: calling `extract_dom` with
+`max_elements: 3` on a page with thirteen elements returned thirteen, and with
+`filter: "sign"` returned all thirteen too — with the same `request_digest` in
+every call, which is the proof that the struct the tool saw was identical. The
+same fields work when the Rust tool is called directly from a test, so the loss
+is between the agent and the tool. Note the counter-example: `endpoint` and
+`highlight` do reach it, and a bad `endpoint` fails the call as it should. The
+next step is to print the argument document the executor is handed for one
+`extract_dom` turn — `emit` a debug line in `norte-tools`, or log
+`view.call.arguments` where the policy runs — and see which fields are there.
+Suspects, in order: the schema the host advertises (a stale vendored
+`norte-tools` in the dependency graph), a policy that rebuilds the arguments,
+and `serde` dropping unknown fields on the way in.
+
+**Then: a representation of the page, on demand.** `extract_dom` returns every
+visible `a, button, input, textarea, select, [role=button]` — 1841 elements and
+about 7500 tokens on a Wikipedia article — and the shape is flat and repetitive:
+five keys per element, `"input_type": null, "placeholder": null` on most of
+them, and the same page's worth of JSON sent again after every navigation. What
+it should be instead:
+
+- **A tree, not a list.** Send the DOM as a pruned tree: containers that hold
+  one child collapse, and a subtree that is not what was asked for becomes a
+  single summarised node — `section: 14 links` — that a later call expands by
+  a path or an id. That is the "redact the leaves, expand on demand" idea: the
+  model walks down only where it is going.
+- **Query, don't dump.** The filter is already there but coarse (a substring of
+  the label). What it wants: "every `a` with an `href`", "every `input`",
+  "anything containing X", "only what is inside `#main`". That is a selector or
+  a small query language over the tree, and it is what makes the first call
+  cheap: a model looking for a search box asks for the inputs.
+- **Only what is missing, and only what changed.** `href` for a link is one
+  short string that saves a click and a navigation; `disabled`, `checked`,
+  `selected` is one bool that saves a click that would fail. Both are absent
+  today. After a navigation, sending the whole page again is the same tokens
+  twice: a diff against the previous extraction would say what appeared and
+  what went.
+- **Say what was left out**, as `elements_matched` already does. The same rule
+  the rest of this repository follows: a bounded answer that does not admit it
+  is bounded is worse than a short one that does.
+
+The shape of the tool's output is the contract, so this is a change to
+`norte-tools` first and to the host only where it renders.
+
+## Next work: tabs in the CLI
+
+The client has no way to move between the things it is showing. Two levels,
+both missing:
+
+- **Session tabs** — the things inside one session: `chat`, the task list, and
+  debug information. Debug information is printed at startup today and should be
+  a tab the person opens, not a wall of text before the first prompt.
+- **Session switcher** — the sessions themselves: change to another, open a
+  new one, and explore the other sections the service already knows about.
+
+The protocol already carries `ListSessions`, `SwitchSession`, `SessionList` and
+`SessionSwitched`, and the service implements them; the CLI does not call any of
+them, so this is client work over a wire that is already there. Two things to
+respect while doing it: the footer row count is `INPUT_ROWS + 4` and the scroll
+region has a test that pins it (`7a45fb7`), and the renderer's todo widget and
+session status share the pinned row with the input editor.
