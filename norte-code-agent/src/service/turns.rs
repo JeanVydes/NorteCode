@@ -210,6 +210,39 @@ impl Service {
         } else {
             Vec::new()
         };
+        // A turn starts by committing the user's message and only then checks
+        // it against the model, so an attachment the model cannot take used to
+        // be committed first and rejected second: every later turn rebuilt the
+        // history, met the same part and failed the same way, which left the
+        // session unusable. A new model did not help, because the part is in the
+        // history, not in the request. The check therefore belongs here, before
+        // anything is committed: a part that cannot be sent is refused while
+        // there is still nothing to undo, and the session carries on.
+        if let Some((code, message)) = unsupported_attachment(&spec.capabilities, &attachments) {
+            // The session's own phase, not a made-up `Idle`: nothing was
+            // committed, so whatever it was before the turn it still is, and a
+            // session parked on an approval has to stay parked for the client
+            // that is looking at the approval it owes.
+            let phase = to_phase(state.phase);
+            self.set_phase(&key, phase).await;
+            return Ok(Box::pin(futures_util::stream::iter(vec![
+                ServerEvent::new(
+                    request_id,
+                    Some(key.clone()),
+                    ServerEventKind::TurnStarted { turn },
+                ),
+                ServerEvent::error(request_id, Some(key.clone()), code, message),
+                ServerEvent::new(
+                    request_id,
+                    Some(key),
+                    ServerEventKind::TurnFinished {
+                        turn,
+                        phase,
+                        committed: false,
+                    },
+                ),
+            ])));
+        }
         // The turn starts here, in the stream's prefix, so a client always sees
         // it begin before the transcript it replays. `run_turn` used to be the
         // only sender, and its event arrives after this prefix is read, which
@@ -1316,11 +1349,63 @@ impl Service {
             .await
             .map_err(|error| error.to_string())?;
         Ok(Some(MediaPart::new(
-            MediaKind::Image,
+            kind_of_mime(&attachment.mime),
             MediaSource::Blob(id),
             mime,
         )))
     }
+}
+
+/// What a media part's kind is, from the MIME type the client sent.
+///
+/// The client names a file's media type, not a [`MediaKind`], and the kind is
+/// what the capability check reads. Deriving it in one place is what keeps the
+/// check and the part that is actually sent in step: a JPEG declared `image/jpeg`
+/// is an image to both, and a `pdf` is a document to both.
+///
+/// Both callers use this: [`unsupported_attachment`] reads the kind to refuse a
+/// part the model cannot take, and [`Service::media_part`] stamps it on the part
+/// that is sent. A single derivation is what makes those two the same answer —
+/// it was `Image` unconditionally on the way out while the check derived the
+/// kind, so a PDF was checked as a document and sent as an image.
+fn kind_of_mime(mime: &str) -> MediaKind {
+    let top = mime.split_once('/').map_or(mime, |(top, _)| top);
+    match top {
+        "image" => MediaKind::Image,
+        "audio" => MediaKind::Audio,
+        "video" => MediaKind::Video,
+        _ => MediaKind::Document,
+    }
+}
+
+/// The first attachment this model cannot take, as an error code and a message
+/// naming it.
+///
+/// Checked against the model's own capabilities before the turn commits
+/// anything. The message names the modality and the model, because the two
+/// things a person needs to act are what was refused and what refused it; the
+/// way out — declare it under `model_overrides` or use an image-capable model —
+/// is in the message for the same reason.
+fn unsupported_attachment(
+    capabilities: &norte::Capabilities,
+    attachments: &[Attachment],
+) -> Option<(ErrorCode, String)> {
+    for attachment in attachments {
+        let modality = norte::Modality::from(kind_of_mime(&attachment.mime));
+        if capabilities.modalities.supports_input(modality) {
+            continue;
+        }
+        return Some((
+            ErrorCode::Capability,
+            format!(
+                "the model does not accept {modality:?} input, so `{}` was not sent; \
+                 use a model that takes {modality:?}, or declare `modalities.input` for \
+                 it under `model_overrides`",
+                attachment.name
+            ),
+        ));
+    }
+    None
 }
 
 /// Whether a tool's own result says it was let go of.
@@ -1432,5 +1517,23 @@ mod tests {
             1,
             "the text is what the model reads"
         );
+    }
+
+    #[test]
+    fn a_mime_type_names_the_kind_the_part_is_built_with() {
+        // The check and the part have to agree, and they did not: the part was
+        // built as `Image` whatever the file was, so a PDF was checked against
+        // the model as a document — the modality a `pdf` override names — and
+        // then sent as an image. A model that takes documents and not images
+        // would have passed the check and failed at the provider.
+        assert_eq!(kind_of_mime("image/png"), MediaKind::Image);
+        assert_eq!(kind_of_mime("image/jpeg"), MediaKind::Image);
+        assert_eq!(kind_of_mime("audio/wav"), MediaKind::Audio);
+        assert_eq!(kind_of_mime("video/mp4"), MediaKind::Video);
+        assert_eq!(kind_of_mime("application/pdf"), MediaKind::Document);
+        // A type with no subtype, and one with none at all: the whole string is
+        // read, and anything not image, audio or video is a document.
+        assert_eq!(kind_of_mime("application"), MediaKind::Document);
+        assert_eq!(kind_of_mime(""), MediaKind::Document);
     }
 }

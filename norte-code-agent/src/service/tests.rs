@@ -21,8 +21,8 @@ use norte::{
 };
 use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
 use norte_code_protocol::{
-    Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, Reasoning as ProtocolReasoning,
-    ReasoningScope,
+    Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
+    Reasoning as ProtocolReasoning, ReasoningScope,
 };
 use norte_code_store_sqlite::SqliteStore;
 use norte_testing::ScriptedModel;
@@ -4492,6 +4492,110 @@ async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
         )),
         "the attachment was accepted: {:?}",
         events.iter().map(|event| &event.kind).collect::<Vec<_>>()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
+    // The bug this pins down: the engine commits the user's message and only
+    // then checks it against the model, so a refused image used to land in the
+    // history first. Every later turn rebuilt that history and met the same
+    // part, which left the session unusable — and a model switch did not help,
+    // because the part is in the history, not in the request. The check now runs
+    // before anything is committed, so the session is untouched and the next
+    // message goes through.
+    let dir = std::env::temp_dir().join(format!("norte-refuse-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let photo = dir.join("photo.png");
+    std::fs::write(&photo, ONE_PIXEL_PNG).expect("png");
+
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    // Text in, text out: the model the catalogue lists as such, which is every
+    // model until the host says otherwise.
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("fine"));
+    let (service, _store) = persistent_service(model).await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    let refused = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "what is in this picture?".to_owned(),
+            attachments: vec![norte_code_protocol::Attachment {
+                path: photo.display().to_string(),
+                mime: "image/png".to_owned(),
+                name: "photo.png".to_owned(),
+            }],
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    // The refusal names the modality and reaches the client as a capability
+    // error, not as a provider failure: the wire was never asked.
+    let error = refused
+        .iter()
+        .find_map(|event| match &event.kind {
+            ServerEventKind::Error { code, message } => Some((*code, message.clone())),
+            _ => None,
+        })
+        .expect("an error event");
+    assert_eq!(error.0, ErrorCode::Capability, "{}", error.1);
+    assert!(error.1.contains("Image"), "{}", error.1);
+    assert!(error.1.contains("model_overrides"), "{}", error.1);
+    assert!(
+        refused.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )),
+        "the turn did not commit"
+    );
+
+    // The point of the whole thing: the session still works. A plain message
+    // after the refused attachment answers normally, which it could not do if
+    // the image had been committed — the history would refuse it every turn.
+    let after = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "never mind".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    assert!(
+        !after
+            .iter()
+            .any(|event| matches!(&event.kind, ServerEventKind::Error { .. })),
+        "the next turn answers: {:?}",
+        after.iter().map(|event| &event.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        after.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::TurnFinished {
+                committed: true,
+                ..
+            }
+        )),
+        "and it commits"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

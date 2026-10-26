@@ -91,6 +91,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An attachment the model cannot take is refused before anything is
+  committed, so a pasted image no longer poisons the session. The engine
+  committed the user's message and only then checked it against the model, so a
+  refused part landed in the history first: every later turn rebuilt that
+  history, met the same part and failed the same way, which left the session
+  unusable — and switching model did not help, because the part is in the
+  history, not in the request. The check now runs first, the error names the
+  modality and the model, and the session carries on.
+
 - The footer and `/debug` name the same reasoning effort. They disagreed because
   each resolved it separately: the footer used the setting from the command line
   and `/debug` the session's override, which is empty in a session started with
