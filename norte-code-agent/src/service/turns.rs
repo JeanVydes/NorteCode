@@ -522,6 +522,11 @@ impl Service {
                             () = tokio::time::sleep(delay) => true,
                         };
                         if !waited {
+                            // Cancelled while waiting to retry: the failure that
+                            // scheduled this retry already left the session
+                            // `Streaming`, and this turn is not coming back to
+                            // lower it.
+                            self.settle_streaming_to_idle(current_nid).await;
                             let phase = engine
                                 .session(current_nid)
                                 .await
@@ -566,7 +571,20 @@ impl Service {
 
             match outcome {
                 Ok(outcome) => {
-                    let phase = to_phase(outcome.session.phase);
+                    // A turn that parked keeps its phase; one that ended is
+                    // over, so nothing is streaming it any more. `Streaming`
+                    // here is a leftover an interceptor left behind by stopping
+                    // the turn after the input was appended. The failure arm
+                    // settles the same leftover, and the invariant is one rule
+                    // either way: the host never leaves a session it is not
+                    // streaming in `Streaming`.
+                    let settled = outcome.session.phase == norte::harness::Phase::Streaming
+                        && self.settle_streaming_to_idle(current_nid).await;
+                    let phase = if settled {
+                        norte_code_protocol::Phase::Idle
+                    } else {
+                        to_phase(outcome.session.phase)
+                    };
                     self.set_phase(key, phase).await;
                     emit(
                         tx,
@@ -628,6 +646,15 @@ impl Service {
                     } else {
                         message
                     };
+                    // The turn is over and no retry follows: the engine left the
+                    // session `Streaming` so `resume` could pick it up (FR-ERR-5),
+                    // but nothing in this process will. Left there, every
+                    // `/model` queues behind an idle boundary that never
+                    // arrives. Settle it here, where the decision that there is
+                    // no retry was just made — the retry path above `continue`s
+                    // and never reaches this arm, so the resume it depends on
+                    // still finds the session as it left it.
+                    self.settle_streaming_to_idle(current_nid).await;
                     let phase = engine
                         .session(current_nid)
                         .await

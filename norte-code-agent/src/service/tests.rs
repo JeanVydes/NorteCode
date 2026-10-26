@@ -934,6 +934,147 @@ async fn a_permanent_failure_is_not_retried() {
     assert!(scripted.requests().is_empty());
 }
 
+#[tokio::test]
+async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
+    // The provider fails for good: no retry is scheduled, and the turn ends
+    // with an error. The engine left the session `Streaming` so a resume could
+    // pick it up, but this process has no retry left and never lowers it — so
+    // before this was settled, `/model` queued behind an idle boundary the
+    // session could no longer reach: the switch was accepted and never applied.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let scripted = Arc::new(ScriptedModel::new(reference).turn_text("unused"));
+    let model = Arc::new(FlakyModel::new(
+        Arc::clone(&scripted),
+        1,
+        None,
+        ProviderErrorKind::QuotaExceeded,
+    ));
+    let (service, _store) = persistent_service_with_config(config(), model).await;
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("the failed turn still names its session");
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        ServerEventKind::TurnFinished {
+            committed: false,
+            ..
+        }
+    )));
+
+    // The switch goes through — and, being a boundary switch, applies now
+    // instead of being queued as a pending model.
+    let changed = drain(
+        &service,
+        ClientRequestKind::SetModel {
+            session: key.clone(),
+            model: "test/other".to_owned(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(changed[0].kind, ServerEventKind::ModelChanged { .. }),
+        "a failed turn must not leave the session busy: {changed:#?}"
+    );
+    let (_, spec, _) = service.require_record(&key).expect("record");
+    assert_eq!(spec.model, "other");
+}
+
+#[tokio::test]
+async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
+    // A process that dies mid-turn leaves `Phase::Streaming` in the store, and
+    // no process is streaming a session it just loaded. The repair commits the
+    // phase back to idle; it used to carry the session's own head, which a
+    // commit with no nodes rejects, so the write failed and the session stayed
+    // streamable-forever — the store, not just the directory row, was the thing
+    // `/model` read.
+    let (service, store) = persistent_service_with_config(config(), scripted_model()).await;
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("killed".to_owned()),
+        },
+    )
+    .await;
+    let key = created[0].session.clone().expect("session");
+    let (nid, _, _) = service.require_record(&key).expect("record");
+
+    // The head the repair must preserve, and a store left mid-stream. The
+    // session already exists (creating it committed once), so the write carries
+    // the version it holds.
+    let current = store.load(nid).await.expect("session");
+    let node = norte::harness::Node::message(Message::user("committed"), current.head);
+    let head = node.id;
+    store
+        .commit(norte::harness::Commit {
+            session_id: nid,
+            expected_version: Some(current.version),
+            nodes: vec![node],
+            head: Some(head),
+            phase: norte::harness::Phase::Streaming,
+            turn: 1,
+            grants: Vec::new(),
+            metadata: None,
+        })
+        .await
+        .expect("park the session mid-stream");
+
+    // A fresh service over the same store is what a relaunch looks like.
+    let reopened = Service::with_directory(
+        config(),
+        catalog(),
+        spec("scripted"),
+        Arc::new(ScriptedFactory {
+            model: scripted_model(),
+        }),
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        "system",
+    )
+    .await
+    .expect("reopen");
+
+    let session = store.load(nid).await.expect("session");
+    assert_eq!(
+        session.phase,
+        norte::harness::Phase::Idle,
+        "reopening must settle a session no process is streaming"
+    );
+    assert_eq!(
+        session.head,
+        Some(head),
+        "settling the phase must not drop the conversation"
+    );
+    let (_, _, phase) = reopened.require_record(&key).expect("record");
+    assert_eq!(phase, norte_code_protocol::Phase::Idle);
+}
+
+/// A model that answers with one text turn, for the tests that care about the
+/// session's state rather than about the answer.
+fn scripted_model() -> Arc<dyn Model> {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    Arc::new(ScriptedModel::new(reference).turn_text("done"))
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn the_command_sandbox_wraps_the_original_request_without_losing_it() {
@@ -2031,6 +2172,46 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
     assert!(changed, "and the queued switch was reported too");
 }
 
+/// An interceptor that lets `after` consults through and stops the next one.
+///
+/// The first consult of a turn runs before the input is appended, when the
+/// session is still idle; stopping there leaves it idle, which is not what most
+/// of these tests are about. `nth(2)` stops on the consult that follows
+/// `append_turn`, when the turn is already `Streaming` — the leftover this file
+/// asserts the host settles.
+struct StopAtConsult {
+    reason: String,
+    after: usize,
+    seen: std::sync::atomic::AtomicUsize,
+}
+
+impl StopAtConsult {
+    fn nth(after: usize, reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            after,
+            seen: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnInterceptor for StopAtConsult {
+    fn name(&self) -> &'static str {
+        "stop-at-consult"
+    }
+
+    async fn intercept(&self, _context: &InterceptionContext<'_>) -> norte::Result<Interception> {
+        let seen = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if seen < self.after {
+            return Ok(Interception::Continue);
+        }
+        Ok(Interception::Stop {
+            reason: self.reason.clone(),
+        })
+    }
+}
+
 /// An interceptor that stops the turn, the way a host's own policy would.
 struct Stopper {
     reason: String,
@@ -2113,6 +2294,92 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
         "a deliberate stop is not a failure"
     );
     assert_eq!(model.request_count(), 0, "the turn made no request");
+    // The turn is over and nothing is streaming it: a session left `Streaming`
+    // here would refuse every later `/model` with a queued switch that no
+    // boundary could apply.
+    let finished = events.iter().find_map(|event| match &event.kind {
+        ServerEventKind::TurnFinished { phase, .. } => Some(*phase),
+        _ => None,
+    });
+    assert_eq!(finished, Some(norte_code_protocol::Phase::Idle));
+}
+
+#[tokio::test]
+async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
+    // The stop here lands after `append_turn`, so the engine has already
+    // committed `Streaming` and hands the turn back as an `Ok` outcome — not an
+    // error. A host that only settled the failure path left this one streaming,
+    // and every `/model` after it queued behind a boundary that never came.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("never"));
+    // `with_interceptor` builds the service, so the store is made here and
+    // handed to both the interceptor's service and the assertions.
+    let store = Arc::new(SqliteStore::in_memory().expect("store"));
+    let service = Arc::new(
+        Service::with_directory(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            store.clone(),
+            store.clone(),
+            store.clone(),
+            "system",
+        )
+        .await
+        .expect("service")
+        .with_interceptor(Arc::new(StopAtConsult::nth(1, "the host said no"))),
+    );
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "work".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    assert_eq!(
+        events.iter().find_map(|event| match &event.kind {
+            ServerEventKind::TurnFinished { phase, .. } => Some(*phase),
+            _ => None,
+        }),
+        Some(norte_code_protocol::Phase::Idle),
+        "{events:#?}"
+    );
+    let (nid, _, _) = service.require_record(&key).expect("record");
+    assert_eq!(
+        store.load(nid).await.expect("session").phase,
+        norte::harness::Phase::Idle,
+        "the store, not just the reported phase, must be idle"
+    );
+
+    // The boundary is usable: the switch applies now instead of queueing.
+    let changed = drain(
+        &service,
+        ClientRequestKind::SetModel {
+            session: key.clone(),
+            model: "test/other".to_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        changed[0].kind,
+        ServerEventKind::ModelChanged { .. }
+    ));
 }
 
 #[tokio::test]

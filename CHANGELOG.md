@@ -99,6 +99,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - A list item the source puts on the next line stays there. A nested list opened
   with no break before it and put the inner bullet on the outer item's line; a
   blank line between items in the source printed as two.
+- A session whose turn ended in an error can switch models again. The engine
+  leaves a failed turn `Streaming` so `resume` can pick it up, which is right on
+  its own — but the host never lowered it, and a `Streaming` session has no idle
+  boundary: every later `/model` and `/provider` was accepted as queued and
+  applied by a turn boundary that could not arrive, in that process or the next.
+  The host now settles a session whose turn is over — on a permanent failure, on
+  a cancel, and on a turn an interceptor stopped — and settles one it finds
+  `Streaming` when it reopens it.
+- A session a process died in reopens idle. The repair wrote the phase with the
+  session's own head, which a commit that carries no nodes rejects, so the write
+  failed on every load and the store stayed `Streaming` for the life of the
+  session. The repair now leaves the head where it is, which is what a
+  phase-only commit means.
 
 ### Added
 

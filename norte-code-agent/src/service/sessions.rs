@@ -187,6 +187,54 @@ impl Service {
         Ok(())
     }
 
+    /// Puts a session no turn is streaming any more back to `Idle`.
+    ///
+    /// `Phase::Streaming` means "a turn is in flight": the engine commits it
+    /// before it asks the model, and only a committed answer lowers it. A turn
+    /// that ends without one — the provider failed with the retries spent, or
+    /// the process was killed — leaves the phase behind, and nothing visible
+    /// breaks, which is what makes it hard to see: the next turn starts from
+    /// `Idle | Streaming` either way. What does break is that `/model` and
+    /// compaction apply only at an idle boundary, so every later switch queues
+    /// behind a boundary the session can no longer reach.
+    ///
+    /// Best effort: a store that cannot be written is logged and not raised,
+    /// because the caller is already holding the failure this is called after.
+    /// Returns whether the session was actually settled.
+    pub(super) async fn settle_streaming_to_idle(&self, nid: norte::SessionId) -> bool {
+        let Ok(session) = self.store.load(nid).await else {
+            return false;
+        };
+        if session.phase != norte::harness::Phase::Streaming {
+            return false;
+        }
+        let commit = norte::harness::Commit {
+            session_id: nid,
+            expected_version: Some(session.version),
+            nodes: Vec::new(),
+            // No nodes, so no head: `Commit::validate` requires a head to be one
+            // of the commit's own nodes, and `None` means "leave it where it
+            // is", which is what this wants — settling a phase does not move
+            // the conversation.
+            head: None,
+            phase: norte::harness::Phase::Idle,
+            turn: session.turn,
+            grants: session.grants.clone(),
+            metadata: None,
+        };
+        match self.store.commit(commit).await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    session = %nid,
+                    %error,
+                    "could not settle a session whose turn ended to idle"
+                );
+                false
+            }
+        }
+    }
+
     /// The phase the session is in, and whether it needs a repair.
     ///
     /// Norte's store is the authority on phase: a parked tool or approval
@@ -196,28 +244,13 @@ impl Service {
     /// rewrite the directory row.
     async fn read_phase(&self, entry: &StoredSession) -> (ProtocolPhase, bool) {
         let stored_phase = entry.phase.clone();
-        let mut needs_repair = stored_phase == "streaming";
         let phase = match self.store.load(entry.north).await {
             Ok(session) if session.phase == norte::harness::Phase::Streaming => {
-                needs_repair = true;
-                let commit = norte::harness::Commit {
-                    session_id: entry.north,
-                    expected_version: Some(session.version),
-                    nodes: Vec::new(),
-                    head: session.head,
-                    phase: norte::harness::Phase::Idle,
-                    turn: session.turn,
-                    grants: session.grants.clone(),
-                    metadata: Some(session.metadata.clone()),
-                };
-                if let Err(error) = self.store.commit(commit).await {
-                    tracing::warn!(
-                        session = %entry.key,
-                        %error,
-                        "could not mark an interrupted session idle"
-                    );
-                }
-                ProtocolPhase::Idle
+                // The store outlived the streaming that wrote it, so the turn
+                // is not coming back in this process: settle it and tell the
+                // caller to rewrite the directory row from the same fact.
+                let _ = self.settle_streaming_to_idle(entry.north).await;
+                return (ProtocolPhase::Idle, true);
             }
             Ok(session) => to_phase(session.phase),
             Err(error) => {
@@ -235,7 +268,9 @@ impl Service {
                 }
             }
         };
-        (phase, needs_repair)
+        // A directory row that says `streaming` is stale whether or not the
+        // store agreed, so it is rewritten either way.
+        (phase, stored_phase == "streaming")
     }
 
     /// Writes one session back to the directory.
