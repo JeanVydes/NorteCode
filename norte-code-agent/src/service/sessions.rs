@@ -18,7 +18,7 @@ use super::EventStream;
 
 use super::Steered;
 use super::mapping::to_phase;
-use super::{ModelSpec, Service, ServiceError, Stats, StoredSession};
+use super::{Service, ServiceError, Stats, StoredSession};
 use crate::provider::ModelSpec as ProviderModelSpec;
 
 /// What the service remembers about a session.
@@ -144,7 +144,11 @@ impl Service {
         for entry in stored {
             let key = SessionKey::new(entry.key.clone());
             let spec =
-                match ModelSpec::from_catalog(&self.lock_config(), &catalog, &entry.model, None) {
+                // A session saved on a provider the catalogue does not list has
+                // to reopen on it: going straight to the catalogue dropped every
+                // such session onto the default model, so a `exa` session came
+                // back as whatever the config's default was.
+                match Service::default_spec_for(&self.lock_config(), &catalog, &entry.model) {
                     Ok(spec) => spec,
                     Err(error) => {
                         tracing::warn!(

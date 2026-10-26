@@ -67,6 +67,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A provider declared only in the config can be switched to. `/model` and
+  `/provider` resolved the reference against the catalogue and nothing else, so
+  a private endpoint — declared in `config.json` and nowhere else — was answered
+  with "unknown provider" while `run --provider` on the same name worked. The
+  same reference was resolved two ways. `/refresh` was fixed for this before,
+  and three paths were left: the model switch, the summariser
+  `config.compaction.model` names, and the reopening of a saved session.
+- A session saved on a config-only provider reopens on it. It fell back to the
+  configured default model, silently, so work done on a private endpoint came
+  back as whatever model was named last and the next message went somewhere the
+  work never was.
 - A detached call is a job the model can reach, whatever the process does next.
   It was registered only when a chunk of output went past, so a process that said
   nothing after the detach — which is most of them — left no job at all, and the

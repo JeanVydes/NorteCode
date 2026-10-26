@@ -388,7 +388,13 @@ impl Service {
         session: &SessionKey,
         model: &str,
     ) -> Result<ModelSpec, ServiceError> {
-        let spec = ModelSpec::from_catalog(&self.lock_config(), &self.catalog(), model, None)?;
+        // The catalogue first, a configured provider second, which is how a run
+        // resolves the same reference. Going straight to the catalogue failed on
+        // every provider the catalogue does not list — `exa`, `river`, any
+        // private endpoint declared in the config and nowhere else — so
+        // `/model exa/…` said the provider was unknown while `--provider exa`
+        // worked.
+        let spec = Service::default_spec_for(&self.lock_config(), &self.catalog(), model)?;
         self.ensure_model_supports_reasoning(session, &spec)?;
         self.ensure_model_supports_budget(session, &spec).await?;
         Ok(spec)

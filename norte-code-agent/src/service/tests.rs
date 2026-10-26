@@ -309,6 +309,184 @@ async fn a_session_reports_the_model_reference_it_is_on() {
 }
 
 #[tokio::test]
+async fn a_compaction_summariser_can_be_a_configured_provider() {
+    // `config.compaction.model` names the model that writes the summary, and it
+    // is free to be a private endpoint. Resolving it through the catalogue alone
+    // meant a session configured with one could not compact at all — and the
+    // failure would arrive exactly when the context was full and room had to be
+    // made, which is the worst moment to have none.
+    let mut config = config();
+    config.compaction.model = Some("private/model-x".to_owned());
+    config.providers.insert(
+        "private".to_owned(),
+        norte_code_config::ProviderConfig {
+            endpoint: Some("https://example.invalid/v1".to_owned()),
+            wire: Some(norte_code_config::WireKind::Chat),
+            api_key_file: Some(
+                std::env::temp_dir().join(format!("norte-code-service-{}-key", std::process::id())),
+            ),
+            ..norte_code_config::ProviderConfig::default()
+        },
+    );
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let service = Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+
+    let resolved = service
+        .summary_spec_for_a_test(&spec("scripted"))
+        .expect("the configured summariser resolves");
+    assert_eq!(
+        resolved.label(),
+        "private/model-x",
+        "the summariser is the one the config named, not the session's model"
+    );
+}
+
+#[tokio::test]
+async fn a_model_switch_accepts_a_configured_provider() {
+    // The same reference `run --provider private` resolves, asked the other way.
+    // `/model private/model-x` went straight to the catalogue — which does not
+    // list a private endpoint — and answered "unknown provider", so the provider
+    // that worked from the command line could not be switched to from the chat.
+    let mut config = config();
+    config.providers.insert(
+        "private".to_owned(),
+        norte_code_config::ProviderConfig {
+            endpoint: Some("https://example.invalid/v1".to_owned()),
+            wire: Some(norte_code_config::WireKind::Chat),
+            api_key_file: Some(
+                std::env::temp_dir().join(format!("norte-code-service-{}-key", std::process::id())),
+            ),
+            ..norte_code_config::ProviderConfig::default()
+        },
+    );
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let service = Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SetModel {
+            session: key,
+            model: "private/model-x".to_owned(),
+        },
+    )
+    .await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::Error { message, .. } if message.contains("unknown provider")
+        )),
+        "a configured provider resolves without the catalogue: {:?}",
+        events.iter().map(|event| &event.kind).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_session_saved_on_a_configured_provider_reopens_on_it() {
+    // The worst of the three, and the only silent one: a restored session whose
+    // model the catalogue does not list fell back to the default, so `exa` work
+    // came back as whatever model the config named last. The next message would
+    // go somewhere the work never was.
+    let dir = std::env::temp_dir().join(format!("norte-reopen-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let key_file = dir.join("private.key");
+    std::fs::write(&key_file, "sk-private\n").expect("key file");
+
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let (store, _service) = sqlite_service(&dir.join("sessions.db"), model).await;
+
+    // A session on file, on a provider the catalogue does not list.
+    let stored = norte_code_store_sqlite::StoredSession {
+        key: "exa-session".to_owned(),
+        north: norte::SessionId::new(),
+        title: None,
+        model: "private/model-x".to_owned(),
+        created_at: chrono::Utc::now(),
+        phase: "idle".to_owned(),
+        stats: serde_json::Value::Null,
+        denied_tools: Vec::new(),
+        allowed_tools: Vec::new(),
+        compacted_from: None,
+    };
+    store.save_session(&stored).await.expect("store");
+
+    // A service built over that directory has to bring it back on its own
+    // model, not on the default.
+    let config_text = format!(
+        r#"{{"providers":{{"private":{{"endpoint":"https://example.invalid/v1","wire":"chat","api_key_file":"{}"}}}}}}"#,
+        key_file.display()
+    );
+    let config = norte_code_config::Config::from_json(&config_text)
+        .expect("config")
+        .config;
+    let session_store: Arc<dyn Store> = store.clone();
+    let blobs: Arc<dyn BlobStore> = store.clone();
+    let directory: Arc<dyn SessionDirectory> = store.clone();
+    let model = Arc::new(ScriptedModel::new(ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    )));
+    let reopened = Service::with_directory(
+        config,
+        catalog(),
+        spec("scripted"),
+        Arc::new(ScriptedFactory { model }),
+        session_store,
+        blobs,
+        directory,
+        "system",
+    )
+    .await
+    .expect("service");
+
+    let key = SessionKey::new("exa-session".to_owned());
+    assert_eq!(
+        reopened.session_model(&key).as_deref(),
+        Some("private/model-x"),
+        "the session reopened on the model it was saved with"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
     // A private endpoint is declared in `config.json` and nowhere else, so the
     // catalogue does not list its provider. A run resolves one of those without

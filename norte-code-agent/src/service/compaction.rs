@@ -234,10 +234,23 @@ impl Service {
         })
     }
 
+    /// The summariser's spec, for a test: it is the one path where a configured
+    /// provider had to be resolved and was not.
+    #[cfg(test)]
+    pub(super) fn summary_spec_for_a_test(
+        &self,
+        session: &ModelSpec,
+    ) -> Result<ModelSpec, ServiceError> {
+        self.summary_spec(session)
+    }
+
     fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
         match &self.config().compaction.model {
+            // The same resolution a switch uses: a summariser can be a provider
+            // the catalogue does not list, and a compaction that failed on one
+            // would stop the session it was meant to make room for.
             Some(reference) => {
-                ModelSpec::from_catalog(&self.lock_config(), &self.catalog(), reference, None)
+                Service::default_spec_for(&self.lock_config(), &self.catalog(), reference)
             }
             None => Ok(session.clone()),
         }
