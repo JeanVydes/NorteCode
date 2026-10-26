@@ -8,6 +8,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A command's streamed output is drawn in a box of its own, grey and shaped
+  like a terminal session, instead of a `stdout ·` label on every line. It is
+  read while it runs:
+  ```
+  ╭
+  │ running 5 tests
+  │ test result: ok
+  ╰
+  ```
+  The box is per call and not per stream, because a command's stdout and stderr
+  are read by two tasks at once, so a label would name whichever arrived first.
 - A command's output is shown as it arrives. The renderer had no branch for
   `ToolOutput`, so a streaming `shell` handed its chunks to the wire and the
   client dropped every one of them: the tool looked stuck until it finished and

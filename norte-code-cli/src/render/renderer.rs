@@ -166,6 +166,18 @@ pub(crate) struct Renderer {
     /// its stdout line by line would otherwise show it twice, once as it ran and
     /// once in the result block right after.
     streamed_calls: BTreeSet<String>,
+
+    /// The call whose streamed output block is open, if any.
+    ///
+    /// A tool's output arrives in chunks, so the box is opened on the first one
+    /// and stays open across them, like the reasoning gutter does for a thought
+    /// that arrives in pieces. It is per call, not per stream: a command's
+    /// stdout and stderr are read by two tasks at once and arrive interleaved,
+    /// which is what a terminal shows.
+    output_gutter: Option<String>,
+
+    /// Whether the open output block has written a row yet.
+    output_line_start: bool,
 }
 
 impl Renderer {
@@ -218,6 +230,8 @@ impl Renderer {
             compaction_threshold: 1.0,
             pending_todos: BTreeMap::new(),
             streamed_calls: BTreeSet::new(),
+            output_gutter: None,
+            output_line_start: true,
         }
     }
 
@@ -368,6 +382,10 @@ impl Renderer {
         if let Some(mut bar) = self.loading_bar.take() {
             bar.stop();
         }
+        // A streamed output block is closed here too: whatever ends the turn or
+        // takes the next line has to leave the block finished, or its closing
+        // bracket lands after unrelated text.
+        self.end_output_gutter();
         self.end_reasoning();
         if self.block == Block::Answer {
             if !self.answer_buffer.is_empty() && self.verbosity.at_least(Verbosity::Medium) {
@@ -533,6 +551,82 @@ impl Renderer {
             }
         }
         let _ = std::io::stderr().flush();
+    }
+
+    /// Writes one chunk of a tool's streamed output, in a box of its own.
+    ///
+    /// The box is drawn like the reasoning gutter, because it is the same kind
+    /// of thing: text produced while something runs, held apart from the answer
+    /// so the two never read as one, and grey so it reads as machine output
+    /// rather than as something the model said.
+    ///
+    /// ```text
+    ///   ╭
+    ///   │ running 5 tests
+    ///   │ test result: ok
+    ///   ╰
+    /// ```
+    ///
+    /// No heading names the stream: the `→ shell` line above already names the
+    /// call, and a command's stdout and stderr are read by two tasks at once, so
+    /// a label per block would name whichever happened to arrive first.
+    ///
+    /// Chunk boundaries are not line boundaries — a reader hands over whatever a
+    /// pipe read returned — so a partial last line is left open for the next
+    /// chunk to finish. The chunk is assembled and written once: two writers
+    /// share this stream, and a frame written in pieces can be broken in half.
+    fn output_delta(&mut self, call_id: &str, text: &str) {
+        use std::fmt::Write as _;
+        let mut frame = String::new();
+        if self.output_gutter.as_deref() != Some(call_id) {
+            if let Some(close) = self.close_output_gutter() {
+                frame.push_str(&close);
+            }
+            let _ = writeln!(frame, "  {}", self.style.faint("╭"));
+            self.output_gutter = Some(call_id.to_owned());
+            self.output_line_start = true;
+        }
+        let mut rest = text;
+        while !rest.is_empty() {
+            if self.output_line_start {
+                let _ = write!(frame, "  {} ", self.style.faint("│"));
+                self.output_line_start = false;
+            }
+            if let Some(index) = rest.find('\n') {
+                let (line, tail) = rest.split_at(index);
+                frame.push_str(&self.style.dim(crate::text::terminal(line)));
+                frame.push('\n');
+                self.output_line_start = true;
+                rest = &tail[1..];
+            } else {
+                frame.push_str(&self.style.dim(crate::text::terminal(rest)));
+                rest = "";
+            }
+        }
+        self.last_char = None;
+        if !frame.is_empty() {
+            let mut out = std::io::stderr().lock();
+            let _ = out.write_all(frame.as_bytes());
+            let _ = out.flush();
+        }
+    }
+
+    /// The rows that close the open output box, if one is open.
+    fn close_output_gutter(&mut self) -> Option<String> {
+        self.output_gutter.take()?;
+        let newline = if self.output_line_start { "" } else { "\n" };
+        self.output_line_start = true;
+        Some(format!("{newline}  {}\n", self.style.faint("╰")))
+    }
+
+    /// Closes the open streamed-output box, if there is one.
+    fn end_output_gutter(&mut self) {
+        if let Some(frame) = self.close_output_gutter() {
+            let mut out = std::io::stderr().lock();
+            let _ = out.write_all(frame.as_bytes());
+            let _ = out.flush();
+            self.last_char = Some('\n');
+        }
     }
 
     /// Writes answer text, closing reasoning and separating it first.
@@ -701,6 +795,10 @@ impl Renderer {
                 // command that failed are the two things a person must not have
                 // to ask for.
                 self.stop_bar();
+                // A tool that streamed its output has an open box; its closing
+                // chunk usually closed it, but a call that died before sending
+                // one would leave the box open and the next line inside it.
+                self.end_output_gutter();
                 if self.verbosity.at_least(Verbosity::Medium) {
                     if *is_error {
                         eprintln!(
@@ -758,37 +856,26 @@ impl Renderer {
                 last,
                 ..
             } => {
+                // The closing chunk carries no bytes, so it is handled before
+                // the emptiness check: the block it ends has to be closed, and
+                // returning here would leave its bracket unprinted.
+                if *last {
+                    self.end_output_gutter();
+                }
                 if text.is_empty() {
                     return;
                 }
-                // A tool that streams says what it is doing while it does it:
-                // a command that takes a minute must report as it runs, not
-                // once it is over. The call is remembered so its finish does
-                // not print the same text again in the result block.
+                // The call is remembered so its finish does not print the same
+                // text a second time in the result block below.
                 self.streamed_calls.insert(call_id.clone());
                 // The bar owns the line under the message and is written by the
                 // same stream, so a streamed line stops it first, like every
                 // other writer.
-                if let Some(mut bar) = self.loading_bar.take() {
-                    bar.stop();
-                }
+                self.stop_bar();
                 self.end_reasoning();
                 self.block = Block::None;
-                let gutter = self.style.faint(format!("{stream} · "));
-                let mut first = true;
-                for line in crate::text::terminal(text).lines() {
-                    if first {
-                        eprintln!("  {gutter}{line}");
-                        first = false;
-                    } else {
-                        eprintln!("    {line}");
-                    }
-                }
-                self.last_char = Some('\n');
-                // The `last` chunk only says this stream closed, not that the
-                // call is over, so the bar is left to `ToolFinished`, which is
-                // the event that knows: the call reports and the turn may go on.
-                let _ = last;
+                let _ = stream;
+                self.output_delta(call_id, text);
             }
             _ => {}
         }
@@ -798,6 +885,12 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) fn streamed_calls(&self) -> Vec<String> {
         self.streamed_calls.iter().cloned().collect()
+    }
+
+    /// The call whose output box is open, for a test.
+    #[cfg(test)]
+    pub(crate) fn output_gutter(&self) -> Option<&str> {
+        self.output_gutter.as_deref()
     }
 
     /// The short result of a finished tool, when one is worth showing.

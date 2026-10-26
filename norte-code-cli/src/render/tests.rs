@@ -738,3 +738,71 @@ fn edit_preview_without_edits_is_not_shown() {
     assert!(edit_preview(Some(&arguments), None).is_none());
     assert!(edit_preview(None, None).is_none());
 }
+
+#[test]
+fn streamed_output_is_boxed_and_closed_by_a_chunk_with_no_bytes() {
+    // The closing chunk a tool sends carries no bytes, so it has to be acted on
+    // before emptiness is checked: returning early on it left the box open, and
+    // the `╰` landed after whatever printed next. The box also stays open across
+    // the partial lines a pipe read hands over.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    let output = |renderer: &mut Renderer, text: &str, last: bool| {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: "stdout".to_owned(),
+            text: text.to_owned(),
+            last,
+        });
+    };
+
+    // Two chunks that split a line, then the empty closing one.
+    output(&mut renderer, "running 5", false);
+    output(&mut renderer, " tests\nok\n", false);
+    assert!(
+        renderer.output_gutter().is_some(),
+        "the box is open while the tool writes"
+    );
+    output(&mut renderer, "", true);
+    assert!(
+        renderer.output_gutter().is_none(),
+        "an empty closing chunk still closes the box"
+    );
+}
+
+#[test]
+fn a_finished_call_closes_the_box_and_its_result_is_not_repeated() {
+    // The streamed text was already shown, so the finish must not print it
+    // again; and it has to close the box first, or the bracket is orphaned.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: "stdout".to_owned(),
+        text: "output\n".to_owned(),
+        last: false,
+    });
+    assert!(renderer.output_gutter().is_some());
+    renderer.tool_event(&ServerEventKind::ToolFinished {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        is_error: false,
+        error: None,
+        output: Some("output\n".to_owned()),
+        truncated: false,
+        duration_ms: 5,
+    });
+    assert!(
+        renderer.output_gutter().is_none(),
+        "the finish closes the box"
+    );
+    assert!(
+        renderer.streamed_calls().is_empty(),
+        "and its result was already shown, so it is not kept to repeat"
+    );
+}
