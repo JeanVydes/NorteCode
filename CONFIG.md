@@ -243,6 +243,9 @@ from the catalogue.
 | `confinement.sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
 | `confinement.sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
 | `confinement.sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |
+| `screenshots.enabled` | boolean | `true` | Attach a `browser_use` screenshot to the conversation so the model can look at it. |
+| `screenshots.max_dimension` | integer | `1568` | Longest side, in pixels, a screenshot keeps. A larger one is downscaled. |
+| `screenshots.max_bytes` | integer | `4000000` | The largest a screenshot may be after re-encoding, in bytes. |
 
 On Linux the workspace and extras are writable, the rest of the filesystem is
 read-only, `/tmp` is a private tmpfs and the process tree gets new namespaces.
@@ -253,6 +256,21 @@ missing platform binary fails closed; there is no unsandboxed fallback.
 for one run or resume. The two halves of `confinement` are separate: the
 workspace gate is a check on a tool's arguments and the sandbox is an operating
 system isolation of one child process.
+
+`browser_use` answers a `screenshot` with the PNG as base64 inside its result,
+and a tool result carries text only on the `chat` wire, so the image never
+reached the model: it was told the size and nothing else. With
+`screenshots.enabled` the host takes the capture out of the result, bounds it,
+stores it, and attaches it to the conversation as an image the model can look
+at — which works on every wire, because a *user* message carries an image on all
+of them. The bound is applied before anything is sent, so a full-page capture is
+downscaled rather than paid for.
+
+A model that does not take image input is not sent the image at all: the
+capture is dropped, with a warning, instead of being attached to a turn the
+model would refuse. `screenshots.enabled` set to `false` restores the previous
+behaviour, where the answer reports how large the capture was and the model
+never sees it.
 
 ## `mcpServers`
 

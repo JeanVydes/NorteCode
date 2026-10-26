@@ -8,6 +8,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A `browser_use` screenshot reaches the model as an image. The tool answers
+  with the PNG as base64 inside its result, and a tool result carries text only
+  on the `chat` wire, so the model was told how large the capture was and never
+  saw it. The host now takes the capture out of the result, bounds it, stores it
+  and attaches it as a user message — which carries an image on every wire. A
+  model that does not take image input is not sent the image at all: the capture
+  is dropped with a warning rather than attached to a turn the model would
+  refuse. `tools.screenshots.enabled`, `max_dimension` and `max_bytes` control
+  it; `enabled: false` restores the previous behaviour.
+
 - `model_overrides.<provider/model>.modalities` declares what a model accepts
   on input and produces on output. The catalogue is the source for a model it
   lists, but `river` and every other private endpoint named only under
@@ -90,6 +100,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   limit.
 
 ### Fixed
+
+- A browser screenshot is no longer stored twice. The capture used to stay in
+  the tool result as base64 *and* reach the model, so every later turn rebuilt
+  the history with the full PNG in it: on one measured session that was 3.5 MB
+  across twenty results, the largest a single half-megabyte node, read back on
+  every request and looked at by nobody. The field is removed from the result
+  once the capture is safely attached, and the text the model reads still says
+  how large the capture was.
 
 - An attachment the model cannot take is refused before anything is
   committed, so a pasted image no longer poisons the session. The engine

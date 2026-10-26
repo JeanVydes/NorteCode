@@ -30,6 +30,7 @@ norte-mcp = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
 norte-tools = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
 
 async-trait = "0.1.89"
+base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-core = "0.3.31"

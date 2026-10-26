@@ -18,6 +18,7 @@ norte-code-store-sqlite = { path = "../norte-code-store-sqlite" }
 norte-code-tools = { path = "../norte-code-tools" }
 
 async-trait = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }

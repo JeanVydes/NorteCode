@@ -19,6 +19,7 @@ mod models;
 mod prompt;
 mod questions;
 mod sandbox;
+mod screenshots;
 mod sessions;
 mod skills;
 mod steering;
@@ -63,6 +64,7 @@ use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 
+use self::screenshots::{ScreenshotInterceptor, Screenshots, publishing_tool};
 use self::sessions::SessionRecord;
 use self::steering::{Steered, Steering, SteeringInterceptor};
 use approvals::{ApprovalModePolicy, ApprovalRules};
@@ -181,6 +183,8 @@ pub struct Service {
     cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
     /// The steering messages the running turns have not reached.
     steering: Arc<Steering>,
+    /// The browser screenshots waiting to be attached to the next request.
+    screenshots: Arc<Screenshots>,
     /// The shell calls running in the background, by job id.
     jobs: Arc<JobRegistry>,
     /// The detach token of the call each session's turn is waiting on.
@@ -353,6 +357,7 @@ impl Service {
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             steering: Arc::new(Steering::default()),
+            screenshots: Arc::new(Screenshots::default()),
             jobs: Arc::new(JobRegistry::default()),
             detaches: Arc::new(DetachRegistry::default()),
             interceptors: Vec::new(),
@@ -462,6 +467,13 @@ impl Service {
                 let mut interceptors: Vec<Arc<dyn TurnInterceptor>> = vec![Arc::new(
                     SteeringInterceptor::new(Arc::clone(&self.steering)),
                 )];
+                // Read from the spec the engine was built with — never
+                // rebuilt, so the check the interceptor makes and the
+                // capabilities the model is handed are the same ones.
+                interceptors.push(Arc::new(ScreenshotInterceptor::new(
+                    Arc::clone(&self.screenshots),
+                    &spec.capabilities,
+                )));
                 interceptors.extend(self.interceptors.iter().cloned());
                 interceptors
             });
@@ -612,7 +624,23 @@ impl Service {
         self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
         self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
         self.register_tool(&mut tools, EditTool::new().into_declaration())?;
-        self.register_tool(&mut tools, BrowserTool::new().into_declaration())?;
+        // The browser's capture is promoted into a user message: the tool
+        // answers with the PNG as base64 in its result, and a tool result
+        // carries text only on the chat completions wire. The wrapper reads the
+        // capture out before the model sees the answer, and the interceptor
+        // below attaches it.
+        let browser = BrowserTool::new().into_declaration();
+        let browser = if self.config().tools.screenshots.enabled {
+            publishing_tool(
+                browser,
+                Arc::clone(&self.screenshots),
+                Arc::clone(&self.blobs),
+                screenshots::preprocessor(&self.config().tools.screenshots),
+            )
+        } else {
+            browser
+        };
+        self.register_tool(&mut tools, browser)?;
 
         self.register_shell(&mut tools)?;
         self.register_tool(
