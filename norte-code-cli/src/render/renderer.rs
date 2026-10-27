@@ -652,7 +652,7 @@ impl Renderer {
             suggestion,
             waiting: self.waiting,
             waiting_since: self.waiting_since,
-            scroll: 0,
+            scroll: self.pinned.transcript_scroll(),
         }
     }
 

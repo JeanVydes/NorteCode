@@ -143,6 +143,12 @@ pub(crate) struct Pinned {
     modal_open: AtomicBool,
     /// How far the panel is scrolled back from the end, in lines.
     modal_scroll: AtomicUsize,
+    /// How many lines the conversation is scrolled back from its end.
+    ///
+    /// Zero follows the tail. The reader moves it with the page keys and the
+    /// frame draws from it, and neither waits: a page key that blocked until
+    /// the next frame would stutter under a fast hand.
+    transcript_scroll: AtomicUsize,
     /// Which row of the completion menu is chosen.
     ///
     /// The menu is built where the registry is, but the choice is the
@@ -212,6 +218,7 @@ impl Default for Pinned {
             modal_open: AtomicBool::new(false),
             modal_scroll: AtomicUsize::new(0),
             completion_pick: AtomicUsize::new(0),
+            transcript_scroll: AtomicUsize::new(0),
         }
     }
 }
@@ -449,6 +456,32 @@ impl Pinned {
     /// How far the panel should be scrolled.
     pub(crate) fn modal_scroll(&self) -> usize {
         self.modal_scroll.load(Ordering::Relaxed)
+    }
+
+    /// Moves the conversation, in pages or in lines.
+    ///
+    /// Up goes back in time, which is the direction the keys point: what is
+    /// above is older. The offset counts from the end, so a line arriving does
+    /// not move what is being read — a person reading history stays where they
+    /// are, and one at the tail sees the newest line because zero is the tail.
+    pub(crate) fn scroll_transcript(&self, delta: isize) {
+        let at = self.transcript_scroll.load(Ordering::Relaxed);
+        let moved = if delta < 0 {
+            at.saturating_sub(delta.unsigned_abs())
+        } else {
+            at.saturating_add(delta.unsigned_abs())
+        };
+        self.transcript_scroll.store(moved, Ordering::Relaxed);
+    }
+
+    /// Puts the conversation back on its newest line.
+    pub(crate) fn follow_tail(&self) {
+        self.transcript_scroll.store(0, Ordering::Relaxed);
+    }
+
+    /// How far the conversation is scrolled back from its end.
+    pub(crate) fn transcript_scroll(&self) -> usize {
+        self.transcript_scroll.load(Ordering::Relaxed)
     }
 
     /// Moves the completion menu, and says whether there was one to move.
@@ -1077,6 +1110,14 @@ mod unix {
         }
     }
 
+    /// How far one page key moves the conversation, in lines.
+    ///
+    /// The reader does not know the height of the terminal — the frame does,
+    /// and it is the frame that clamps to what fits. A page is a screenful of an
+    /// ordinary terminal, which is the number a person expects from the key
+    /// whether their own screen is taller or shorter.
+    const SCROLL_PAGE: isize = 24;
+
     /// Reads keys and reports what they meant, until the terminal closes.
     ///
     /// It is the input half of the editor and nothing else: the frame is drawn
@@ -1138,6 +1179,34 @@ mod unix {
                                 } else if pinned.scroll_modal(delta) {
                                     continue;
                                 }
+                            }
+                            // The page keys belong to the conversation, and to
+                            // nothing else: they are the only way to read what
+                            // scrolled past, and the input has no use for them.
+                            // A page moves by a screenful, which is what the
+                            // key says; a line is what Ctrl does with it.
+                            match key.code {
+                                KeyCode::PageUp => {
+                                    pinned.scroll_transcript(-SCROLL_PAGE);
+                                    continue;
+                                }
+                                KeyCode::PageDown => {
+                                    pinned.scroll_transcript(SCROLL_PAGE);
+                                    continue;
+                                }
+                                KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    // Top of the conversation: as far back as
+                                    // it goes, which the frame clamps.
+                                    pinned.scroll_transcript(-10_000);
+                                    continue;
+                                }
+                                KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    // And back to the tail, which is the one key
+                                    // that resumes following it.
+                                    pinned.follow_tail();
+                                    continue;
+                                }
+                                _ => {}
                             }
                             // The completion menu owns the arrows while it is
                             // open. It has to be read before the arrows reach

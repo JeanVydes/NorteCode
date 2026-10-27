@@ -646,6 +646,32 @@ mod tests {
     }
 
     #[test]
+    fn a_new_line_does_not_move_what_is_being_read() {
+        // The offset counts from the end, which is what makes the view usable
+        // while an answer streams in: a person reading history stays on the
+        // line they were on, and one at the tail sees the newest line because
+        // zero is the tail.
+        let mut transcript = Transcript::new();
+        for index in 0..40 {
+            transcript.push(Entry::line(Kind::Answer, format!("line {index}")));
+        }
+        let width = 80;
+        // Twenty rows of a hundred, three lines back: the window is fixed to
+        // its offset from the end, wherever the end is.
+        let before = transcript_lines(&transcript, width);
+        let from_before = before.len() - 3;
+        assert_eq!(before[from_before - 20].1, "line 17", "twenty rows back");
+        transcript.push(Entry::line(Kind::Answer, "one more".to_owned()));
+        let after = transcript_lines(&transcript, width);
+        let from_after = after.len() - 3;
+        assert_eq!(
+            after[from_after - 20].1,
+            "line 18",
+            "and the same rows are on screen one line further in"
+        );
+    }
+
+    #[test]
     fn the_margin_is_what_says_who_is_talking() {
         // Colour alone cannot carry it: on a terminal with no colour every ink
         // is the same ink, and the two sides of a conversation would read as
