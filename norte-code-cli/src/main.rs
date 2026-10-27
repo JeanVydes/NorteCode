@@ -11,6 +11,7 @@
 
 mod app;
 mod approval;
+mod art;
 mod commands;
 mod commands_registry;
 mod input;

@@ -143,6 +143,12 @@ pub(crate) struct Pinned {
     modal_open: AtomicBool,
     /// How far the panel is scrolled back from the end, in lines.
     modal_scroll: AtomicUsize,
+    /// Which row of the completion menu is chosen.
+    ///
+    /// The menu is built where the registry is, but the choice is the
+    /// keyboard's: the reader moves it and the frame draws it, and neither
+    /// waits for the other.
+    completion_pick: AtomicUsize,
 }
 
 impl Default for PinnedInner {
@@ -205,6 +211,7 @@ impl Default for Pinned {
             modal_closed: AtomicBool::new(false),
             modal_open: AtomicBool::new(false),
             modal_scroll: AtomicUsize::new(0),
+            completion_pick: AtomicUsize::new(0),
         }
     }
 }
@@ -444,6 +451,37 @@ impl Pinned {
         self.modal_scroll.load(Ordering::Relaxed)
     }
 
+    /// Moves the completion menu, and says whether there was one to move.
+    ///
+    /// It wraps, because a list of a handful of rows is walked with one key: a
+    /// menu that stopped at its last row would need the other key to come back,
+    /// and the arrow that does nothing reads as broken.
+    pub(crate) fn move_completion(&self, delta: isize, rows: usize) -> bool {
+        if rows == 0 {
+            return false;
+        }
+        let at = self.completion_pick.load(Ordering::Relaxed);
+        let count = isize::try_from(rows).unwrap_or(isize::MAX);
+        let moved = (isize::try_from(at).unwrap_or(0) + delta).rem_euclid(count);
+        self.completion_pick
+            .store(usize::try_from(moved).unwrap_or(0), Ordering::Relaxed);
+        true
+    }
+
+    /// Which row of the completion menu is chosen.
+    pub(crate) fn completion_pick(&self) -> usize {
+        self.completion_pick.load(Ordering::Relaxed)
+    }
+
+    /// Puts the completion choice back on the first row.
+    ///
+    /// The menu is rebuilt from the line on every keystroke, so the choice goes
+    /// with it: a row picked under one prefix is not a row the next line offers,
+    /// and keeping it would complete to something nobody chose.
+    pub(crate) fn reset_completion_pick(&self) {
+        self.completion_pick.store(0, Ordering::Relaxed);
+    }
+
     /// Records whether a panel is on screen, called by whoever draws it.
     pub(crate) fn set_modal_open(&self, open: bool) {
         self.modal_open.store(open, Ordering::Relaxed);
@@ -553,7 +591,6 @@ mod unix {
     use tokio::sync::mpsc;
 
     use super::{Pinned, TodoItem, TodoStatus};
-    use crate::interaction::command_suggestion;
     use crate::style::Style;
     use crate::tabs::SessionTab;
 
@@ -1102,6 +1139,28 @@ mod unix {
                                     continue;
                                 }
                             }
+                            // The completion menu owns the arrows while it is
+                            // open. It has to be read before the arrows reach
+                            // the draft: they are the keys that walk the list,
+                            // and a list nobody can walk is a list nobody uses.
+                            // Every other key belongs to the line, which is what
+                            // rebuilds the menu and puts the choice back on the
+                            // first row.
+                            let rows =
+                                crate::interaction::completion_rows(&buffer.text(), buffer.cursor);
+                            if rows > 1 {
+                                match key.code {
+                                    KeyCode::Up => {
+                                        pinned.move_completion(-1, rows);
+                                        continue;
+                                    }
+                                    KeyCode::Down => {
+                                        pinned.move_completion(1, rows);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                            }
                             // A question owns the keyboard before anything
                             // else does: it is what the model is waiting on, and
                             // the draft is not what the person is working on
@@ -1192,6 +1251,19 @@ mod unix {
                                 }
                             }
                             if to_input {
+                                // What Tab writes is the row the menu has under
+                                // its cursor, resolved from the line as it is
+                                // now: the key about to be read may be the one
+                                // that changes it.
+                                let picked = if rows > 1 {
+                                    crate::interaction::completion_text(
+                                        &buffer.text(),
+                                        buffer.cursor,
+                                        pinned.completion_pick(),
+                                    )
+                                } else {
+                                    None
+                                };
                                 match handle_key(
                                     key,
                                     &mut buffer,
@@ -1199,6 +1271,7 @@ mod unix {
                                     &mut history_pos,
                                     &mut draft,
                                     sender,
+                                    picked.as_deref(),
                                 ) {
                                     KeyOutcome::Continue => redraw = true,
                                     KeyOutcome::Exit => break,
@@ -1262,6 +1335,7 @@ mod unix {
                         // this is the one place the two halves of the editor
                         // meet, and it is a copy rather than the buffer so
                         // neither waits for the other.
+                        pinned.reset_completion_pick();
                         pinned.set_draft(buffer.text(), buffer.cursor);
                     }
                 }
@@ -1388,6 +1462,7 @@ mod unix {
         history_pos: &mut Option<usize>,
         draft: &mut String,
         sender: &mpsc::UnboundedSender<EditorEvent>,
+        completion: Option<&str>,
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1559,9 +1634,12 @@ mod unix {
                 }
             }
             KeyCode::Tab => {
-                match command_suggestion(&buffer.text(), buffer.cursor) {
-                    Some(suggestion) if !suggestion.completion.is_empty() => {
-                        buffer.insert_text(&suggestion.completion);
+                // What Tab writes is the row the menu has under its cursor, and
+                // the first row when there is no menu: a completion that always
+                // took the first candidate made the arrows pointless.
+                match completion {
+                    Some(completion) if !completion.is_empty() => {
+                        buffer.insert_text(completion);
                         *history_pos = None;
                     }
                     _ => {
@@ -1908,6 +1986,7 @@ mod unix {
                 &mut position,
                 &mut draft,
                 &sender,
+                None,
             );
             assert!(position.is_some(), "up entered the history");
             assert_eq!(
@@ -1918,6 +1997,7 @@ mod unix {
                     &mut position,
                     &mut draft,
                     &sender,
+                    None,
                 ),
                 KeyOutcome::Continue,
                 "the history is still walking"
@@ -1933,6 +2013,7 @@ mod unix {
                     &mut position,
                     &mut draft,
                     &sender,
+                    None,
                 ),
                 KeyOutcome::FocusTabs
             );
@@ -1956,6 +2037,7 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                None,
             );
             assert_eq!(outcome, KeyOutcome::NextTab);
             assert_eq!(buffer.text(), "hola", "the draft keeps its text");
@@ -1968,6 +2050,7 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                None,
             );
             assert_eq!(outcome, KeyOutcome::ShowTab(SessionTab::Todo));
             assert_eq!(buffer.text(), "", "the digit never reaches the draft");
@@ -1981,6 +2064,7 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                None,
             );
             assert_eq!(buffer.text(), "2");
         }
@@ -2108,6 +2192,7 @@ mod unix {
                         &mut history_pos,
                         &mut draft,
                         &sender,
+                        None,
                     ),
                     KeyOutcome::Detach,
                     "{code:?} with {modifiers:?} asks to detach"
@@ -2131,6 +2216,7 @@ mod unix {
                     &mut history_pos,
                     &mut draft,
                     &sender,
+                    None,
                 ),
                 KeyOutcome::Detach,
                 "ctrl-shift-b stays an alias"
@@ -2146,6 +2232,7 @@ mod unix {
                     &mut history_pos,
                     &mut draft,
                     &sender,
+                    None,
                 ),
                 KeyOutcome::Continue,
                 "plain ctrl-b stays where readline put it"
@@ -2160,6 +2247,7 @@ mod unix {
                     &mut history_pos,
                     &mut draft,
                     &sender,
+                    None,
                 ),
                 KeyOutcome::Continue,
                 "plain g is still a letter"
@@ -2503,6 +2591,7 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                None,
             );
             assert_eq!(buffer.text(), "first\n");
             assert!(
@@ -2518,6 +2607,7 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                None,
             );
             assert_eq!(buffer.text(), "", "a plain enter clears the buffer");
             assert_eq!(
@@ -2528,7 +2618,11 @@ mod unix {
         }
 
         #[test]
-        fn tab_accepts_command_and_argument_suggestions() {
+        fn tab_writes_the_completion_it_is_given() {
+            // Tab does not look the candidate up: the menu owns the choice and
+            // hands it over, which is what makes the arrows mean something. A
+            // `handle_key` that searched the registry itself always took the
+            // first row, whatever the cursor was on.
             let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
             let mut history = Vec::new();
             let mut history_pos = None;
@@ -2542,10 +2636,11 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                Some("soning"),
             );
-            assert_eq!(buffer.text(), "/reasoning");
+            assert_eq!(buffer.text(), "/reasoning", "the given row is written");
 
-            buffer.insert_text(" ");
+            buffer.insert_text(" xh");
             handle_key(
                 KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
                 &mut buffer,
@@ -2553,8 +2648,34 @@ mod unix {
                 &mut history_pos,
                 &mut draft,
                 &sender,
+                Some("igh"),
             );
-            assert_eq!(buffer.text(), "/reasoning auto");
+            assert_eq!(
+                buffer.text(),
+                "/reasoning xhigh",
+                "and an argument's row is written the same way"
+            );
+        }
+
+        #[test]
+        fn tab_with_nothing_to_complete_indents() {
+            // No menu and no suggestion: the key is the indent it always was,
+            // and swallowing it would leave a person unable to line up a draft.
+            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut history = Vec::new();
+            let mut history_pos = None;
+            let mut draft = String::new();
+            let mut buffer = LineBuffer::default();
+            handle_key(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut history_pos,
+                &mut draft,
+                &sender,
+                None,
+            );
+            assert_eq!(buffer.text(), "    ");
         }
     }
 }

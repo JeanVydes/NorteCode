@@ -300,6 +300,30 @@ pub(crate) struct CommandSuggestion {
 /// `None` means there is nothing to offer: the text is not a command, or the
 /// cursor is not at the end of it, which is what keeps a completion from
 /// rewriting the middle of a line somebody is editing.
+/// How many rows the completion offers for a line.
+///
+/// The keymap asks this to know whether the arrows belong to the menu: one row
+/// is a hint and not a list, and taking the arrows for a choice nobody has to
+/// make is how a menu ends up feeling broken.
+pub(crate) fn completion_rows(text: &str, cursor: usize) -> usize {
+    crate::commands_registry::registry()
+        .candidates(text, cursor)
+        .len()
+}
+
+/// What Tab inserts for the row at `pick`.
+///
+/// `pick` is clamped to the rows that exist, because the keyboard sends it and
+/// the line it was chosen for may be gone: completing to a row that is no
+/// longer offered is worse than completing to the first one.
+#[must_use]
+pub(crate) fn completion_text(text: &str, cursor: usize, pick: usize) -> Option<String> {
+    let rows = crate::commands_registry::registry().candidates(text, cursor);
+    rows.get(pick.min(rows.len().saturating_sub(1)))
+        .map(|row| row.completion.clone())
+        .filter(|completion| !completion.is_empty())
+}
+
 pub(crate) fn command_suggestion(text: &str, cursor: usize) -> Option<CommandSuggestion> {
     let rows = crate::commands_registry::registry().candidates(text, cursor);
     if rows.is_empty() {
@@ -353,6 +377,11 @@ pub(crate) async fn interactive_loop(
     // blank until the first turn ends, and an empty row reads as nothing to
     // report rather than as not looked at yet.
     refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
+    // The conversation opens with the mark and a frame: a session that showed
+    // nothing until the first tool ran looked like a client that had not
+    // started.
+    renderer.greet();
+    renderer.draw()?;
     loop {
         let Some((text, attachments)) =
             read_repl_line(service, session.as_ref(), input, renderer, style).await?

@@ -186,6 +186,12 @@ impl Style {
         self.ratatui(BLUE, 39, "34")
     }
 
+    /// The widget style for a heading, which is the bold default ink.
+    #[must_use]
+    pub(crate) const fn bold_span() -> ratatui::style::Style {
+        ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::BOLD)
+    }
+
     /// The widget style for dimmed text, which is the muted colour.
     #[must_use]
     pub(crate) fn dim_span(self) -> ratatui::style::Style {

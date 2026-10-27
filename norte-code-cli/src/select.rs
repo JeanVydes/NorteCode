@@ -18,6 +18,8 @@
 //! entry exactly, so a provider or a session key that fell off the end of a
 //! bounded list is still two keystrokes away.
 
+use ratatui::layout::Rect;
+
 use crate::style::Style;
 
 /// How many rows the menu shows at once.
@@ -408,13 +410,10 @@ fn hint(filter: &str) -> String {
 /// that were passed in, and what nobody answered is [`Outcome::Left`], because
 /// whether that is an error or a default is not the menu's decision to make.
 ///
-/// A frame is drawn when something changed and not otherwise: the loop is
-/// blocked on reading a key, so there is nothing to redraw between them, and
-/// the terminal is one thing this process does not have to keep busy.
+/// The loop lives in [`draw`] because the screen has one: an animation needs a
+/// frame when nothing was pressed, so the frame and the key are the same loop.
 #[cfg(unix)]
 pub(crate) fn run(items: Vec<Item>, title: &str, style: Style) -> Result<Outcome, String> {
-    use ratatui::crossterm::event::{self, Event, KeyEventKind};
-
     if !crate::terminal::is_interactive() {
         return Err(format!(
             "`{title}` needs a terminal to be answered on; answer it on the command line instead"
@@ -422,98 +421,246 @@ pub(crate) fn run(items: Vec<Item>, title: &str, style: Style) -> Result<Outcome
     }
     let mut menu = Menu::new(items);
     let mut terminal = crate::terminal::Guard::enter()?;
-    draw(&mut terminal, &menu, title, style)?;
-    let outcome = loop {
-        let Ok(event) = event::read() else {
-            // A terminal that cannot be read is a terminal that cannot answer,
-            // which leaves the way Escape does.
-            break Outcome::Left;
-        };
-        let Event::Key(key) = event else {
-            continue;
-        };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        match menu.key(press_of(key)) {
-            Step::Continue => draw(&mut terminal, &menu, title, style)?,
-            Step::Accept => break chosen(&menu),
-            Step::Cancel => break Outcome::Left,
-        }
-    };
-    Ok(outcome)
+    draw(&mut terminal, &mut menu, title, style)
 }
 
-/// Draws one frame of the menu.
+/// Draws the menu, and runs it: one frame, then one key, until an answer.
 ///
-/// The layout is what decides where everything goes: the list takes what is
-/// left after the title and the hint, and the rows inside it are cut to the
-/// width the terminal has at that moment. Nothing here knows a number of
-/// columns or rows, which is what makes a resize one more frame.
+/// It is both things because the screen animates: a loop that only redrew on a
+/// key would freeze the mascot, and one that redrew on a clock alone would spin
+/// a core for a screen nobody is touching. A frame, a short wait, a key.
+///
+/// The layout is what decides where everything goes. Nothing here knows a
+/// number of columns or rows, which is what makes a resize one more frame.
 #[cfg(unix)]
 fn draw(
     terminal: &mut crate::terminal::Guard,
-    menu: &Menu,
+    menu: &mut Menu,
     title: &str,
     style: Style,
-) -> Result<(), String> {
-    use ratatui::layout::{Constraint, Layout};
+) -> Result<Outcome, String> {
+    use ratatui::layout::{Alignment, Constraint, Layout};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+    use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-    let (rows, above, below) = menu.window();
-    let hidden = above + below;
-    let mut state = ListState::default();
-    state.select(Some(menu.cursor));
-
-    // The rows are built here and drawn by the widget, so nothing in this
-    // function writes to the terminal: the frame is one buffer, and the buffer
-    // is what rustui diffs against the last one.
-    let listed: Vec<ListItem> = rows
-        .clone()
-        .map(|index| {
-            let item = &menu.items[menu.visible[index]];
-            let mut line = Line::from(vec![Span::raw(item.label.clone())]);
-            if let Some(note) = &item.note {
-                line.push_span(Span::styled(format!(" · {note}"), style.dim_span()));
+    let started = std::time::Instant::now();
+    let mut drawn: Option<u16> = None;
+    loop {
+        let tick = tick_of(started);
+        // The rows are built every frame, because the menu is walked between
+        // them: the window moved, or the filter did. Ratatui diffs the buffer,
+        // so a frame with the same rows writes nothing.
+        let (rows, above, below) = menu.window();
+        let hidden = above + below;
+        // The width is measured once and kept: it changes only when the window
+        // does, and a list that grew a column as the cursor moved would jump
+        // left and right under the eye.
+        let width = match drawn {
+            Some(width) if width != 0 => width,
+            _ => {
+                let widest = rows
+                    .clone()
+                    .map(|index| menu.items[menu.visible[index]].label.chars().count())
+                    .max()
+                    .unwrap_or(20)
+                    .saturating_add(6);
+                u16::try_from(widest).unwrap_or(60).clamp(20, 100)
             }
-            ListItem::new(line)
-        })
-        .collect();
-    // What the row says depends on what is left to say: a filter that matched
-    // nothing says so, a list longer than the window counts what it hid, and
-    // the rest of the time it names the keys.
-    let footer = if menu.is_empty() {
-        format!("nothing matches `{}`", menu.filter())
-    } else if hidden > 0 {
-        format!("… {hidden} more, type to narrow the list")
-    } else {
-        hint(menu.filter())
-    };
+        };
+        drawn = Some(width);
 
-    terminal.draw(|frame| {
-        let area = frame.area();
-        // What the menu needs, in the order it reads: the title, the rows, the
-        // hint. The rows take the slack and the others keep their one line.
-        let [title_area, list_area, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-        ])
-        .areas(area);
+        let mut state = ListState::default();
+        state.select(Some(menu.cursor));
+        let listed: Vec<ListItem> = rows
+            .clone()
+            .map(|index| {
+                let item = &menu.items[menu.visible[index]];
+                let mut line = Line::from(vec![Span::raw(item.label.clone())]);
+                if let Some(note) = &item.note {
+                    line.push_span(Span::styled(format!(" {note}"), style.dim_span()));
+                }
+                ListItem::new(line)
+            })
+            .collect();
+        // What the row says depends on what is left to say: a filter that
+        // matched nothing says so, a list longer than the window counts what it
+        // hid, and the rest of the time it names the keys.
+        let footer = if menu.is_empty() {
+            format!("nothing matches `{}`", menu.filter())
+        } else if hidden > 0 {
+            format!("… {hidden} more, type to narrow the list")
+        } else {
+            hint(menu.filter())
+        };
+
+        terminal.draw(|frame| {
+            let area = frame.area();
+            draw_art(frame, area, tick, style);
+            // The list is centred on the screen, with its title above it and
+            // the keys below: the eye finds the top of the block and reads
+            // down, which is what a prompt in the middle of a screen is for.
+            let [list_area, hint_area] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(Rect::new(
+                    area.x,
+                    art_rows(area),
+                    area.width,
+                    area.height - art_rows(area),
+                ));
+            let block = centred(
+                Rect::new(
+                    list_area.x,
+                    list_area.y + 2,
+                    list_area.width,
+                    list_area.height.saturating_sub(3),
+                ),
+                width,
+            );
+            frame.render_widget(
+                Paragraph::new(Line::styled(title.to_owned(), Style::bold_span()))
+                    .alignment(Alignment::Center),
+                Rect::new(area.x, block.y.saturating_sub(2), area.width, 1),
+            );
+            let list = List::new(listed)
+                .highlight_style(Style::selected())
+                .highlight_symbol("› ");
+            frame.render_stateful_widget(list, block, &mut state);
+            frame.render_widget(
+                Paragraph::new(Line::styled(footer, style.faint_span()))
+                    .alignment(Alignment::Center),
+                Rect::new(area.x, hint_area.y, area.width, 1),
+            );
+        })?;
+
+        // A frame was drawn; now the key, if one is waiting. The wait is what
+        // makes the animation possible without a thread of its own.
+        if let Some(press) = next_press(std::time::Duration::from_millis(crate::art::FRAME_MS))? {
+            match menu.key(press) {
+                Step::Continue => {}
+                Step::Accept => return Ok(chosen(menu)),
+                Step::Cancel => return Ok(Outcome::Left),
+            }
+        }
+    }
+}
+
+/// Which frame of the animation the clock is on.
+#[cfg(unix)]
+fn tick_of(started: std::time::Instant) -> usize {
+    usize::try_from(started.elapsed().as_millis() / u128::from(crate::art::FRAME_MS)).unwrap_or(0)
+}
+
+/// How many rows the art takes, which is what the list is drawn under.
+///
+/// The art gives way first: a terminal that is short loses the mascot, then
+/// the wordmark, before it loses a row of sessions.
+#[cfg(unix)]
+fn art_rows(area: Rect) -> u16 {
+    let mut rows = 1;
+    if area.height >= 30 {
+        rows += 7;
+    }
+    if area.height >= 20 {
+        rows += 2;
+    }
+    if area.height >= 24 {
+        rows += 6;
+    }
+    rows.min(area.height)
+}
+
+/// Draws the wordmark, the tagline and the mascot, centred.
+#[cfg(unix)]
+fn draw_art(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usize, style: Style) {
+    use ratatui::layout::{Alignment, Constraint, Layout};
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+
+    let [wordmark, tagline, _gap, bear] = Layout::vertical([
+        Constraint::Length(if area.height >= 24 { 6 } else { 0 }),
+        Constraint::Length(u16::from(area.height >= 20)),
+        Constraint::Length(1),
+        Constraint::Length(if area.height >= 30 { 7 } else { 0 }),
+    ])
+    .areas(Rect::new(area.x, area.y, area.width, art_rows(area)));
+
+    if wordmark.height > 0 {
+        let lines: Vec<Line> = crate::art::WORDMARK
+            .iter()
+            .map(|row| {
+                Line::styled(
+                    (*row).to_owned(),
+                    style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+                )
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), wordmark);
+    }
+    if tagline.height > 0 {
         frame.render_widget(
-            Paragraph::new(Line::styled(title.to_owned(), style.dim_span())),
-            title_area,
+            Paragraph::new(Line::styled(
+                crate::art::TAGLINE.to_owned(),
+                style.faint_span(),
+            ))
+            .alignment(Alignment::Center),
+            tagline,
         );
-        let list = List::new(listed)
-            .highlight_style(Style::selected())
-            .highlight_symbol("› ");
-        frame.render_stateful_widget(list, list_area, &mut state);
-        frame.render_widget(
-            Paragraph::new(Line::styled(footer, style.faint_span())).block(Block::new()),
-            hint_area,
-        );
-    })
+    }
+    // The widths are asked for rather than measured: a drawing is that wide by
+    // construction, and a row cut by the terminal is one the person cannot
+    // read. What does not fit is left out whole.
+    let room = usize::from(area.width);
+    if wordmark.height > 0 && crate::art::wordmark_width() <= room {
+        let lines: Vec<Line> = crate::art::WORDMARK
+            .iter()
+            .map(|row| {
+                Line::styled(
+                    (*row).to_owned(),
+                    style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+                )
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), wordmark);
+    }
+    if bear.height > 0 && crate::art::mascot_width() <= room {
+        let lines: Vec<Line> = crate::art::mascot(tick)
+            .into_iter()
+            .map(|row| Line::styled(row, style.dim_span()))
+            .collect();
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), bear);
+    }
+}
+
+/// The centred block a width is drawn in.
+#[cfg(unix)]
+fn centred(area: Rect, width: u16) -> Rect {
+    let width = width.min(area.width);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    Rect::new(x, area.y, width, area.height)
+}
+
+/// The next keystroke, or `None` when the wait ran out.
+///
+/// It is what lets the loop draw a frame without a key: waiting forever would
+/// freeze the animation, and polling with no wait would spin a core.
+#[cfg(unix)]
+fn next_press(wait: std::time::Duration) -> Result<Option<Press>, String> {
+    use ratatui::crossterm::event::{self, Event, KeyEventKind};
+
+    if !event::poll(wait).map_err(|error| error.to_string())? {
+        return Ok(None);
+    }
+    let Ok(event) = event::read() else {
+        // A terminal that cannot be read is one that cannot answer, which the
+        // caller reads as leaving.
+        return Ok(Some(Press::Escape));
+    };
+    let Event::Key(key) = event else {
+        return Ok(None);
+    };
+    if key.kind == KeyEventKind::Release {
+        return Ok(None);
+    }
+    Ok(Some(press_of(key)))
 }
 
 /// What Enter produced: a row, or the typed name when there was no row.

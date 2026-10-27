@@ -29,8 +29,13 @@ pub(crate) struct Modal {
     pub(crate) title: String,
     /// The lines, already plain text.
     pub(crate) lines: Vec<String>,
-    /// How many lines back from the end the panel is scrolled to.
-    pub(crate) scroll: usize,
+    /// Which line is at the top of the panel.
+    ///
+    /// It counts from the beginning, which is what a report is read from: the
+    /// first line is the first thing it says, and a panel that opened at its
+    /// own end would have the person scrolling backwards to find out what they
+    /// asked for.
+    pub(crate) top: usize,
 }
 
 impl Modal {
@@ -40,7 +45,7 @@ impl Modal {
         Self {
             title: title.into(),
             lines,
-            scroll: 0,
+            top: 0,
         }
     }
 
@@ -50,7 +55,7 @@ impl Modal {
         self.lines.is_empty()
     }
 
-    /// Scrolls the panel, clamping at both ends.
+    /// Moves the top of the panel, clamping at both ends.
     ///
     /// The frame calls this with the offset the keyboard asked for: what the
     /// reader sends is a number of lines, and what fits on screen is decided
@@ -58,7 +63,7 @@ impl Modal {
     #[cfg(test)]
     pub(crate) fn scroll_by(&mut self, delta: isize, height: usize) {
         let most = self.lines.len().saturating_sub(height);
-        self.scroll = self.scroll.saturating_add_signed(delta).min(most);
+        self.top = self.top.saturating_add_signed(delta).min(most);
     }
 
     /// Draws the panel, over everything else.
@@ -84,15 +89,11 @@ impl Modal {
             panel.height.saturating_sub(2),
         );
         let room = usize::from(inner.height);
-        // From the end, like every other view here: the newest line of a report
-        // is the one it was asked about.
+        // From the beginning: a report is read from the top, where the thing it
+        // is about is named. Opening at the end would have the person scrolling
+        // backwards to find out what they asked for.
         let shown = self.lines.len().min(room);
-        let from = self
-            .lines
-            .len()
-            .saturating_sub(shown)
-            .saturating_sub(self.scroll)
-            .min(self.lines.len().saturating_sub(shown));
+        let from = self.top.min(self.lines.len().saturating_sub(shown));
         let rows: Vec<Line> = self.lines[from..from + shown]
             .iter()
             .map(|line| {
@@ -137,7 +138,8 @@ impl Modal {
         // complete one.
         let hint = if self.lines.len() > room {
             format!(
-                " {} of {} · ↑↓ scroll · esc close ",
+                " {}-{} of {} · ↑↓ scroll · esc close ",
+                from + 1,
                 from + shown,
                 self.lines.len()
             )
@@ -214,12 +216,12 @@ mod tests {
         let mut modal = Modal::new("tools", (0..100).map(|n| format!("line {n}")).collect());
         // Down is towards the end, and there is nowhere past it.
         modal.scroll_by(-1_000, 10);
-        assert_eq!(modal.scroll, 0);
-        // And the count of what the panel holds is what bounds the other way.
+        assert_eq!(modal.top, 0, "there is nothing above the first line");
+        // And the count of what the panel holds bounds the other way.
         modal.scroll_by(10_000, 10);
         assert_eq!(
-            modal.scroll, 90,
-            "100 lines, ten shown: ninety back at most"
+            modal.top, 90,
+            "100 lines, ten shown: ninety is as far as the top goes"
         );
     }
 

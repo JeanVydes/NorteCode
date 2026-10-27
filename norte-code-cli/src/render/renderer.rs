@@ -433,6 +433,22 @@ impl Renderer {
         }
     }
 
+    /// Marks the top of a session in the conversation.
+    ///
+    /// The transcript is scrolled and the first line is what says where a
+    /// session begins: without it a resumed conversation starts mid-thought,
+    /// with no sign that anything above it was a different session.
+    pub(crate) fn greet(&mut self) {
+        if matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        self.transcript.push(crate::transcript::Entry::line(
+            crate::transcript::Kind::Notice,
+            crate::art::MARK,
+        ));
+        self.transcript.close();
+    }
+
     pub(crate) fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
         self.session = event.session.as_ref().map(ToString::to_string);
         if self.pinned.take_resized() {
@@ -573,7 +589,7 @@ impl Renderer {
         // what it means in rows is the frame's business, because the frame is
         // what knows how many of them fit.
         if let Some(modal) = self.modal.as_mut() {
-            modal.scroll = self.pinned.modal_scroll();
+            modal.top = self.pinned.modal_scroll();
         }
         let mut state = self.ui_state();
         let modal = self.modal.clone();
@@ -598,7 +614,7 @@ impl Renderer {
     /// translation between them.
     fn ui_state(&self) -> crate::app::State {
         let (input, cursor) = self.pinned.draft();
-        let completion = Self::completion_for(&input, cursor);
+        let completion = self.completion_for(&input, cursor);
         // The hint speaks only when no menu is up: an open menu is already
         // saying what may be typed, and a row repeating the first candidate
         // under it would say the same thing twice.
@@ -630,7 +646,7 @@ impl Renderer {
     /// It is built here and not in the widget because the registry is not the
     /// widget's to read: a widget that asked would need the command registry,
     /// and the frame would stop being a function of the state it was given.
-    fn completion_for(text: &str, cursor: usize) -> Option<crate::app::Completion> {
+    fn completion_for(&self, text: &str, cursor: usize) -> Option<crate::app::Completion> {
         let rows = crate::commands_registry::registry().candidates(text, cursor);
         // One candidate is not a menu: the hint says what Tab would write, and
         // opening a list for a single row would take the arrow keys away from
@@ -650,7 +666,7 @@ impl Renderer {
                     }
                 })
                 .collect(),
-            cursor: 0,
+            cursor: self.pinned.completion_pick().min(rows.len() - 1),
         })
     }
 
