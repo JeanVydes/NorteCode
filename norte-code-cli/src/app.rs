@@ -681,7 +681,26 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
                     draw = draw.fg(style.muted_color());
                 }
                 crate::markdown::Emphasis::Link => draw = draw.fg(style.blue_color()),
-                crate::markdown::Emphasis::Plain => {}
+                // A strike is the line-through and nothing else: it is an
+                // emphasis on the text, not a different kind of text.
+                crate::markdown::Emphasis::Strike => {
+                    draw = draw.add_modifier(Modifier::CROSSED_OUT);
+                }
+                // An underline keeps the ink and adds the line under it, the
+                // way bold keeps the ink and adds weight.
+                crate::markdown::Emphasis::Underline => {
+                    draw = draw.add_modifier(Modifier::UNDERLINED);
+                }
+                // A table's header is its column names: bold, in the answer's
+                // own ink, so it reads as a label and not as another colour.
+                crate::markdown::Emphasis::TableHead => {
+                    draw = draw.add_modifier(Modifier::BOLD);
+                }
+                // A body cell is ordinary text: the padding and the `│` between
+                // cells are what draw the table, and a colour of its own would
+                // fight the prose around it. So it takes the same arm as plain
+                // text, which is what it is.
+                crate::markdown::Emphasis::TableCell | crate::markdown::Emphasis::Plain => {}
             }
             Span::styled(run.text.clone(), draw)
         })

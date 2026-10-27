@@ -8,6 +8,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A model's answer is drawn with more of its markdown: `~~struck~~` and
+  `<u>underlined</u>` now render, and a pipe table is drawn as aligned columns
+  with the header in bold and a rule under it, instead of a wall of pipes. The
+  width is the widest cell in each column, so a cell that is longer than its
+  header is not wrapped. A line with a pipe in it and no separator under it is
+  still prose, so a shell pipeline in an answer is not read as a table.
+
 - `/tools` and `/mcp` are panels a person acts on, not text to read and
   dismiss. The tools list is where a tool's rule is decided: Enter walks the row
   through its three states — allow, deny, and "ask again", which forgets the

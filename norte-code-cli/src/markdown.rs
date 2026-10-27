@@ -47,6 +47,14 @@ pub(crate) enum Emphasis {
     Fence,
     /// A link's target, which is shown but is not what the link reads as.
     Link,
+    /// `~~struck~~`: text a person drew a line through.
+    Strike,
+    /// `<u>underlined</u>`: an underline, which markdown has no marker for.
+    Underline,
+    /// A table's header cell.
+    TableHead,
+    /// A table's body cell.
+    TableCell,
 }
 
 /// One run of text in one emphasis.
@@ -121,8 +129,12 @@ pub(crate) fn render(text: &str) -> Vec<Rendered> {
     let mut out = Vec::new();
     // The fence that is open, if any: its backtick run and its language.
     let mut fence: Option<(String, String)> = None;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut index = 0;
 
-    for raw in text.split('\n') {
+    while index < lines.len() {
+        let raw = lines[index];
+        index += 1;
         // A quote is marked per line, so its depth is read before anything else
         // and the rest of the line is read as what it quotes.
         let mut line = raw;
@@ -156,9 +168,130 @@ pub(crate) fn render(text: &str) -> Vec<Rendered> {
             fence = Some((marker, language));
             continue;
         }
+        // A table: a row of cells followed by a separator row. It is read here
+        // and not per line because no single line says it is a table — the
+        // separator under the header is what does.
+        if is_table_row(line)
+            && lines
+                .get(index)
+                .is_some_and(|next| is_table_separator(next))
+        {
+            let header = cells(line);
+            index += 1;
+            // Every row is read before any is drawn, because a column is as wide
+            // as its widest cell and the body can be wider than the header.
+            let mut body: Vec<Vec<String>> = Vec::new();
+            while index < lines.len() && is_table_row(lines[index]) {
+                body.push(cells(lines[index]));
+                index += 1;
+            }
+            let widths = widths_of(&header, &body);
+            out.extend(table_rows(&header, &widths, true));
+            // The rule under the header, drawn as the separator a terminal has
+            // room for: a run of dashes per column, joined at the cells.
+            out.push(table_rule(&widths));
+            for row in &body {
+                out.extend(table_rows(row, &widths, false));
+            }
+            continue;
+        }
         out.push(block(line, depth));
     }
     out
+}
+
+/// Whether a line looks like a table row: it has a pipe with something on one
+/// side of it, which is what tells a table from a line of prose that happens to
+/// hold a `|`.
+#[must_use]
+fn is_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty() && trimmed.contains('|')
+}
+
+/// Whether a line is a table's separator: every cell is dashes, with optional
+/// colons for alignment, and at least one dash somewhere.
+#[must_use]
+fn is_table_separator(line: &str) -> bool {
+    if !line.contains('-') {
+        return false;
+    }
+    let row = line.trim().trim_matches('|');
+    let mut saw_cell = false;
+    for cell in row.split('|') {
+        let cell = cell.trim();
+        if cell.is_empty() {
+            continue;
+        }
+        saw_cell = true;
+        let body = cell.strip_prefix(':').unwrap_or(cell);
+        let body = body.strip_suffix(':').unwrap_or(body);
+        if body.is_empty() || !body.chars().all(|c| c == '-') {
+            return false;
+        }
+    }
+    saw_cell
+}
+
+/// A table row's cells, trimmed, with the leading and trailing pipe dropped.
+#[must_use]
+fn cells(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect()
+}
+
+/// The width of each column, in columns, from the widest cell in it.
+///
+/// The header and every body row are measured: a column is as wide as the
+/// widest thing in it, and a body cell wider than its header is the common case.
+#[must_use]
+fn widths_of(header: &[String], body: &[Vec<String>]) -> Vec<usize> {
+    let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
+    for row in body {
+        for (at, cell) in row.iter().enumerate() {
+            let width = cell.chars().count();
+            if at < widths.len() {
+                widths[at] = widths[at].max(width);
+            } else {
+                widths.push(width);
+            }
+        }
+    }
+    widths
+}
+
+/// One table row as a rendered line, with each cell padded to its column.
+#[must_use]
+fn table_rows(row: &[String], widths: &[usize], header: bool) -> Vec<Rendered> {
+    let mut runs: Vec<Run> = Vec::new();
+    for (at, cell) in row.iter().enumerate() {
+        let width = widths.get(at).copied().unwrap_or(0);
+        if header {
+            runs.push(Run::styled(Emphasis::TableHead, format!("{cell:<width$}")));
+        } else {
+            runs.push(Run::styled(Emphasis::TableCell, format!("{cell:<width$}")));
+        }
+        if at + 1 < row.len() {
+            runs.push(Run::styled(Emphasis::TableHead, " │ "));
+        }
+    }
+    vec![Rendered { runs, indent: 0 }]
+}
+
+/// The rule under a table's header: a run of dashes per column, joined.
+#[must_use]
+fn table_rule(widths: &[usize]) -> Rendered {
+    let mut runs: Vec<Run> = Vec::new();
+    for (at, width) in widths.iter().enumerate() {
+        runs.push(Run::styled(Emphasis::TableHead, "─".repeat(*width)));
+        if at + 1 < widths.len() {
+            runs.push(Run::styled(Emphasis::TableHead, "─┼─"));
+        }
+    }
+    Rendered { runs, indent: 0 }
 }
 
 /// The head of a code block, as the row that names it.
@@ -358,6 +491,30 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
                 continue;
             }
         }
+        // `~~struck~~`: two tildes, and the text between them is struck. It is
+        // read before the single-character markers below so a lone `~` stays a
+        // `~` and a pair is an emphasis.
+        if character == '~' && chars.get(at + 1) == Some(&'~') {
+            if let Some(end) = find_double(&chars, at + 2, '~') {
+                flush!();
+                let inner: String = chars[at + 2..end].iter().collect();
+                runs.push(Run::styled(Emphasis::Strike, inner));
+                at = end + 2;
+                continue;
+            }
+        }
+        // `<u>underlined</u>`: markdown has no marker for an underline, so the
+        // one HTML tag a terminal can honour is read as one. A tag this does not
+        // know is left as text, which is what it is.
+        if character == '<' && starts_with(&chars, at, "<u>") {
+            if let Some(end) = find_tag(&chars, at + 3, "</u>") {
+                flush!();
+                let inner: String = chars[at + 3..end].iter().collect();
+                runs.push(Run::styled(Emphasis::Underline, inner));
+                at = end + 4;
+                continue;
+            }
+        }
         if character == '*' || character == '_' {
             let doubled = chars.get(at + 1) == Some(&character);
             let marker = if doubled { 2 } else { 1 };
@@ -417,6 +574,40 @@ fn find_run(chars: &[char], from: usize, marker: char, count: usize) -> Option<u
             }
             at += run;
             continue;
+        }
+        at += 1;
+    }
+    None
+}
+
+/// The index of the closing pair of a doubled marker, if the line has one.
+///
+/// `~~struck~~` is opened and closed by two tildes: a single one in between is
+/// text, which is what a lone `~` in prose is.
+#[must_use]
+fn find_double(chars: &[char], from: usize, marker: char) -> Option<usize> {
+    let mut at = from;
+    while at + 1 < chars.len() {
+        if chars[at] == marker && chars[at + 1] == marker {
+            return Some(at);
+        }
+        at += 1;
+    }
+    None
+}
+
+/// The index where a closing tag begins, if the line has one.
+///
+/// A terminal can honour an underline and nothing else of HTML, so this looks
+/// only for the tag it was given and leaves every other angle bracket as the
+/// text it is.
+#[must_use]
+fn find_tag(chars: &[char], from: usize, tag: &str) -> Option<usize> {
+    let want: Vec<char> = tag.chars().collect();
+    let mut at = from;
+    while at + want.len() <= chars.len() {
+        if chars[at..at + want.len()] == want[..] {
+            return Some(at);
         }
         at += 1;
     }
@@ -891,6 +1082,84 @@ mod tests {
             let lines = texts(rule);
             assert!(lines[0].contains('─'), "{rule} -> {lines:?}");
         }
+    }
+
+    #[test]
+    fn a_struck_run_loses_its_tildes_and_a_lone_one_stays() {
+        let runs = inline("a ~~gone~~ b");
+        let struck = runs
+            .iter()
+            .find(|run| run.emphasis == Emphasis::Strike)
+            .expect("struck");
+        assert_eq!(struck.text, "gone");
+        assert!(
+            !runs.iter().any(|run| run.text.contains('~')),
+            "no tilde survives: {runs:?}"
+        );
+        // A single tilde is a tilde: `~5` is not an unclosed strike.
+        assert_eq!(inline("about ~5 items"), vec![Run::plain("about ~5 items")]);
+    }
+
+    #[test]
+    fn an_underline_run_loses_its_tag() {
+        let runs = inline("a <u>under</u> b");
+        let underlined = runs
+            .iter()
+            .find(|run| run.emphasis == Emphasis::Underline)
+            .expect("underlined");
+        assert_eq!(underlined.text, "under");
+        assert!(
+            !runs.iter().any(|run| run.text.contains('<')),
+            "the tag is gone: {runs:?}"
+        );
+        // A tag this does not know is left as the text it is.
+        assert_eq!(inline("a <b>bold</b>"), vec![Run::plain("a <b>bold</b>")]);
+    }
+
+    #[test]
+    fn a_table_is_drawn_as_aligned_columns() {
+        let lines = texts("| a | b |\n| --- | --- |\n| 1 | 22 |");
+        // The header, the rule, and the body: three rows and not the pipes.
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[0].contains('a') && lines[0].contains('b'),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains('─') && lines[1].contains('┼'),
+            "{lines:?}"
+        );
+        assert!(
+            lines[2].contains('1') && lines[2].contains("22"),
+            "{lines:?}"
+        );
+        assert!(
+            !lines[0].contains('|') || !lines[0].starts_with('|'),
+            "the outer pipe is gone: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_column_is_as_wide_as_its_widest_cell() {
+        // The body can be wider than the header, and the column grows to hold
+        // it: a header-only measurement would wrap the longest cell.
+        let rendered = render("| h |\n| --- |\n| a longer cell |");
+        let body = rendered.last().expect("body").text();
+        assert!(body.contains("a longer cell"), "{body:?}");
+        // The header is padded to the same column, so the rule under it lines up.
+        let header = rendered.first().expect("header").text();
+        assert_eq!(
+            header.chars().count(),
+            body.chars().count(),
+            "header and body share a width"
+        );
+    }
+
+    #[test]
+    fn a_line_of_prose_with_a_pipe_is_not_a_table() {
+        // A table needs the separator under its header; a pipe in prose is a
+        // pipe, which is what a shell command full of `|` relies on.
+        assert_eq!(texts("cat a | grep b"), ["cat a | grep b"]);
     }
 
     #[test]
