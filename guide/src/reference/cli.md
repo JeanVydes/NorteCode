@@ -192,11 +192,27 @@ reject unknown values instead of forwarding them to the model.
 | `/compact` | Summarise the session and continue on a new one. |
 | `/allow TOOL [session\|global]` | Allow a tool without asking. |
 | `/deny TOOL [session\|global]` | Refuse a tool without asking. |
+| `/tools` | List every tool the model can reach, with how a call to each is decided — `allow`, `deny` or `ask` — and how far its rule reaches. |
 | `/reasoning SETTING [session\|message]` | Set the reasoning override. `SETTING` is `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. The scope defaults to `session`. |
 | `/model PROVIDER/MODEL` | Switch the model at the next turn boundary. |
+| `/provider NAME` | Switch provider at the next turn boundary, keeping the model where it has one. |
 | `/revoke [GRANT-OR-TOOL]` | List the approval grants, or revoke one. |
 | `/refresh` | Re-scan the skills and their tools. |
+| `/reload` | Re-read the configuration file. |
+| `/restart` | Re-read the configuration and rebuild the engine at the next turn boundary. |
+| `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one off or on. |
+| `/jobs [list\|check\|stop] [ID]` | List the session's background jobs, look at one, or stop one. |
+| `/rename [TITLE]` | Name the session. Bare, ask the model for a name from the first message. |
+| `/tab [NAME\|NUMBER]` | Show a footer tab: `stats`, `todo`, `tools` or `mcp`. Bare, list them. |
+| `/debug` | Print what the process knows about itself: paths, model, catalogue, tools, servers. |
 | `/exit`, `/quit` | Leave the chat. |
+
+The footer carries a row of tabs above the input: `stats` is what the session
+has spent, `todo` the model's task list, `tools` how many tools are allowed,
+denied or gated by the approval mode, and `mcp` how many servers are up. `Ctrl-T`
+cycles them, `Ctrl-1` to `Ctrl-4` go straight to one, and `/tab` names one
+without a modified key. Each tab has a single row, so the ones that count say
+the count and `/tools` is where the names are.
 
 The editor suggests the command names and their arguments in dimmed text as
 you type, and Tab accepts the suggestion.

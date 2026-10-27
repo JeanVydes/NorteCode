@@ -55,7 +55,7 @@ The model reference is `provider/model`.
 **Request** — A `ClientRequest` sent to the service. It is not a provider HTTP
 request; telemetry records provider attempts separately.
 
-**Sandbox** — An executor wrapper that launches `command` under bubblewrap or
+**Sandbox** — An executor wrapper that launches `shell` under bubblewrap or
 `sandbox-exec`. It is not a virtual machine and has no unsandboxed fallback.
 
 **Session** — Ambiguous by design: a logical session is what the client sees; a
@@ -64,6 +64,10 @@ they diverge.
 
 **Skill** — An Agent Skills directory with `SKILL.md` and optional resources.
 Discovery is passive; scripts are opt-in.
+
+**Tab** — A named view the client shows in the row above the input: `stats`,
+`todo`, `tools` and `mcp`. One row each, so the tabs that count things count and
+the names are a command away. It is not part of the protocol.
 
 **Telemetry** — Local request rows with latency, tokens, cache, tools and status.
 It is not remote analytics and not the money ledger.

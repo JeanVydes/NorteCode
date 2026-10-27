@@ -9,7 +9,7 @@ Every engine gets the same configured registry:
 | `read` | Read a file. | No |
 | `write` | Write a file. | Yes in `ask` and `auto-edit` |
 | `edit` | Replace exact text in a file. | Yes in `ask` and `auto-edit` |
-| `command` | Run a command, with a cleared environment. | Yes in every mode except `yolo` |
+| `shell` | Run a shell script, with a cleared environment. | Yes in every mode except `yolo` |
 | `glob` | Find paths matching a glob, honoring `.gitignore`. | No |
 | `list_dir` | List one directory, directories first. | No |
 | `grep` | Search file contents. | No |
@@ -28,8 +28,8 @@ text the model can read; they do not abort the engine.
 
 | Mode | Behaviour |
 | --- | --- |
-| `ask` (default) | `write`, `edit`, `command` and `skill_script` ask first. |
-| `auto-edit` | Edits run; `command` and `skill_script` still ask. |
+| `ask` (default) | `write`, `edit`, `shell` and `skill_script` ask first. |
+| `auto-edit` | Edits run; `shell` and `skill_script` still ask. |
 | `yolo` | Every tool runs without asking. |
 
 The mode is a host policy, not a promise about the model. A deny rule wins even
@@ -49,11 +49,13 @@ revokes a saved deny.
 In the REPL:
 
 ```text
-/allow command session
-/deny command global
+/allow shell session
+/deny shell global
 ```
 
-The scope defaults to `session`.
+The scope defaults to `session`. The name is the one the model calls the tool
+by, which is what `/tools` prints beside each rule: a rule that names a tool
+nobody has does nothing, and does not say so.
 
 ## The approval panel
 

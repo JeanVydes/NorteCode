@@ -30,6 +30,7 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `approvals` | object | empty lists | Global allow/deny rules. |
 | `max_iterations` | integer or null | null | Model iterations per turn. |
 | `extensions` | object | `{}` | Vendor request fields. |
+| `ui` | object | see below | What the client shows. |
 | `cost` | object | `{"show":true}` | Cost display. |
 | `budgets` | object | all null | Message, session, daily limits. |
 | `tools` | object | see below | Web fetch and sandbox. |
@@ -139,10 +140,42 @@ or `{"budget": N}`. It is checked against the selected model.
 
 ## `approval_mode` and `approvals`
 
-`ask` asks for `write`, `edit`, `command` and `skill_script`. `auto-edit` lets
+`ask` asks for `write`, `edit`, `shell` and `skill_script`. `auto-edit` lets
 edits run and still asks for commands and scripts. `yolo` runs everything.
 `approvals.allow` and `approvals.deny` are tool-wide; denial wins. `/allow` and
 `/deny` edit the same rules; `global` writes the user config.
+
+## `ui`
+
+What the client shows, as opposed to what the engine does. A host with no
+interface ignores the block; the engine never reads it.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `verbosity` | string | `medium` | How much of the conversation to show: `low` (the answer alone), `medium` (also that tools run and that the model is thinking) or `high` (the reasoning, what each tool was asked and what it returned). |
+| `diff_style` | `unified`, `split` | `unified` | How an `edit` call's diff is drawn. |
+
+`--verbose` overrides `ui.verbosity` for one run. A config that says nothing
+keeps `medium`, which is what the client shows with no file at all.
+
+`diff_style` names two shapes of the same box, both carrying the same edit
+number and line ranges:
+
+- `unified` writes a patch: one column, `-` for a line that left and `+` for a
+  line that arrived, with one row of context per unchanged line. It is the
+  default because it fits a terminal that is not wide — the side-by-side view
+  needs two panels of at least ten columns each and draws nothing below that.
+- `split` shows the file before and after, side by side. Wider, and the only
+  shape that shows a change inside a line rather than the two whole lines.
+
+```json
+{
+  "ui": {
+    "verbosity": "high",
+    "diff_style": "split"
+  }
+}
+```
 
 ## `budgets`
 
@@ -162,7 +195,7 @@ edits run and still asks for commands and scripts. `yolo` runs everything.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `web_fetch` | `false` | Register `web_fetch`. |
-| `command_max_model_bytes` | `131072` | Bytes of each `command` stream that reach the model; the rest is elided. Range `1024`–`1048576`. |
+| `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; the rest is elided. Range `1024`–`1048576`. |
 | `sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
 | `sandbox.network` | `false` | Allow network in the sandbox. |
 | `sandbox.writable` | `[]` | Extra writable roots. |

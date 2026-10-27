@@ -133,7 +133,8 @@ second, the cache-read share and the cost; `--verbose high` adds the token
 counts, the wall time, the time to the first token, the input:output ratio and
 the tools that request called. The footer follows the same rule: `medium` keeps
 the context dial, the cache share and the cost, and `high` adds the request
-count, the token totals and the input:output ratio. `--verbose` prints each tool
+count, the token totals and the input:output ratio. `ui.verbosity` sets the
+level the client works at, and `--verbose` overrides it for one run. `--verbose` prints each tool
 call's effective arguments and its result as fenced blocks; large values are
 shortened, and long tool output is capped before it crosses the wire. The final summary
 lists the tools that ran and their counts. Iterations are unlimited by default;
@@ -145,6 +146,12 @@ otherwise from the built-in prompt. An `AGENTS.md` in the workspace root is
 appended to whichever prompt is used, as project instructions. It is untrusted
 input: only a regular file is read, the read is capped at 64 KiB, and the
 instructions never override the user's request, the approvals or the budgets.
+
+An `edit` call is drawn as a diff. `ui.diff_style` picks the shape: `unified`
+(the default) writes it the way a patch reads — one column, `-` for what left
+and `+` for what arrived — and `split` shows the file before and after side by
+side. The unified one fits a narrow terminal; the split one needs two panels of
+at least ten columns each and draws nothing below that.
 
 `--interactive` keeps the same session open after each turn. A pinned footer
 below the streamed output holds the todo widget (completed count, the current
@@ -245,7 +252,7 @@ inventing a selection nobody made. A multi-select answer joins the selected
 option strings with `, `.
 
 While a turn is running, `Ctrl-C` cancels it: the running tool is asked to stop
-(Norte's `command` tool kills the whole child process group, so a hung command
+(Norte's `shell` tool kills the whole child process group, so a hung command
 does not keep the terminal hostage) and the turn finishes uncommitted. A second
 `Ctrl-C` within five seconds only repeats “still cancelling”; after five seconds
 it force-exits. The session stays resumable with `norte-code resume`.
@@ -257,7 +264,7 @@ invented answer.
 
 ## Command sandbox
 
-`tools.sandbox.enabled` (default `false`) runs every `command` inside the host
+`tools.sandbox.enabled` (default `false`) runs every `shell` call inside the host
 sandbox: bubblewrap on Linux, `sandbox-exec` on macOS. The workspace is
 writable, the rest of the filesystem is read-only, `/tmp` is a private tmpfs,
 and the network is off unless `tools.sandbox.network` is `true`. Extra writable

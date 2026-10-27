@@ -44,7 +44,7 @@ read host files unless the sandbox is enabled.
 
 ## The command sandbox
 
-`tools.sandbox.enabled` turns the `command` executor into a wrapped invocation.
+`tools.sandbox.enabled` turns the `shell` executor into a wrapped invocation.
 The tool keeps its name, schema and arguments; only the process launch changes.
 This keeps approvals, history, the effect journal and telemetry honest.
 

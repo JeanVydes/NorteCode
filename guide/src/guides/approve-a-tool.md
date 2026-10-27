@@ -2,9 +2,13 @@
 
 ## What parks
 
-In `ask` (the default), `write`, `edit`, `command` and `skill_script` park
-before running. In `auto-edit`, writes and edits run; commands and skill scripts
-still park. `yolo` runs everything. A global or session deny wins over the mode.
+In `ask` (the default), `write`, `edit`, `shell` and `skill_script` park before
+running. In `auto-edit`, writes and edits run; commands and skill scripts still
+park. `yolo` runs everything. A global or session deny wins over the mode.
+
+The names are the ones the model calls the tools by, and they are what
+`/tools` prints: a rule that names a tool nobody has does nothing, and says
+nothing about having done it.
 
 When a call parks, the turn is durable. You can answer now, or exit and resume
 later.
@@ -36,10 +40,15 @@ n use the existing helper instead
 In the interactive prompt:
 
 ```text
-/allow command session
+/allow shell session
 /allow edit global
-/deny command global
+/deny shell global
 ```
+
+`/tools` lists every tool with the state of its rule — `allow`, `deny` or `ask`
+— and whether the rule is this session's, every session's, or the approval
+mode's. It is the fastest way to check that a rule you wrote names a tool that
+exists.
 
 The scope defaults to `session`. Global rules are written to the user config's
 `approvals.allow` / `approvals.deny`; session rules are stored with the logical
@@ -51,7 +60,7 @@ The same rules can be written directly:
 {
   "approvals": {
     "allow": ["read", "glob"],
-    "deny": ["command"]
+    "deny": ["shell"]
   }
 }
 ```

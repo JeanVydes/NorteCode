@@ -45,7 +45,7 @@ gap:
 2. Mark it finished from the tool event.
 3. On startup, a call still at intent is refused rather than replayed.
 
-The journal covers `write`, `edit`, `command` and `skill_script`.
+The journal covers `write`, `edit`, `shell` and `skill_script`.
 
 ## Repair on load
 
