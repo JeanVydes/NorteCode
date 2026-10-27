@@ -6913,3 +6913,136 @@ async fn the_mode_asks_before_the_tool_that_runs_a_command() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_session_reasoning_override_survives_a_restart() {
+    // `max` is not the configured default, so seeing it after the reopen is the
+    // whole test: a session that comes back on `auto` is one where the person
+    // has to type `/reasoning max` again every time they start the client,
+    // which is what they said happens.
+    let dir = std::env::temp_dir().join(format!("norte-reasoning-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("sessions.db");
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let (store, service) = sqlite_service(
+        &path,
+        Arc::new(ScriptedModel::new(reference.clone()).turn_text("ok")),
+    )
+    .await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+    drain(
+        &service,
+        ClientRequestKind::SetReasoning {
+            session: key.clone(),
+            scope: ReasoningScope::Session,
+            reasoning: Reasoning::Effort {
+                effort: "max".to_owned(),
+            },
+        },
+    )
+    .await;
+    assert_eq!(
+        service.session_reasoning(&key),
+        Some(Reasoning::Effort {
+            effort: "max".to_owned(),
+        }),
+        "set in memory"
+    );
+
+    // What a restart does: a new service over the same database.
+    drop(service);
+    drop(store);
+    let (store, reopened) = sqlite_service(
+        &path,
+        Arc::new(ScriptedModel::new(reference).turn_text("ok")),
+    )
+    .await;
+    assert_eq!(
+        reopened.session_reasoning(&key),
+        Some(Reasoning::Effort {
+            effort: "max".to_owned(),
+        }),
+        "and it is still there after the reopen"
+    );
+    drop(reopened);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_resumed_session_sends_the_effort_it_was_left_on() {
+    // The override is stored, so the next turn of a resumed session must ask
+    // the provider for it without the client passing anything: a person who
+    // typed `/reasoning max` and restarted should not have to type it again.
+    let dir = std::env::temp_dir().join(format!("norte-effort-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("sessions.db");
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let (store, service) = sqlite_service(
+        &path,
+        Arc::new(ScriptedModel::new(reference.clone()).turn_text("ok")),
+    )
+    .await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+    drain(
+        &service,
+        ClientRequestKind::SetReasoning {
+            session: key.clone(),
+            scope: ReasoningScope::Session,
+            reasoning: Reasoning::Effort {
+                effort: "high".to_owned(),
+            },
+        },
+    )
+    .await;
+    drop(service);
+    drop(store);
+
+    // Reopened, and asked for a turn with no reasoning in the request: what the
+    // client does when the flag was not passed. `high` rather than `max`
+    // because the scripted model declares up to high — the engine checks the
+    // effort against what the model says it takes, which is the model's answer
+    // and not the catalogue's, and a fixture that declares four efforts is the
+    // right thing to check that against.
+    let (store, reopened) = sqlite_service(
+        &path,
+        Arc::new(ScriptedModel::new(reference).turn_text("ok")),
+    )
+    .await;
+    let events = drain(
+        &reopened,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(&event.kind, ServerEventKind::Error { .. })),
+        "the turn runs: {events:?}"
+    );
+    assert_eq!(
+        reopened.session_reasoning(&key),
+        Some(Reasoning::Effort {
+            effort: "high".to_owned(),
+        }),
+        "the stored override is what the turn used"
+    );
+    drop(reopened);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1493,9 +1493,16 @@ fn parse_budget_limit(unit: BudgetUnit, value: &str) -> Result<f64, String> {
 
 /// Recomputes the effort the footer shows from the session's own state.
 ///
-/// The setting is resolved once, where it is decided, and the footer and
-/// `/debug` both read that: computing it twice is how they came to disagree.
-fn refresh_effort(service: &Arc<Service>, session: &SessionKey, renderer: &mut Renderer) {
+/// A resumed session carries its own override, and that is what the next turn
+/// sends; a footer showing the config's default instead would name an effort
+/// the session is not on. The setting is resolved once, here, and the footer
+/// and `/debug` both read that: computing it twice is how they came to
+/// disagree.
+pub(crate) fn refresh_effort(
+    service: &Arc<Service>,
+    session: &SessionKey,
+    renderer: &mut Renderer,
+) {
     let label = service.session_spec(session).and_then(|spec| {
         let override_reasoning = service.session_reasoning(session);
         norte_code_agent::effective_reasoning(

@@ -27,7 +27,7 @@ mod text;
 use approval::{clip_text, compact_json};
 use commands::{apply_extensions, database_path, duration_label, run};
 use input::{InteractiveInput, Pinned};
-use interaction::{drive_turns, interactive_loop};
+use interaction::{drive_turns, interactive_loop, refresh_effort};
 use models::{list_models, resolve_spec};
 use render::{
     Format, HostFacts, Renderer, Verbosity, approval_label, cache_percent_label, fallback_env,
@@ -853,6 +853,11 @@ async fn resume_session(
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));
     let session = SessionKey::new(session_key);
+    // The session may carry a reasoning override of its own — `/reasoning max`
+    // leaves one — and that is what the next turn sends. The line above is the
+    // configuration's answer, which is what a session with no override is on;
+    // this is the session's, which is what the footer has to show.
+    refresh_effort(&service, &session, &mut renderer);
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
