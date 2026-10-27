@@ -1243,6 +1243,7 @@ dependencies = [
  "norte",
  "norte-code-agent",
  "norte-code-catalog",
+ "norte-code-commands",
  "norte-code-config",
  "norte-code-cost",
  "norte-code-protocol",
@@ -1256,6 +1257,10 @@ dependencies = [
  "tokio",
  "uuid",
 ]
+
+[[package]]
+name = "norte-code-commands"
+version = "0.1.0"
 
 [[package]]
 name = "norte-code-config"

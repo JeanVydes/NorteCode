@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 norte-code-agent = { path = "../norte-code-agent" }
 norte-code-catalog = { path = "../norte-code-catalog" }
+norte-code-commands = { path = "../norte-code-commands" }
 norte-code-config = { path = "../norte-code-config" }
 norte-code-cost = { path = "../norte-code-cost" }
 norte-code-protocol = { path = "../norte-code-protocol" }

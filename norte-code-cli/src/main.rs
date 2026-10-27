@@ -12,6 +12,7 @@
 mod approval;
 mod code;
 mod commands;
+mod commands_registry;
 mod input;
 mod interaction;
 mod markdown;
@@ -43,8 +44,6 @@ use approval::{
 };
 #[cfg(test)]
 use commands::cost_summary;
-#[cfg(test)]
-use interaction::parse_approval_command;
 #[cfg(test)]
 use prompt::compose_selection;
 #[cfg(test)]

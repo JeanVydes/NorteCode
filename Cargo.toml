@@ -4,6 +4,7 @@ members = [
     "norte-code-agent",
     "norte-code-catalog",
     "norte-code-cli",
+    "norte-code-commands",
     "norte-code-config",
     "norte-code-cost",
     "norte-code-protocol",

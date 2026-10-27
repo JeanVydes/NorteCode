@@ -8,6 +8,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Commands are declared once, in a registry, and the parser, the completion
+  and `/help` all read that declaration. They used to be five lists kept in step
+  by hand, and they had drifted: `/tools` was parsed and never completed, and
+  `/help` named four commands fewer than the client answered to. The crate that
+  holds it is `norte-code-commands`, and it knows nothing about what a command
+  does — a registry a plugin can add to cannot be keyed by this binary's own
+  enum.
+
+  The completion finishes partial arguments, which is what the registry is for:
+  `/reasoning xh` completes to `xhigh`, and the hint says which word Tab is
+  about to write.
+
 - `ui`, a section of the configuration for what the client shows, holding
   `ui.verbosity` and `ui.diff_style`. `verbosity` is the `--verbose` level the
   client works at when the flag is absent; the flag still wins for one run, and

@@ -1,8 +1,8 @@
 use super::{
     ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions, Style,
     apply_extensions, approval_request, argument_preview, budget_label, budget_warning,
-    compose_selection, cost_summary, parse_approval_choice, parse_approval_command,
-    parse_reasoning_setting, select_system_prompt,
+    compose_selection, cost_summary, parse_approval_choice, parse_reasoning_setting,
+    select_system_prompt,
 };
 use crate::commands::{RequestSummary, bucket_label, telemetry_table};
 use chrono::{DateTime, Utc};
@@ -298,32 +298,59 @@ fn a_selection_is_composed_as_the_one_answer_the_model_reads() {
 
 #[test]
 fn chat_approval_commands_default_to_the_session_and_reject_bad_scopes() {
+    // What a rule names is a tool, and the completion offers none of them here:
+    // which tools exist is the engine's answer and not a list in the client.
+    let registry = crate::commands_registry::registry();
+    let allow = registry
+        .parse("/allow command")
+        .expect("a command")
+        .expect("a tool and no scope");
+    assert_eq!(allow.command, "/allow");
+    assert_eq!(allow.arg("tool"), Some("command"));
     assert_eq!(
-        parse_approval_command("/allow command"),
-        Some(Ok((true, "command".to_owned(), false)))
+        allow.arg("scope"),
+        None,
+        "the scope defaults to the session"
     );
-    assert_eq!(
-        parse_approval_command("/deny write global"),
-        Some(Ok((false, "write".to_owned(), true)))
-    );
-    assert_eq!(
-        parse_approval_command("/allow skill_script session"),
-        Some(Ok((true, "skill_script".to_owned(), false)))
-    );
-    assert!(parse_approval_command("/allow").expect("command").is_err());
+
+    let deny = registry
+        .parse("/deny write global")
+        .expect("a command")
+        .expect("a tool and a scope");
+    assert_eq!(deny.command, "/deny");
+    assert_eq!(deny.arg("tool"), Some("write"));
+    assert_eq!(deny.arg("scope"), Some("global"));
+
+    let alias_like = registry
+        .parse("/allow skill_script session")
+        .expect("a command")
+        .expect("an underscore is part of a name");
+    assert_eq!(alias_like.arg("tool"), Some("skill_script"));
+
     assert!(
-        parse_approval_command("/deny write everywhere")
-            .expect("command")
-            .is_err()
+        registry.parse("/allow").expect("a command").is_err(),
+        "the tool is required"
     );
     assert!(
-        parse_approval_command("/allow write global extra")
-            .expect("command")
-            .is_err()
+        registry
+            .parse("/deny write everywhere")
+            .expect("a command")
+            .is_err(),
+        "an unknown scope is refused rather than sent to the model"
     );
-    assert_eq!(parse_approval_command("/allowance"), None);
-    assert_eq!(parse_approval_command("/other command"), None);
-    assert_eq!(parse_approval_command("hello"), None);
+    assert!(
+        registry
+            .parse("/allow write global extra")
+            .expect("a command")
+            .is_err(),
+        "a word nobody takes is not dropped"
+    );
+    assert!(
+        registry.parse("/allowance").is_none(),
+        "a word that only starts like one is not a command"
+    );
+    assert!(registry.parse("/other command").is_none());
+    assert!(registry.parse("hello").is_none());
 }
 
 #[test]

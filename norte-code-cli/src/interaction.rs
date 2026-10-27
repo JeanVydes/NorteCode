@@ -16,44 +16,11 @@ use crate::render::{
     report_start, report_tool_rules, report_tools, scope_name, tools_summary, unit_name,
 };
 use crate::tabs::SessionTab;
+use norte_code_commands::Invocation;
 /// The wire's own attachment, named apart from the editor's: they carry the
 /// same three fields today, and they are not the same type — one is what a
 /// keystroke produced and the other is what goes on the wire.
 use norte_code_protocol::Attachment as ProtocolAttachment;
-
-/// Parses `/allow` and `/deny` into `(allow, tool, global)`.
-///
-/// The scope is optional and defaults to the current session. Anything that is
-/// not one of these commands returns `None`, so an ordinary message that starts
-/// with `/` is still sent to the model.
-pub(crate) fn parse_approval_command(text: &str) -> Option<Result<(bool, String, bool), String>> {
-    let (allow, rest) = text
-        .strip_prefix("/allow")
-        .map(|rest| (true, rest))
-        .or_else(|| text.strip_prefix("/deny").map(|rest| (false, rest)))?;
-    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let command = if allow { "/allow" } else { "/deny" };
-    let mut parts = rest.split_whitespace();
-    let Some(tool) = parts.next() else {
-        return Some(Err(format!("usage: {command} <tool> [session|global]")));
-    };
-    let scope = parts.next().unwrap_or("session");
-    if parts.next().is_some() {
-        return Some(Err(format!("usage: {command} <tool> [session|global]")));
-    }
-    let global = match scope {
-        "session" => false,
-        "global" => true,
-        other => {
-            return Some(Err(format!(
-                "unknown scope `{other}`; use session or global"
-            )));
-        }
-    };
-    Some(Ok((allow, tool.to_owned(), global)))
-}
 
 /// A validated interactive command.
 ///
@@ -161,130 +128,124 @@ pub(crate) enum JobListAction {
 /// `None` means the text is an ordinary message. `Some(Err(_))` means the
 /// command was recognised but its arguments were rejected; it must not be sent
 /// to the model as a message.
+///
+/// The names, the arguments and the usage lines all come from the registry, so
+/// this function is only the mapping from a parsed invocation to what the client
+/// does about it. That mapping is the one thing that cannot move: the registry
+/// is written to be usable by something that is not this binary.
 pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, String>> {
     let text = text.trim();
-    let exact = match text {
-        "/help" => Some(ChatCommand::Help),
-        "/compact" => Some(ChatCommand::Compact),
-        "/refresh" | "/reload" => Some(ChatCommand::Refresh),
-        "/mcp" => Some(ChatCommand::Mcp {
-            action: McpAction::List,
-            server: None,
-        }),
-        "/exit" | "/quit" | "exit" | "quit" => Some(ChatCommand::Exit),
-        "/restart" => Some(ChatCommand::Restart),
-        "/jobs" => Some(ChatCommand::Jobs {
-            action: JobListAction::List,
-            id: None,
-        }),
-        "/debug" => Some(ChatCommand::Debug),
-        "/tools" => Some(ChatCommand::Tools),
-        _ => None,
-    };
-    if let Some(rest) = command_rest(text, "/jobs") {
-        return Some(parse_jobs_command(rest));
+    // `exit` and `quit` without a slash are what a person types at a prompt
+    // that looks like a shell, and they have always left the chat.
+    if matches!(text, "exit" | "quit") {
+        return Some(Ok(ChatCommand::Exit));
     }
-    if let Some(command) = exact {
-        return Some(Ok(command));
-    }
-    if let Some(rule) = parse_approval_command(text) {
-        return Some(rule.map(|(allow, tool, global)| ChatCommand::Approval {
-            allow,
-            tool,
-            global,
-        }));
-    }
-    if let Some(rest) = command_rest(text, "/reasoning") {
-        return Some(parse_reasoning_command(rest));
-    }
+    // A command that was taken away still says so, rather than reaching the
+    // model as a message that starts with a slash.
     if command_rest(text, "/steer").is_some() {
         return Some(Err(
             "/steer was removed; type the text directly while a turn is running".to_owned(),
         ));
     }
-    if let Some(rest) = command_rest(text, "/revoke") {
-        let mut parts = rest.split_whitespace();
-        let grant = parts.next().map(str::to_owned);
-        if parts.next().is_some() {
-            return Some(Err("usage: /revoke [grant-id-or-tool]".to_owned()));
-        }
-        return Some(Ok(ChatCommand::Revoke { grant }));
-    }
-    if let Some(rest) = command_rest(text, "/mcp") {
-        let mut parts = rest.split_whitespace();
-        let action = match parts.next() {
-            None | Some("list") => McpAction::List,
-            Some("enable") => McpAction::Enable,
-            Some("disable") => McpAction::Disable,
-            Some(other) => {
-                return Some(Err(format!(
-                    "unknown /mcp action `{other}`; use list, enable or disable"
-                )));
+    let invocation = match crate::commands_registry::registry().parse(text)? {
+        Ok(invocation) => invocation,
+        Err(problem) => return Some(Err(problem)),
+    };
+    // A command the registry knows and this mapping does not: the registry is
+    // the list of what a person may type, so a gap here is a command that does
+    // nothing. The tests check the two agree.
+    let command = match invocation.command.as_str() {
+        "/help" => ChatCommand::Help,
+        "/compact" => ChatCommand::Compact,
+        "/refresh" => ChatCommand::Refresh,
+        "/restart" => ChatCommand::Restart,
+        "/debug" => ChatCommand::Debug,
+        "/tools" => ChatCommand::Tools,
+        "/exit" => ChatCommand::Exit,
+        "/mcp" => match parse_mcp(&invocation) {
+            Ok(command) => command,
+            Err(problem) => return Some(Err(problem)),
+        },
+        "/jobs" => match parse_jobs(&invocation) {
+            Ok(command) => command,
+            Err(problem) => return Some(Err(problem)),
+        },
+        "/allow" | "/deny" => {
+            let allow = invocation.command == "/allow";
+            let global = invocation.arg("scope") == Some("global");
+            let tool = invocation.arg_or_empty("tool").to_owned();
+            ChatCommand::Approval {
+                allow,
+                tool,
+                global,
             }
-        };
-        let server = parts.next().map(str::to_owned);
-        if parts.next().is_some() {
-            return Some(Err("usage: /mcp [list|enable|disable] [server]".to_owned()));
         }
-        if action.needs_server() && server.is_none() {
-            return Some(Err(format!("usage: /mcp {} <server>", action.usage())));
+        "/reasoning" => match parse_reasoning(&invocation) {
+            Ok(command) => command,
+            Err(problem) => return Some(Err(problem)),
+        },
+        "/revoke" => ChatCommand::Revoke {
+            grant: invocation.arg("grant").map(str::to_owned),
+        },
+        "/model" => ChatCommand::Model {
+            model: invocation.arg_or_empty("model").to_owned(),
+        },
+        "/provider" => ChatCommand::Provider {
+            provider: invocation.arg_or_empty("provider").to_owned(),
+        },
+        "/tab" => ChatCommand::Tab {
+            target: invocation.arg("target").map(str::to_owned),
+        },
+        "/rename" => ChatCommand::Rename {
+            title: invocation.arg("title").map(str::to_owned),
+        },
+        other => {
+            return Some(Err(format!(
+                "`{other}` is declared and not implemented; this is a bug"
+            )));
         }
-        if !action.needs_server() && server.is_some() {
-            return Some(Err("usage: /mcp list  (it takes no server)".to_owned()));
-        }
-        return Some(Ok(ChatCommand::Mcp { action, server }));
-    }
-    if let Some(rest) = command_rest(text, "/tab") {
-        let target = rest.trim();
-        return Some(Ok(ChatCommand::Tab {
-            target: (!target.is_empty()).then(|| target.to_owned()),
-        }));
-    }
-    if let Some(rest) = command_rest(text, "/model") {
-        return Some(parse_model_command(rest));
-    }
-    if let Some(rest) = command_rest(text, "/provider") {
-        return Some(parse_provider_command(rest));
-    }
-    if let Some(rest) = command_rest(text, "/rename") {
-        // Everything after the command is the title, spaces and all: a name is
-        // not a word, and splitting it would make `/rename fix the footer` a
-        // usage error instead of the name it obviously is.
-        let title = rest.trim();
-        return Some(Ok(ChatCommand::Rename {
-            title: (!title.is_empty()).then(|| title.to_owned()),
-        }));
-    }
-    None
+    };
+    Some(Ok(command))
 }
 
-/// Returns the argument text after an exact command name.
-fn command_rest<'a>(text: &'a str, command: &str) -> Option<&'a str> {
-    let rest = text.strip_prefix(command)?;
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
-}
-
-/// Parses the arguments of `/jobs`.
+/// The `/mcp` command, with its action and server checked against each other.
 ///
-/// The action is optional and defaults to `list`, which is what a bare `/jobs`
-/// asks for. `list` takes no id and the others require one: a `check` with
-/// nothing to check is a usage error, not an empty listing.
-fn parse_jobs_command(rest: &str) -> Result<ChatCommand, String> {
-    let mut parts = rest.split_whitespace();
-    let action = match parts.next() {
-        None | Some("list") => JobListAction::List,
-        Some("check") => JobListAction::Check,
-        Some("stop") => JobListAction::Stop,
-        Some(other) => {
+/// The registry knows the two arguments; what it cannot know is that `list`
+/// takes no server and the others need one, which is a rule about this command.
+fn parse_mcp(invocation: &Invocation) -> Result<ChatCommand, String> {
+    let action = match invocation.arg("action").unwrap_or("list") {
+        "list" => McpAction::List,
+        "enable" => McpAction::Enable,
+        "disable" => McpAction::Disable,
+        other => {
+            return Err(format!(
+                "unknown /mcp action `{other}`; use list, enable or disable"
+            ));
+        }
+    };
+    let server = invocation.arg("server").map(str::to_owned);
+    if action.needs_server() && server.is_none() {
+        return Err(format!("usage: /mcp {} <server>", action.usage()));
+    }
+    if !action.needs_server() && server.is_some() {
+        return Err("usage: /mcp list  (it takes no server)".to_owned());
+    }
+    Ok(ChatCommand::Mcp { action, server })
+}
+
+/// The `/jobs` command, with its action and id checked against each other.
+fn parse_jobs(invocation: &Invocation) -> Result<ChatCommand, String> {
+    let action = match invocation.arg("action").unwrap_or("list") {
+        "list" => JobListAction::List,
+        "check" => JobListAction::Check,
+        "stop" => JobListAction::Stop,
+        other => {
             return Err(format!(
                 "unknown /jobs action `{other}`; use list, check or stop"
             ));
         }
     };
-    let id = parts.next().map(str::to_owned);
-    if parts.next().is_some() {
-        return Err("usage: /jobs [list|check|stop] [job-id]".to_owned());
-    }
+    let id = invocation.arg("job-id").map(str::to_owned);
     match (action, &id) {
         (JobListAction::List, Some(_)) => Err("/jobs list takes no job id".to_owned()),
         (JobListAction::Check | JobListAction::Stop, None) => {
@@ -294,391 +255,71 @@ fn parse_jobs_command(rest: &str) -> Result<ChatCommand, String> {
     }
 }
 
-fn parse_reasoning_command(rest: &str) -> Result<ChatCommand, String> {
-    const USAGE: &str = "usage: /reasoning <setting> [session|message]";
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    let (scope, setting) = match parts.as_slice() {
-        [setting] => (ReasoningScope::Session, *setting),
-        [first, second] if is_reasoning_scope(first) => (scope(first), *second),
-        [setting, second] if is_reasoning_scope(second) => (scope(second), *setting),
-        _ => return Err(USAGE.to_owned()),
+/// The `/reasoning` command, with the scope and the setting resolved.
+fn parse_reasoning(invocation: &Invocation) -> Result<ChatCommand, String> {
+    let Some(setting) = invocation.arg("setting") else {
+        return Err("usage: /reasoning <setting> [session|message]".to_owned());
+    };
+    let scope = match invocation.arg("scope") {
+        Some("message") => ReasoningScope::Message,
+        _ => ReasoningScope::Session,
     };
     let reasoning = parse_reasoning_setting(setting)?;
     Ok(ChatCommand::Reasoning { scope, reasoning })
 }
 
-fn is_reasoning_scope(value: &str) -> bool {
-    matches!(value, "session" | "message")
-}
-
-fn scope(value: &str) -> ReasoningScope {
-    match value {
-        "message" => ReasoningScope::Message,
-        _ => ReasoningScope::Session,
-    }
-}
-
-fn parse_provider_command(rest: &str) -> Result<ChatCommand, String> {
-    const USAGE: &str = "usage: /provider <provider>  (no args lists available providers)";
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    match parts.as_slice() {
-        [] => Ok(ChatCommand::Provider {
-            provider: String::new(),
-        }),
-        [provider] => {
-            if provider.is_empty() {
-                return Err(USAGE.to_owned());
-            }
-            Ok(ChatCommand::Provider {
-                provider: (*provider).to_owned(),
-            })
-        }
-        _ => Err(USAGE.to_owned()),
-    }
-}
-
-fn parse_model_command(rest: &str) -> Result<ChatCommand, String> {
-    const USAGE: &str = "usage: /model <model>  or  /model <provider/model>";
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    match parts.as_slice() {
-        [] => Ok(ChatCommand::Model {
-            model: String::new(),
-        }),
-        [model] => {
-            if model.is_empty() {
-                return Err(USAGE.to_owned());
-            }
-            Ok(ChatCommand::Model {
-                model: (*model).to_owned(),
-            })
-        }
-        _ => Err(USAGE.to_owned()),
-    }
+/// Returns the argument text after an exact command name.
+fn command_rest<'a>(text: &'a str, command: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(command)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
 }
 
 /// One dimmed completion shown by the input editor.
+///
+/// It is what the registry returned, in the shape the editor draws: the text to
+/// append and the row to show. The editor does not decide what may be typed —
+/// it asks the registry and shows the answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CommandSuggestion {
     /// The text Tab inserts at the cursor.
     pub(crate) completion: String,
-    /// The dim hint shown in the footer row above the input.
+    /// The dim hint shown on the row above the input.
     pub(crate) hint: String,
 }
 
-const CHAT_COMMANDS: &[&str] = &[
-    "/help",
-    "/compact",
-    "/allow",
-    "/deny",
-    "/reasoning",
-    "/model",
-    "/provider",
-    "/revoke",
-    "/refresh",
-    "/reload",
-    "/mcp",
-    "/jobs",
-    "/restart",
-    "/tab",
-    "/rename",
-    "/debug",
-    "/exit",
-    "/quit",
-];
-
-const REASONING_SUGGESTIONS: &[&str] = &[
-    "auto", "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
-
-const REASONING_SCOPES: &[&str] = &["session", "message"];
-const TOOL_SCOPES: &[&str] = &["session", "global"];
-
-/// The actions `/jobs` accepts, for the completion hint.
-const JOB_ACTIONS: &[&str] = &["list", "check", "stop"];
-
-/// Suggests a command name or a command argument for the current input line.
+/// Reads the completion for the line as it stands.
 ///
-/// The completion is only offered at the end of the line; moving the cursor
-/// into the middle never rewrites what the human is editing.
+/// `None` means there is nothing to offer: the text is not a command, or the
+/// cursor is not at the end of it, which is what keeps a completion from
+/// rewriting the middle of a line somebody is editing.
 pub(crate) fn command_suggestion(text: &str, cursor: usize) -> Option<CommandSuggestion> {
-    if cursor != text.len() || !text.starts_with('/') {
+    let rows = crate::commands_registry::registry().candidates(text, cursor);
+    if rows.is_empty() {
         return None;
     }
-    let Some(space) = text.find(char::is_whitespace) else {
-        let prefix = text.to_ascii_lowercase();
-        let matches: Vec<&str> = CHAT_COMMANDS
-            .iter()
-            .copied()
-            .filter(|command| command.starts_with(&prefix))
-            .collect();
-        if matches.is_empty() {
-            return None;
-        }
-        let completion = matches[0][text.len()..].to_owned();
-        let hint = if matches.len() == 1 {
-            command_usage(matches[0]).unwrap_or(matches[0]).to_owned()
+    let first = &rows[0];
+    let hint = if rows.len() == 1 {
+        // One candidate: the row says what Tab is about to write and, after a
+        // dash, what it is. `xhigh — setting` tells a person both that the word
+        // is `xhigh` and that it is the setting of whatever they typed, which
+        // is the question they were asking by typing a prefix of it.
+        if first.note.is_empty() {
+            first.text.clone()
         } else {
-            matches.join("  ")
-        };
-        return Some(CommandSuggestion { completion, hint });
-    };
-    let command = &text[..space];
-    let usage = command_usage(command)?;
-    let rest = &text[space..];
-    let ends_with_space = rest.ends_with(char::is_whitespace);
-    let tokens: Vec<&str> = rest.split_whitespace().collect();
-    let completed = if ends_with_space {
-        tokens.len()
+            format!("{} — {}", first.text, first.note)
+        }
     } else {
-        tokens.len().saturating_sub(1)
+        // Several are a list, and the names are what there is to show: a
+        // terminal with no room for a menu still says what may be typed.
+        rows.iter()
+            .map(|row| row.text.clone())
+            .collect::<Vec<String>>()
+            .join("  ")
     };
-    let partial = if ends_with_space {
-        ""
-    } else {
-        tokens.last().copied().unwrap_or("")
-    };
-    let Some(candidates) = argument_candidates(command, completed) else {
-        return Some(CommandSuggestion {
-            completion: String::new(),
-            hint: usage.to_owned(),
-        });
-    };
-    if command == "/reasoning" && completed == 0 && partial.starts_with("budget:") {
-        return Some(CommandSuggestion {
-            completion: String::new(),
-            hint: "budget:<tokens>".to_owned(),
-        });
-    }
-    if candidates.is_empty() {
-        return Some(CommandSuggestion {
-            completion: String::new(),
-            hint: usage.to_owned(),
-        });
-    }
-    let completion = candidate_completion(candidates, partial);
-    let mut hint = candidates.join("  ");
-    if command == "/reasoning" && completed == 0 {
-        hint.push_str("  budget:<tokens>");
-    }
     Some(CommandSuggestion {
-        completion: completion.unwrap_or_default(),
+        completion: first.completion.clone(),
         hint,
     })
-}
-
-fn command_usage(command: &str) -> Option<&'static str> {
-    match command {
-        "/help" => Some("/help"),
-        "/compact" => Some("/compact"),
-        "/allow" => Some("/allow <tool> [session|global]"),
-        "/deny" => Some("/deny <tool> [session|global]"),
-        "/reasoning" => Some("/reasoning <setting> [session|message]"),
-        "/model" => Some("/model <model>"),
-        "/provider" => Some("/provider <provider>"),
-        "/revoke" => Some("/revoke [grant-id-or-tool]"),
-        "/refresh" | "/reload" => Some("/refresh  (alias: /reload)"),
-        "/mcp" => Some("/mcp [list|enable|disable] [server]"),
-        "/jobs" => Some("/jobs [list|check|stop] [job-id]"),
-        "/restart" => Some("/restart"),
-        "/rename" => Some("/rename [title]"),
-        "/debug" => Some("/debug"),
-        "/exit" => Some("/exit"),
-        "/quit" => Some("/quit"),
-        _ => None,
-    }
-}
-
-fn argument_candidates(command: &str, completed: usize) -> Option<&'static [&'static str]> {
-    match command {
-        "/reasoning" => match completed {
-            0 => Some(REASONING_SUGGESTIONS),
-            1 => Some(REASONING_SCOPES),
-            _ => Some(&[]),
-        },
-        "/allow" | "/deny" => match completed {
-            0 => None,
-            1 => Some(TOOL_SCOPES),
-            _ => Some(&[]),
-        },
-        "/jobs" => match completed {
-            0 => Some(JOB_ACTIONS),
-            _ => Some(&[]),
-        },
-        _ => None,
-    }
-}
-
-fn candidate_completion(candidates: &[&str], partial: &str) -> Option<String> {
-    let partial = partial.to_ascii_lowercase();
-    let candidate = candidates
-        .iter()
-        .find(|candidate| candidate.to_ascii_lowercase().starts_with(&partial))?;
-    Some(candidate[partial.len()..].to_owned())
-}
-
-/// Re-reads the configuration and reports what happened.
-///
-/// The per-session rules and the model a session already resolved are session
-/// state and are not rebuilt, so the notice names what needs a new session.
-fn report_reload(service: &Arc<Service>, style: Style) {
-    match service.reload_config() {
-        Ok(reloaded) => {
-            eprintln!(
-                "{}",
-                style.green(format!(
-                    "configuration reloaded ({} providers)",
-                    reloaded.config.providers.len()
-                ))
-            );
-            for warning in &reloaded.warnings {
-                eprintln!(
-                    "{}",
-                    style.yellow(format!(
-                        "warning: unknown config key `{}`",
-                        crate::text::terminal(warning)
-                    ))
-                );
-            }
-            eprintln!(
-                "{}",
-                style.dim(
-                    "the open session keeps its model and its rules; a new session uses the new default"
-                )
-            );
-        }
-        Err(error) => eprintln!(
-            "{}",
-            style.red(format!("could not reload the configuration: {error}"))
-        ),
-    }
-}
-
-/// Re-reads everything that can be re-read while the process runs.
-///
-/// The configuration, the skill roots and the MCP servers that failed to start
-/// are the three things that can change underneath a running agent, so one
-/// command covers them: what a person means by "refresh" is not one of the
-/// three, and asking them to remember which is which was the mistake.
-async fn report_refresh(service: &Arc<Service>, style: Style) {
-    report_reload(service, style);
-    let count = service.refresh_skills();
-    eprintln!("{}", style.green(format!("skills refreshed: {count}")));
-    let recovered = service.retry_mcp().await;
-    match recovered {
-        0 => {
-            let failed = service.mcp_failures();
-            if !failed.is_empty() {
-                eprintln!(
-                    "{}",
-                    style.yellow(format!("{} mcp server(s) still unreachable", failed.len()))
-                );
-            }
-        }
-        count => eprintln!(
-            "{}",
-            style.green(format!("mcp server(s) connected: {count}"))
-        ),
-    }
-}
-
-/// Reports the MCP servers, or switches one off or on.
-///
-/// A server's tools ride in every prompt, so the count is worth seeing; a server
-/// that is off keeps its process, which is what makes turning it back on
-/// instant.
-fn report_mcp(service: &Arc<Service>, action: McpAction, server: Option<&str>, style: Style) {
-    if let Some(name) = server {
-        let active = action == McpAction::Enable;
-        match service.set_mcp_active(name, active) {
-            Some(state) => {
-                let word = if state { "enabled" } else { "disabled" };
-                eprintln!("{}", style.green(format!("mcp server `{name}` {word}")));
-                if !state {
-                    eprintln!(
-                        "{}",
-                        style.dim("its tools leave the next turn; the process stays up")
-                    );
-                }
-            }
-            None => eprintln!(
-                "{}",
-                style.yellow(format!("no mcp server named `{name}` connected"))
-            ),
-        }
-        return;
-    }
-
-    let status = service.mcp_status();
-    if status.is_empty() {
-        eprintln!("{}", style.dim("no MCP server connected"));
-        return;
-    }
-    for server in &status {
-        let mark = if server.active {
-            style.green("on")
-        } else {
-            style.faint("off")
-        };
-        eprintln!(
-            "{} {} {} {}",
-            mark,
-            style.bold(server.name.clone()),
-            style.dim(server.command.clone()),
-            style.dim(format!("{} tool(s)", server.tools.len()))
-        );
-        if server.active {
-            for tool in &server.tools {
-                eprintln!("  {}", style.dim(tool.clone()));
-            }
-        }
-        for warning in &server.filtered {
-            eprintln!("  {}", style.yellow(warning.clone()));
-        }
-    }
-}
-
-pub(crate) fn print_chat_help(style: Style) {
-    eprintln!("{}", style.bold("chat commands"));
-    eprintln!("  /help                     show this list");
-    eprintln!("  /compact                  summarise and continue on a new session");
-    eprintln!("  /allow <tool> [session|global]  allow without asking");
-    eprintln!("  /deny <tool> [session|global]   refuse without asking");
-    eprintln!("  /reasoning <setting> [session|message]  set reasoning");
-    eprintln!("  /tab [name|number]        switch tab (chat, todo); bare lists them");
-    eprintln!("  /rename [title]           name the session; bare asks the model");
-    eprintln!("  /debug                    what the process knows: model, tools, paths");
-    eprintln!("  /model <model>             switch model (uses current provider)");
-    eprintln!("  /provider <provider>       switch provider (keeps current model)");
-    eprintln!("  /revoke [grant-or-tool]   list or revoke an approval grant");
-    eprintln!("  /refresh                  re-read the config, the skills and the MCP servers");
-    eprintln!("  /reload                   an alias for /refresh");
-    eprintln!("  /exit, /quit              leave the chat");
-    eprintln!(
-        "{}",
-        style.dim(
-            "  reasoning: auto, off, minimal, low, medium, high, xhigh, max or budget:<tokens>"
-        )
-    );
-    eprintln!(
-        "{}",
-        style.dim("  text typed while a turn runs is steered into that turn")
-    );
-    eprintln!(
-        "{}",
-        style.dim("  scope defaults to session; global writes the user config")
-    );
-}
-
-/// Echoes a message the human sent into the transcript, above the footer.
-pub(crate) fn echo_user_message(style: Style, text: &str) {
-    let mut lines = text.lines();
-    match lines.next() {
-        Some(first) => eprintln!("{} {}", style.cyan("›"), first),
-        None => eprintln!("{}", style.cyan("›")),
-    }
-    for line in lines {
-        eprintln!("  {}", crate::text::terminal(line));
-    }
 }
 
 /// Reads and sends messages until the human exits, a turn parks or the budget
@@ -1901,6 +1542,178 @@ fn stream_error(events: &[ServerEvent]) -> Option<String> {
     })
 }
 
+/// Re-reads everything that can be re-read while the process runs.
+///
+/// The configuration, the skill roots and the MCP servers that failed to start
+/// are the three things that can change underneath a running agent, so one
+/// command covers them: what a person means by "refresh" is not one of the
+/// three, and asking them to remember which is which was the mistake.
+async fn report_refresh(service: &Arc<Service>, style: Style) {
+    report_reload(service, style);
+    let count = service.refresh_skills();
+    eprintln!("{}", style.green(format!("skills refreshed: {count}")));
+    let recovered = service.retry_mcp().await;
+    match recovered {
+        0 => {
+            let failed = service.mcp_failures();
+            if !failed.is_empty() {
+                eprintln!(
+                    "{}",
+                    style.yellow(format!("{} mcp server(s) still unreachable", failed.len()))
+                );
+            }
+        }
+        count => eprintln!(
+            "{}",
+            style.green(format!("mcp server(s) connected: {count}"))
+        ),
+    }
+}
+
+/// Reports the MCP servers, or switches one off or on.
+///
+/// A server's tools ride in every prompt, so the count is worth seeing; a server
+/// that is off keeps its process, which is what makes turning it back on
+/// instant.
+fn report_mcp(service: &Arc<Service>, action: McpAction, server: Option<&str>, style: Style) {
+    if let Some(name) = server {
+        let active = action == McpAction::Enable;
+        match service.set_mcp_active(name, active) {
+            Some(state) => {
+                let word = if state { "enabled" } else { "disabled" };
+                eprintln!("{}", style.green(format!("mcp server `{name}` {word}")));
+                if !state {
+                    eprintln!(
+                        "{}",
+                        style.dim("its tools leave the next turn; the process stays up")
+                    );
+                }
+            }
+            None => eprintln!(
+                "{}",
+                style.yellow(format!("no mcp server named `{name}` connected"))
+            ),
+        }
+        return;
+    }
+
+    let status = service.mcp_status();
+    if status.is_empty() {
+        eprintln!("{}", style.dim("no MCP server connected"));
+        return;
+    }
+    for server in &status {
+        let mark = if server.active {
+            style.green("on")
+        } else {
+            style.faint("off")
+        };
+        eprintln!(
+            "{} {} {} {}",
+            mark,
+            style.bold(server.name.clone()),
+            style.dim(server.command.clone()),
+            style.dim(format!("{} tool(s)", server.tools.len()))
+        );
+        if server.active {
+            for tool in &server.tools {
+                eprintln!("  {}", style.dim(tool.clone()));
+            }
+        }
+        for warning in &server.filtered {
+            eprintln!("  {}", style.yellow(warning.clone()));
+        }
+    }
+}
+
+/// Echoes a message the human sent into the transcript, above the footer.
+pub(crate) fn echo_user_message(style: Style, text: &str) {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) => eprintln!("{} {}", style.cyan("›"), first),
+        None => eprintln!("{}", style.cyan("›")),
+    }
+    for line in lines {
+        eprintln!("  {}", crate::text::terminal(line));
+    }
+}
+
+/// Re-reads the configuration and reports what happened.
+///
+/// The per-session rules and the model a session already resolved are session
+/// state and are not rebuilt, so the notice names what needs a new session.
+fn report_reload(service: &Arc<Service>, style: Style) {
+    match service.reload_config() {
+        Ok(reloaded) => {
+            eprintln!(
+                "{}",
+                style.green(format!(
+                    "configuration reloaded ({} providers)",
+                    reloaded.config.providers.len()
+                ))
+            );
+            for warning in &reloaded.warnings {
+                eprintln!(
+                    "{}",
+                    style.yellow(format!(
+                        "warning: unknown config key `{}`",
+                        crate::text::terminal(warning)
+                    ))
+                );
+            }
+            eprintln!(
+                "{}",
+                style.dim(
+                    "the open session keeps its model and its rules; a new session uses the new default"
+                )
+            );
+        }
+        Err(error) => eprintln!(
+            "{}",
+            style.red(format!("could not reload the configuration: {error}"))
+        ),
+    }
+}
+
+/// Prints the command list.
+///
+/// Every line comes from the registry, so a command that is declared is a
+/// command that is listed and the two cannot drift. The usage column is
+/// measured from the lines themselves rather than being a number kept beside
+/// them: a command that grows an argument would push the summaries out of line.
+pub(crate) fn print_chat_help(style: Style) {
+    let registry = crate::commands_registry::registry();
+    eprintln!("{}", style.bold("chat commands"));
+    let usages: Vec<String> = registry
+        .commands()
+        .iter()
+        .map(norte_code_commands::CommandSpec::usage)
+        .collect();
+    let width = usages.iter().map(String::len).max().unwrap_or(0);
+    for (spec, usage) in registry.commands().iter().zip(&usages) {
+        eprintln!(
+            "  {}  {}",
+            style.cyan(format!("{usage:<width$}")),
+            style.dim(spec.summary.clone())
+        );
+        if !spec.aliases.is_empty() {
+            eprintln!(
+                "  {}  {}",
+                " ".repeat(width),
+                style.dim(format!("(also {})", spec.aliases.join(", ")))
+            );
+        }
+    }
+    eprintln!(
+        "{}",
+        style.dim("  text typed while a turn runs is steered into that turn")
+    );
+    eprintln!(
+        "{}",
+        style.dim("  an approval scope defaults to session; global writes the user config")
+    );
+}
+
 /// Prints the interactive prompt and waits for the next message.
 ///
 /// Ctrl-C, Ctrl-D, `/exit` and `quit` all leave the loop without inventing a
@@ -2526,10 +2339,28 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        BudgetUnit, CHAT_COMMANDS, ChatCommand, JobListAction, McpAction, Reasoning,
-        ReasoningScope, SignalGuard, command_suggestion, command_usage, parse_budget_limit,
-        parse_chat_command,
+        BudgetUnit, ChatCommand, JobListAction, McpAction, Reasoning, ReasoningScope, SignalGuard,
+        command_suggestion, parse_budget_limit, parse_chat_command,
     };
+
+    /// The usage line the registry writes for a command.
+    fn usage_of(name: &str) -> Option<String> {
+        crate::commands_registry::registry()
+            .get(name)
+            .map(norte_code_commands::CommandSpec::usage)
+    }
+
+    /// Whether the completion offers a name.
+    ///
+    /// These tests were written against a `const` list of names, and the bug
+    /// they exist for was a command that was parsed and missing from it. Asking
+    /// the registry is the same question and cannot go stale.
+    fn offered(name: &str) -> bool {
+        crate::commands_registry::registry()
+            .commands()
+            .iter()
+            .any(|spec| spec.spellings().contains(&name))
+    }
 
     #[test]
     fn reasoning_commands_accept_only_known_settings_and_scopes() {
@@ -2617,8 +2448,8 @@ mod tests {
             parse_chat_command("/rename"),
             Some(Ok(ChatCommand::Rename { title: None }))
         );
-        assert!(CHAT_COMMANDS.contains(&"/rename"));
-        assert_eq!(command_usage("/rename"), Some("/rename [title]"));
+        assert!(offered("/rename"));
+        assert_eq!(usage_of("/rename"), Some("/rename [title]".to_owned()));
         // A word that merely starts with it is still a message.
         assert_eq!(parse_chat_command("/renamed"), None);
     }
@@ -2628,11 +2459,18 @@ mod tests {
         assert_eq!(parse_chat_command("/debug"), Some(Ok(ChatCommand::Debug)));
         // The command list and the completion both know it, so it is reachable
         // by typing `/deb` and pressing Tab.
-        assert!(CHAT_COMMANDS.contains(&"/debug"));
-        assert_eq!(command_usage("/debug"), Some("/debug"));
-        // A word after it is not an argument it knows, so it is a message: the
-        // parser leaves it alone rather than inventing a subcommand.
-        assert_eq!(parse_chat_command("/debug now"), None);
+        assert!(offered("/debug"));
+        assert_eq!(usage_of("/debug"), Some("/debug".to_owned()));
+        // A word after it is not an argument it takes, and it is refused
+        // rather than sent: a command with text the client does not understand
+        // is a mistake the person wants told about, not a message for the
+        // model that happens to start with a slash.
+        assert!(
+            parse_chat_command("/debug now")
+                .expect("a command")
+                .is_err()
+        );
+        // A name that is not the command at all is still a message.
         assert_eq!(parse_chat_command("/debugs"), None);
     }
 
@@ -2709,7 +2547,7 @@ mod tests {
         ));
         // Prose is still a message.
         assert!(parse_chat_command("mcp enable everything").is_none());
-        assert!(CHAT_COMMANDS.contains(&"/mcp"), "the list offers it");
+        assert!(offered("/mcp"), "the list offers it");
     }
 
     #[test]
@@ -2728,10 +2566,29 @@ mod tests {
             parse_chat_command("refresh the config").is_none(),
             "prose is a message, not the command"
         );
-        assert!(command_usage("/refresh").is_some());
-        assert!(command_usage("/reload").is_some());
-        assert!(CHAT_COMMANDS.contains(&"/refresh"), "the list offers it");
-        assert!(CHAT_COMMANDS.contains(&"/reload"), "and its alias");
+        assert!(usage_of("/refresh").is_some());
+        assert!(usage_of("/reload").is_some());
+        assert!(offered("/refresh"), "the list offers it");
+        assert!(offered("/reload"), "and its alias");
+    }
+
+    #[test]
+    fn typing_part_of_an_effort_completes_it() {
+        // The case the registry was built for: nobody should have to remember
+        // that it is `xhigh` and not `x-high`, and Tab has to finish the word
+        // rather than refuse it for being partial.
+        let typed = command_suggestion("/reasoning xh", "/reasoning xh".len())
+            .expect("the effort is offered");
+        assert_eq!(typed.completion, "igh", "Tab finishes `xh` into `xhigh`");
+        assert!(
+            typed.hint.contains("xhigh"),
+            "and the row says what it was: {typed:?}"
+        );
+
+        // A single command with nothing typed past the slash still lists them.
+        let listed =
+            command_suggestion("/reasoning ", "/reasoning ".len()).expect("the values are offered");
+        assert!(listed.hint.contains("budget:<tokens>"), "{listed:?}");
     }
 
     #[test]
@@ -2814,14 +2671,14 @@ mod tests {
             Some(Ok(ChatCommand::Restart))
         ));
         assert!(
-            CHAT_COMMANDS.contains(&"/jobs") && CHAT_COMMANDS.contains(&"/restart"),
-            "the list must offer both: {CHAT_COMMANDS:?}"
+            offered("/jobs") && offered("/restart"),
+            "the list must offer both"
         );
         assert_eq!(
-            command_usage("/jobs"),
-            Some("/jobs [list|check|stop] [job-id]")
+            usage_of("/jobs"),
+            Some("/jobs [list|check|stop] [job-id]".to_owned())
         );
-        assert_eq!(command_usage("/restart"), Some("/restart"));
+        assert_eq!(usage_of("/restart"), Some("/restart".to_owned()));
     }
 
     #[tokio::test]
