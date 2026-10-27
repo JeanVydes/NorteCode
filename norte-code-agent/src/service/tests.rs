@@ -3507,6 +3507,94 @@ async fn a_reconstructed_request_carries_its_tools_and_timing() {
 }
 
 #[tokio::test]
+async fn two_tools_in_one_answer_produce_one_request_summary() {
+    // The line the client prints under an answer is a request summary, not a
+    // tool summary: this pins the count to the requests the model was actually
+    // asked, which the engine reports once per request. Two tool calls in one
+    // answer are one request followed by one more that carries their results --
+    // so two lines, and never one per call.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let first = CallId::new();
+    let second = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            // One answer that asks for two reads at once, which is what makes
+            // this the case worth pinning: the engine reports the request once.
+            .turn(vec![
+                norte::StreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: first,
+                    name: "read".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 0,
+                    call_id: first,
+                    name: None,
+                    arguments: serde_json::json!({ "path": "uno.txt" }).to_string(),
+                },
+                norte::StreamEvent::ToolCallStart {
+                    index: 1,
+                    call_id: second,
+                    name: "read".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 1,
+                    call_id: second,
+                    name: None,
+                    arguments: serde_json::json!({ "path": "dos.txt" }).to_string(),
+                },
+                norte::StreamEvent::Finish(FinishReason::ToolCalls),
+            ])
+            .turn_text("done"),
+    );
+    let (service, _store) = persistent_service(model).await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created
+        .first()
+        .and_then(|event| event.session.clone())
+        .expect("session");
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "lee los dos archivos".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    let requests: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            ServerEventKind::RequestReconstructed { index, tools, .. } => {
+                Some((*index, tools.len()))
+            }
+            _ => None,
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let calls = events
+        .iter()
+        .filter(|event| matches!(&event.kind, ServerEventKind::ToolStarted { .. }))
+        .count();
+    assert_eq!(calls, 2, "the model asked for two reads and both ran");
+    assert_eq!(
+        requests.len(),
+        2,
+        "one summary per request, not per call: {requests:?}"
+    );
+    // And they are numbered, so a client can tell them apart and count them.
+    assert_eq!(requests, vec![1, 2]);
+}
+
+#[tokio::test]
 async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),

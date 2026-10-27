@@ -1236,3 +1236,39 @@ fn a_setting_that_is_not_a_rung_draws_no_bar() {
     );
     assert!(budget.contains("4096"), "{budget}");
 }
+
+#[test]
+fn the_footer_names_the_directory_the_work_is_in() {
+    // The root is what a person checks when a tool reads the wrong tree, and
+    // the footer is where they are looking. It cannot be set in a test -- the
+    // process's own directory is the test runner's and `set_var` is unsafe --
+    // so what is checked is that the footer carries the path it was given and
+    // that the switch turns it off.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.session = Some("f5868da6-0000-4000-8000-000000000000".to_owned());
+    let shown = renderer.session_status();
+    let cwd = std::env::current_dir().expect("a directory");
+    let expected = crate::render::helpers::short_path_in(
+        &cwd,
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .as_deref(),
+    );
+    assert!(
+        shown.contains(&expected),
+        "the footer names `{expected}`: {shown}"
+    );
+    // The line is still one line with the switch off, which is what a narrow
+    // terminal or a pipe needs.
+    renderer.show_workdir = false;
+    let without = renderer.session_status();
+    assert!(
+        !without.contains(&expected),
+        "and it goes when it is asked to: {without}"
+    );
+    assert!(
+        without.contains("session"),
+        "the rest of the line stays: {without}"
+    );
+}
