@@ -5,11 +5,14 @@ use std::sync::Arc;
 
 use crate::input::{Pinned, TodoItem};
 
+/// The ink a row of the transcript is written in.
+use crate::transcript::Ink;
+
 use super::argument::{todo_item, todo_items};
 use super::dial::{context_dial, reasoning_bar, token_ratio};
 use super::edit::{
     EditBox, EditPreview, Side, UnifiedKind, clip_command, clip_plain, edit_box_width,
-    edit_preview, edit_range, line_range, preview_path, render_panel, unify,
+    edit_preview, edit_range, preview_path, render_panel_plain, unify,
 };
 use super::helpers::{cache_percent_label, human_tokens, short_path};
 use super::labels::{
@@ -36,11 +39,13 @@ pub(crate) enum Format {
 /// newline that never comes would show nothing at all while the tool runs.
 const MAX_PARTIAL_LINE_CHARS: usize = 512;
 
-/// How many rows the output box shows before it drops the oldest.
+/// How many rows one streamed output box keeps.
 ///
 /// A command that prints thousands of lines would push the transcript off the
-/// screen; the box keeps its last rows and counts what it dropped.
-const MAX_OUTPUT_ROWS: usize = 12;
+/// screen; the box keeps its last rows and counts what it dropped. It is a bound
+/// on one call and not on the conversation: the transcript is scrolled, so what
+/// a longer command produced is not a reason to lose the work around it.
+const MAX_OUTPUT_ROWS: usize = 400;
 
 /// How much of the conversation the renderer shows.
 ///
@@ -254,10 +259,18 @@ pub(crate) struct Renderer {
 
     /// How many rows the open output box has printed.
     ///
-    /// Past [`MAX_OUTPUT_ROWS`] a row is not printed, so a command that prints
+    /// Past [`MAX_OUTPUT_ROWS`] a row is not kept, so a command that prints
     /// thousands of lines cannot push the transcript off the screen. The count
     /// is what says how many were left out.
     output_rows_seen: usize,
+
+    /// The rows the open output box holds, in the order they arrived.
+    ///
+    /// They are collected here and become one entry when the call closes: a
+    /// streamed command used to add an entry per line, which is what bloated the
+    /// transcript and what drew a box whose edges landed in the middle of the
+    /// work.
+    output_rows: Vec<String>,
 
     /// What has arrived from each stream without a newline yet, by stream.
     ///
@@ -353,6 +366,7 @@ impl Renderer {
             output_line_start: true,
             output_pending: BTreeMap::new(),
             output_rows_seen: 0,
+            output_rows: Vec::new(),
         }
     }
 
@@ -393,30 +407,59 @@ impl Renderer {
                 ..
             } => {
                 self.transcript.close();
+                // One row per call, written here in the present tense: what the
+                // call is doing, with the clock running because it has not said
+                // it is done. The ending rewrites this same row, so a call is
+                // one line and not two — see `tool_event`.
+                // `low` is the answer alone: a tool is not part of it, and a
+                // row here would be a row with no ending to rewrite it — the
+                // ending is what says how it went, and `low` does not show
+                // that either.
+                if self.verbosity.is_quiet() {
+                    return;
+                }
+                // The row says what the call is doing and nothing else: the id
+                // it used to carry was there to pair the announcement with the
+                // ending, and the ending edits this same row now, so there is
+                // nothing left to pair.
                 let mut entry = crate::transcript::Entry::line(
                     Entry::ToolStarted,
-                    format!("→ {tool} #{}", short(call_id)),
+                    Self::doing(tool, arguments.as_ref()),
                 );
-                // The clock starts with the announcement: a call is out until
-                // it says otherwise, and its row counts while it is.
                 entry.started = Some(std::time::Instant::now());
-                if let Some(command) = Self::command_summary(arguments.as_ref()) {
-                    entry.push_line(format!("$ {command}"));
-                }
+                entry.call_id = Some(call_id.clone());
                 self.transcript.push(entry);
             }
             ServerEventKind::ToolOutput { text, .. } => {
                 self.transcript.append(Entry::ToolOutput, text);
             }
-            ServerEventKind::ToolFinished { tool, is_error, .. } => {
+            ServerEventKind::ToolFinished {
+                tool,
+                call_id,
+                is_error,
+                ..
+            } => {
                 // The call is over, so its clock stops: what the row shows from
                 // here is the duration the service reported, and a count that
                 // kept running beside a finished call would be a lie.
                 self.transcript.stop_timer();
                 self.transcript.close();
+                // The row the call announced itself on becomes the row that
+                // says how it ended. It is one call and one line: the two used
+                // to be separate entries, so a suite of ten calls put twenty
+                // lines in the conversation and the reader had to pair them up
+                // by the id beside them.
+                //
+                // There is no ending text here — the duration the service
+                // reported is joined to the line in `tool_event`, which is
+                // where the rest of the ending is known.
                 if *is_error {
-                    self.transcript
-                        .push(crate::transcript::Entry::line(Entry::Failure, tool.clone()));
+                    if let Some(entry) = self.transcript.call_mut(call_id) {
+                        entry.kind = Entry::Failure;
+                    } else {
+                        self.transcript
+                            .push(crate::transcript::Entry::line(Entry::Failure, tool.clone()));
+                    }
                 }
             }
             ServerEventKind::MessageReplayed { role, text, .. } => {
@@ -595,6 +638,26 @@ impl Renderer {
     ///
     /// Returns an error when the terminal is gone, which means the process is
     /// ending anyway.
+    /// Whether the frame is animating, so a clock has to keep drawing it.
+    ///
+    /// A spinner turns and a running call counts. Everything else — the
+    /// conversation, the input, the status — only changes when a key or an
+    /// event does, and drawing it on a timer is a frame written to produce the
+    /// same screen.
+    #[must_use]
+    pub(crate) fn animating(&self) -> bool {
+        self.waiting.is_some() || self.transcript.running_for().is_some()
+    }
+
+    /// Takes the "something changed" flag the keyboard's thread set.
+    ///
+    /// The two threads speak through the pinned handle: the reader marks it
+    /// when a keystroke changes the draft, and the frame takes it, so a tick
+    /// with nothing to draw writes nothing.
+    pub(crate) fn take_dirty(&self) -> bool {
+        self.pinned.take_dirty()
+    }
+
     pub(crate) fn draw(&mut self) -> Result<(), String> {
         if self.screen.is_none() {
             return Ok(());
@@ -614,8 +677,9 @@ impl Renderer {
         }
         let mut state = self.ui_state();
         let modal = self.modal.clone();
+        let pinned = std::sync::Arc::clone(&self.pinned);
         if let Some(screen) = self.screen.as_mut() {
-            state.draw(screen, self.style)?;
+            state.draw(screen, self.style, &pinned)?;
             // The panel is drawn over the frame, in the same frame: two draws
             // would be a flicker between them.
             if let Some(modal) = modal {
@@ -658,12 +722,12 @@ impl Renderer {
             // the frame draws with spans: what reaches it is the text, and the
             // ink is the widget's.
             status: crate::select::strip_style(&self.session_status()),
-            tabs: self.tabs_label(),
-            tab_body: crate::select::strip_style(&self.tab_summary()),
+            todos: self.task_rows(),
             suggestion,
             waiting: self.waiting,
             waiting_since: self.waiting_since,
             scroll: self.pinned.transcript_scroll(),
+            selection: self.pinned.selection(),
         }
     }
 
@@ -707,33 +771,25 @@ impl Renderer {
             })
     }
 
-    /// The row of tab names, with the active one marked.
+    /// The task list, as the rows the sidebar shows.
     ///
-    /// Plain names and not styled text: the frame draws with ratatui, where a
-    /// colour is a span's and not an escape code a string carries. The active
-    /// tab is the one in brackets, which is what the keyboard changes.
-    fn tabs_label(&self) -> String {
-        let active = self.pinned.tab();
-        crate::tabs::SessionTab::ALL
-            .iter()
-            .map(|tab| {
-                if *tab == active {
-                    format!("[{}]", tab.name())
-                } else {
-                    tab.name().to_owned()
-                }
+    /// The list used to be a tab in the footer, and a footer row is one line:
+    /// what the model planned and what it has finished is a list, and a list
+    /// does not fit in a row that also carries the model, the cost and the
+    /// effort. It is a column of the sidebar now, where it has the room and
+    /// where a person can see the work in flight beside the work.
+    ///
+    /// The rows come from the same state the footer's row used to be built
+    /// from, so the two can never disagree about what is pending.
+    fn task_rows(&self) -> Vec<crate::app::TaskRow> {
+        self.pinned
+            .todos()
+            .into_iter()
+            .map(|todo| crate::app::TaskRow {
+                text: todo.content,
+                done: matches!(todo.status, crate::input::TodoStatus::Completed),
             })
-            .collect::<Vec<String>>()
-            .join(" · ")
-    }
-
-    /// The row the active tab shows.
-    ///
-    /// It is the summary the pinned handle already carries, which is built
-    /// where the session is: the tab is one row and what goes in it is decided
-    /// once, so a tab and the pinned line cannot disagree.
-    fn tab_summary(&self) -> String {
-        self.pinned.tab_body()
+            .collect()
     }
 
     /// Takes the pending `ask` budget stop, if any, so the CLI prompts once.
@@ -767,9 +823,28 @@ impl Renderer {
         }
         self.failed = false;
         self.cancelled = false;
-        self.waiting = Some(super::loading::Wait::Waiting);
-        self.waiting_since = Some(now_millis());
+        self.set_wait(super::loading::Wait::Waiting);
         self.set_activity(Some("waiting for the first token".to_owned()));
+    }
+
+    /// Moves the spinner to a phase, keeping the clock it counts on.
+    ///
+    /// The instant the wait began belongs to the turn, so it is recorded once
+    /// and a phase change inside the same turn keeps counting from there: what
+    /// the number answers is how long this turn has been out, and restarting it
+    /// at the first token would hide the wait that came before.
+    ///
+    /// It is set here and not at the two places that raised the phase. Those
+    /// set `waiting` alone, and a phase raised after `stop_bar` had cleared the
+    /// clock — which is what a tool's output does, and a tool runs in the
+    /// middle of most turns — left `waiting_since` at `None`. The frame read a
+    /// missing instant as zero, so the row said `streaming · 0s…` and stayed
+    /// there for the rest of the answer.
+    fn set_wait(&mut self, phase: super::loading::Wait) {
+        self.waiting = Some(phase);
+        if self.waiting_since.is_none() {
+            self.waiting_since = Some(now_millis());
+        }
     }
 
     /// Stops the animated bar, if one is running.
@@ -849,17 +924,27 @@ impl Renderer {
     }
 
     /// Closes a reasoning gutter, if one is open.
+    ///
+    /// The thought is one bounded thing, so the view frames it and the frame is
+    /// chrome: the closing rule is not a row of the conversation. It used to be
+    /// pushed as an entry of its own — a bare `╰` with nothing around it — which
+    /// is what left a stray bracket under every thought and made a run of
+    /// reasoning read as a box that had come apart.
     pub(crate) fn end_reasoning(&mut self) {
         if self.block != Block::Reasoning {
             return;
         }
-        // The gutter's closing edge is a row of the conversation: the view
-        // draws it where the conversation is, and nothing has to know which
-        // line the cursor was on to put it there.
-        self.transcript.push(crate::transcript::Entry::line(
-            crate::transcript::Kind::Reasoning,
-            "╰",
-        ));
+        // The entry the thought was appended to is the one that gets the frame.
+        // `record` opened it without one, because whether a thought is a box is
+        // not known until it ends.
+        if let Some(last) = self.transcript.last_mut()
+            && last.kind == crate::transcript::Kind::Reasoning
+        {
+            last.boxed = true;
+            if last.title.is_none() {
+                last.title = Some("thinking".to_owned());
+            }
+        }
         self.block = Block::None;
         self.last_char = Some('\n');
     }
@@ -1057,13 +1142,12 @@ impl Renderer {
             // Whatever box was open closes first, and its rows are already in
             // the conversation: what is left is to open this one.
             self.close_output_gutter();
-            // The box opening is a row of the conversation and not a thing
-            // printed where the cursor happened to be: it goes to the
-            // transcript, which is what the view draws.
-            self.transcript.push(crate::transcript::Entry::line(
-                crate::transcript::Kind::ToolOutput,
-                "╭",
-            ));
+            // The box is not opened here: it is one entry the view frames, and
+            // it is pushed when the call closes. Opening it at the first chunk
+            // put its edges in the middle of the work — the top rule arrived
+            // before the output and the bottom one an unknown number of rows
+            // later, which is what left a `│` running down one side of the
+            // transcript.
             self.output_gutter = Some(call_id.to_owned());
             self.output_line_start = true;
         }
@@ -1104,18 +1188,20 @@ impl Renderer {
     /// The rows are what the box holds and the view draws: how many were kept,
     /// and which of them, is decided here, and nothing about it depends on
     /// where the cursor was.
+    ///
+    /// The row carries no bar and no marker: the box the view draws is what
+    /// says where the output begins and ends, and a `│` written into every row
+    /// is a `│` a person selects along with the output they meant to copy.
     fn keep_output_row(&mut self, line: &str) {
         self.output_rows_seen += 1;
         if self.output_rows_seen > MAX_OUTPUT_ROWS {
-            // The oldest rows are already in the conversation; this one is not
-            // added, and the count says how many in total were left out.
+            // Past the bound the row is not kept, and the count says how many
+            // were left out. The newest are the ones worth keeping, so this is
+            // the oldest being dropped.
             return;
         }
-        self.transcript.append(
-            crate::transcript::Kind::ToolOutput,
-            &format!("│ {}", crate::text::terminal(line)),
-        );
-        self.transcript.close();
+        self.output_rows
+            .push(crate::text::terminal(line).into_owned());
     }
 
     /// Keeps a line that has not ended yet, ending it for the moment.
@@ -1123,11 +1209,8 @@ impl Renderer {
     /// A chunk can stop mid-line and the rest may never come (a progress bar),
     /// so the row is kept whole and the next chunk starts its own.
     fn keep_partial_row(&mut self, text: &str) {
-        self.transcript.append(
-            crate::transcript::Kind::ToolOutput,
-            &format!("│ {}", crate::text::terminal(text)),
-        );
-        self.transcript.close();
+        self.output_rows
+            .push(crate::text::terminal(text).into_owned());
     }
 
     /// Keeps what was left of a stream that ended without a newline.
@@ -1141,26 +1224,32 @@ impl Renderer {
 
     /// Closes the open output box, if one is open.
     ///
-    /// The rows go to the conversation rather than to the terminal, and the
-    /// count of what the box did not keep is said once, where the reader looks
-    /// last: a box that hid its own bound would be a box a person cannot tell
-    /// from a complete one.
+    /// The rows go to the conversation as **one** entry the view frames, rather
+    /// than as a row at a time. A streamed command used to add an entry per
+    /// line with its own margin, so a call that printed a hundred lines was a
+    /// hundred entries with a box drawn around the whole run — which is what
+    /// bloated the transcript, and what made a box's edge land in the middle of
+    /// the work it was meant to bound.
     fn close_output_gutter(&mut self) {
-        if self.output_gutter.take().is_none() {
+        let Some(call_id) = self.output_gutter.take() else {
             return;
-        }
+        };
         self.flush_output_pending();
         let hidden = self.output_rows_seen.saturating_sub(MAX_OUTPUT_ROWS);
-        if hidden > 0 {
-            self.transcript.push(crate::transcript::Entry::line(
-                crate::transcript::Kind::ToolOutput,
-                format!("│ … {hidden} more line(s)"),
-            ));
-        }
-        self.transcript.push(crate::transcript::Entry::line(
+        let mut entry = crate::transcript::Entry::bordered(
             crate::transcript::Kind::ToolOutput,
-            "╰",
-        ));
+            format!("shell #{}", short(&call_id)),
+        );
+        for row in std::mem::take(&mut self.output_rows) {
+            entry.push_line(row);
+        }
+        if hidden > 0 {
+            entry.push_inked(
+                crate::transcript::Ink::Yellow,
+                format!("… {hidden} earlier line(s) left out"),
+            );
+        }
+        self.transcript.push(entry);
         self.output_rows_seen = 0;
         self.output_line_start = true;
     }
@@ -1175,7 +1264,7 @@ impl Renderer {
         let text = crate::text::terminal(text);
         // The first answer token is the same signal as the first reasoning one.
         if !text.is_empty() {
-            self.waiting = Some(super::loading::Wait::Streaming);
+            self.set_wait(super::loading::Wait::Streaming);
         }
         if !self.verbosity.at_least(Verbosity::Medium) {
             // `low` is the answer alone, and it is still the conversation: the
@@ -1341,9 +1430,11 @@ impl Renderer {
                 // this one must not open another.
                 self.closed_calls.insert(call_id.clone());
                 if self.verbosity.at_least(Verbosity::Medium) {
-                    // How the call ended is a row of what it did, in the ink the
-                    // outcome deserves: a failure reads red and a call that was
-                    // let go of reads as neither.
+                    // How the call ended is the same row the call began on,
+                    // rewritten: a row that said what was running now says how
+                    // it went, on the line it already occupied. The two used to
+                    // be separate rows, so a call was two lines and the reader
+                    // had to pair them by the id beside them.
                     let text = call_ending(
                         crate::style::Style::plain(),
                         tool,
@@ -1356,8 +1447,32 @@ impl Renderer {
                     } else {
                         crate::transcript::Kind::ToolOutput
                     };
-                    self.transcript
-                        .push(crate::transcript::Entry::line(kind, text));
+                    // The outcome has its own ink: green for a call that
+                    // finished, red for one that failed, and the quieter yellow
+                    // for one that was let go of — its process is still running,
+                    // which is neither. While it runs the row is grey, so the
+                    // colour a person sees is what the call became.
+                    let outcome = if *detached {
+                        crate::transcript::Ink::Yellow
+                    } else if *is_error {
+                        crate::transcript::Ink::Red
+                    } else {
+                        crate::transcript::Ink::Green
+                    };
+                    match self.transcript.call_mut(call_id) {
+                        Some(entry) => {
+                            entry.kind = kind;
+                            entry.started = None;
+                            entry.lines = vec![crate::transcript::Line::inked(outcome, text)];
+                        }
+                        // A call whose beginning was never shown — `low` keeps
+                        // the announcement out of the conversation — still has
+                        // an ending worth reading, and it opens its own row.
+                        None => {
+                            self.transcript
+                                .push(crate::transcript::Entry::line(kind, text));
+                        }
+                    }
                 }
                 if *is_error && !*detached && tool.as_str() != "edit" {
                     // A failure needs its reason whatever the verbosity. A
@@ -1452,7 +1567,7 @@ impl Renderer {
         self.output_gutter.as_deref()
     }
 
-    /// How many rows the open box has printed, for a test.
+    /// How many rows the open box has seen, for a test.
     #[cfg(test)]
     pub(crate) fn output_rows_seen(&self) -> usize {
         self.output_rows_seen
@@ -1549,16 +1664,19 @@ impl Renderer {
             first = false;
             if labelled {
                 if let Some(name) = &section.name {
-                    entry.push_line(name.clone());
+                    entry.push_inked(crate::transcript::Ink::Cyan, name.clone());
                 }
             }
             let mut kept = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
             let hidden = tool_lines(&mut kept, &section.lines);
             for line in kept.lines {
-                entry.push_line(line);
+                entry.push_line(line.text);
             }
             if hidden > 0 {
-                entry.push_line(format!("… {hidden} more line(s)"));
+                entry.push_inked(
+                    crate::transcript::Ink::Yellow,
+                    format!("… {hidden} more line(s)"),
+                );
             }
         }
         self.transcript.push(entry);
@@ -1579,37 +1697,78 @@ impl Renderer {
     fn print_edit_box(&mut self, path: &str, edit: &EditBox, width: usize) {
         match self.diff_style {
             DiffStyle::Unified => self.keep_edit_box_unified(path, edit, width),
-            DiffStyle::Split => self.print_edit_box_split(path, edit, width),
+            DiffStyle::Split => self.keep_edit_box_split(path, edit, width),
         }
     }
 
     /// Renders one boxed edit as a patch: one column, `-` for what left and
     /// `+` for what arrived.
-    /// Keeps the diff of one edit, as the rows the view draws.
     ///
-    /// The rows are already plain text with the ink decided by `unified_lines`,
-    /// so what is left is to put them in the conversation: an edit's diff is a
-    /// thing that was done, and where it happened is where it is read.
+    /// The diff is one bounded thing, so the view draws a frame around it and a
+    /// person can read where the edit starts and ends without the frame being
+    /// part of what they select. The rows carry their ink, so the removal and
+    /// the addition are told apart by the widget and not by escape sequences in
+    /// the text.
     fn keep_edit_box_unified(&mut self, path: &str, edit: &EditBox, width: usize) {
-        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
-        for line in Self::unified_lines(self.style, path, edit, width) {
-            entry.push_line(line);
+        let mut entry = crate::transcript::Entry::bordered(
+            crate::transcript::Kind::ToolOutput,
+            Self::edit_title(path, edit),
+        );
+        for (ink, text) in Self::unified_lines(self.style, path, edit, width) {
+            entry.push_inked(ink, text);
         }
         self.transcript.push(entry);
     }
+
+    /// What the top rule of an edit's box says.
+    ///
+    /// The same words in both shapes, so a person who switches `ui.diff_style`
+    /// does not have to learn a second set of words for the same fact: which
+    /// edit of how many, where the lines it touched are, and which file.
+    pub(crate) fn edit_title(path: &str, edit: &EditBox) -> String {
+        let approximate = if edit.approximate {
+            " · approximate"
+        } else {
+            ""
+        };
+        format!(
+            "edit {}/{} · {}{approximate} · {}",
+            edit.index,
+            edit.total,
+            edit_range(edit),
+            preview_path(path)
+        )
+    }
+
     /// Renders one boxed edit side by side.
     ///
-    /// The two panels are sized independently so the right border stays aligned
-    /// on odd terminal widths.
+    /// The panes are laid out with a blank gutter and not with `│` between
+    /// them: a bar between two columns is a bar a person selects along with the
+    /// line they meant to copy, and the frame the view draws around the whole
+    /// diff is what says where it begins and ends.
+    fn keep_edit_box_split(&mut self, path: &str, edit: &EditBox, width: usize) {
+        let mut entry = crate::transcript::Entry::bordered(
+            crate::transcript::Kind::ToolOutput,
+            Self::edit_title(path, edit),
+        );
+        for (ink, text) in Self::split_lines(edit, width) {
+            entry.push_inked(ink, text);
+        }
+        self.transcript.push(entry);
+    }
+
+    /// The rows of a side-by-side diff, each with the ink it is written in.
+    ///
+    /// The two panels are sized independently so the right one ends where it
+    /// should on an odd terminal width.
     #[allow(clippy::too_many_lines)]
-    /// Keeps the side-by-side diff of one edit, as the rows the view draws.
-    fn print_edit_box_split(&mut self, path: &str, edit: &EditBox, width: usize) {
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        let panel_left = width.saturating_sub(7) / 2;
-        let panel_right = width.saturating_sub(7).saturating_sub(panel_left);
+    pub(crate) fn split_lines(edit: &EditBox, width: usize) -> Vec<(Ink, String)> {
+        let panel_left = width.saturating_sub(4) / 2;
+        let panel_right = width.saturating_sub(4).saturating_sub(panel_left);
         if panel_left < 10 || panel_right < 10 {
-            return;
+            // A terminal too narrow for two columns gets the unified shape,
+            // which is the one that fits: half a diff is worse than a patch.
+            return Self::unified_lines(Style::plain(), "", edit, width);
         }
         let digits = edit
             .rows
@@ -1620,129 +1779,52 @@ impl Renderer {
             .max()
             .unwrap_or(3)
             .clamp(3, 6);
-
-        let range = match (edit.old_range, edit.new_range) {
-            (Some((start, end)), Some((new_start, new_end)))
-                if (start, end) == (new_start, new_end) =>
-            {
-                line_range(start, end)
-            }
-            (Some((start, end)), Some((new_start, new_end))) => {
-                format!(
-                    "{} → {}",
-                    line_range(start, end),
-                    line_range(new_start, new_end)
-                )
-            }
-            (Some((start, end)), None) => format!("{} → deleted", line_range(start, end)),
-            (None, _) => "location unavailable".to_owned(),
-        };
-        let approximate = if edit.approximate {
-            " · approximate"
-        } else {
-            ""
-        };
-        let mut title = format!(
-            " edit {}/{} · {range}{approximate} · {}",
-            edit.index,
-            edit.total,
-            preview_path(path)
-        );
-        title.push(' ');
-        let title = clip_plain(&title, width.saturating_sub(3));
-        let fill = width.saturating_sub(title.chars().count() + 3);
-        let _ = writeln!(
-            out,
-            "  {}{}{}{}",
-            self.style.blue("╭─"),
-            self.style.bold(title),
-            self.style.blue("─".repeat(fill)),
-            self.style.blue("╮")
-        );
-
-        let left_label = format!("{:<panel_left$}", clip_plain(" original", panel_left));
-        let right_label = format!("{:<panel_right$}", clip_plain(" result", panel_right));
-        let _ = writeln!(
-            out,
-            "  {} {} {} {} {}",
-            self.style.blue("│"),
-            self.style.cyan(left_label),
-            self.style.blue("│"),
-            self.style.cyan(right_label),
-            self.style.blue("│")
-        );
-        let left_segment = "─".repeat(panel_left + 2);
-        let right_segment = "─".repeat(panel_right + 2);
-        let _ = writeln!(
-            out,
-            "  {}{}{}{}{}",
-            self.style.blue("├"),
-            self.style.blue(left_segment),
-            self.style.blue("┼"),
-            self.style.blue(right_segment),
-            self.style.blue("┤")
-        );
-
+        let mut lines = vec![(
+            Ink::Dim,
+            format!(
+                "{:<panel_left$}  {}",
+                clip_plain("original", panel_left),
+                clip_plain("result", panel_right)
+            ),
+        )];
         for row in &edit.rows {
-            let left = render_panel(
-                row.left.as_ref(),
-                Side::Left,
-                panel_left,
-                digits,
-                self.style,
-            );
-            let right = render_panel(
-                row.right.as_ref(),
-                Side::Right,
-                panel_right,
-                digits,
-                self.style,
-            );
-            let _ = writeln!(
-                out,
-                "  {} {} {} {} {}",
-                self.style.blue("│"),
-                left,
-                self.style.blue("│"),
-                right,
-                self.style.blue("│")
-            );
+            // The panel text is plain: the panels are laid out as text and the
+            // frame draws them, because painting here would put the escape
+            // sequences on screen as the characters they are.
+            // kind so a removal reads red on both sides of the pair.
+            let left = render_panel_plain(row.left.as_ref(), Side::Left, panel_left, digits);
+            let right = render_panel_plain(row.right.as_ref(), Side::Right, panel_right, digits);
+            let ink = if row.left.as_ref().is_some_and(|cell| cell.changed) {
+                Ink::Red
+            } else if row.right.as_ref().is_some_and(|cell| cell.changed) {
+                Ink::Green
+            } else {
+                Ink::Faint
+            };
+            lines.push((ink, format!("{left}  {right}")));
         }
         if edit.omitted > 0 {
-            let note = format!("… {} more line(s) …", edit.omitted);
-            let inner = width.saturating_sub(4);
-            let note = format!("{:<inner$}", clip_plain(&note, inner));
-            let _ = writeln!(
-                out,
-                "  {} {} {}",
-                self.style.blue("│"),
-                self.style.yellow(note),
-                self.style.blue("│")
-            );
+            lines.push((Ink::Yellow, format!("… {} more line(s) …", edit.omitted)));
         }
-        let _ = writeln!(
-            out,
-            "  {}{}{}",
-            self.style.blue("╰"),
-            self.style.blue("─".repeat(width.saturating_sub(2))),
-            self.style.blue("╯")
-        );
-        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
-        entry.push_text(&out);
-        self.transcript.push(entry);
+        lines
     }
 
-    /// Builds the unified box, one string per terminal row.
+    /// Returns the rows of a unified patch, each with the ink it is written in.
     ///
-    /// It is built here rather than printed from the method so the rows can be
-    /// checked: a patch that puts the new line above the old one, or numbers an
-    /// addition from the file it is not in, reads plausibly and is wrong.
+    /// The ink is carried as data and not wrapped around the text. The rows used
+    /// to come back as strings already painted with `style.red(...)` and the
+    /// rest, which is a form for a printer writing to a terminal: a frame draws
+    /// text, so it put the escape sequences on screen as the characters they
+    /// are.
+    ///
+    /// `path` is not read here: the caller puts it on the box's top rule, which
+    /// is the view's chrome and not a row of the diff.
     pub(crate) fn unified_lines(
-        style: Style,
-        path: &str,
+        _style: Style,
+        _path: &str,
         edit: &EditBox,
         width: usize,
-    ) -> Vec<String> {
+    ) -> Vec<(Ink, String)> {
         let inner = width.saturating_sub(4).max(1);
         let digits = edit
             .rows
@@ -1753,28 +1835,7 @@ impl Renderer {
             .max()
             .unwrap_or(3)
             .clamp(3, 6);
-        let approximate = if edit.approximate {
-            " · approximate"
-        } else {
-            ""
-        };
-        let mut title = format!(
-            " edit {}/{} · {}{approximate} · {}",
-            edit.index,
-            edit.total,
-            edit_range(edit),
-            preview_path(path)
-        );
-        title.push(' ');
-        let title = clip_plain(&title, width.saturating_sub(3));
-        let fill = width.saturating_sub(title.chars().count() + 3);
-        let mut lines = vec![format!(
-            "  {}{}{}{}",
-            style.blue("╭─"),
-            style.bold(title),
-            style.blue("─".repeat(fill)),
-            style.blue("╮")
-        )];
+        let mut lines = Vec::new();
         for row in unify(&edit.rows) {
             let number = row
                 .number
@@ -1782,35 +1843,48 @@ impl Renderer {
             let mark = row.kind.mark();
             let room = inner.saturating_sub(digits + 3);
             let text = format!("{:<room$}", clip_plain(&row.text, room));
-            let (mark, text) = match row.kind {
-                UnifiedKind::Context => (style.faint(mark.to_string()), style.faint(text)),
-                UnifiedKind::Removed => (style.red(mark.to_string()), style.red(text)),
-                UnifiedKind::Added => (style.green(mark.to_string()), style.green(text)),
+            let (ink, text) = match row.kind {
+                UnifiedKind::Context => (Ink::Faint, format!("{number} {mark} {text}")),
+                UnifiedKind::Removed => (Ink::Red, format!("{number} {mark} {text}")),
+                UnifiedKind::Added => (Ink::Green, format!("{number} {mark} {text}")),
             };
-            lines.push(format!(
-                "  {} {} {mark} {text} {}",
-                style.blue("│"),
-                style.faint(number),
-                style.blue("│")
-            ));
+            lines.push((ink, text));
         }
         if edit.omitted > 0 {
             let note = format!("… {} more line(s) …", edit.omitted);
-            let note = format!("{:<inner$}", clip_plain(&note, inner));
-            lines.push(format!(
-                "  {} {} {}",
-                style.blue("│"),
-                style.yellow(note),
-                style.blue("│")
-            ));
+            lines.push((Ink::Yellow, note));
         }
-        lines.push(format!(
-            "  {}{}{}",
-            style.blue("╰"),
-            style.blue("─".repeat(width.saturating_sub(2))),
-            style.blue("╯")
-        ));
         lines
+    }
+
+    /// What a call says while it is running.
+    ///
+    /// A row is one line and it has to answer "what is happening" without the
+    /// reader knowing the tool's name: `read` takes a path, `grep` takes a
+    /// pattern, `shell` takes a command. The tool's own name is what the row
+    /// leads with when there is nothing better to say — a row that guessed at an
+    /// argument would claim the call is doing something it is not.
+    #[must_use]
+    fn doing(tool: &str, arguments: Option<&serde_json::Value>) -> String {
+        let text = |key: &str| {
+            arguments
+                .and_then(|arguments| arguments.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        match tool {
+            "read" | "write" | "edit" | "list_dir" | "glob" => text("path")
+                .or_else(|| text("pattern"))
+                .map_or_else(|| tool.to_owned(), |path| format!("{tool} {path}")),
+            "grep" => {
+                text("pattern").map_or_else(|| tool.to_owned(), |pattern| format!("grep {pattern}"))
+            }
+            "shell" => match Self::command_summary(arguments) {
+                Some(command) => format!("shell $ {command}"),
+                None => tool.to_owned(),
+            },
+            _ => tool.to_owned(),
+        }
     }
 
     /// Returns the command a shell tool call ran, clipped to one line.
@@ -2256,7 +2330,7 @@ impl Renderer {
                     return;
                 }
                 // The provider answered: the bar stops saying it is waiting.
-                self.waiting = Some(super::loading::Wait::Streaming);
+                self.set_wait(super::loading::Wait::Streaming);
                 if self.verbosity.is_quiet() {
                     // `low` is the answer alone: not even the fact that the
                     // model is thinking is shown.

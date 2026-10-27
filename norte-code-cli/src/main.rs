@@ -25,7 +25,6 @@ mod render;
 mod select;
 mod startup;
 mod style;
-mod tabs;
 mod terminal;
 mod text;
 mod transcript;

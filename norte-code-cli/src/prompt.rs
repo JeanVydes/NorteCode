@@ -82,7 +82,11 @@ pub(crate) async fn answer_if_asked(
             Some(crate::input::EditorEvent::Question(answer)) => break Some(answer),
             // A line is not an answer to a question: the box sends its text as a
             // `Question` like every other way of answering.
-            Some(crate::input::EditorEvent::Line(..) | crate::input::EditorEvent::Action(_)) => {}
+            Some(
+                crate::input::EditorEvent::Line(..)
+                | crate::input::EditorEvent::Action(_)
+                | crate::input::EditorEvent::Copied(_),
+            ) => {}
             Some(crate::input::EditorEvent::End) | None => break None,
         }
     };

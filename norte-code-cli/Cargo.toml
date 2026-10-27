@@ -24,6 +24,10 @@ norte-code-skills = { path = "../norte-code-skills" }
 norte-code-store-sqlite = { path = "../norte-code-store-sqlite" }
 
 clap = { workspace = true }
+# The clipboard of a terminal is written through OSC 52, which carries the text
+# base64-encoded. There is no clipboard crate here: the only clipboard that
+# matters is the one belonging to the terminal a person is looking at.
+base64 = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 norte = { workspace = true }

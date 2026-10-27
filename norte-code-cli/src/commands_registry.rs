@@ -34,8 +34,6 @@ pub(crate) const JOB_ACTIONS: &[&str] = &["list", "check", "stop"];
 pub(crate) const MCP_ACTIONS: &[&str] = &["list", "enable", "disable"];
 
 /// The tabs `/tab` can show, as the footer names them.
-pub(crate) const TAB_NAMES: &[&str] = &["stats", "todo", "tools", "mcp"];
-
 /// The registry every part of the client reads.
 ///
 /// It is built once, with the plugins already in it, and handed out by
@@ -140,10 +138,6 @@ pub(crate) fn built() -> Registry {
         "re-read the configuration and rebuild the engine at the next boundary",
     ));
     registry.register(
-        CommandSpec::new("/tab", "show a footer tab, or list them")
-            .arg(ArgSpec::optional_open_with("target", TAB_NAMES)),
-    );
-    registry.register(
         CommandSpec::new("/rename", "name the session; bare, ask the model for one")
             .arg(ArgSpec::rest("title")),
     );
@@ -191,7 +185,6 @@ mod tests {
             "/mcp",
             "/jobs",
             "/restart",
-            "/tab",
             "/rename",
             "/debug",
             "/exit",

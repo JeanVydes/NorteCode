@@ -19,10 +19,10 @@ mod tests;
 pub(crate) use argument::approval_label;
 pub(crate) use debug::reasoning_setting_label;
 pub(crate) use debug::{
-    HostFacts, mcp_summary, report_mcp, report_prompt, report_reasoning, report_start,
-    report_tool_rules, report_tools, tools_summary,
+    HostFacts, report_mcp, report_prompt, report_reasoning, report_start, report_tool_rules,
+    report_tools,
 };
-pub(crate) use dial::{reasoning_label, source_label, token_ratio};
+pub(crate) use dial::{effort_span, reasoning_label, source_label, token_ratio};
 pub(crate) use helpers::{cache_percent_label, fallback_env, find_project_config, human_tokens};
 #[cfg(test)]
 pub(crate) use labels::budget_label;

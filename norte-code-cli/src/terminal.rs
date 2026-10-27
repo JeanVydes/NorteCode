@@ -33,8 +33,8 @@ use std::io::{self, IsTerminal, Write};
 
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -100,6 +100,11 @@ impl Guard {
         let _ = execute!(
             out,
             EnableBracketedPaste,
+            // Mouse capture is what makes the wheel scroll the conversation. A
+            // terminal without it sends nothing for a wheel event at all, so
+            // there is no fallback to keep: the keys are the other way to read
+            // what scrolled past.
+            EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
         let screen = Terminal::with_options(
@@ -136,6 +141,30 @@ impl Guard {
     }
 }
 
+/// Puts text on the clipboard of the terminal the client is running in.
+///
+/// It is OSC 52: the sequence carries the bytes and the terminal writes them to
+/// whatever clipboard the person is actually using. That is what makes it work
+/// over ssh and inside tmux, where a program on this side has no reach into the
+/// other one — and it is why there is no clipboard crate here: the only
+/// clipboard that matters is the one belonging to the terminal a person is
+/// looking at, and only they can write to it.
+///
+/// The payload is bounded by what a terminal accepts. What a person copies out
+/// of a conversation is a paragraph, not a megabyte.
+///
+/// # Errors
+///
+/// Returns an error when the terminal refuses the write.
+pub(crate) fn copy(text: &str) -> Result<(), String> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut out = io::stdout();
+    // `c` is the clipboard; `p` would be the primary selection.
+    write!(out, "\x1b]52;c;{encoded}\x07").map_err(|error| error.to_string())?;
+    out.flush().map_err(|error| error.to_string())
+}
+
 impl Drop for Guard {
     fn drop(&mut self) {
         // The screen goes first: its own restore runs while the terminal is
@@ -145,6 +174,7 @@ impl Drop for Guard {
         let _ = execute!(
             out,
             PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );

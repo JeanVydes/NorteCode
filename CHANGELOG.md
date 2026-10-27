@@ -83,6 +83,75 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Selecting text with the mouse copies it. Asking for the wheel turns off the
+  terminal's own selection, and a client that takes the mouse and gives nothing
+  back is one a person cannot copy out of: the drag is read by the client now,
+  drawn in reverse video, and letting go puts it on the terminal's clipboard
+  through OSC 52 — which is the clipboard the person is actually using, over ssh
+  and inside tmux as well as here. What is copied is the rows the frame painted,
+  so a drag that starts on a blank row above the text copies the text.
+
+- The scroll did nothing. The offset counts from the end — the page-up
+  direction, towards what is older — and the delta was subtracted the other way
+  round, so `0 - 24` saturates back to zero: `PageUp` and `Ctrl-Home` were
+  no-ops until something else moved the offset first. A move also writes nothing
+  unless the offset changed, and a resize is a change like any other: nothing
+  marked it, so the frame was not redrawn and the sidebar kept the columns of
+  the size before it.
+
+- The spinner counted `0s` for the rest of an answer. Two places raised the
+  phase to `streaming` without setting the instant the wait began, and a tool's
+  output clears that instant mid-turn, so the clock the row counts on was `None`
+  and the frame read it as zero.
+
+- A tick with nothing to draw wrote a frame anyway. The renderer reads the
+  "something changed" flag the keyboard sets — fourteen setters wrote it and
+  nobody read it — and asks whether anything is animating. Idle, the client
+  writes nothing: measured at 0 bytes per second where it had been writing a
+  cursor hide/show pair sixteen times a second.
+
+- The chrome wrote escape sequences into text the frame draws. The status line,
+  the usage rows, a notice and a session line are built by the string painters
+  and those wrap text in raw SGR codes; a frame draws text, so the codes were
+  shown as the characters they are and were counted as characters by the row's
+  own cut, which chopped a line that fitted mid-field.
+
+- The status row's rule was drawn onto the status row and then overwritten by
+  it, so half of it survived as stray dashes across the bottom line.
+
+- The conversation painted only the rows it had. The area is fixed and the
+  content is not, so the rect moved down the screen as the conversation grew and
+  left what was above it as the last frame had put it: on a real terminal, the
+  tail of an older answer interleaved with the new one.
+
+- The interface drew escape sequences as text. A row of the conversation was
+  built with the string painters — `style.red("…")` and the rest — which wrap
+  text in raw SGR codes. That is right for a printer writing to a terminal and
+  wrong for a frame that draws text: `edit` came out as
+  `38;2;224;108;117m- old line`, the shell box drew a `│` down one side of its
+  own output, and nothing lined up. A row is now **text plus an ink**, and the
+  widget is what turns the ink into colour. Nothing that reaches a frame carries
+  an escape sequence.
+
+- A tool's output is one box with rules above and below, and not a box drawn
+  with sides. The sides were what a person selected along with the output they
+  meant to copy, and they were drawn a row at a time, so the edge landed in the
+  middle of the work it was meant to bound. A streamed command also added one
+  transcript entry per line; it now collects its rows and adds a single entry
+  when the call closes, which is what made `shell` bloat the conversation.
+
+- Wrapping lost the indentation. The wrap split on `' '` and dropped the empty
+  runs leading spaces produce, so `    let x = 1;` came back flush against the
+  margin: every diff lost the shape it is read by and every nested line of
+  output lost its nesting. Indentation is preserved, a wrapped continuation is
+  indented under the line it belongs to, and a run of spaces inside a line is no
+  longer collapsed.
+
+- Scrolling past the top emptied the screen. The offset was clamped to the whole
+  conversation instead of to the last screenful, so a held `PageUp` produced
+  `total - total` rows to draw and left no line to scroll back from. It now
+  stops with the first row in the first row of the view.
+
 - `resume` left the interface on the terminal and blocked. It never took the
   terminal over the way a new session does, so there was no alternate screen,
   no raw mode and no frame: `draw` returned early, the input box was never
@@ -128,6 +197,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- One tool call is one line. A call used to be two rows — one announcing it and
+  one reporting how it went — so a suite of ten calls put twenty lines in the
+  conversation and the reader had to pair them up by the id beside them. The row
+  now says what the call is doing while it runs, with a glyph that turns and the
+  time it has taken, and the ending rewrites that same row: the tick, the cross
+  or the circle, in green, red or the quiet yellow of a call that was let go of.
+  `low` shows neither, which is what "the answer alone" means.
+
+- The context dial warns in steps. It reads its scale from the compaction
+  threshold and not from the model's window — the same share of a small window
+  and a large one means the same thing — and turns green, yellow, orange and red
+  as the window fills towards it. A threshold written into the config and picked
+  up by `/refresh` moves the colour with it, which it did not: the two
+  disagreed, which is the one thing a warning must not do. The suggestion above
+  the input reads in the colour of the rung it names.
+
 - The whole interface draws with `ratatui`, and nothing else in the client
   writes to the terminal. The transcript is data the client keeps — one entry
   per thing that was said or done, wrapped when it is drawn and not when it
@@ -147,6 +232,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   working, which is what the animated bar was for — and the bar is gone, thread
   and all, because a thread that repaints a line of its own is a second writer
   on a terminal that has one.
+
+  The mouse wheel scrolls the conversation, and the keys still do:
+  `PageUp`/`PageDown` move a screen, `Ctrl-Home`/`Ctrl-End` go to either end. A
+  terminal sends nothing for a wheel event unless the client asks for mouse
+  capture, which is why the wheel did nothing at all before.
 
   Two files of drawing code went with it: `code.rs` and `markdown.rs`
   highlighted syntax for a printer that no longer prints, and `input.rs` lost

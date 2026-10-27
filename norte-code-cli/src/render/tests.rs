@@ -8,10 +8,20 @@ use norte_code_protocol::{Delta, ServerEvent, ServerEventKind, SessionKey};
 use crate::input::{Pinned, TodoItem, TodoStatus};
 use crate::render::argument::todo_items;
 use crate::render::dial::context_dial;
-use crate::render::edit::{EditPreview, build_edit_preview, edit_preview};
+use crate::render::edit::{
+    EditPreview, build_edit_preview, edit_preview, edit_range, preview_path,
+};
 
 use crate::render::renderer::{Block, Format, Renderer, Verbosity, call_ending, tool_sections};
 use crate::style::Style;
+
+/// The text of an entry's rows, which is what the assertions are about.
+///
+/// A row is text and an ink, and most tests ask about the text: spelling every
+/// assertion as `.iter().map(...)` would bury the thing under test.
+fn texts(entry: &crate::transcript::Entry) -> Vec<String> {
+    entry.lines.iter().map(|line| line.text.clone()).collect()
+}
 
 fn renderer(pinned: &Arc<Pinned>) -> Renderer {
     Renderer::new(
@@ -237,6 +247,21 @@ fn todo_started(call_id: &str, todos: &serde_json::Value) -> ServerEvent {
             call_id: call_id.to_owned(),
             tool: "todo".to_owned(),
             arguments: Some(serde_json::json!({ "todos": todos })),
+            source: None,
+        },
+    }
+}
+
+/// A `read` that started, so a test can watch the row and its ending.
+fn read_started(call_id: &str, path: &str) -> ServerEvent {
+    ServerEvent {
+        request_id: 1,
+        session: None,
+        kind: ServerEventKind::ToolStarted {
+            turn: 1,
+            call_id: call_id.to_owned(),
+            tool: "read".to_owned(),
+            arguments: Some(serde_json::json!({ "path": path })),
             source: None,
         },
     }
@@ -1255,9 +1280,9 @@ fn the_unified_diff_reads_as_a_patch() {
     let preview = edit_preview(Some(&arguments), Some("one\ntwo\nthree\n")).expect("preview");
     let edit = &preview.boxes[0];
     let lines = Renderer::unified_lines(Style::plain(), &preview.path, edit, 60);
-    // `Style::plain` carries no escape codes, so the rows are already the text
-    // a terminal would show.
-    let plain: Vec<String> = lines.clone();
+    // The rows are text and an ink, so this is the only place the shape can be
+    // checked: the text alone, and which of it left and which arrived.
+    let plain: Vec<String> = lines.iter().map(|(_, text)| text.clone()).collect();
     let joined = plain.join("\n");
 
     // What left comes before what arrived, which is how a patch reads.
@@ -1276,14 +1301,21 @@ fn the_unified_diff_reads_as_a_patch() {
         1,
         "context is not drawn twice:\n{joined}"
     );
-    // Every row is boxed, and the box closes exactly once.
-    assert!(joined.contains('╭'), "{joined}");
-    assert!(joined.contains('╰'), "{joined}");
-    assert_eq!(
-        plain.iter().filter(|line| line.contains('╰')).count(),
-        1,
-        "{joined}"
-    );
+    // The frame is the view's, so the rows carry none of it: a `│` in a row is
+    // a `│` a person selects along with the code they meant to copy.
+    assert!(!joined.contains('╭'), "no rule in a row:\n{joined}");
+    assert!(!joined.contains('│'), "no bar in a row:\n{joined}");
+    // And what left reads red, what arrived green, the context quiet.
+    let ink_of = |needle: &str| {
+        lines
+            .iter()
+            .find(|(_, text)| text.contains(needle))
+            .map(|(ink, _)| *ink)
+            .expect(needle)
+    };
+    assert_eq!(ink_of("- two"), crate::transcript::Ink::Red);
+    assert_eq!(ink_of("+ TWO"), crate::transcript::Ink::Green);
+    assert_eq!(ink_of("one"), crate::transcript::Ink::Faint);
 }
 
 #[test]
@@ -1302,7 +1334,7 @@ fn the_unified_diff_clips_to_the_width_it_was_given() {
     let preview = edit_preview(Some(&arguments), Some("short\n")).expect("preview");
     let edit = &preview.boxes[0];
     let width = 60;
-    for line in Renderer::unified_lines(Style::plain(), &preview.path, edit, width) {
+    for (_, line) in Renderer::unified_lines(Style::plain(), &preview.path, edit, width) {
         let visible = line.chars().count();
         assert!(
             visible <= width + 2,
@@ -1322,14 +1354,24 @@ fn the_split_view_still_draws_two_panels() {
     let preview = edit_preview(Some(&arguments), Some("one\ntwo\nthree\n")).expect("preview");
     let edit = &preview.boxes[0];
     let unified = Renderer::unified_lines(Style::plain(), &preview.path, edit, 60);
-    let joined = unified.join("\n");
+    let joined: Vec<&str> = unified.iter().map(|(_, text)| text.as_str()).collect();
+    let joined = joined.join("\n");
     assert!(
         !joined.contains("original"),
         "the unified view has no panels: {joined}"
     );
     assert!(
-        joined.contains("edit 1/1"),
-        "both views name the same edit: {joined}"
+        !joined.contains("edit 1/1"),
+        "the heading is the box's, not a row: {joined}"
+    );
+    assert_eq!(
+        Renderer::edit_title(&preview.path, edit),
+        format!(
+            "edit 1/1 · {} · {}",
+            edit_range(edit),
+            preview_path(&preview.path)
+        ),
+        "both views name the same edit"
     );
 }
 
@@ -1380,7 +1422,7 @@ fn the_conversation_is_kept_as_it_arrives() {
         "each event is one entry, in the order they arrived: {entries:?}"
     );
     assert_eq!(
-        entries[0].lines,
+        texts(&entries[0]),
         ["Hello"],
         "the two tokens are one answer, not two lines"
     );
@@ -1403,7 +1445,7 @@ fn the_conversation_is_kept_as_it_arrives() {
         .iter()
         .find(|entry| entry.kind == Kind::Reasoning)
         .expect("the thought is kept at high");
-    assert_eq!(thought.lines, ["thinking"]);
+    assert_eq!(texts(thought), ["thinking"]);
     let answer = entries
         .iter()
         .position(|entry| entry.kind == Kind::Answer)
@@ -1413,4 +1455,127 @@ fn the_conversation_is_kept_as_it_arrives() {
         .position(|entry| entry.kind == Kind::Reasoning)
         .expect("and it is before it");
     assert!(thought < answer, "the thought leads: {entries:?}");
+}
+
+#[test]
+fn a_call_is_one_row_that_changes_when_it_ends() {
+    // A tool used to be two rows — one announcing it and one reporting how it
+    // went — so a suite of ten calls put twenty lines in the conversation and
+    // the reader had to pair them up by the id beside them. One call is one
+    // row: it says what is running while it runs, and the same row gains its
+    // outcome when it ends.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+
+    renderer
+        .event(&read_started("call-1", "README.md"))
+        .expect("started");
+    let running = renderer.transcript.entries();
+    assert_eq!(running.len(), 1, "the announcement is the whole of it");
+    assert_eq!(texts(&running[0]), ["read README.md"]);
+    assert!(
+        running[0].started.is_some(),
+        "and it is counting, because it has not said it is done"
+    );
+
+    renderer
+        .event(&tool_finished("call-1", "read", false))
+        .expect("finished");
+    let entries = renderer.transcript.entries();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the ending edits the row, it does not add one: {:?}",
+        entries.iter().map(texts).collect::<Vec<_>>()
+    );
+    let done = texts(&entries[0]);
+    assert!(done[0].contains("read"), "{done:?}");
+    assert!(done[0].contains("ms"), "the ending says how long: {done:?}");
+    assert!(
+        entries[0].started.is_none(),
+        "and the clock stopped with it"
+    );
+}
+
+#[test]
+fn a_call_that_failed_keeps_one_row_and_reads_as_a_failure() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer
+        .event(&read_started("call-1", "missing.md"))
+        .expect("started");
+    renderer
+        .event(&tool_finished("call-1", "read", true))
+        .expect("finished");
+    let entries = renderer.transcript.entries();
+    assert_eq!(entries.len(), 1, "still one row");
+    assert_eq!(
+        entries[0].kind,
+        crate::transcript::Kind::Failure,
+        "and the row itself says it went wrong"
+    );
+}
+
+#[test]
+fn a_quiet_run_shows_neither_the_call_nor_its_ending() {
+    // `low` is the answer alone: no announcement, no ending, no row. The ending
+    // edits the row the call opened, and a run that never opened one has
+    // nothing to edit — which is the level working, not a call going missing.
+    let pinned = Pinned::new();
+    let mut renderer = renderer(&pinned);
+    assert!(renderer.verbosity.is_quiet());
+    renderer
+        .event(&read_started("call-1", "README.md"))
+        .expect("started");
+    renderer
+        .event(&tool_finished("call-1", "read", false))
+        .expect("finished");
+    assert!(
+        renderer.transcript.entries().is_empty(),
+        "the answer alone: {:?}",
+        renderer
+            .transcript
+            .entries()
+            .iter()
+            .map(texts)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_outcome_of_a_call_carries_its_own_ink() {
+    // While a call runs its row is grey; when it ends the same row takes the
+    // colour of what it became. That is what a person reads down the
+    // conversation for: what worked and what did not, at a glance.
+    let ink_of = |is_error: bool| {
+        let pinned = Pinned::new();
+        let mut renderer = visible_renderer(&pinned);
+        renderer
+            .event(&read_started("call-1", "README.md"))
+            .expect("started");
+        renderer
+            .event(&tool_finished("call-1", "read", is_error))
+            .expect("finished");
+        renderer.transcript.entries()[0].lines[0].ink
+    };
+    assert_eq!(ink_of(false), Some(crate::transcript::Ink::Green));
+    assert_eq!(ink_of(true), Some(crate::transcript::Ink::Red));
+}
+
+#[test]
+fn a_call_that_is_still_out_is_grey_and_carries_no_outcome() {
+    // The row while it runs has no ink of its own: the frame draws it in the
+    // quiet ink of a thing in progress, and there is no tick or cross in the
+    // text because the call has not said how it went.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer
+        .event(&read_started("call-1", "README.md"))
+        .expect("started");
+    let entry = &renderer.transcript.entries()[0];
+    assert_eq!(entry.lines[0].ink, None, "no outcome yet");
+    let text = &entry.lines[0].text;
+    assert!(!text.contains('\u{2713}'), "no tick: {text:?}");
+    assert!(!text.contains('\u{2717}'), "no cross: {text:?}");
+    assert!(entry.started.is_some(), "and it is counting");
 }

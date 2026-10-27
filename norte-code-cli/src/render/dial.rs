@@ -8,8 +8,36 @@ use super::{ReasoningInfo, Source, Style};
 /// One cell of the context dial, from empty to full.
 const DIAL_CELLS: [char; 4] = ['░', '▒', '▓', '█'];
 
-/// How close to the compaction limit the context must be before the dial warns.
-const DIAL_WARN_FRACTION: f64 = 0.8;
+/// Where each colour of the dial begins, as a fraction *of the threshold*.
+///
+/// The dial answers one question — how close is the compaction — so its scale
+/// is the threshold and not the window: the same share of a small model's window
+/// and a large one's means the same thing. A ring that turned red at a fixed
+/// fraction of the window would warn late on a model whose threshold is low and
+/// early on one whose threshold is high, which is the opposite of what a warning
+/// is for.
+///
+/// The rungs are the ones the effort bar uses, for the same reason: a person
+/// reads both rows at once and should not have to learn two scales.
+const DIAL_RUNGS: [(f64, Rung); 4] = [
+    // A quarter of the way to the limit: the work is still comfortable.
+    (0.25, Rung::Green),
+    // Halfway: worth watching.
+    (0.50, Rung::Yellow),
+    // Three quarters: the next turn may not fit.
+    (0.75, Rung::Orange),
+    // At the limit: compaction is what happens next.
+    (1.00, Rung::Red),
+];
+
+/// One colour of the dial's scale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rung {
+    Green,
+    Yellow,
+    Orange,
+    Red,
+}
 
 /// How many cells the context dial draws.
 const DIAL_WIDTH: usize = 8;
@@ -52,16 +80,55 @@ pub(crate) fn context_dial(
             ring.push('░');
         }
     }
-    // The window is over the limit once the used fraction reaches the threshold.
-    let over = threshold > 0.0 && fraction >= threshold;
-    let near = !over && threshold > 0.0 && fraction >= threshold * DIAL_WARN_FRACTION;
-    let label = format!("ctx {} {}", percent_label(used, max), ring);
-    if over || compact {
-        format!("{} {}", style.red(label), style.red("⟳ compact"))
-    } else if near {
-        style.yellow(label)
+    // How far towards the compaction limit the window is. With no threshold
+    // there is no scale to warn on, so the dial is the plain reading of the
+    // window it always was.
+    let towards = if threshold > 0.0 {
+        fraction / threshold
     } else {
-        style.blue(label)
+        0.0
+    };
+    let label = format!("ctx {} {}", percent_label(used, max), ring);
+    // At or past the limit the word joins the row: the colour says it is close
+    // and the word says what close means.
+    let over = threshold > 0.0 && fraction >= threshold;
+    let label = if over || compact {
+        format!("{label} ⟳ compact")
+    } else {
+        label
+    };
+    paint(style, &label, towards, threshold > 0.0)
+}
+
+/// The colour the dial is written in, by how far towards the limit it is.
+///
+/// Below the first rung it is the blue the row always used, and above the last
+/// it stays red: a dial past its limit has nothing further to say.
+#[must_use]
+fn paint(style: Style, label: &str, towards: f64, scaled: bool) -> String {
+    if !scaled {
+        return style.blue(label);
+    }
+    // Below the first rung the row is the blue it always was: the scale has not
+    // started, and a colour there would claim a warning nobody has earned.
+    let Some((first, first_rung)) = DIAL_RUNGS.first().copied() else {
+        return style.blue(label);
+    };
+    if towards < first {
+        return style.blue(label);
+    }
+    // Otherwise the rung the reading has reached, and no further.
+    let mut chosen = first_rung;
+    for (at, rung) in DIAL_RUNGS {
+        if towards >= at {
+            chosen = rung;
+        }
+    }
+    match chosen {
+        Rung::Green => style.green(label),
+        Rung::Yellow => style.yellow(label),
+        Rung::Orange => style.orange(label),
+        Rung::Red => style.red(label),
     }
 }
 
@@ -126,6 +193,31 @@ fn effort_fraction(effort: &str) -> (usize, u8) {
     }
 }
 
+/// The ink a reasoning setting is written in, as a widget style.
+///
+/// It is the bar's own colour, exposed for the rows that name a setting without
+/// drawing one: the suggestion above the input says what Tab would write —
+/// `xhigh — setting` — and it means the same thing the bar does, so it reads in
+/// the same colour. A person learning the scale from one row and reading the
+/// other should not have to learn it twice.
+///
+/// The rungs are the ones the bar draws, in the order they cost: `off` is grey
+/// because it is the absence of an effort, the four middle rungs go green,
+/// yellow, orange and red, and `max` is the top of the scale.
+#[must_use]
+pub(crate) fn effort_span(style: Style, effort: &str) -> ratatui::style::Style {
+    match effort_fraction(effort).1 {
+        0 => style.faint_span(),
+        1 => style.green_span(),
+        2 => style.yellow_span(),
+        3 => style.orange_span(),
+        4 => style.red_span(),
+        5 => style.magenta_span(),
+        // `auto` and a token budget, which are a setting of another kind.
+        _ => style.blue_span(),
+    }
+}
+
 /// The reasoning effort as a bar, coloured by how much is being asked.
 ///
 /// The footer used to say `think high`, which is a word a person has to map to
@@ -164,5 +256,78 @@ pub(crate) fn source_label(source: Source) -> &'static str {
         Source::Network => "network",
         Source::StaleCache => "stale cache",
         Source::Bundled => "bundled snapshot",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::Colors;
+
+    /// A style that paints, so a test can tell which rung was chosen from the
+    /// colour that came out.
+    fn styled() -> Style {
+        Style::for_tests(Colors::True)
+    }
+
+    #[test]
+    fn the_dial_turns_a_rung_at_a_time_towards_the_limit() {
+        // The scale is the threshold and not the window: what is being warned
+        // about is how close the compaction is, and the same share of a small
+        // model's window and a large one's means the same thing. Under a 0.5
+        // threshold, a quarter of the way there is 12.5% of the window.
+        let code = |used: u64| {
+            context_dial(styled(), used, Some(1_000), 0.5, false)
+                .split('m')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        // Below the first rung the row is the blue it always was.
+        assert_eq!(code(50), code(10), "the scale has not started");
+        // And each rung after it is a colour of its own, in the order they cost.
+        let rungs = [code(200), code(300), code(400), code(500)];
+        for rung in &rungs {
+            assert!(!rung.is_empty(), "every rung paints");
+        }
+        let mut seen = vec![code(50)];
+        seen.extend(rungs);
+        let count = seen.len();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "no two rungs share a colour: {seen:?}");
+        // At the limit the word joins the row, so the colour is not the only
+        // thing saying it.
+        assert!(context_dial(styled(), 500, Some(1_000), 0.5, false).contains("compact"));
+    }
+
+    #[test]
+    fn a_threshold_that_moved_moves_the_colour() {
+        // The bug this exists for: the threshold was read once at startup, so a
+        // value written into the config and picked up by `/refresh` changed how
+        // the session compacts without changing the colour the bar warns in.
+        // The same usage is a different colour under a different limit.
+        let used = 400;
+        let loose = context_dial(styled(), used, Some(1_000), 0.9, false);
+        let tight = context_dial(styled(), used, Some(1_000), 0.45, false);
+        assert_ne!(
+            loose, tight,
+            "the threshold is what the colour is read from"
+        );
+        // And the limit itself is the threshold: past it, the word that says
+        // what happens next is on the row.
+        let past = context_dial(styled(), 460, Some(1_000), 0.45, false);
+        assert!(!loose.contains("compact"), "not close under the loose one");
+        assert!(past.contains("compact"), "past the tight one: {past:?}");
+    }
+
+    #[test]
+    fn a_window_with_no_maximum_is_not_a_full_one() {
+        // A missing maximum is not a full context: there is no fraction to
+        // draw, so the dial shows the count and claims nothing.
+        let text = context_dial(styled(), 123, None, 0.5, false);
+        assert!(text.contains("123"), "{text:?}");
+        assert!(!text.contains('\u{2588}'), "nothing is claimed: {text:?}");
+        assert!(!text.contains("compact"), "{text:?}");
     }
 }

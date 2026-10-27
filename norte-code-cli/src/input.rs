@@ -10,8 +10,6 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::tabs::SessionTab;
-
 /// A file pasted into the draft, as the message carries it.
 ///
 /// The bytes are not here: a paste carries a path, and the service is what reads
@@ -44,17 +42,6 @@ pub(crate) enum TodoStatus {
     InProgress,
     /// Done.
     Completed,
-}
-
-impl TodoStatus {
-    /// The marker the `todo` tool uses for this state.
-    fn marker(self) -> &'static str {
-        match self {
-            Self::Pending => "[ ]",
-            Self::InProgress => "[~]",
-            Self::Completed => "[x]",
-        }
-    }
 }
 
 /// A question from the model, waiting for an answer.
@@ -109,6 +96,64 @@ pub(crate) enum Answer {
     Left,
 }
 
+/// The text a selection holds, from the rows the last frame painted.
+///
+/// The corners come in any order — a drag may go up and to the left as easily
+/// as down and to the right — so they are sorted first. The first and last rows
+/// are cut at the selected columns and the rows between them are taken whole,
+/// which is what a terminal does with a selection and what makes a drag over a
+/// wrapped paragraph yield the paragraph.
+#[must_use]
+fn text_in(range: ((u16, u16), (u16, u16)), rows: &[String]) -> String {
+    let ((c1, r1), (c2, r2)) = range;
+    let (top, left) = if (r1, c1) <= (r2, c2) {
+        (r1, c1)
+    } else {
+        (r2, c2)
+    };
+    let (bottom, right) = if (r1, c1) <= (r2, c2) {
+        (r2, c2)
+    } else {
+        (r1, c1)
+    };
+    let mut out: Vec<String> = Vec::new();
+    for row in top..=bottom {
+        let Some(line) = rows.get(usize::from(row)) else {
+            continue;
+        };
+        let chars: Vec<char> = line.chars().collect();
+        // Only the first and the last row are cut at a column. The rows between
+        // them are taken whole — a drag that spans three rows means all of the
+        // middle one — and the first row starts where the drag did while the
+        // last ends where it did. A one-row drag is both at once, which is why
+        // the first row is cut at its start and the last at its end.
+        let from = if row == top {
+            usize::from(left).min(chars.len())
+        } else {
+            0
+        };
+        let to = if row == bottom {
+            usize::from(right).saturating_add(1).min(chars.len())
+        } else {
+            chars.len()
+        };
+        let slice: String = chars[from.min(to)..to].iter().collect();
+        out.push(slice.trim_end().to_owned());
+    }
+    // A drag that starts on a blank row above the text picks up the blank rows
+    // it passed over, and they are not part of what the person meant to copy:
+    // the answer is what they dragged *to*. Leading and trailing blanks go, and
+    // the rows between stay — three selected rows of a paragraph are three
+    // lines even when the middle one is empty.
+    while out.first().is_some_and(|row| row.trim().is_empty()) {
+        out.remove(0);
+    }
+    while out.last().is_some_and(|row| row.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 /// Everything the footer draws, read under one lock.
 ///
 /// One lock for the lot: taking each field on its own lets a writer land
@@ -118,9 +163,6 @@ pub(crate) enum Answer {
 struct Snapshot {
     session: String,
     todos: Vec<TodoItem>,
-    tab: SessionTab,
-    tool_summary: String,
-    mcp_summary: String,
 }
 
 /// The pinned text above the input line.
@@ -143,6 +185,12 @@ pub(crate) struct Pinned {
     modal_open: AtomicBool,
     /// How far the panel is scrolled back from the end, in lines.
     modal_scroll: AtomicUsize,
+    /// Whether the left button is down, so a drag is a selection.
+    ///
+    /// It lives beside the selection and not in the frame: the button and the
+    /// motion arrive on the keyboard's thread, and the frame only reads the
+    /// result.
+    selecting: AtomicBool,
     /// How many lines the conversation is scrolled back from its end.
     ///
     /// Zero follows the tail. The reader moves it with the page keys and the
@@ -157,38 +205,19 @@ pub(crate) struct Pinned {
     completion_pick: AtomicUsize,
 }
 
-impl Default for PinnedInner {
-    fn default() -> Self {
-        Self {
-            session: String::new(),
-            todos: Vec::new(),
-            asked: None,
-            tab: SessionTab::Stats,
-            pending_steers: Vec::new(),
-            tool_summary: String::new(),
-            mcp_summary: String::new(),
-            draft: String::new(),
-            draft_cursor: 0,
-        }
-    }
-}
-
+#[derive(Default)]
 struct PinnedInner {
     session: String,
     todos: Vec<TodoItem>,
     /// The question being answered, when the model asked one.
     asked: Option<Asked>,
-    /// Which tab is showing. What the session has spent is what a client opens
-    /// on: it is the line the footer carried before the other tabs existed.
-    tab: SessionTab,
-    /// The one-row summary the tools tab shows.
+    /// What the mouse has selected, in cells of the frame.
     ///
-    /// It is built where the rules live and handed over as text: a client that
-    /// counted the rules itself would be a second place that knows what `deny`
-    /// winning over `allow` means, and the two would drift.
-    tool_summary: String,
-    /// The one-row summary the MCP tab shows.
-    mcp_summary: String,
+    /// A cell is a column and a row of the terminal, and the range is the two
+    /// corners: the anchor where the drag began and the end where it is now.
+    selection: Option<((u16, u16), (u16, u16))>,
+    /// The rows the last frame painted, so a selection can be turned into text.
+    painted: Vec<String>,
     /// The draft as the key reader last had it.
     ///
     /// It is a copy and not the buffer itself: the reader owns the buffer and
@@ -217,6 +246,7 @@ impl Default for Pinned {
             modal_closed: AtomicBool::new(false),
             modal_open: AtomicBool::new(false),
             modal_scroll: AtomicUsize::new(0),
+            selecting: AtomicBool::new(false),
             completion_pick: AtomicUsize::new(0),
             transcript_scroll: AtomicUsize::new(0),
         }
@@ -385,30 +415,10 @@ impl Pinned {
             self.dirty.store(true, Ordering::Relaxed);
         }
     }
-    /// Replaces the tools summary the footer shows for the tools tab.
-    ///
-    /// The text is the whole line, already styled: the tab is one row and what
-    /// goes in it is decided where the rules are, so the editor draws what it
-    /// is given and never counts a rule itself.
-    pub(crate) fn set_tool_summary(&self, text: String) {
-        let mut inner = self.lock();
-        if inner.tool_summary != text {
-            inner.tool_summary = text;
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// Replaces the MCP summary the footer shows for the MCP tab.
-    pub(crate) fn set_mcp_summary(&self, text: String) {
-        let mut inner = self.lock();
-        if inner.mcp_summary != text {
-            inner.mcp_summary = text;
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-    }
-
     /// A snapshot of the todo list, in the model's order.
-    #[cfg(test)]
+    ///
+    /// The sidebar draws it, so it is read on every frame and not only by a
+    /// test: the list is the model's plan, and it belongs beside the work.
     pub(crate) fn todos(&self) -> Vec<TodoItem> {
         self.lock().todos.clone()
     }
@@ -421,6 +431,11 @@ impl Pinned {
     pub(crate) fn close_modal(&self) -> bool {
         if self.modal_open.load(Ordering::Relaxed) {
             self.modal_closed.store(true, Ordering::Relaxed);
+            // Escape is handled on the keyboard's thread and the panel is taken
+            // down by the frame. Nothing drew the frame unless something else
+            // had changed, so the panel stayed on screen after the key that
+            // closed it.
+            self.dirty.store(true, Ordering::Relaxed);
             return true;
         }
         false
@@ -449,7 +464,10 @@ impl Pinned {
         } else {
             at.saturating_add(delta.unsigned_abs())
         };
-        self.modal_scroll.store(moved, Ordering::Relaxed);
+        if moved != at {
+            self.modal_scroll.store(moved, Ordering::Relaxed);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
         true
     }
 
@@ -466,17 +484,28 @@ impl Pinned {
     /// are, and one at the tail sees the newest line because zero is the tail.
     pub(crate) fn scroll_transcript(&self, delta: isize) {
         let at = self.transcript_scroll.load(Ordering::Relaxed);
-        let moved = if delta < 0 {
-            at.saturating_sub(delta.unsigned_abs())
-        } else {
-            at.saturating_add(delta.unsigned_abs())
-        };
-        self.transcript_scroll.store(moved, Ordering::Relaxed);
+        // The offset counts from the end, so a negative delta — the page-up
+        // direction, towards what is older — moves it *further* from the tail.
+        // It was subtracted the other way round, which left the keys doing
+        // nothing at the tail: `0 - 24` saturates back to zero, which is where
+        // they started, so `PageUp` and `Ctrl-Home` were no-ops until something
+        // else moved the offset first.
+        let moved = at.saturating_add_signed(-delta);
+        if moved != at {
+            self.transcript_scroll.store(moved, Ordering::Relaxed);
+            // The frame draws the offset, so moving it is a change like any
+            // other. Without this the tick had nothing to draw and the
+            // conversation stayed where it was: the keys moved a number nobody
+            // read.
+            self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Puts the conversation back on its newest line.
     pub(crate) fn follow_tail(&self) {
-        self.transcript_scroll.store(0, Ordering::Relaxed);
+        if self.transcript_scroll.swap(0, Ordering::Relaxed) != 0 {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     /// How far the conversation is scrolled back from its end.
@@ -521,6 +550,10 @@ impl Pinned {
         if !open {
             self.modal_closed.store(false, Ordering::Relaxed);
         }
+        // Opening a panel is a change to draw: the command that asked for it
+        // returns to the prompt and the frame is written on the next tick,
+        // which only writes when something moved.
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Takes the request to close the panel, if one was made.
@@ -544,40 +577,6 @@ impl Pinned {
         (inner.draft.clone(), inner.draft_cursor)
     }
 
-    /// The row the active tab shows.
-    ///
-    /// The tabs module decides what each one says from the state it holds, so
-    /// the row and the pinned line cannot disagree about the same fact.
-    pub(crate) fn tab_body(&self) -> String {
-        let inner = self.lock();
-        let todos: Vec<crate::input::TodoItem> = inner.todos.clone();
-        match inner.tab {
-            // `stats` has no body of its own: what it shows *is* the status
-            // line, and drawing it here as well put the same sentence on two
-            // rows — which is what a doubled footer looks like.
-            SessionTab::Stats => String::new(),
-            SessionTab::Todo => {
-                crate::input::unix::todo_line(crate::style::Style::plain(), &todos, 80)
-            }
-            SessionTab::Tools => inner.tool_summary.clone(),
-            SessionTab::Mcp => inner.mcp_summary.clone(),
-        }
-    }
-
-    /// The tab that is showing.
-    pub(crate) fn tab(&self) -> SessionTab {
-        self.lock().tab
-    }
-
-    /// Shows another tab, and marks the footer dirty so it repaints.
-    pub(crate) fn set_tab(&self, tab: SessionTab) {
-        let mut inner = self.lock();
-        if inner.tab != tab {
-            inner.tab = tab;
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-    }
-
     /// The question and its cursor, for the editor that draws and drives it.
     #[cfg(test)]
     fn question(&self) -> Option<Asked> {
@@ -591,9 +590,6 @@ impl Pinned {
         Snapshot {
             session: inner.session.clone(),
             todos: inner.todos.clone(),
-            tab: inner.tab,
-            tool_summary: inner.tool_summary.clone(),
-            mcp_summary: inner.mcp_summary.clone(),
         }
     }
 
@@ -601,6 +597,74 @@ impl Pinned {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether anything changed since the last frame was drawn.
+    ///
+    /// The flag was written by every setter and read by nobody: the frame was
+    /// drawn on a clock instead, so a client sitting at a prompt with nothing
+    /// happening wrote a frame every 120ms — thousands of cursor hide/show
+    /// pairs a second, and a core burned to draw the same screen. The reader
+    /// takes it; what it means is "something moved since the frame".
+    pub(crate) fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
+    }
+
+    /// The range of the screen the mouse has selected, if any.
+    ///
+    /// It is in cells of the frame: a column and a row of the terminal, top
+    /// left to bottom right. It is kept here because the two halves of the
+    /// editor are on different threads — the mouse is read by the keyboard's
+    /// and the text is drawn by the frame's — and because a selection is a
+    /// property of what is on screen, not of the transcript behind it.
+    pub(crate) fn selection(&self) -> Option<((u16, u16), (u16, u16))> {
+        let inner = self.lock();
+        inner.selection
+    }
+
+    /// Starts a selection at a cell.
+    pub(crate) fn begin_selection(&self, column: u16, row: u16) {
+        let mut inner = self.lock();
+        inner.selection = Some(((column, row), (column, row)));
+        drop(inner);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Moves the end of the selection, which is what a drag does.
+    pub(crate) fn extend_selection(&self, column: u16, row: u16) {
+        let mut inner = self.lock();
+        if let Some((start, _)) = inner.selection {
+            inner.selection = Some((start, (column, row)));
+            drop(inner);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Ends the selection and hands back the text that was in it.
+    ///
+    /// The frame is what turns cells into text: only it knows what was drawn
+    /// where, and the transcript behind it may have been wrapped differently.
+    /// So the frame records the rows it painted and this reads them, which is
+    /// also why the copy happens on the frame's thread and not on the mouse's.
+    pub(crate) fn finish_selection(&self) -> Option<String> {
+        let mut inner = self.lock();
+        let range = inner.selection.take()?;
+        let rows = std::mem::take(&mut inner.painted);
+        drop(inner);
+        self.dirty.store(true, Ordering::Relaxed);
+        let text = text_in(range, &rows);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// What the frame painted, for a test that is asking why a copy failed.
+    #[cfg(test)]
+    pub(crate) fn debug_painted(&self) -> Vec<String> {
+        self.lock().painted.clone()
+    }
+
+    /// Records what the frame painted, so a selection can be read back.
+    pub(crate) fn set_painted(&self, rows: Vec<String>) {
+        self.lock().painted = rows;
     }
 
     /// Consumes the resize notice, if one is pending.
@@ -613,7 +677,6 @@ impl Pinned {
 mod unix {
     use super::Attachment;
 
-    use std::fmt::Write as _;
     use std::io::{self, IsTerminal};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -623,9 +686,7 @@ mod unix {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use tokio::sync::mpsc;
 
-    use super::{Pinned, TodoItem, TodoStatus};
-    use crate::style::Style;
-    use crate::tabs::SessionTab;
+    use super::Pinned;
 
     /// What the editor handed the repl: a line, or something a keystroke asked
     /// for that is not a line.
@@ -642,6 +703,8 @@ mod unix {
         Action(EditorAction),
         /// The question on screen was answered.
         Question(crate::input::Answer),
+        /// A selection was copied, with the text that went to the clipboard.
+        Copied(String),
         /// The editor ended: end of input.
         End,
     }
@@ -729,7 +792,9 @@ mod unix {
                     // A question answered while another prompt wanted a line:
                     // the answer is not that line, and dropping it would leave
                     // the question on screen with nothing driving it.
-                    Some(EditorEvent::Question(_) | EditorEvent::Action(_)) => {}
+                    Some(
+                        EditorEvent::Question(_) | EditorEvent::Action(_) | EditorEvent::Copied(_),
+                    ) => {}
                     Some(EditorEvent::End) | None => return Some(None),
                 }
             }
@@ -1083,12 +1148,6 @@ mod unix {
             self.cursor = self.chars.len();
         }
 
-        /// The draft as it is drawn: the labels, not what they stand for.
-        #[cfg(test)]
-        fn text_without_chips(&self) -> String {
-            self.chars.iter().collect()
-        }
-
         /// The draft as it is sent: every chip stands for what it carries.
         fn text(&self) -> String {
             let mut out = String::new();
@@ -1118,6 +1177,13 @@ mod unix {
     /// whether their own screen is taller or shorter.
     const SCROLL_PAGE: isize = 24;
 
+    /// How far one notch of the wheel moves the conversation, in lines.
+    ///
+    /// Three is what a wheel is on most terminals: one event per notch, and a
+    /// conversation that moved a whole screen per notch would be impossible to
+    /// read at the pace a hand turns it.
+    const SCROLL_WHEEL: isize = 3;
+
     /// Reads keys and reports what they meant, until the terminal closes.
     ///
     /// It is the input half of the editor and nothing else: the frame is drawn
@@ -1131,10 +1197,6 @@ mod unix {
         let mut history: Vec<String> = Vec::new();
         let mut history_pos: Option<usize> = None;
         let mut draft = String::new();
-        // Where the keyboard is. `None` is the input line, which is where a
-        // person starts and where every key belongs; `Some(tab)` is the tab row
-        // with that tab selected but not yet applied.
-        let mut focus: Option<SessionTab> = None;
         // The draft the answer box stepped over, kept to be handed back.
         //
         // The box draws on the same buffer the draft does, and an answer is not
@@ -1286,39 +1348,6 @@ mod unix {
                                 }
                                 redraw = true;
                             }
-                            if let Some(selected) = focus.filter(|_| !asking) {
-                                match tab_row_key(key, selected) {
-                                    TabRowKey::Select(tab) => {
-                                        focus = Some(tab);
-                                        redraw = true;
-                                        to_input = false;
-                                    }
-                                    TabRowKey::Apply => {
-                                        pinned.set_tab(selected);
-                                        focus = None;
-                                        redraw = true;
-                                        to_input = false;
-                                    }
-                                    // Up and Escape go back to the input
-                                    // without changing anything, which is the
-                                    // one thing that makes the row safe to
-                                    // walk into by accident.
-                                    TabRowKey::Leave => {
-                                        focus = None;
-                                        redraw = true;
-                                        to_input = false;
-                                    }
-                                    // A key the row does not use belongs to the
-                                    // draft: the focus drops and the character
-                                    // that did it is still typed, so a person
-                                    // who starts typing is back in the input
-                                    // without losing the first letter.
-                                    TabRowKey::Input => {
-                                        focus = None;
-                                        redraw = true;
-                                    }
-                                }
-                            }
                             if to_input {
                                 // What Tab writes is the row the menu has under
                                 // its cursor, resolved from the line as it is
@@ -1363,35 +1392,71 @@ mod unix {
                                             sender.send(EditorEvent::Action(EditorAction::Detach));
                                         redraw = true;
                                     }
-                                    // The tab is the editor's to change: it holds
-                                    // the shared state and repaints the footer from
-                                    // it. Asking the reader would need a round trip
-                                    // for something that never leaves this process.
-                                    KeyOutcome::NextTab => {
-                                        pinned.set_tab(pinned.tab().next());
-                                        redraw = true;
-                                    }
-                                    KeyOutcome::ShowTab(tab) => {
-                                        pinned.set_tab(tab);
-                                        redraw = true;
-                                    }
-                                    KeyOutcome::PreviousTab => {
-                                        pinned.set_tab(pinned.tab().previous());
-                                        redraw = true;
-                                    }
-                                    // Down, with the draft at its last line and
-                                    // the history at its newest entry: the only
-                                    // thing under the input is the tab row.
-                                    KeyOutcome::FocusTabs => {
-                                        focus = Some(pinned.tab());
-                                        redraw = true;
-                                    }
                                 }
                             }
                         }
                         Ok(Event::Paste(text)) => {
                             buffer.insert_paste(&text);
                             redraw = true;
+                        }
+                        // A resize is a change like any other, and the frame
+                        // reads the terminal's size when it draws: what it needs
+                        // is to be told to draw. Nothing marked this before, so
+                        // the flag the frame's own resize handling reads was
+                        // never set — the sidebar kept the columns it had been
+                        // given at the old size and took the rest of the screen.
+                        Ok(Event::Resize(..)) => {
+                            pinned.resized.store(true, Ordering::Release);
+                            pinned.dirty.store(true, Ordering::Relaxed);
+                        }
+                        // The wheel scrolls the conversation, which is the one
+                        // thing under it that is taller than the screen. A
+                        // panel that is up takes the wheel first: it is over
+                        // the interface, so what a person is looking at is what
+                        // they are scrolling.
+                        Ok(Event::Mouse(mouse)) => {
+                            use crossterm::event::{MouseButton, MouseEventKind};
+                            match mouse.kind {
+                                MouseEventKind::ScrollUp => {
+                                    if !pinned.scroll_modal(-SCROLL_WHEEL) {
+                                        pinned.scroll_transcript(-SCROLL_WHEEL);
+                                    }
+                                    redraw = true;
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    if !pinned.scroll_modal(SCROLL_WHEEL) {
+                                        pinned.scroll_transcript(SCROLL_WHEEL);
+                                    }
+                                    redraw = true;
+                                }
+                                // Selecting with the mouse is the application's
+                                // now: asking for the wheel turns off the
+                                // terminal's own selection, and a terminal that
+                                // does not select is one a person cannot copy
+                                // out of. The drag is read here and the frame
+                                // draws it; letting go copies it.
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    pinned.selecting.store(true, Ordering::Relaxed);
+                                    pinned.begin_selection(mouse.column, mouse.row);
+                                    redraw = true;
+                                }
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    if pinned.selecting.load(Ordering::Relaxed) {
+                                        pinned.extend_selection(mouse.column, mouse.row);
+                                        redraw = true;
+                                    }
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    let was = pinned.selecting.swap(false, Ordering::Relaxed);
+                                    if was {
+                                        if let Some(text) = pinned.finish_selection() {
+                                            let _ = sender.send(EditorEvent::Copied(text));
+                                        }
+                                        redraw = true;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         // A resize needs no handling here: the frame reads the
                         // terminal's size when it draws, so the next frame is
@@ -1421,18 +1486,6 @@ mod unix {
     enum KeyOutcome {
         Continue,
         Exit,
-        /// The user asked for the next tab. Which one that is depends on the
-        /// current tab, which the editor does not own, so it asks rather than
-        /// deciding.
-        NextTab,
-        /// The user asked for the previous tab.
-        PreviousTab,
-        /// The user pressed Down with nowhere left to go: the draft has no line
-        /// below and the history is already at its newest entry. The focus
-        /// moves to the tab row, which is the one thing under the input.
-        FocusTabs,
-        /// The user asked for one tab by name or number.
-        ShowTab(SessionTab),
         /// The user asked to stop the running turn (Escape).
         CancelTurn,
         /// The user asked to stop the running jobs (Ctrl-C).
@@ -1481,48 +1534,6 @@ mod unix {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
-    /// What a key means while the tab row has the focus.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum TabRowKey {
-        /// Move the selection.
-        Select(SessionTab),
-        /// Show the selected tab and go back to the input.
-        Apply,
-        /// Go back to the input without changing the tab.
-        Leave,
-        /// Not the row's key: drop the focus and let the input handle it.
-        Input,
-    }
-
-    /// Reads one key while the tab row has the focus.
-    ///
-    /// Left and right walk the row, Enter applies and leaves, and up goes back
-    /// without applying — the opposite of the down that came in. Everything
-    /// else is the input's, including Escape and `Ctrl-T`, which keeps the two
-    /// ways of changing tabs from fighting over the same key.
-    ///
-    /// Only the arrows and Tab walk the row: `h` and `l` were here at first,
-    /// by vim habit, and they ate the first letter of anyone who started typing
-    /// from the row — the row is entered by one keypress too many, so the
-    /// letter that follows it is far more likely than an unlabelled j/k.
-    fn tab_row_key(key: KeyEvent, selected: SessionTab) -> TabRowKey {
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Left | KeyCode::BackTab => TabRowKey::Select(selected.previous()),
-            KeyCode::Right => TabRowKey::Select(selected.next()),
-            KeyCode::Enter => TabRowKey::Apply,
-            KeyCode::Up if !control => TabRowKey::Leave,
-            KeyCode::Esc => TabRowKey::Leave,
-            // Tab cycles the selection like right, so the row is walkable
-            // without the arrow keys on a keyboard that has none handy.
-            KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                TabRowKey::Select(selected.next())
-            }
-            _ => TabRowKey::Input,
-        }
-    }
-
     #[allow(clippy::too_many_lines)] // one arm per key, which is the keymap.
     fn handle_key(
         key: KeyEvent,
@@ -1535,27 +1546,6 @@ mod unix {
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        // The tabs: `Ctrl-T` cycles and `Ctrl-1..3` go straight to one. They are
-        // read before the editing keys so a digit never lands in the draft while
-        // a modifier is held.
-        if control && !alt {
-            match key.code {
-                // `Ctrl-Shift-T` walks back the way `Ctrl-T` walks forward.
-                KeyCode::Char('T') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    return KeyOutcome::PreviousTab;
-                }
-                KeyCode::Char('t' | 'T') => return KeyOutcome::NextTab,
-                KeyCode::Char(digit @ '1'..='3') => {
-                    if let Some(tab) = digit
-                        .to_digit(10)
-                        .and_then(|n| SessionTab::numbered(n as usize))
-                    {
-                        return KeyOutcome::ShowTab(tab);
-                    }
-                }
-                _ => {}
-            }
-        }
         match key.code {
             KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 buffer.insert('\n');
@@ -1691,16 +1681,14 @@ mod unix {
                 if buffer.down() {
                     return KeyOutcome::Continue;
                 }
-                // The draft has no line below. Walking down the history comes
-                // first, because that is what the key has always done; the tab
-                // row is what is left once the history is at its newest entry
-                // and there is nowhere further down to go.
+                // The draft has no line below, so the key walks the history.
+                // That is what it has always done, and there is nothing under
+                // the input for it to reach once the history is at its newest
+                // entry: the row it used to focus is gone with the tabs.
                 if history_pos.is_some() {
                     history_next(buffer, history, history_pos, draft);
-                    KeyOutcome::Continue
-                } else {
-                    KeyOutcome::FocusTabs
                 }
+                KeyOutcome::Continue
             }
             KeyCode::Tab => {
                 // What Tab writes is the row the menu has under its cursor, and
@@ -1769,131 +1757,11 @@ mod unix {
         }
     }
 
-    /// Builds the one-line todo widget: progress, the current item first, then
-    /// pending items that fit. Completed items are represented by the count,
-    /// and a `+N` says how many actionable items did not fit.
-    pub(crate) fn todo_line(style: Style, todos: &[TodoItem], max: usize) -> String {
-        if todos.is_empty() {
-            return String::new();
-        }
-        let done = todos
-            .iter()
-            .filter(|todo| todo.status == TodoStatus::Completed)
-            .count();
-        let mut plain = format!("todo {done}/{}", todos.len());
-        let mut line = format!(
-            "{} {}",
-            style.faint("todo"),
-            style.cyan(format!("{done}/{}", todos.len()))
-        );
-        let active: Vec<&TodoItem> = todos
-            .iter()
-            .filter(|todo| todo.status == TodoStatus::InProgress)
-            .chain(
-                todos
-                    .iter()
-                    .filter(|todo| todo.status == TodoStatus::Pending),
-            )
-            .collect();
-        if active.is_empty() {
-            let _ = write!(line, " · {}", style.green("all done"));
-            return line;
-        }
-        let mut shown = 0;
-        for item in &active {
-            let marker = item.status.marker();
-            let remaining = active.len().saturating_sub(shown + 1);
-            let reserve = if remaining > 0 {
-                format!(" · +{remaining}").chars().count()
-            } else {
-                0
-            };
-            let prefix = format!(" · {marker} ");
-            let available = max.saturating_sub(plain.chars().count() + reserve);
-            if available <= prefix.chars().count() {
-                break;
-            }
-            let (mut content, truncated) =
-                single_line(&item.content, available - prefix.chars().count());
-            if truncated && shown > 0 {
-                break;
-            }
-            if truncated {
-                content.pop();
-                content.push('…');
-            }
-            let piece = format!("{prefix}{content}");
-            plain.push_str(&piece);
-            line.push_str(&style.faint(" · "));
-            line.push_str(&match item.status {
-                TodoStatus::Pending => style.faint(marker),
-                TodoStatus::InProgress => style.yellow(marker),
-                TodoStatus::Completed => style.green(marker),
-            });
-            line.push(' ');
-            line.push_str(&match item.status {
-                TodoStatus::InProgress => style.bold(&content),
-                _ => style.dim(&content),
-            });
-            shown += 1;
-        }
-        let hidden = active.len().saturating_sub(shown);
-        if shown == 0 {
-            let suffix = format!(" · +{hidden}");
-            if plain.chars().count() + suffix.chars().count() <= max {
-                line.push_str(&style.faint(suffix));
-            }
-        } else if hidden > 0 {
-            line.push_str(&style.faint(format!(" · +{hidden}")));
-        }
-        line
-    }
-
-    /// Folds a todo item onto one footer line, keeping at most `max`
-    /// characters and reporting whether anything was dropped.
-    ///
-    /// The content is model text, so newlines, tabs and control escapes must
-    /// not reach the terminal as layout instructions; styling escapes it, and
-    /// this collapses whitespace.
-    fn single_line(text: &str, max: usize) -> (String, bool) {
-        let mut out = String::new();
-        let mut used = 0;
-        let mut truncated = false;
-        'words: for word in text.split_whitespace() {
-            if used == max {
-                truncated = true;
-                break;
-            }
-            if used > 0 {
-                out.push(' ');
-                used += 1;
-                if used == max {
-                    truncated = true;
-                    break;
-                }
-            }
-            for character in word.chars() {
-                if used == max {
-                    truncated = true;
-                    break 'words;
-                }
-                out.push(character);
-                used += 1;
-            }
-        }
-        (out, truncated)
-    }
-
-    /// The buffer as the rows the input line draws.
-    ///
-    /// A logical line (one separated by `\n`) becomes as many rows as it needs
-    /// at `width`, and the window keeps the row the cursor is on in view: a
-    /// draft longer than the terminal wraps, it does not lose its tail.
     /// A pasted path that names an image, as the attachment to carry.
     ///
-    /// Only a path that exists and whose extension is one a model can look at makes
-    /// an attachment: anything else is text, and pasting a path to a script is still
-    /// pasting text.
+    /// Only a path that exists and whose extension is one a model can look at
+    /// makes an attachment: anything else is text, and pasting a path to a
+    /// script is still pasting text.
     fn image_attachment(text: &str) -> Option<Attachment> {
         let path = text.trim();
         // A terminal may wrap a path in quotes, and a path with a newline in it is
@@ -1971,781 +1839,6 @@ mod unix {
             }
         }
         out
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-        use crate::tabs::SessionTab;
-
-        use super::{
-            EditorEvent, KeyOutcome, LineBuffer, TabRowKey, TodoItem, TodoStatus, handle_key,
-            tab_row_key, todo_line,
-        };
-
-        #[test]
-        fn the_tab_row_reads_its_own_keys() {
-            // Left and right walk, Enter applies, up leaves. The row is what a
-            // person reaches by pressing down one time too many, so it has to
-            // be walkable and it has to be escapable.
-            let key = |code, modifiers| KeyEvent::new(code, modifiers);
-            assert_eq!(
-                tab_row_key(key(KeyCode::Right, KeyModifiers::NONE), SessionTab::Stats),
-                TabRowKey::Select(SessionTab::Todo)
-            );
-            assert_eq!(
-                tab_row_key(key(KeyCode::Left, KeyModifiers::NONE), SessionTab::Stats),
-                TabRowKey::Select(SessionTab::Mcp),
-                "left from the first wraps to the last"
-            );
-            assert_eq!(
-                tab_row_key(key(KeyCode::Enter, KeyModifiers::NONE), SessionTab::Todo),
-                TabRowKey::Apply
-            );
-            assert_eq!(
-                tab_row_key(key(KeyCode::Up, KeyModifiers::NONE), SessionTab::Todo),
-                TabRowKey::Leave
-            );
-            assert_eq!(
-                tab_row_key(key(KeyCode::Esc, KeyModifiers::NONE), SessionTab::Todo),
-                TabRowKey::Leave
-            );
-            // No letter navigates: every one of them drops the focus and is
-            // typed, so starting to write from the row does not swallow the
-            // first character. `h` and `l` were the aliases that did eat it.
-            for character in ['h', 'l', 'j', 'k', 'x', 'q'] {
-                assert_eq!(
-                    tab_row_key(
-                        key(KeyCode::Char(character), KeyModifiers::NONE),
-                        SessionTab::Todo
-                    ),
-                    TabRowKey::Input,
-                    "`{character}` belongs to the draft"
-                );
-            }
-            // Tab walks the row, because a keyboard without arrows still has
-            // to be able to move; backwards is `Shift-Tab`.
-            assert_eq!(
-                tab_row_key(key(KeyCode::Tab, KeyModifiers::NONE), SessionTab::Stats),
-                TabRowKey::Select(SessionTab::Todo)
-            );
-            assert_eq!(
-                tab_row_key(key(KeyCode::BackTab, KeyModifiers::NONE), SessionTab::Stats),
-                TabRowKey::Select(SessionTab::Mcp)
-            );
-        }
-
-        #[test]
-        fn down_reaches_the_tab_row_only_with_nowhere_else_to_go() {
-            // Down is the history key first and the tab row second: a draft
-            // with a line below moves the cursor, a history still walking keeps
-            // walking, and only the end of both reaches the row.
-            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut history = vec!["one".to_owned(), "two".to_owned()];
-            let mut draft = String::new();
-
-            // Walking back through the history: down is still the history's.
-            let mut buffer = LineBuffer::default();
-            let mut position = None;
-            let _ = handle_key(
-                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-                &mut buffer,
-                &mut history,
-                &mut position,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert!(position.is_some(), "up entered the history");
-            assert_eq!(
-                handle_key(
-                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                    &mut buffer,
-                    &mut history,
-                    &mut position,
-                    &mut draft,
-                    &sender,
-                    None,
-                ),
-                KeyOutcome::Continue,
-                "the history is still walking"
-            );
-            assert!(position.is_none(), "and it reached the newest entry");
-
-            // Now there is nowhere down: the row is what is left.
-            assert_eq!(
-                handle_key(
-                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                    &mut buffer,
-                    &mut history,
-                    &mut position,
-                    &mut draft,
-                    &sender,
-                    None,
-                ),
-                KeyOutcome::FocusTabs
-            );
-        }
-
-        #[test]
-        fn the_tab_keys_ask_for_a_tab_without_touching_the_draft() {
-            // A modified digit must not land in the draft: the branch is read
-            // before the editing keys for exactly that reason.
-            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut history = Vec::new();
-            let mut history_pos = None;
-            let mut draft = String::new();
-
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("hola");
-            let outcome = handle_key(
-                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert_eq!(outcome, KeyOutcome::NextTab);
-            assert_eq!(buffer.text(), "hola", "the draft keeps its text");
-
-            let mut buffer = LineBuffer::default();
-            let outcome = handle_key(
-                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::CONTROL),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert_eq!(outcome, KeyOutcome::ShowTab(SessionTab::Todo));
-            assert_eq!(buffer.text(), "", "the digit never reaches the draft");
-
-            // Without the modifier a digit is just a digit.
-            let mut buffer = LineBuffer::default();
-            let _ = handle_key(
-                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert_eq!(buffer.text(), "2");
-        }
-
-        fn item(content: &str, status: TodoStatus) -> TodoItem {
-            TodoItem {
-                content: content.to_owned(),
-                status,
-            }
-        }
-
-        #[test]
-        fn the_todo_widget_shows_progress_and_the_current_item_first() {
-            let todos = vec![
-                item("done", TodoStatus::Completed),
-                item("later", TodoStatus::Pending),
-                item("now", TodoStatus::InProgress),
-            ];
-            assert_eq!(
-                todo_line(crate::style::Style::plain(), &todos, 80),
-                "todo 1/3 · [~] now · [ ] later"
-            );
-        }
-
-        #[test]
-        fn the_todo_widget_counts_completed_items_and_says_when_all_are_done() {
-            let todos = vec![
-                item("one", TodoStatus::Completed),
-                item("two", TodoStatus::Completed),
-            ];
-            assert_eq!(
-                todo_line(crate::style::Style::plain(), &todos, 80),
-                "todo 2/2 · all done"
-            );
-            assert_eq!(todo_line(crate::style::Style::plain(), &[], 80), "");
-        }
-
-        #[test]
-        fn the_todo_widget_reports_items_that_did_not_fit() {
-            let todos = vec![
-                item("first", TodoStatus::Pending),
-                item("second", TodoStatus::Pending),
-            ];
-            assert_eq!(
-                todo_line(crate::style::Style::plain(), &todos, 30),
-                "todo 0/2 · [ ] first · +1"
-            );
-            assert_eq!(
-                todo_line(crate::style::Style::plain(), &todos, 20),
-                "todo 0/2 · +2"
-            );
-        }
-
-        #[test]
-        fn the_todo_widget_folds_untrusted_content_onto_one_line() {
-            let todos = vec![item("first\nsecond\tthird", TodoStatus::Pending)];
-            let line = todo_line(crate::style::Style::plain(), &todos, 80);
-            assert_eq!(line, "todo 0/1 · [ ] first second third");
-            assert!(!line.contains('\n'));
-            assert!(!line.contains('\t'));
-        }
-
-        #[test]
-        fn the_todo_widget_truncates_a_long_first_item_to_the_footer() {
-            let todos = vec![item(
-                "a very long item that does not fit on one line",
-                TodoStatus::Pending,
-            )];
-            let line = todo_line(crate::style::Style::plain(), &todos, 24);
-            assert!(line.starts_with("todo 0/1 · [ ] "), "{line}");
-            assert!(line.ends_with('…'), "{line}");
-            assert_eq!(line.chars().count(), 24, "{line}");
-        }
-
-        #[test]
-        fn arrows_move_the_insertion_point_without_reordering_text() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("abc");
-            assert!(buffer.left());
-            assert!(buffer.left());
-            buffer.insert('X');
-            assert_eq!(buffer.text(), "aXbc");
-            assert!(buffer.home());
-            buffer.insert('0');
-            assert_eq!(buffer.text(), "0aXbc");
-            assert!(buffer.end());
-            buffer.insert('!');
-            assert_eq!(buffer.text(), "0aXbc!");
-        }
-
-        #[test]
-        fn ctrl_g_detaches_and_the_keys_around_it_do_not() {
-            // Detaching sits on a plain Ctrl-G. Ctrl-Shift-B is what it was, and
-            // did nothing: it arrived as `Char('b')` with SHIFT and CONTROL — the
-            // keyboard protocol sends the *unshifted* codepoint — while the branch
-            // looked for `Char('B')`, so it fell through to plain Ctrl-B and moved
-            // the cursor while the call kept running.
-            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("abc");
-            let mut history = Vec::new();
-            let mut history_pos = None;
-            let mut draft = String::new();
-
-            // Every one of these is a key a terminal can send for Ctrl-G, and
-            // all of them mean the same thing here. The shift is not part of the
-            // request: the legacy byte `\x07` cannot carry one.
-            let detaching = [
-                (KeyCode::Char('g'), KeyModifiers::CONTROL),
-                (
-                    KeyCode::Char('g'),
-                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                ),
-                (
-                    KeyCode::Char('G'),
-                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                ),
-            ];
-            for (code, modifiers) in detaching {
-                assert_eq!(
-                    handle_key(
-                        KeyEvent::new(code, modifiers),
-                        &mut buffer,
-                        &mut history,
-                        &mut history_pos,
-                        &mut draft,
-                        &sender,
-                        None,
-                    ),
-                    KeyOutcome::Detach,
-                    "{code:?} with {modifiers:?} asks to detach"
-                );
-            }
-            // Nothing was typed and the cursor did not move: that is what the
-            // keys below are for, and a detach that also edited the line would
-            // lose the draft the human was in the middle of.
-            assert_eq!(buffer.text(), "abc", "detaching types no g");
-            assert_eq!(buffer.cursor, 3, "detaching is not a cursor move");
-
-            // The alias still detaches, and still does not move the cursor.
-            assert_eq!(
-                handle_key(
-                    KeyEvent::new(
-                        KeyCode::Char('b'),
-                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
-                    ),
-                    &mut buffer,
-                    &mut history,
-                    &mut history_pos,
-                    &mut draft,
-                    &sender,
-                    None,
-                ),
-                KeyOutcome::Detach,
-                "ctrl-shift-b stays an alias"
-            );
-            assert_eq!(buffer.cursor, 3, "detaching is not a cursor move");
-
-            // The keys the rebinding must not have swallowed.
-            assert_eq!(
-                handle_key(
-                    KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
-                    &mut buffer,
-                    &mut history,
-                    &mut history_pos,
-                    &mut draft,
-                    &sender,
-                    None,
-                ),
-                KeyOutcome::Continue,
-                "plain ctrl-b stays where readline put it"
-            );
-            assert_eq!(buffer.cursor, 2, "and it moves the cursor back");
-
-            assert_eq!(
-                handle_key(
-                    KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
-                    &mut buffer,
-                    &mut history,
-                    &mut history_pos,
-                    &mut draft,
-                    &sender,
-                    None,
-                ),
-                KeyOutcome::Continue,
-                "plain g is still a letter"
-            );
-            assert_eq!(buffer.text(), "abgc", "and it is typed at the cursor");
-        }
-
-        #[test]
-        fn backspace_and_delete_respect_the_cursor() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("abcd");
-            assert!(buffer.left());
-            assert!(buffer.backspace());
-            assert_eq!(buffer.text(), "abd");
-            assert!(buffer.home());
-            assert!(buffer.delete());
-            assert_eq!(buffer.text(), "bd");
-            buffer.insert_text("x");
-            assert!(buffer.right());
-            assert!(buffer.kill_to_end());
-            assert_eq!(buffer.text(), "xb");
-            buffer.insert_text("rest");
-            assert!(buffer.kill_to_start());
-            assert!(buffer.is_empty());
-        }
-
-        #[test]
-        fn control_word_editing_does_not_eat_the_prompt() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("hello brave world");
-            assert!(buffer.kill_word());
-            assert_eq!(buffer.text(), "hello brave ");
-            assert!(buffer.kill_to_start());
-            assert_eq!(buffer.text(), "");
-        }
-
-        /// A second label typed before the first must not fold the two chips
-        /// together.
-        ///
-        /// Inserting into `chars` moves every character after the cursor, but a
-        /// chip's range is recorded in those same indices. A range that is not
-        /// moved with them ends up pointing at a different run than the label it
-        /// stands for, and the next `text()` walks backwards through the two.
-        #[test]
-        fn inserting_before_a_chip_keeps_its_range_in_place() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_chip("[one]", "one".to_owned());
-            assert_eq!(buffer.text(), "one");
-            // Type in front of the chip: every character of the chip shifts by
-            // one, so its range has to shift too.
-            buffer.home();
-            buffer.insert_text("x");
-            assert_eq!(buffer.text(), "xone", "the label still stands for `one`");
-            assert_eq!(buffer.text_without_chips(), "x[one]");
-            // And the same the other way round: a chip after a chip.
-            buffer.end();
-            buffer.insert_chip("[two]", "two".to_owned());
-            assert_eq!(buffer.text(), "xonetwo");
-            assert_eq!(buffer.text_without_chips(), "x[one][two]");
-        }
-
-        #[test]
-        fn a_pasted_path_to_an_image_becomes_an_attachment() {
-            // A terminal pastes a file's *path* — kitty does, and so does a
-            // drag-and-drop — so this is the only way an image can arrive. What
-            // the draft shows is a label; what the message carries is the file.
-            let dir = std::env::temp_dir().join(format!("norte-paste-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).expect("temp dir");
-            let photo = dir.join("holiday.png");
-            std::fs::write(&photo, b"\x89PNG\r\n\x1a\n").expect("png");
-
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste(&photo.display().to_string());
-
-            let shown = buffer.text_without_chips();
-            assert_eq!(
-                shown, "[Image: holiday.png]",
-                "the draft shows a label, not a path"
-            );
-            let attachments = buffer.attachments();
-            assert_eq!(attachments.len(), 1, "and it asks for the file");
-            assert_eq!(attachments[0].mime, "image/png");
-            assert_eq!(attachments[0].path, photo.display().to_string());
-            assert_eq!(
-                buffer.text(),
-                photo.display().to_string(),
-                "the path is what the model is given"
-            );
-
-            // One keystroke takes the label and the attachment together.
-            assert!(buffer.backspace());
-            assert_eq!(buffer.text(), "");
-            assert!(
-                buffer.attachments().is_empty(),
-                "and the attachment goes with it"
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn a_path_that_is_not_an_image_is_a_path_and_not_an_attachment() {
-            // A file the model cannot look at is still a file, and a long path
-            // is shown as one: `[Path: build.sh]`, not eighty characters of
-            // directory and not `[Copied: …]`, which would call a reference
-            // text. Nothing is attached — the path is what the model gets, and
-            // it can open it itself with `read`.
-            let dir = std::env::temp_dir().join(format!("norte-paste-txt-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).expect("temp dir");
-            let script = dir.join("build.sh");
-            std::fs::write(&script, b"echo hi\n").expect("script");
-
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste(&script.display().to_string());
-            assert_eq!(
-                buffer.text_without_chips(),
-                "[Path: build.sh]",
-                "a long path is shown by its name"
-            );
-            assert_eq!(
-                buffer.text(),
-                script.display().to_string(),
-                "and the path is what the draft sends"
-            );
-            assert!(buffer.attachments().is_empty(), "nothing is attached");
-
-            // A missing file is text: a path that is not there may arrive later,
-            // and the draft must not claim a file it cannot see.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste("/tmp/not-there-at-all.png");
-            assert!(
-                buffer.attachments().is_empty(),
-                "a missing file is not an attachment"
-            );
-            assert_eq!(buffer.text_without_chips(), "/tmp/not-there-at-all.png");
-
-            // A short path is short enough to show whole.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste("/tmp/a.sh");
-            assert_eq!(buffer.text_without_chips(), "/tmp/a.sh");
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn a_long_paste_becomes_a_label_and_sends_what_it_hid() {
-            // What the human sees is a label; what the model gets is the text.
-            // That is the whole point: a paragraph pasted into the draft buries
-            // the sentence being written, and the model must not receive the
-            // label in its place.
-            let mut buffer = LineBuffer::default();
-            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-            buffer.insert_paste(pasted);
-            let shown = buffer.text_without_chips();
-            assert!(
-                shown.starts_with("[Copied: "),
-                "the draft shows a label: {shown:?}"
-            );
-            assert!(shown.ends_with(']'), "and the label closes: {shown:?}");
-            assert!(
-                !shown.contains("consectetur"),
-                "the pasted text is not in the draft: {shown:?}"
-            );
-            assert_eq!(buffer.text(), pasted, "but it is what the draft sends");
-        }
-
-        #[test]
-        fn a_short_paste_is_its_own_label() {
-            // A chip that saves nothing costs a keystroke to remove, and
-            // `[Copied: hi]` is longer than `hi`.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste("hi");
-            assert_eq!(buffer.text(), "hi");
-            assert_eq!(buffer.text_without_chips(), "hi");
-        }
-
-        #[test]
-        fn a_keystroke_on_a_label_takes_the_whole_paste() {
-            // `]` removes the chip, and with it everything the chip stands for.
-            // Half a paragraph is not a smaller paragraph.
-            let mut buffer = LineBuffer::default();
-            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-            buffer.insert_paste(pasted);
-            let label_chars = buffer.text_without_chips().chars().count();
-            assert_eq!(buffer.cursor, label_chars, "the cursor is after the label");
-
-            assert!(buffer.backspace(), "a backspace removed something");
-            assert_eq!(buffer.text(), "", "the whole paste went with the label");
-            assert_eq!(buffer.text_without_chips(), "");
-        }
-
-        #[test]
-        fn deleting_a_label_from_the_left_takes_it_whole() {
-            let mut buffer = LineBuffer::default();
-            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-            buffer.insert_paste(pasted);
-            assert!(buffer.home());
-            assert!(buffer.delete(), "the delete removed something");
-            assert_eq!(buffer.text(), "", "the whole paste went with the label");
-        }
-
-        #[test]
-        fn killing_the_line_takes_the_chips_whole() {
-            // Ctrl-U and Ctrl-K are how a draft is cleared, and a chip in the
-            // way must not survive them half-formed: what is removed is either
-            // the chip or nothing, never a piece of the label with its text
-            // still attached.
-            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-
-            // Ctrl-K from the top: the chip and the tail go together.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste(pasted);
-            buffer.insert_text("tail");
-            assert!(buffer.home());
-            assert!(buffer.kill_to_end());
-            assert_eq!(buffer.text(), "", "the chip went whole with the rest");
-            assert_eq!(buffer.text_without_chips(), "");
-
-            // Ctrl-U with the cursor after the chip: the same.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_paste(pasted);
-            buffer.insert_text("tail");
-            assert!(buffer.kill_to_start());
-            assert_eq!(buffer.text(), "", "the chip and the tail both went");
-            assert_eq!(buffer.text_without_chips(), "");
-        }
-
-        #[test]
-        fn typing_inside_a_label_lands_after_it() {
-            // A chip is not editable: a character inserted in the middle would
-            // leave the label and what it stands for disagreeing.
-            let mut buffer = LineBuffer::default();
-            let pasted = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-            buffer.insert_paste(pasted);
-            assert!(buffer.home());
-            buffer.right();
-            buffer.insert('X');
-            let shown = buffer.text_without_chips();
-            assert!(
-                !shown.contains("[X"),
-                "nothing lands inside the label: {shown:?}"
-            );
-            assert!(
-                shown.starts_with("[Copied: ") && shown.ends_with("]X"),
-                "it lands after it: {shown:?}"
-            );
-            assert_eq!(buffer.text(), format!("{pasted}X"));
-        }
-
-        #[test]
-        fn two_pastes_are_two_chips() {
-            let mut buffer = LineBuffer::default();
-            let first = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-            let second = "Sed ut perspiciatis unde omnis iste natus error sit voluptatem";
-            buffer.insert_paste(first);
-            buffer.insert_text(" and ");
-            buffer.insert_paste(second);
-            assert_eq!(
-                buffer.text(),
-                format!("{first} and {second}"),
-                "both pastes reach the model, in order"
-            );
-            assert_eq!(
-                buffer.text_without_chips().matches("[Copied: ").count(),
-                2,
-                "and the draft shows two labels: {:?}",
-                buffer.text_without_chips()
-            );
-        }
-
-        #[test]
-        fn removing_one_chip_leaves_the_other_where_it_was() {
-            let mut buffer = LineBuffer::default();
-            let first = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do";
-            let second = "Sed ut perspiciatis unde omnis iste natus error sit voluptatem";
-            buffer.insert_paste(first);
-            buffer.insert_text(" and ");
-            buffer.insert_paste(second);
-            // The cursor is already at the end, so the backspace takes the
-            // second chip from its right edge.
-            let shown = buffer.text_without_chips();
-            assert!(buffer.backspace());
-            let left = buffer.text_without_chips();
-            assert!(
-                left.starts_with("[Copied: "),
-                "the first chip is intact: {left:?}"
-            );
-            assert_eq!(
-                buffer.text(),
-                format!("{first} and "),
-                "and the second one's text went with it ({shown:?} -> {left:?})"
-            );
-        }
-
-        #[test]
-        fn pasted_newlines_become_line_breaks() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("one\r\ntwo\tthree");
-            assert_eq!(buffer.text(), "one\ntwo    three");
-        }
-
-        #[test]
-        fn the_arrows_move_inside_the_draft_before_the_history() {
-            let mut buffer = LineBuffer::default();
-            // Two lines, the cursor at the end of the second.
-            buffer.insert_text("uno\ndos");
-            assert!(buffer.up(), "there is a line above");
-            assert_eq!(buffer.cursor, 3, "the cursor lands on the line above");
-            assert!(!buffer.up(), "the first line has nowhere above it");
-            assert!(buffer.down(), "there is a line below");
-            assert_eq!(buffer.cursor, 7, "back down to the second line");
-            assert!(!buffer.down(), "the last line has nowhere below it");
-        }
-
-        #[test]
-        fn the_arrows_keep_the_column_where_they_can() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("abcdef\nxy");
-            // Move into the first line, column five.
-            buffer.cursor = 5;
-            assert!(buffer.down());
-            // The second line is two wide, so the column is clamped to its end.
-            assert_eq!(buffer.text(), "abcdef\nxy");
-            assert_eq!(buffer.cursor, 9, "clamped to the shorter line");
-        }
-
-        #[test]
-        fn shift_enter_breaks_the_line_and_enter_submits() {
-            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut history = Vec::new();
-            let mut history_pos = None;
-            let mut draft = String::new();
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("first");
-
-            // Shift+Enter must insert a newline, not send: the terminal only
-            // reports the modifier when the keyboard protocol is pushed, which
-            // is why this branch used to be unreachable.
-            handle_key(
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert_eq!(buffer.text(), "first\n");
-            assert!(
-                receiver.try_recv().is_err(),
-                "shift+enter must not submit the message"
-            );
-
-            buffer.insert_text("second");
-            handle_key(
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert_eq!(buffer.text(), "", "a plain enter clears the buffer");
-            assert_eq!(
-                receiver.try_recv().expect("the message was sent"),
-                EditorEvent::Line("first\nsecond".to_owned(), Vec::new()),
-                "a plain enter submits the whole multi-line message"
-            );
-        }
-
-        #[test]
-        fn tab_writes_the_completion_it_is_given() {
-            // Tab does not look the candidate up: the menu owns the choice and
-            // hands it over, which is what makes the arrows mean something. A
-            // `handle_key` that searched the registry itself always took the
-            // first row, whatever the cursor was on.
-            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut history = Vec::new();
-            let mut history_pos = None;
-            let mut draft = String::new();
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("/rea");
-            handle_key(
-                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                Some("soning"),
-            );
-            assert_eq!(buffer.text(), "/reasoning", "the given row is written");
-
-            buffer.insert_text(" xh");
-            handle_key(
-                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                Some("igh"),
-            );
-            assert_eq!(
-                buffer.text(),
-                "/reasoning xhigh",
-                "and an argument's row is written the same way"
-            );
-        }
-
-        #[test]
-        fn tab_with_nothing_to_complete_indents() {
-            // No menu and no suggestion: the key is the indent it always was,
-            // and swallowing it would leave a person unable to line up a draft.
-            let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            let mut history = Vec::new();
-            let mut history_pos = None;
-            let mut draft = String::new();
-            let mut buffer = LineBuffer::default();
-            handle_key(
-                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-                &mut buffer,
-                &mut history,
-                &mut history_pos,
-                &mut draft,
-                &sender,
-                None,
-            );
-            assert_eq!(buffer.text(), "    ");
-        }
     }
 }
 
@@ -2832,7 +1925,7 @@ mod fallback {
             loop {
                 match self.events.recv().await {
                     Some(EditorEvent::Line(line, _)) => return Some(Some(line)),
-                    Some(EditorEvent::Action(_)) => continue,
+                    Some(EditorEvent::Action(_) | EditorEvent::Copied(_)) => continue,
                     Some(EditorEvent::End) | None => return Some(None),
                 }
             }
@@ -2849,10 +1942,77 @@ pub(crate) use unix::{EditorAction, EditorEvent, InteractiveInput};
 mod pinned_tests {
     use super::{Answer, Pinned, TodoItem, TodoStatus};
 
-    use crate::tabs::SessionTab;
+    #[test]
+    fn a_selection_is_read_back_as_the_text_that_was_on_screen() {
+        // The frame is what knows where a row landed, so what a drag covers is
+        // read from the rows it painted and not from the transcript behind
+        // them: the same entry wraps differently at another width.
+        let rows = vec![
+            "  first line of the answer".to_owned(),
+            "  second line".to_owned(),
+            "  third".to_owned(),
+        ];
+        // A drag takes the rest of the row it started on — from the column it
+        // started at — and everything before the column it ended on, in the row
+        // it ended on. `  first line of the answer` is column 8 onwards: that is
+        // `l` and a space, which is what a terminal copies too.
+        assert_eq!(
+            super::text_in(((8, 0), (8, 1)), &rows),
+            "line of the answer\n  second"
+        );
+        // A drag that ends on a later row takes the rows between whole, which
+        // is what makes a drag over a paragraph yield the paragraph.
+        assert_eq!(
+            super::text_in(((2, 0), (4, 2)), &rows),
+            "first line of the answer\n  second line\n  thi"
+        );
+        // And the corners may come in any order: a drag goes up as easily as
+        // down.
+        assert_eq!(
+            super::text_in(((8, 1), (8, 0)), &rows),
+            "line of the answer\n  second"
+        );
+        // A click with no drag is one character, and a click past the end is
+        // nothing to copy at all.
+        assert_eq!(super::text_in(((2, 0), (2, 0)), &rows), "f");
+        assert_eq!(super::text_in(((0, 9), (5, 9)), &rows), "");
+    }
+
+    #[test]
+    fn moving_the_conversation_is_a_change_to_draw() {
+        // The frame draws the offset it is handed, and the tick only draws when
+        // something moved. The keys moved a number nobody marked as changed, so
+        // the conversation stayed where it was: the scroll did nothing.
+        let pinned = Pinned::new();
+        pinned.take_dirty();
+        // Page-up is a negative delta and it goes *back*: the offset counts
+        // from the end, so going back is a bigger number. Subtracting instead
+        // left the key doing nothing at the tail, where zero minus a page is
+        // still zero.
+        pinned.scroll_transcript(-10);
+        assert_eq!(pinned.transcript_scroll(), 10, "up goes back in time");
+        assert!(pinned.take_dirty(), "a scroll has to be drawn");
+        pinned.scroll_transcript(10);
+        assert_eq!(pinned.transcript_scroll(), 0, "down returns to the tail");
+        // A key that cannot move anything is not a change: at the tail, moving
+        // further towards it leaves the offset where it was.
+        pinned.take_dirty();
+        pinned.scroll_transcript(5);
+        assert!(!pinned.take_dirty(), "nothing moved, nothing to draw");
+        // And jumping back to the tail is a move when there was somewhere to
+        // come back from.
+        pinned.scroll_transcript(-500);
+        pinned.take_dirty();
+        pinned.follow_tail();
+        assert!(pinned.take_dirty(), "following the tail is a move");
+        assert_eq!(pinned.transcript_scroll(), 0);
+    }
 
     #[test]
     fn the_pinned_footer_keeps_the_session_and_todos() {
+        // The footer's state is read under one lock, and two of its fields are
+        // the session line and the task list. The tabs that used to share this
+        // handle are gone; what they carried is not part of it any more.
         let pinned = Pinned::new();
         pinned.set_session("session".to_owned());
         pinned.set_todos(vec![TodoItem {
@@ -2863,32 +2023,6 @@ mod pinned_tests {
         assert_eq!(snapshot.session, "session");
         assert_eq!(snapshot.todos.len(), 1);
         assert_eq!(snapshot.todos[0].content, "task");
-        assert_eq!(
-            snapshot.tab,
-            SessionTab::Stats,
-            "a session opens on the stats"
-        );
-        // The rows the tabs that count things show, which start empty because
-        // nothing has been counted yet.
-        assert_eq!(
-            snapshot.tool_summary, "",
-            "nothing has been counted for the tools row yet"
-        );
-        assert_eq!(
-            snapshot.mcp_summary, "",
-            "nothing has been counted for the MCP row yet"
-        );
-    }
-
-    #[test]
-    fn the_active_tab_is_shared_and_marks_the_footer_dirty() {
-        // The editor changes it and the footer draws it, and they are two
-        // threads: the shared handle is what keeps them agreeing.
-        let pinned = Pinned::new();
-        assert_eq!(pinned.tab(), SessionTab::Stats);
-        pinned.set_tab(SessionTab::Todo);
-        assert_eq!(pinned.tab(), SessionTab::Todo);
-        assert_eq!(pinned.snapshot().tab, SessionTab::Todo);
     }
 
     #[test]

@@ -34,7 +34,7 @@ use ratatui::widgets::{Paragraph, Widget as _};
 
 use crate::style::Style;
 use crate::terminal::{self, Draw};
-use crate::transcript::{Kind, Transcript};
+use crate::transcript::{Ink, Kind, Transcript};
 
 /// What the interface is showing.
 ///
@@ -61,10 +61,12 @@ pub(crate) struct State {
     /// Empty when nothing was loaded, which is every ordinary run: the column
     /// takes no space when there is nothing to put in it.
     pub(crate) sidebar: Vec<(String, Vec<norte_code_plugins::SidebarRow>)>,
-    /// The tab row, already rendered by the tabs module.
-    pub(crate) tabs: String,
-    /// The row under the tabs: what the active tab shows.
-    pub(crate) tab_body: String,
+    /// The model's task list, as the sidebar shows it.
+    ///
+    /// It was a footer tab and a footer row is one line: a plan is a list, and
+    /// a list does not fit in a row that also carries the model, the cost and
+    /// the effort. It is a column of the sidebar now, where it has the room.
+    pub(crate) todos: Vec<TaskRow>,
     /// What may be typed next, when there is something to say about it.
     pub(crate) suggestion: String,
     /// What the client is waiting for, when a turn is in flight.
@@ -81,6 +83,21 @@ pub(crate) struct State {
     pub(crate) waiting_since: Option<u128>,
     /// How many lines the view is scrolled back from the end.
     pub(crate) scroll: usize,
+    /// What the mouse has selected, as two corners of the screen.
+    ///
+    /// The frame draws it and the frame is what reads it back as text: only it
+    /// knows what was painted where, and the transcript behind it may have been
+    /// wrapped differently for a terminal of another size.
+    pub(crate) selection: Option<((u16, u16), (u16, u16))>,
+}
+
+/// One row of the task list, as the sidebar draws it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TaskRow {
+    /// What the task says.
+    pub(crate) text: String,
+    /// Whether the model marked it finished.
+    pub(crate) done: bool,
 }
 
 /// A completion offered while typing.
@@ -160,33 +177,76 @@ impl State {
         &mut self,
         terminal: &mut terminal::Guard,
         style: Style,
+        pinned: &crate::input::Pinned,
     ) -> Result<(), String> {
-        terminal.draw(|frame| {
+        terminal.draw(|frame| self.paint(frame, style, pinned))
+    }
+
+    /// Paints the whole interface into one frame.
+    ///
+    /// It is separate from [`State::draw`] so a test can paint into a
+    /// `TestBackend` and read the screen back: the layout bugs this file has
+    /// had were all visible as the *screen* and invisible in the rows, and the
+    /// only way to check the screen is to draw one.
+    pub(crate) fn paint(&self, frame: &mut Draw<'_>, style: Style, pinned: &crate::input::Pinned) {
+        {
             let area = frame.area();
             let input = self.input_height(area.width);
             let waiting = u16::from(self.waiting.is_some());
-            // The sidebar takes a column on the right, and only when a plugin
-            // asked for one: a run with no plugins draws exactly what it drew
-            // before there were plugin columns.
-            let body = if self.sidebar.is_empty() {
-                area
-            } else {
-                let [main, _gap, side] = Layout::horizontal([
+            // The screen is divided into two regions and one rule:
+            //
+            //   ┌──────────────────────────┬──────────────┐
+            //   │ conversation             │ sidebar      │
+            //   │  (scrolls)               │  tasks       │
+            //   │                          │  plugins     │
+            //   ├──────────────────────────┤              │
+            //   │ waiting                  │              │
+            //   │ input                    │              │
+            //   │ suggestion               │              │
+            //   │ status                   │              │
+            //   └──────────────────────────┴──────────────┘
+            //
+            // The sidebar takes a column on the right, and only when there is
+            // something to put in it: the task list, or a plugin that asked for
+            // one. A run with neither draws exactly what it drew before there
+            // was a sidebar.
+            // A sidebar needs a screen to be a sidebar on. At a quarter of a
+            // narrow terminal it is a column too thin to read a task in, and
+            // what it costs is the conversation, which is the thing the screen
+            // is for: below the bound the column is not drawn and the
+            // conversation keeps the width.
+            let aside = (!self.sidebar.is_empty() || !self.todos.is_empty())
+                && area.width >= SIDEBAR_MIN_WIDTH;
+            let body = if aside {
+                let [main, rule, side] = Layout::horizontal([
                     Constraint::Fill(1),
-                    Constraint::Length(2),
-                    Constraint::Percentage(25),
+                    // One column, drawn as a rule: a panel is a panel because
+                    // its edge is visible, and a gap alone reads as a mistake.
+                    Constraint::Length(1),
+                    Constraint::Percentage(SIDEBAR_PERCENT),
                 ])
                 .areas(area);
+                draw_rule(frame, rule, style);
                 draw_sidebar(frame, side, self, style);
                 main
+            } else {
+                area
             };
-            let [conversation, spinner, entry, status, tabs_row, suggestion] = Layout::vertical([
+            // The chrome is measured from the bottom up, and what is left over
+            // is the conversation: the input grows with what is typed and the
+            // status row is always exactly one line, so the transcript takes
+            // whatever those two do not, which is what keeps it scrollable
+            // against a terminal of any height.
+            let [conversation, spinner, entry, suggestion, rule, status] = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(waiting),
                 // The input grows with what is in it and stops: a draft of a
                 // thousand lines is not a reason to lose the conversation.
                 Constraint::Length(input),
                 Constraint::Length(1),
+                // The rule is a row of its own. It used to be drawn onto the
+                // status row and then overwritten by it, so half of it survived
+                // as stray dashes across the bottom line.
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
@@ -197,19 +257,75 @@ impl State {
                 draw_spinner(frame, spinner, self, style);
             }
             draw_input(frame, entry, self, style);
+            // The suggestion names what may be typed next, and when it names a
+            // reasoning setting it means the same thing the bar in the status
+            // does: it reads in the same colour, so the scale is learned once.
+            draw_row(
+                frame,
+                suggestion,
+                &self.suggestion,
+                suggestion_ink(self, style),
+            );
+            draw_chrome_rule(frame, rule, style);
+            // The status closes the frame: it is what the session *is* — the
+            // model, the dial, the cost, the effort — and the bottom row is
+            // where a status is read from.
             draw_row(frame, status, &self.status, style.dim_span());
-            // The tab row shows which tabs there are and what the active one
-            // holds: the names alone would leave a person wondering what the
-            // bracket around one of them does, and the body alone would hide
-            // that there are others a keystroke away.
-            let tabs = if self.tab_body.is_empty() {
-                self.tabs.clone()
-            } else {
-                format!("{}   {}", self.tabs, self.tab_body)
-            };
-            draw_row(frame, tabs_row, &tabs, style.faint_span());
-            draw_row(frame, suggestion, &self.suggestion, style.faint_span());
+        }
+        // What was painted, row by row, so a selection can be read back as
+        // text. It is taken from the finished frame and not from the state
+        // that built it: the frame is what knows how a row was wrapped and
+        // where it landed, and the two can disagree after a resize.
+        pinned.set_painted(painted_rows(frame));
+        if let Some(range) = self.selection {
+            highlight(frame, range);
+        }
+    }
+}
+
+/// The text of every row of the frame, as it was drawn.
+#[must_use]
+fn painted_rows(frame: &mut Draw<'_>) -> Vec<String> {
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
         })
+        .collect()
+}
+
+/// Inverts the cells a selection covers.
+///
+/// It is an inversion and not a colour: the selection has to be visible over
+/// every ink the conversation uses — a green diff line, a grey notice, plain
+/// text — and a colour of its own would fight whichever it landed on. Reverse
+/// video is what a terminal does with its own selection, so this reads as one.
+fn highlight(frame: &mut Draw<'_>, range: ((u16, u16), (u16, u16))) {
+    use ratatui::style::Modifier;
+    let ((c1, r1), (c2, r2)) = range;
+    let (top, left) = if (r1, c1) <= (r2, c2) {
+        (r1, c1)
+    } else {
+        (r2, c2)
+    };
+    let (bottom, right) = if (r1, c1) <= (r2, c2) {
+        (r2, c2)
+    } else {
+        (r1, c1)
+    };
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    for row in top..=bottom {
+        for column in left..=right {
+            if column < area.width && row < area.height {
+                buffer[(column, row)].modifier.insert(Modifier::REVERSED);
+            }
+        }
     }
 }
 
@@ -272,6 +388,9 @@ fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
 }
 
 /// How long one glyph of the spinner is shown, in ms.
+///
+/// A live row uses the same clock as the status spinner, so the two turn
+/// together: they are one process saying it is alive, not two.
 const SPINNER_MS: u64 = 90;
 
 /// The frames of the spinner, in the order they turn.
@@ -279,6 +398,28 @@ const SPINNER_MS: u64 = 90;
 /// Plain characters rather than braille: every terminal shows them, and a
 /// missing glyph would leave a hole where the only sign of life was.
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+
+/// The ink the suggestion row is written in.
+///
+/// A reasoning hint is written in the colour of the rung it names — `xhigh` in
+/// the red the bar would draw — and everything else stays quiet, because a hint
+/// is an aside and the eye should skip it.
+fn suggestion_ink(state: &State, style: Style) -> ratatui::style::Style {
+    let hint = state.suggestion.as_str();
+    for rung in [
+        "xhigh", "max", "high", "medium", "minimal", "low", "off", "auto",
+    ] {
+        // The hint is `word — setting` or a list of candidates, so the word has
+        // to be matched as a word and not found inside another one.
+        if hint
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case(rung))
+        {
+            return crate::render::effort_span(style, rung);
+        }
+    }
+    style.faint_span()
+}
 
 /// Draws one row of chrome, clipped to its area.
 fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style::Style) {
@@ -291,7 +432,14 @@ fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style:
     // builders keep it short — `session_status` drops what does not fit — and
     // this is the backstop for a width they did not expect.
     let room = usize::from(area.width).saturating_sub(2).max(1);
-    let text = crate::text::terminal(text);
+    // The escapes go first. The chrome is built by the string painters — the
+    // status line in particular, which colours each of its fields — and those
+    // wrap text in SGR codes. A frame draws text: the codes would be shown as
+    // the characters they are, and they would be counted as characters by the
+    // cut below, so a row that fit came back chopped mid-field with the tail of
+    // an escape sequence left on screen.
+    let text = crate::select::strip_style(text);
+    let text = crate::text::terminal(&text);
     let shown = if text.chars().count() > room {
         let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
         cut.push('…');
@@ -323,6 +471,41 @@ pub(crate) fn margin(kind: Kind) -> &'static str {
 /// its own beside the text.
 pub(crate) const MARGIN_COLS: u16 = 3;
 
+/// Which part of a box a row is.
+///
+/// A tool's output is one bounded thing, and the frame is what says so. The
+/// frame is drawn by the view and is not part of the row's text: a box whose
+/// edges were rows of the conversation would be a box nobody can select the
+/// inside of without taking the edges with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// The rule that opens the box, carrying its title.
+    Top,
+    /// A row between the rules.
+    Inside,
+    /// The rule that closes it.
+    Bottom,
+}
+
+/// One row of the conversation, as the view draws it.
+///
+/// It is the wrap of one [`crate::transcript::Line`] at the width of the
+/// terminal, with the frame the row belongs to and the ink it is written in
+/// carried separately. Nothing here is a string of escape codes: the widget
+/// draws text, and a code kept in the text is what put `38;2;97;175;239m` on
+/// screen where a colour was meant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Row {
+    /// The ink, when the row's own is not the one its kind asks for.
+    pub(crate) ink: Option<Ink>,
+    /// What kind of entry the row belongs to.
+    pub(crate) kind: Kind,
+    /// The text of this row, already wrapped.
+    pub(crate) text: String,
+    /// Which part of a box it is, for an entry the view frames.
+    pub(crate) frame: Option<Frame>,
+}
+
 /// Draws the conversation: the part that fits, newest at the bottom.
 fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     if area.height == 0 {
@@ -334,46 +517,118 @@ fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style
     let width = area.width.saturating_sub(MARGIN_COLS).max(1);
     let lines = transcript_lines(&state.transcript, width);
     // From the bottom up: the newest line is the one being read, and a view
-    // that grew from the top would put it off the screen.
-    let skipped = state.scroll.min(lines.len());
-    let shown = lines.len() - skipped;
-    let take = usize::from(area.height).min(shown);
-    let from = shown - take;
+    // that grew from the top would put it off the screen. The frame is what
+    // clamps the offset, because it is the only thing that knows how many rows
+    // fit: the reader moves a number of lines and never knows the height.
+    let (from, take) = viewport(lines.len(), area.height, state.scroll);
 
-    // Each kind gets the shape it reads best in: the thought is a box with its
-    // own margin, so a run of it is visibly one bounded thing and not the
-    // conversation drifting, and everything else is a line.
-    let rows: Vec<Line> = lines[from..from + take]
-        .iter()
-        .map(|(kind, text)| {
-            let ink = ink(*kind, style);
+    // The conversation sits against the input and not against the top: what a
+    // person reads is the newest line, and a view pinned to the top row would
+    // leave the transcript floating at the top of an empty screen with a gap
+    // between it and the prompt.
+    //
+    // The rows that precede it are drawn as blanks rather than left alone. The
+    // area is fixed and the content is not: a frame that painted only the rows
+    // it had moved the rect down the screen as the conversation grew, and what
+    // stayed above it was whatever the last frame had put there — which is what
+    // left the tail of an older answer interleaved with the new one on a real
+    // terminal.
+    let blank = usize::from(area.height).saturating_sub(take);
+    let mut rows: Vec<Line> = Vec::with_capacity(usize::from(area.height));
+    rows.extend(std::iter::repeat_with(Line::default).take(blank));
+    rows.extend(
+        lines[from..from + take]
+            .iter()
+            .map(|row| row_line(row, area.width, style)),
+    );
+    Paragraph::new(rows).render(area, frame.buffer_mut());
+}
+
+/// The rows of the conversation a view of `height` rows shows, and where.
+///
+/// The offset counts from the end, which is what makes the view usable while an
+/// answer streams in: a person reading history stays on the line they were on,
+/// and one at the tail sees the newest line because zero is the tail. The frame
+/// is what clamps, because it is the only thing that knows how many rows fit.
+#[must_use]
+pub(crate) fn viewport(total: usize, height: u16, scroll: usize) -> (usize, usize) {
+    let height = usize::from(height);
+    let take = height.min(total);
+    // Scrolling back can go until the first row is the first row on screen and
+    // no further. Clamping to the whole conversation instead was a scroll off
+    // its end: `total - total` is nothing to draw, so holding a page key down
+    // emptied the screen and left no line to scroll back from.
+    let skipped = scroll.min(total - take);
+    (total - take - skipped, take)
+}
+
+/// One row, with its margin, its frame and its ink.
+///
+/// The frame is chrome the view adds, and it is deliberately two rules and no
+/// vertical bars: a box drawn with sides puts a `│` on every row of the text it
+/// holds, and those bars are what a person selects along with the output they
+/// meant to copy. A rule above and a rule below say where the box starts and
+/// ends and leave every row of the content clean.
+fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
+    let ink = row.ink.map_or_else(
+        || ink(row.kind, style),
+        |ink| match ink {
+            Ink::Faint => style.faint_span(),
+            Ink::Dim => style.dim_span(),
+            Ink::Cyan => style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+            Ink::Green => style.ratatui((0x98, 0xC3, 0x79), 71, "32"),
+            Ink::Red => style.ratatui((0xE0, 0x6C, 0x75), 203, "31"),
+            Ink::Yellow => style.ratatui((0xE5, 0xC0, 0x7B), 180, "33"),
+        },
+    );
+    match row.frame {
+        Some(Frame::Top) => {
+            // The title leads, and the rule fills what is left of the row.
+            let label = format!("─ {} ", row.text);
+            let room = usize::from(width).saturating_sub(3);
+            let label: String = label.chars().take(room).collect();
+            let fill = room.saturating_sub(label.chars().count());
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("╭", style.blue_span()),
+                Span::styled(label.clone(), Style::bold_span()),
+                Span::styled("─".repeat(fill), style.blue_span()),
+                Span::styled("╮", style.blue_span()),
+            ])
+        }
+        Some(Frame::Bottom) => Line::from(vec![
+            Span::raw("  "),
+            Span::styled("╰", style.blue_span()),
+            Span::styled(
+                "─".repeat(usize::from(width).saturating_sub(2)),
+                style.blue_span(),
+            ),
+            Span::styled("╯", style.blue_span()),
+        ]),
+        // Inside a box the text keeps its own indent and nothing else: the row
+        // is the output, and a bar in front of it is a bar in the copy.
+        Some(Frame::Inside) => {
+            Line::from(vec![Span::raw("  "), Span::styled(row.text.clone(), ink)])
+        }
+        None => {
             // The margin is what says who is talking. One column, before every
             // line: the person at `▌` and the model at a space, which is the
             // convention a chat and a diff already share. A colour alone cannot
             // carry it — a terminal with no colour shows none — and the margin
             // costs a column and reads at a glance.
-            let bar_ink = match kind {
+            let bar_ink = match row.kind {
                 Kind::Said => style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
                 Kind::Reasoning => style.faint_span(),
                 _ => style.dim_span(),
             };
-            let bar = margin(*kind);
+            let bar = margin(row.kind);
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(bar.to_owned(), bar_ink),
-                Span::styled(text.clone(), ink),
+                Span::styled(row.text.clone(), ink),
             ])
-        })
-        .collect();
-    // The conversation sits against the input and not against the top: what a
-    // person reads is the newest line, and a view pinned to the top row would
-    // leave the transcript floating at the top of an empty screen with a gap
-    // between it and the prompt.
-    let take = u16::try_from(take).unwrap_or(area.height);
-    let top = area.y + area.height.saturating_sub(take);
-    let inside = Rect::new(area.x, top, area.width, take);
-    Paragraph::new(rows).render(inside, frame.buffer_mut());
-    let _ = top;
+        }
+    }
 }
 
 /// Every entry of the conversation as the rows a terminal would show.
@@ -381,32 +636,91 @@ fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style
 /// The wrap happens here and not in the data: a wrapped line is only correct at
 /// the width it was wrapped for, and the width is the terminal's right now.
 #[must_use]
-pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<(Kind, String)> {
+pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> {
     let mut out = Vec::new();
     for entry in transcript.entries() {
-        // A call that is out says so on its own header: the row counts while
-        // the work runs, which is the one number that turns a silent wait into
-        // something a person can read. It replaces the header rather than
-        // adding a line, so nothing under it moves while it counts.
-        let counting = entry.kind == Kind::ToolStarted && entry.started.is_some();
+        // A boxed entry opens with its rule, whatever it holds: the rule is what
+        // says where the output begins, and an entry with no rows at all is one
+        // the rule and the closing rule already describe.
+        if entry.boxed {
+            out.push(Row {
+                ink: None,
+                kind: entry.kind,
+                text: entry.title.clone().unwrap_or_default(),
+                frame: Some(Frame::Top),
+            });
+        }
         for (index, line) in entry.lines.iter().enumerate() {
-            let line = if counting && index == 0 {
+            // A call that is out says so on the row it will end on: a glyph
+            // that turns and the time it has taken. The clock is the one number
+            // that turns a silent wait into something a person can read, and the
+            // glyph is what says the process is alive — a row that only counted
+            // seconds looks the same as one that stopped counting.
+            //
+            // It is drawn here and not written into the row: the glyph turns
+            // between frames, and a row that carried one would be a row the
+            // data kept rewriting.
+            let counting = entry.kind == Kind::ToolStarted && entry.started.is_some();
+            // The escapes go first, for the same reason they go in `draw_row`:
+            // some entries are built by the string painters, and a frame draws
+            // text. They also count as characters in the wrap, so a line that
+            // fitted was re-flowed around codes the reader never sees.
+            let text = if counting && index == 0 {
                 let at = entry.started.unwrap_or_else(std::time::Instant::now);
-                format!("{line}  {}", elapsed(at.elapsed()))
+                format!("{}  {}", line.text, elapsed(at.elapsed()))
             } else {
-                line.clone()
+                line.text.clone()
             };
-            for wrapped in wrap(&line, width) {
-                out.push((entry.kind, wrapped));
+            let text = crate::select::strip_style(&text);
+            let text = crate::text::terminal(&text).into_owned();
+            // Wrapped to the width the box's inside has, which is the text
+            // width and not the row width: the frame's rules take columns of
+            // their own.
+            let frame = entry.boxed.then_some(Frame::Inside);
+            // The turning glyph leads the row that is counting, and only that
+            // row: a finished call carries its own mark — the tick, the cross —
+            // which the ending wrote into the text.
+            let text = if counting && index == 0 {
+                let step = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis())
+                    / u128::from(SPINNER_MS)) as usize;
+                format!("{} {text}", SPINNER[step % SPINNER.len()])
+            } else {
+                text
+            };
+            let ink = if counting && index == 0 {
+                Some(Ink::Dim)
+            } else {
+                line.ink
+            };
+            let wrapped = wrap(&text, width);
+            for text in wrapped {
+                out.push(Row {
+                    ink,
+                    kind: entry.kind,
+                    text,
+                    frame,
+                });
             }
         }
         // What the bound dropped is said where it was dropped: a cut that hides
         // itself is worse than a short list that admits it.
         if entry.dropped > 0 {
-            out.push((
-                Kind::Notice,
-                format!("… {} earlier line(s) left out", entry.dropped),
-            ));
+            out.push(Row {
+                ink: Some(Ink::Yellow),
+                kind: Kind::Notice,
+                text: format!("… {} earlier line(s) left out", entry.dropped),
+                frame: entry.boxed.then_some(Frame::Inside),
+            });
+        }
+        if entry.boxed {
+            out.push(Row {
+                ink: None,
+                kind: entry.kind,
+                text: String::new(),
+                frame: Some(Frame::Bottom),
+            });
         }
     }
     out
@@ -430,24 +744,55 @@ pub(crate) fn elapsed(since: std::time::Duration) -> String {
 }
 
 /// Breaks one line to a width, keeping words whole where it can.
+///
+/// Indentation is preserved. It used to be lost: the split was on `' '` and the
+/// empty runs that leading spaces produce were dropped, so `    let x = 1;` came
+/// back as `let x = 1;`. For a diff that is the whole shape of the thing — a
+/// removed line and the line it became are read by their indent — and for a
+/// command's output it is the structure a tree or a JSON blob is read by.
 #[must_use]
 pub(crate) fn wrap(line: &str, width: u16) -> Vec<String> {
     let width = usize::from(width).max(1);
     if line.is_empty() {
         return vec![String::new()];
     }
-    let mut rows = Vec::new();
+    // Tabs are already spaces by the time a row reaches here: the transcript
+    // expands them when the line arrives, because the width of a tab depends on
+    // the column it starts at, and that column is not known here.
+    //
+    // The leading spaces are kept, and so is a run of them inside the line. The
+    // split used to be on `' '` with the empty runs it produces dropped, which
+    // lost the indent silently: `    let x = 1;` came back flush against the
+    // margin. For a diff that is the whole shape of the thing, and for a
+    // command's output it is the structure a tree or a JSON blob is read by.
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let lead: String = line.chars().take(indent).collect();
+    let body = &line[indent..];
+    let mut rows: Vec<String> = Vec::new();
     let mut current = String::new();
-    for word in line.split(' ') {
-        let size = word.chars().count();
-        if current.is_empty() {
-            current.push_str(word);
-        } else if current.chars().count() + 1 + size <= width {
-            current.push(' ');
-            current.push_str(word);
+    current.push_str(&lead);
+    for piece in pieces(body) {
+        // A run of spaces is kept when it fits. When it does not, the row is
+        // full, and a break is where a space goes anyway.
+        if piece.chars().all(|character| character == ' ') {
+            if current.chars().count() + piece.chars().count() <= width {
+                current.push_str(piece);
+            }
+            continue;
+        }
+        if current.chars().count() + piece.chars().count() <= width {
+            current.push_str(piece);
         } else {
-            rows.push(std::mem::take(&mut current));
-            current.push_str(word);
+            // A row holding nothing but the indent is not a row: pushing it
+            // would put a blank line under a word too long for the width.
+            if !current.trim_end().is_empty() {
+                rows.push(current.trim_end().to_owned());
+            }
+            // A wrapped continuation is indented under the line it belongs to,
+            // which is what makes a wrapped paragraph read as one paragraph.
+            current.clear();
+            current.push_str(&lead);
+            current.push_str(piece);
         }
         // A word wider than the row is cut where it stands: moving it would
         // leave the row empty and the next one still too long.
@@ -457,12 +802,38 @@ pub(crate) fn wrap(line: &str, width: u16) -> Vec<String> {
         }
     }
     if !current.is_empty() {
-        rows.push(current);
+        rows.push(current.trim_end().to_owned());
     }
     if rows.is_empty() {
         rows.push(String::new());
     }
     rows
+}
+
+/// One line cut into the runs a wrap works on: words, and the spaces between.
+///
+/// A run is maximal, so two spaces together are one piece and stay two spaces.
+/// Splitting on `' '` and treating every part as a word is what lost them.
+fn pieces(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_space: Option<bool> = None;
+    for (at, character) in body.char_indices() {
+        let space = character == ' ';
+        match in_space {
+            None => in_space = Some(space),
+            Some(seen) if seen != space => {
+                out.push(&body[start..at]);
+                start = at;
+                in_space = Some(space);
+            }
+            _ => {}
+        }
+    }
+    if start < body.len() {
+        out.push(&body[start..]);
+    }
+    out
 }
 
 /// The ink one kind of entry is written in.
@@ -501,6 +872,52 @@ fn clip_visible(text: &str, columns: usize) -> String {
     cut
 }
 
+/// How much of the width the sidebar takes.
+///
+/// A quarter, and it is a bound on what the conversation loses: a sidebar that
+/// grew with its content would take the screen from the thing it is beside.
+const SIDEBAR_PERCENT: u16 = 25;
+
+/// The narrowest terminal the sidebar is drawn on.
+///
+/// Under it a quarter of the width is a column too thin to read a task in, and
+/// the conversation is what the screen is for: the sidebar gives way, and the
+/// row it would have shown is still reachable with `/jobs`, `/tools` and the
+/// task events in the conversation itself.
+const SIDEBAR_MIN_WIDTH: u16 = 72;
+
+/// Draws the one column between the conversation and the sidebar.
+///
+/// A panel is a panel because its edge is visible: a gap alone reads as a
+/// mistake in the layout, and a rule reads as the border it is.
+fn draw_rule(frame: &mut Draw<'_>, area: Rect, style: Style) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let rows: Vec<Line> = (0..area.height)
+        .map(|_| {
+            Line::from(Span::styled(
+                "│",
+                style.ratatui((0x4A, 0x4E, 0x54), 238, "90"),
+            ))
+        })
+        .collect();
+    Paragraph::new(rows).render(area, frame.buffer_mut());
+}
+
+/// Draws a horizontal rule across the top edge of an area.
+fn draw_chrome_rule(frame: &mut Draw<'_>, area: Rect, style: Style) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let line = Line::from(Span::styled(
+        "─".repeat(usize::from(area.width)),
+        style.ratatui((0x4A, 0x4E, 0x54), 238, "90"),
+    ));
+    let strip = Rect::new(area.x, area.y, area.width, 1);
+    Paragraph::new(line).render(strip, frame.buffer_mut());
+}
+
 /// Draws the column a plugin asked for, beside the conversation.
 ///
 /// It is drawn in the area the layout gave it and nowhere else, and every row
@@ -513,26 +930,71 @@ fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
         return;
     }
     let width = area.width;
-    let mut rows: Vec<Line> = Vec::new();
+    // The panels the column holds, top to bottom. The task list leads: it is
+    // what the model is doing, and a person watching the work wants to see it
+    // before they want what a plugin has to say about it.
+    let mut panels: Vec<(String, Vec<Line>)> = Vec::new();
+    if !state.todos.is_empty() {
+        let done = state.todos.iter().filter(|task| task.done).count();
+        let rows = state
+            .todos
+            .iter()
+            .map(|task| {
+                // The mark is a character and not a colour: a terminal with no
+                // colour shows none, and the state of a task is the one thing
+                // this column exists to say.
+                let (mark, ink) = if task.done {
+                    ("✔", style.faint_span())
+                } else {
+                    ("·", style.dim_span())
+                };
+                let text = format!(
+                    "{mark} {}",
+                    clip_visible(
+                        &crate::text::terminal(&task.text),
+                        usize::from(width).saturating_sub(3)
+                    )
+                );
+                Line::from(Span::styled(text, ink))
+            })
+            .collect();
+        panels.push((format!("tasks {done}/{}", state.todos.len()), rows));
+    }
     for (plugin, list) in &state.sidebar {
         // The name leads, because a column of rows with no attribution is one
         // nobody can turn off.
+        let rows = list
+            .iter()
+            .map(|row| {
+                let ink = if row.heading {
+                    Style::bold_span()
+                } else {
+                    style.dim_span()
+                };
+                Line::from(Span::styled(
+                    clip_visible(&crate::text::terminal(&row.text), usize::from(width)),
+                    ink,
+                ))
+            })
+            .collect();
+        panels.push((plugin.clone(), rows));
+    }
+    let mut rows: Vec<Line> = Vec::new();
+    for (index, (title, body)) in panels.iter().enumerate() {
+        if index > 0 {
+            rows.push(Line::default());
+        }
+        // Each panel has a heading and a rule under it: a column of rows with
+        // no edge is a column nobody can tell apart from the conversation.
         rows.push(Line::from(Span::styled(
-            clip_visible(&style.faint(plugin.clone()), usize::from(width)),
+            clip_visible(title, usize::from(width)),
             style.faint_span(),
         )));
-        for row in list {
-            let ink = if row.heading {
-                Style::bold_span()
-            } else {
-                style.dim_span()
-            };
-            rows.push(Line::from(Span::styled(
-                clip_visible(&crate::text::terminal(&row.text), usize::from(width)),
-                ink,
-            )));
-        }
-        rows.push(Line::default());
+        rows.push(Line::from(Span::styled(
+            "─".repeat(usize::from(width)),
+            style.ratatui((0x4A, 0x4E, 0x54), 238, "90"),
+        )));
+        rows.extend(body.iter().cloned());
     }
     let take = usize::from(area.height).min(rows.len());
     let hidden = rows.len().saturating_sub(take);
@@ -661,6 +1123,7 @@ fn draw_block(frame: &mut Draw<'_>, area: Rect, rows: &[Line]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::Pinned;
     use crate::transcript::Entry;
 
     #[test]
@@ -670,6 +1133,24 @@ mod tests {
         // wrap for a width the terminal may no longer have.
         let rows = wrap("one two three four", 9);
         assert_eq!(rows, ["one two", "three", "four"]);
+    }
+
+    #[test]
+    fn indentation_survives_the_wrap() {
+        // A diff's shape is its indent: the line that left and the line that
+        // arrived are read by how far in they start. Dropping the leading spaces
+        // was silent — the row simply came back flush against the margin — and
+        // it made every wrapped diff and every nested line of output lie.
+        assert_eq!(wrap("    let x = 1;", 40), ["    let x = 1;"]);
+        // A wrapped continuation stays indented under the line it came from, so
+        // a wrapped paragraph still reads as one paragraph.
+        assert_eq!(
+            wrap("    one two three", 10),
+            ["    one", "    two", "    three"],
+            "the continuation is indented too"
+        );
+        // And a run of spaces inside the line is not collapsed into one.
+        assert_eq!(wrap("a  b", 20), ["a  b"]);
     }
 
     #[test]
@@ -696,7 +1177,7 @@ mod tests {
         }
         transcript.push(entry);
         let lines = transcript_lines(&transcript, 80);
-        let last = &lines[lines.len() - 1].1;
+        let last = &lines[lines.len() - 1].text;
         assert!(last.contains('3'), "the count is on screen: {last}");
         assert!(last.contains("left out"), "{last}");
     }
@@ -709,8 +1190,57 @@ mod tests {
         transcript.push(Entry::line(Kind::Said, "hello"));
         transcript.push(Entry::line(Kind::Answer, "hi"));
         let lines = transcript_lines(&transcript, 80);
-        assert_eq!(lines[0], (Kind::Said, "hello".to_owned()));
-        assert_eq!(lines[1], (Kind::Answer, "hi".to_owned()));
+        assert_eq!(lines[0].kind, Kind::Said);
+        assert_eq!(lines[0].text, "hello");
+        assert_eq!(lines[1].kind, Kind::Answer);
+        assert_eq!(lines[1].text, "hi");
+    }
+
+    #[test]
+    fn a_boxed_entry_draws_its_rules_and_carries_no_bars_inside() {
+        // The frame says where the output begins and ends. What it must not do
+        // is put a bar on every row of the content: those bars are what a person
+        // selects along with the output they meant to copy, and a box drawn with
+        // sides is a box whose inside cannot be copied cleanly.
+        let mut transcript = Transcript::new();
+        let mut entry = Entry::bordered(Kind::ToolOutput, "shell #abc");
+        entry.push_line("one");
+        entry.push_line("two");
+        transcript.push(entry);
+        let rows = transcript_lines(&transcript, 80);
+        assert_eq!(rows[0].frame, Some(Frame::Top));
+        assert_eq!(rows[0].text, "shell #abc");
+        assert_eq!(rows[1].frame, Some(Frame::Inside));
+        assert_eq!(rows[1].text, "one");
+        assert_eq!(rows[2].frame, Some(Frame::Inside));
+        assert_eq!(rows[3].frame, Some(Frame::Bottom));
+        for row in &rows[1..4] {
+            assert!(
+                !row.text.contains('│'),
+                "the content carries no bar: {:?}",
+                row.text
+            );
+        }
+    }
+
+    #[test]
+    fn no_row_the_view_draws_carries_an_escape_sequence() {
+        // The bug this design exists to prevent: the rows were built by the
+        // string painters, which wrap text in raw SGR codes, and the frame put
+        // the codes on screen as the characters they are. A row is text and an
+        // ink, and the ink is what the widget turns into colour.
+        let mut transcript = Transcript::new();
+        let mut diff = Entry::bordered(Kind::ToolOutput, "edit 1/1 · src/main.rs");
+        diff.push_inked(Ink::Red, "- old");
+        diff.push_inked(Ink::Green, "+ new");
+        transcript.push(diff);
+        for row in transcript_lines(&transcript, 80) {
+            assert!(
+                !row.text.contains('\u{1b}'),
+                "a row is text and an ink, never an escape: {:?}",
+                row.text
+            );
+        }
     }
 
     #[test]
@@ -742,15 +1272,362 @@ mod tests {
         // its offset from the end, wherever the end is.
         let before = transcript_lines(&transcript, width);
         let from_before = before.len() - 3;
-        assert_eq!(before[from_before - 20].1, "line 17", "twenty rows back");
+        assert_eq!(before[from_before - 20].text, "line 17", "twenty rows back");
         transcript.push(Entry::line(Kind::Answer, "one more".to_owned()));
         let after = transcript_lines(&transcript, width);
         let from_after = after.len() - 3;
         assert_eq!(
-            after[from_after - 20].1,
+            after[from_after - 20].text,
             "line 18",
             "and the same rows are on screen one line further in"
         );
+    }
+
+    /// The frame a state draws, as lines of text.
+    ///
+    /// It is the whole interface at a size the test chose, which is the one
+    /// thing the unit tests above cannot see: they check what the rows *are*
+    /// and not what the screen *shows*. Every layout bug this file has had —
+    /// the rule overwritten by the status, the panel that took the wrong
+    /// columns, the conversation painted over its own tail — was invisible to
+    /// them and obvious here.
+    fn frame_of(state: &State, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let state = state.clone();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let body = Rect::new(area.x, area.y, area.width, area.height);
+                draw_transcript(frame, body, &state, Style::plain());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// Draws twice into the same terminal and reports the second frame.
+    ///
+    /// It is the one thing a single-frame test cannot see: a frame is diffed
+    /// against the last one, so a row that used to hold more than it does now
+    /// keeps the tail of the old text unless the frame writes over it.
+    fn second_frame(first: &State, then: &State, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        for state in [first, then] {
+            let state = state.clone();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    draw_transcript(frame, area, &state, Style::plain());
+                })
+                .expect("draw");
+        }
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The whole interface drawn twice, as the screen the second frame shows.
+    fn whole_frames(build: impl Fn(&mut State), then: impl Fn(&mut State)) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (w, h) = (100u16, 32u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+        let pinned = Pinned::new();
+        for step in [&build as &dyn Fn(&mut State), &then] {
+            let mut state = State::new();
+            step(&mut state);
+            terminal
+                .draw(|frame| state.paint(frame, Style::plain(), &pinned))
+                .expect("draw");
+        }
+        let buffer = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_frame_that_shrinks_leaves_nothing_of_the_one_before_it() {
+        // What this is for: on a real terminal a long answer followed by a
+        // shorter one left the tail of the first sitting beside the second, and
+        // a box rule that moved up left its dashes behind on the old row. A
+        // frame is diffed against the last one, so a cell the new frame does
+        // not write keeps what the old frame put there.
+        let long = |state: &mut State| {
+            state.transcript.push(Entry::line(
+                Kind::Answer,
+                "a very long line that fills the row and then keeps going past its end",
+            ));
+            for n in 0..12 {
+                state.transcript.push(Entry::line(
+                    Kind::Answer,
+                    format!("line {n} of a longer answer"),
+                ));
+            }
+        };
+        let short = |state: &mut State| {
+            state.transcript.push(Entry::line(Kind::Answer, "short"));
+        };
+        let rows = whole_frames(long, short);
+        // Every row that is not the answer is blank: no dash, no word of the
+        // answer that was there before.
+        // The chrome is written every frame and belongs where it is: the input
+        // prompt, and the rule that closes the frame under it.
+        let chrome =
+            |row: &str| row.trim_start().starts_with('›') || row.trim_start().starts_with('─');
+        for (at, row) in rows.iter().enumerate() {
+            let trimmed = row.trim();
+            if trimmed.is_empty() || chrome(row) {
+                continue;
+            }
+            assert!(
+                trimmed.contains("short"),
+                "row {at} holds something the last frame left: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shorter_line_does_not_leave_the_tail_of_the_longer_one() {
+        // The bug this exists for: a row that held a long line keeps whatever
+        // the new, shorter line did not reach. On a real terminal it came out as
+        // stray dashes from a box rule and the tail of an older answer sitting
+        // beside the new text.
+        let mut first = State::new();
+        first.transcript.push(Entry::line(
+            Kind::Answer,
+            "a line long enough to reach the right edge of the view",
+        ));
+        let mut then = State::new();
+        then.transcript.push(Entry::line(Kind::Answer, "short"));
+        let rows = second_frame(&first, &then, 40, 4);
+        let painted = rows
+            .iter()
+            .find(|row| !row.trim().is_empty())
+            .expect("a row");
+        assert!(
+            painted.trim_end().ends_with("short"),
+            "the tail of the long line is still there: {rows:?}"
+        );
+    }
+
+    /// Paints a frame and hands back the pinned handle it wrote to.
+    ///
+    /// The selection is read from what the frame painted, so the only way to
+    /// test it is to paint one: a test that built the rows by hand would be
+    /// testing `text_in` against rows nothing ever drew.
+    fn paint_into(pinned: &Pinned, state: &State, width: u16, height: u16) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let state = state.clone();
+        terminal
+            .draw(|frame| state.paint(frame, Style::plain(), pinned))
+            .expect("draw");
+    }
+
+    /// A frame painted into a fresh handle, for a test that wants both.
+    fn painted_state(state: &State, width: u16, height: u16) -> std::sync::Arc<Pinned> {
+        let pinned = Pinned::new();
+        paint_into(&pinned, state, width, height);
+        pinned
+    }
+
+    #[test]
+    fn a_drag_copies_what_the_frame_painted_and_nothing_else() {
+        // What the copy reads is the frame's own rows: the selection is in
+        // cells of the screen, and only the frame knows where a line landed.
+        // A blank row above the text is not part of a drag that starts on it.
+        let mut state = State::new();
+        state
+            .transcript
+            .push(Entry::line(Kind::Answer, "alpha beta gamma"));
+        let pinned = painted_state(&state, 40, 6);
+
+        // The answer is the last row, because the conversation sits against the
+        // input. A drag across `beta` on it: columns 6..=9.
+        //
+        // Every drag repaints first: a copy takes the rows the frame recorded,
+        // because what is on screen is what is being copied, and a second drag
+        // without a frame would read the screen from before it.
+        paint_into(&pinned, &state, 40, 6);
+        let painted = pinned.debug_painted();
+        // The row the answer landed on, found from the frame and not assumed:
+        // the conversation sits against the input, so where it starts depends on
+        // how much is in it and on the chrome below.
+        let on_screen = painted
+            .iter()
+            .position(|line| line.contains("alpha beta gamma"))
+            .expect("the answer on screen");
+        let row = u16::try_from(on_screen).expect("a row of the screen");
+        // The margin leads — a space and the bar — so the answer starts at the
+        // column the frame reports and not at zero: `alpha` at 3, `beta` at 9.
+        let line = &painted[on_screen];
+        let start = u16::try_from(line.find("alpha").expect("the answer")).expect("a column");
+        let word = u16::try_from(line.find("beta").expect("the word")).expect("a column");
+        pinned.begin_selection(word, row);
+        pinned.extend_selection(word + 3, row);
+        assert_eq!(start, 3, "the margin is what the row leads with");
+        let copied = pinned.finish_selection().expect("the selection");
+        assert_eq!(copied, "beta", "the word that was under the drag");
+
+        // A drag that starts on the blank rows above and ends on the text takes
+        // the text and not the blanks it passed over.
+        paint_into(&pinned, &state, 40, 6);
+        let painted = pinned.debug_painted();
+        let row = u16::try_from(
+            painted
+                .iter()
+                .position(|line| line.contains("alpha beta gamma"))
+                .expect("the answer on screen"),
+        )
+        .expect("a row of the screen");
+        pinned.begin_selection(0, 0);
+        pinned.extend_selection(4, row);
+        let copied = pinned.finish_selection().expect("the selection");
+        assert!(
+            copied.starts_with("   al") && copied.ends_with("al"),
+            "it starts and stops where the drag did: {copied:?}"
+        );
+        assert_eq!(
+            copied.lines().count(),
+            1,
+            "the blank row above is not a line of the copy: {copied:?}"
+        );
+
+        // A drag over nothing is not a copy at all: an empty selection would
+        // put a newline on the clipboard and lose whatever was there.
+        paint_into(&pinned, &state, 40, 6);
+        pinned.begin_selection(0, 0);
+        pinned.extend_selection(3, 0);
+        assert_eq!(
+            pinned.finish_selection(),
+            None,
+            "a drag over nothing is not a copy"
+        );
+    }
+
+    #[test]
+    fn a_running_call_draws_one_row_that_turns_and_a_finished_one_keeps_its_place() {
+        // One call is one row, and the frame is what shows it: while the call
+        // runs the row leads with a turning glyph and the time it has taken,
+        // and when it ends the same row — the same screen row — carries the
+        // outcome. A test of the data alone cannot see either, because the glyph
+        // and the clock are drawn and never stored.
+        let mut state = State::new();
+        let mut running = Entry::line(Kind::ToolStarted, "read README.md");
+        running.started = Some(std::time::Instant::now());
+        running.call_id = Some("call-1".to_owned());
+        state.transcript.push(running);
+
+        let rows = frame_of(&state, 60, 6);
+        let live = rows
+            .iter()
+            .find(|row| row.contains("read README.md"))
+            .expect("the live row");
+        assert!(
+            live.chars()
+                .any(|glyph| SPINNER.contains(&glyph.to_string().as_str())),
+            "a glyph of the spinner leads it: {live:?}"
+        );
+        assert!(live.contains("0s"), "and the clock runs: {live:?}");
+
+        // The ending replaces the row's text, on the row it already had: the
+        // glyph and the clock are the frame's, so a finished call has neither.
+        let mut ended = Entry::line(Kind::ToolStarted, "read README.md");
+        ended.kind = Kind::ToolOutput;
+        ended.lines = vec![crate::transcript::Line::inked(
+            crate::transcript::Ink::Green,
+            "\u{2713} read in 3 ms",
+        )];
+        let mut done = State::new();
+        done.transcript.push(ended);
+        let rows = frame_of(&done, 60, 6);
+        let finished = rows
+            .iter()
+            .find(|row| row.contains("read in 3 ms"))
+            .expect("the finished row");
+        assert!(
+            !finished
+                .chars()
+                .any(|glyph| SPINNER.contains(&glyph.to_string().as_str())),
+            "no glyph on a call that ended: {finished:?}"
+        );
+        assert!(!finished.contains("0s"), "and no clock: {finished:?}");
+    }
+
+    #[test]
+    fn the_conversation_paints_every_row_it_was_given() {
+        // The area is fixed and the content is not. A short conversation left
+        // the rows above it untouched, so whatever the previous frame had put
+        // there stayed on screen: on a real terminal that was the tail of an
+        // older answer interleaved with the new one.
+        let mut state = State::new();
+        state.transcript.push(Entry::line(Kind::Said, "hi"));
+        let rows = frame_of(&state, 40, 6);
+        assert_eq!(rows.len(), 6);
+        // The line is the last row: the conversation sits against the input
+        // and not against the top of an empty screen.
+        assert!(
+            rows[5].contains("hi"),
+            "the newest line is at the bottom: {rows:?}"
+        );
+        // And every row above it was written as blank, not left as it was: an
+        // untouched row keeps whatever the last frame put there.
+        for row in &rows[..5] {
+            assert!(
+                row.trim().is_empty(),
+                "an untouched row keeps old text: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_view_shows_the_tail_until_someone_scrolls_back() {
+        // The offset counts from the end, and the frame clamps it: the reader
+        // moves a number of lines without knowing the height, so a scroll past
+        // the top has to land on the first row and not on a negative one.
+        assert_eq!(viewport(100, 20, 0), (80, 20), "the tail by default");
+        assert_eq!(viewport(100, 20, 5), (75, 20), "five rows back");
+        assert_eq!(
+            viewport(100, 20, 95),
+            (0, 20),
+            "the top: a full screen, and the first row is the first row"
+        );
+        assert_eq!(
+            viewport(100, 20, 10_000),
+            (0, 20),
+            "a wild scroll lands on the first row and not past it"
+        );
+        // A conversation shorter than the screen shows what there is, and the
+        // rows it does not have are not blank ones.
+        assert_eq!(viewport(3, 20, 0), (0, 3));
+        assert_eq!(viewport(0, 20, 0), (0, 0), "nothing to draw");
     }
 
     #[test]

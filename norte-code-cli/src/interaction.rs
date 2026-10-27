@@ -11,11 +11,10 @@ use crate::input::{Attachment, EditorAction, EditorEvent, InteractiveInput};
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
-    BudgetPrompt, Verbosity, format_measure, mcp_summary, parse_reasoning_setting,
-    reasoning_setting_label, report_mcp as render_mcp, report_prompt, report_reasoning,
-    report_start, report_tool_rules, report_tools, scope_name, tools_summary, unit_name,
+    BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
+    report_mcp as render_mcp, report_prompt, report_reasoning, report_start, report_tool_rules,
+    report_tools, scope_name, unit_name,
 };
-use crate::tabs::SessionTab;
 use norte_code_commands::Invocation;
 /// How often a running turn redraws, in ms.
 ///
@@ -115,11 +114,6 @@ pub(crate) enum ChatCommand {
     },
     /// Start a fresh session, leaving this one saved.
     Restart,
-    /// Show another tab of the session, or list them.
-    Tab {
-        /// The tab's name or number; `None` lists them.
-        target: Option<String>,
-    },
 
     /// Report what the process knows about itself: the model, its
     /// capabilities, the tools, the servers, the paths. Built when it is asked
@@ -213,9 +207,6 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         },
         "/provider" => ChatCommand::Provider {
             provider: invocation.arg_or_empty("provider").to_owned(),
-        },
-        "/tab" => ChatCommand::Tab {
-            target: invocation.arg("target").map(str::to_owned),
         },
         "/rename" => ChatCommand::Rename {
             title: invocation.arg("title").map(str::to_owned),
@@ -385,10 +376,6 @@ pub(crate) async fn interactive_loop(
         let _ = &style;
     }
     let mut request_id = 2_u64;
-    // The tabs open on something: without this the tools and MCP rows stay
-    // blank until the first turn ends, and an empty row reads as nothing to
-    // report rather than as not looked at yet.
-    refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
     // The conversation opens with the mark and a frame: a session that showed
     // nothing until the first tool ran looked like a client that had not
     // started.
@@ -463,7 +450,6 @@ pub(crate) async fn interactive_loop(
                 },
                 ChatCommand::Mcp { action, server } => {
                     report_mcp(service, action, server.as_deref(), renderer, style);
-                    refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
                 }
                 ChatCommand::Approval {
                     allow,
@@ -483,7 +469,6 @@ pub(crate) async fn interactive_loop(
                         renderer.notice(format!("{verb} `{tool}` {scope}"));
                         // The rule just changed, so the row that counts the
                         // rules is stale until it is rebuilt.
-                        refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
                     }
                     Err(error) => {
                         renderer.failure(format!("could not set the rule: {error}"));
@@ -494,51 +479,6 @@ pub(crate) async fn interactive_loop(
                         run_reasoning(service, current, scope, reasoning, renderer).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
-                    }
-                }
-                // `/tab` is the way to change tabs that does not need a
-                // modified key: `Ctrl-T` cycles, and this one travels where a
-                // terminal will not send the key. Bare, it lists them.
-                ChatCommand::Tab { target } => {
-                    let wanted = match target.as_deref() {
-                        None => {
-                            // Which tab is showing is state, and the list of
-                            // them is a report: it is read and dismissed.
-                            let lines = vec![format!(
-                                "tabs: {}",
-                                SessionTab::ALL
-                                    .iter()
-                                    .map(|tab| format!(
-                                        "{}{}",
-                                        if *tab == renderer.pinned.tab() {
-                                            "*"
-                                        } else {
-                                            " "
-                                        },
-                                        tab.name()
-                                    ))
-                                    .collect::<Vec<_>>()
-                                    .join("  ")
-                            )];
-                            renderer.open_modal("tabs", lines);
-                            continue;
-                        }
-                        Some(target) => target
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(SessionTab::numbered)
-                            .or_else(|| SessionTab::named(target)),
-                    };
-                    match wanted {
-                        Some(tab) => renderer.pinned.set_tab(tab),
-                        None => renderer.notice(format!(
-                            "no tab `{target:?}`; use {}",
-                            SessionTab::ALL
-                                .iter()
-                                .map(|tab| tab.name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )),
                     }
                 }
                 ChatCommand::Model { model } => {
@@ -805,37 +745,6 @@ async fn steer_text(
     }
 }
 
-/// The tab a `/tab` argument names, or the tab a bare one would list.
-///
-/// `None` is a name no tab has. It is shared by the two paths that run a
-/// command — the repl between turns and the live handler during one — because
-/// they have to accept the same words: `/tab 2` and `/tab todo` mean the same
-/// thing whichever path reads them, and one of them used to answer that tabs
-/// needed a terminal it was standing in front of.
-fn tab_target(target: Option<&str>, renderer: &Renderer) -> Result<SessionTab, String> {
-    match target {
-        // Bare during a turn: the tab after the current one, which is what
-        // `Ctrl-T` does. The repl path lists the tabs instead, because it has
-        // the room and a person between turns is asking what there is.
-        None => Ok(renderer.pinned.tab().next()),
-        Some(target) => target
-            .parse::<usize>()
-            .ok()
-            .and_then(SessionTab::numbered)
-            .or_else(|| SessionTab::named(target))
-            .ok_or_else(|| {
-                format!(
-                    "no tab `{target}`; use {}",
-                    SessionTab::ALL
-                        .iter()
-                        .map(|tab| tab.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }),
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 async fn handle_live_command(
     service: &Arc<Service>,
@@ -850,10 +759,6 @@ async fn handle_live_command(
         // message claiming otherwise was simply wrong, and the command is the
         // one that helps most here: Ctrl-T is a keystroke a person reaches for
         // while the model is working.
-        ChatCommand::Tab { target } => match tab_target(target.as_deref(), renderer) {
-            Ok(tab) => renderer.pinned.set_tab(tab),
-            Err(message) => renderer.notice(message),
-        },
         ChatCommand::Exit => renderer.notice("wait until the current turn finishes, then /exit"),
         ChatCommand::Help => print_chat_help(renderer, style),
         // The report needs no turn boundary: it reads state that is already
@@ -881,7 +786,6 @@ async fn handle_live_command(
         ChatCommand::Refresh => report_refresh(service, renderer).await,
         ChatCommand::Mcp { action, server } => {
             report_mcp(service, action, server.as_deref(), renderer, style);
-            refresh_tab_summaries(service, current, &renderer.pinned, style);
         }
         ChatCommand::Approval {
             allow,
@@ -1037,22 +941,6 @@ fn report_tools_now(
     // lines written onto it land on top of the conversation.
     let lines = report_tool_rules(style, service, session);
     renderer.open_modal("tools", lines);
-}
-
-/// Rebuilds the one-row summaries the tools and MCP tabs show.
-///
-/// Called at every moment either can change: when the session opens, when a
-/// turn ends (a tool an MCP server published may have come or gone), and after
-/// a command that writes a rule. The summaries arrive as text, so the footer
-/// draws them without knowing what a rule is.
-fn refresh_tab_summaries(
-    service: &Arc<Service>,
-    session: Option<&SessionKey>,
-    pinned: &crate::input::Pinned,
-    style: Style,
-) {
-    pinned.set_tool_summary(tools_summary(style, service, session));
-    pinned.set_mcp_summary(mcp_summary(style, service));
 }
 
 fn report_debug(
@@ -1621,6 +1509,18 @@ fn report_mcp(
 fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
     match service.reload_config() {
         Ok(reloaded) => {
+            // The dial in the status row is drawn from the threshold and the
+            // window, and both are read from the configuration. They were set
+            // once at startup, so a threshold written into the file and picked
+            // up by `/refresh` changed how the session compacts without
+            // changing the colour the bar warns in: the two disagreed, which is
+            // the one thing a warning must not do.
+            renderer.compaction_threshold = reloaded.config.compaction.threshold;
+            // The window comes from the spec, which a `/model` may have moved:
+            // a session switched to a model with a smaller window has a dial
+            // that fills faster, and reading it from the startup spec would
+            // leave the bar lying about how close the compaction is.
+            renderer.max_context = service.default_spec().capabilities.max_context;
             renderer.notice(format!(
                 "configuration reloaded ({} providers)",
                 reloaded.config.providers.len()
@@ -1701,11 +1601,19 @@ pub(crate) async fn read_repl_line(
                 return Ok(None);
             }
             event = input.recv() => event,
-            // The tick is what keeps a typed character on screen: a keystroke
-            // is not a server event, so without a clock the draft would appear
-            // only when something else happened to arrive.
+            // The clock is what keeps an animation moving — the spinner, and
+            // the seconds a running call counts — and what puts a keystroke on
+            // screen: a key is not a server event, so without a tick the draft
+            // would appear only when something else happened to arrive.
+            //
+            // It draws only when there is a reason to. The frame used to be
+            // written every 120ms whatever had happened, which is a cursor
+            // hide/show pair sixteen times a second and a core burned to draw
+            // the screen it had just drawn.
             _ = tick.tick() => {
-                renderer.draw()?;
+                if renderer.animating() || renderer.take_dirty() {
+                    renderer.draw()?;
+                }
                 continue;
             }
         };
@@ -1713,6 +1621,13 @@ pub(crate) async fn read_repl_line(
         renderer.draw()?;
         let (line, attachments) = match event {
             Some(EditorEvent::Line(line, attachments)) => (line, attachments),
+            // A selection was copied: the terminal has it, and the conversation
+            // says so, because a copy that reported nothing is one a person
+            // cannot tell from a drag that missed.
+            Some(EditorEvent::Copied(text)) => {
+                copied(&text, renderer);
+                continue;
+            }
             Some(EditorEvent::End) | None => {
                 return Ok(None);
             }
@@ -1740,6 +1655,22 @@ pub(crate) async fn read_repl_line(
             return Ok(None);
         }
         return Ok(Some((line.to_owned(), attachments)));
+    }
+}
+
+/// Puts a selection on the terminal's clipboard and says what went there.
+///
+/// OSC 52 is the write; the sentence is the receipt. A copy that said nothing
+/// would be a copy a person cannot tell from a drag that missed, and the one
+/// thing they need after selecting a long answer is to know it landed.
+fn copied(text: &str, renderer: &mut Renderer) {
+    match crate::terminal::copy(text) {
+        Ok(()) => {
+            let lines = text.lines().count();
+            let chars = text.chars().count();
+            renderer.notice(format!("copied {chars} character(s), {lines} line(s)"));
+        }
+        Err(error) => renderer.failure(format!("could not copy the selection: {error}")),
     }
 }
 
@@ -1887,6 +1818,10 @@ pub(crate) async fn drive_turns_titled(
                             // driving a turn, and a question is not a line for
                             // it to steer.
                             Some(EditorEvent::Question(_)) => continue,
+                            Some(EditorEvent::Copied(text)) => {
+                                copied(&text, renderer);
+                                continue;
+                            }
                             Some(EditorEvent::End) | None => Wake::Eof,
                         },
                         next = stream.next() => Wake::Event(Box::new(next)),
@@ -1916,7 +1851,9 @@ pub(crate) async fn drive_turns_titled(
                     // keeps a running call's counter moving and the spinner
                     // turning while the provider is silent.
                     Wake::Tick => {
-                        renderer.draw()?;
+                        if renderer.animating() || renderer.take_dirty() {
+                            renderer.draw()?;
+                        }
                         continue;
                     }
                     // A keystroke the editor could not act on itself: it knows
@@ -2268,7 +2205,6 @@ pub(crate) async fn drive_turns_titled(
     // A turn can move both lists: an approval can write a session rule, and a
     // server that dropped took its tools with it. The rows are rebuilt once
     // here rather than after every event that might have moved either.
-    refresh_tab_summaries(service, current.as_ref(), &renderer.pinned, style);
     Ok(DriveOutcome {
         session: current,
         parked,
@@ -2343,29 +2279,6 @@ mod tests {
             parse_chat_command("/reasoning budget:0"),
             Some(Err(_))
         ));
-    }
-
-    #[test]
-    fn tab_is_resolved_the_same_way_wherever_the_command_runs() {
-        // `/tab` used to answer "tabs need an interactive terminal" during a
-        // turn, which was false: the live handler runs inside the editor, with
-        // the footer on screen. What it means is the same on both paths.
-        assert_eq!(
-            parse_chat_command("/tab todo"),
-            Some(Ok(ChatCommand::Tab {
-                target: Some("todo".to_owned())
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/tab 2"),
-            Some(Ok(ChatCommand::Tab {
-                target: Some("2".to_owned())
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/tab"),
-            Some(Ok(ChatCommand::Tab { target: None }))
-        );
     }
 
     #[test]

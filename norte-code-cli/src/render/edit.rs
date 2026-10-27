@@ -3,8 +3,6 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use super::Style;
-
 /// A search/replace edit rendered as a side-by-side, boxed preview.
 #[derive(Debug)]
 pub(crate) struct EditPreview {
@@ -405,12 +403,17 @@ fn display_line(text: &str) -> String {
     text.trim_end_matches('\r').replace('\t', "    ")
 }
 
-pub(crate) fn render_panel(
+/// Lays out one cell of a side-by-side panel as plain text.
+///
+/// It is [`render_panel`] without the painting: the number, the sign and the
+/// code, padded to the column. A frame draws text and turns the ink into colour
+/// itself, so a panel that came back already wrapped in SGR codes put
+/// `38;2;224;108;117m` on screen where a red line was meant.
+pub(crate) fn render_panel_plain(
     cell: Option<&Cell>,
     side: Side,
     panel: usize,
     digits: usize,
-    style: Style,
 ) -> String {
     let code_width = panel.saturating_sub(digits + 3).max(1);
     let (number, text, changed) = match cell {
@@ -427,19 +430,7 @@ pub(crate) fn render_panel(
         (true, Side::Right) => "+",
         _ => " ",
     };
-    let padded = format!("{text:<code_width$}");
-    let code = match (changed, side) {
-        (true, Side::Left) => style.red(padded),
-        (true, Side::Right) => style.green(padded),
-        _ => padded,
-    };
-    let number = style.faint(number);
-    let sign = match (changed, side) {
-        (true, Side::Left) => style.red(sign),
-        (true, Side::Right) => style.green(sign),
-        _ => style.faint(sign),
-    };
-    format!("{number} {sign} {code}")
+    format!("{number} {sign} {text:<code_width$}")
 }
 
 /// One row of the unified view: the line, and what happened to it.
@@ -597,6 +588,15 @@ pub(crate) fn preview_path(path: &str) -> String {
     displayed.display().to_string().replace(['\n', '\r'], " ")
 }
 
+/// The width a boxed preview is laid out for.
+///
+/// It is the terminal's width at the moment the preview is *built*, which is not
+/// the width it is drawn at: a box built at 120 columns and drawn in an 80-column
+/// terminal is re-wrapped by the view, and the wrap lands in the middle of the
+/// careful alignment the panels were laid out with. The rows go to the
+/// transcript as data, and the view is what decides where they break — see
+/// `app::wrap`. This is only the width the panels are *laid out* for, so they are
+/// already the right shape for a terminal of that size.
 pub(crate) fn edit_box_width() -> usize {
     let columns = crossterm::terminal::size().map_or(100, |(columns, _)| usize::from(columns));
     let available = columns.saturating_sub(2);

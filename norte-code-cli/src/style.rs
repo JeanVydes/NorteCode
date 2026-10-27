@@ -192,6 +192,30 @@ impl Style {
         self.ratatui(YELLOW, 180, "33")
     }
 
+    /// The widget style for a successful action.
+    #[must_use]
+    pub(crate) fn green_span(self) -> ratatui::style::Style {
+        self.ratatui(GREEN, 71, "32")
+    }
+
+    /// The widget style for a failure.
+    #[must_use]
+    pub(crate) fn red_span(self) -> ratatui::style::Style {
+        self.ratatui(RED, 203, "31")
+    }
+
+    /// The widget style for an effort above the middle.
+    #[must_use]
+    pub(crate) fn orange_span(self) -> ratatui::style::Style {
+        self.ratatui(ORANGE, 208, "33")
+    }
+
+    /// The widget style for the model identity.
+    #[must_use]
+    pub(crate) fn magenta_span(self) -> ratatui::style::Style {
+        self.ratatui(MAGENTA, 141, "35")
+    }
+
     /// The widget style for a heading, which is the bold default ink.
     #[must_use]
     pub(crate) const fn bold_span() -> ratatui::style::Style {
