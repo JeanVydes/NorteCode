@@ -9,7 +9,7 @@ use crate::input::{Pinned, TodoItem, TodoStatus};
 use crate::render::argument::todo_items;
 use crate::render::dial::context_dial;
 use crate::render::edit::{EditPreview, build_edit_preview, edit_preview};
-use crate::render::loading::{LOADING_BAR_WIDTH, Phase, loading_frame};
+
 use crate::render::renderer::{Block, Format, Renderer, Verbosity, call_ending, tool_sections};
 use crate::style::Style;
 
@@ -580,17 +580,14 @@ fn the_first_reasoning_token_keeps_the_one_bar_at_medium() {
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     renderer.mark_working();
-    assert!(
-        renderer.loading_bar.is_some(),
-        "the wait starts with the turn"
-    );
+    assert!(renderer.waiting.is_some(), "the wait starts with the turn");
 
     renderer.delta(&Delta::Reasoning {
         index: 0,
         text: "thinking".to_owned(),
     });
     assert!(
-        renderer.loading_bar.is_some(),
+        renderer.waiting.is_some(),
         "the bar survives the first token so it can say `streaming`"
     );
 
@@ -601,22 +598,40 @@ fn the_first_reasoning_token_keeps_the_one_bar_at_medium() {
         text: "answer".to_owned(),
     });
     assert!(
-        renderer.loading_bar.is_none(),
+        renderer.waiting.is_none(),
         "the bar disappears once the answer arrives"
     );
 }
 
 #[test]
-fn thinking_is_still_announced_when_no_bar_is_running() {
-    // Without a bar there is nothing else saying the model is thinking, so the
-    // line is the only signal and has to be printed.
+fn thinking_is_announced_when_nothing_else_says_so() {
+    // The reasoning arriving at `medium` says the model is thinking without
+    // drawing the thought, and the spinner is what says it. What matters is
+    // that the activity is set: it is what the frame draws, and a turn that
+    // showed nothing while the model worked would look like a hang.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     renderer.delta(&Delta::Reasoning {
         index: 0,
         text: "thinking".to_owned(),
     });
-    assert!(renderer.reasoning_placeholder, "the thought is announced");
+    // The spinner takes over: a thought arriving means the provider answered,
+    // and the frame says `streaming` from then on. The `thinking…` line is what
+    // a turn with no spinner running shows instead.
+    assert_eq!(renderer.waiting, Some(crate::render::Wait::Streaming));
+    // The thought reaches the conversation through the event, which is the one
+    // place an event becomes an entry: `delta` moves the state, and the event
+    // that carried it makes the entry. Two writers would put it in twice.
+    let reasoning = renderer
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == crate::transcript::Kind::Reasoning)
+        .count();
+    assert_eq!(
+        reasoning, 0,
+        "the direct call is state only; the event is what records"
+    );
 }
 
 #[test]
@@ -640,7 +655,7 @@ fn a_summary_with_no_answer_still_stops_the_bar() {
         tools: vec!["shell".to_owned()],
     });
     assert!(
-        renderer.loading_bar.is_none(),
+        renderer.waiting.is_none(),
         "the summary must not be written onto the bar's line"
     );
 }
@@ -652,10 +667,7 @@ fn the_bar_comes_back_after_a_tool() {
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     renderer.mark_working();
-    assert!(
-        renderer.loading_bar.is_some(),
-        "the bar starts with the turn"
-    );
+    assert!(renderer.waiting.is_some(), "the bar starts with the turn");
 
     // The model answers with a call, which stops the bar like any answer.
     renderer.delta(&Delta::Text {
@@ -664,7 +676,7 @@ fn the_bar_comes_back_after_a_tool() {
     });
     renderer.end_blocks();
     assert!(
-        renderer.loading_bar.is_none(),
+        renderer.waiting.is_none(),
         "the answer stops the bar, as before"
     );
 
@@ -672,51 +684,9 @@ fn the_bar_comes_back_after_a_tool() {
     let finished = tool_finished("call-1", "write", false);
     renderer.tool_event(&finished.kind);
     assert!(
-        renderer.loading_bar.is_some(),
+        renderer.waiting.is_some(),
         "the bar is back for what the model says next"
     );
-}
-
-#[test]
-fn the_frame_shape_tells_the_two_phases_apart() {
-    // While waiting the highlight travels; while streaming it fills from the
-    // left, so the shape says which one it is without reading the label.
-    let waiting = loading_frame(Style::plain(), 0, Phase::Waiting);
-    let streaming = loading_frame(Style::plain(), 0, Phase::Streaming);
-    assert_ne!(waiting, streaming, "the two phases do not look alike");
-    // Streaming is a fill: the first cell is painted and the last is not at
-    // tick zero.
-    assert!(streaming.starts_with('█'), "{streaming:?}");
-    assert!(streaming.ends_with('░'), "{streaming:?}");
-}
-
-#[test]
-fn loading_frame_is_legible_without_colour() {
-    let frame = loading_frame(Style::plain(), 3, Phase::Waiting);
-    assert_eq!(frame.chars().count(), LOADING_BAR_WIDTH);
-    assert!(
-        !frame.contains('\u{1b}'),
-        "plain style must not emit escapes"
-    );
-}
-
-#[test]
-fn loading_frame_moves_with_the_tick() {
-    assert_ne!(
-        loading_frame(Style::plain(), 0, Phase::Waiting),
-        loading_frame(Style::plain(), 2, Phase::Waiting)
-    );
-}
-
-#[test]
-fn a_cost_silent_provider_hides_the_missing_cost() {
-    let pinned = Pinned::new();
-    let mut renderer = renderer(&pinned);
-    renderer.requests = 1;
-    renderer.unpriced = 1;
-    assert!(renderer.session_status().contains("cost not reported"));
-    renderer.set_cost_silent(true);
-    assert!(!renderer.session_status().contains("not reported"));
 }
 
 #[test]
@@ -1361,4 +1331,86 @@ fn the_split_view_still_draws_two_panels() {
         joined.contains("edit 1/1"),
         "both views name the same edit: {joined}"
     );
+}
+
+#[test]
+fn the_conversation_is_kept_as_it_arrives() {
+    // The transcript is the same conversation the printing produces, recorded
+    // rather than drawn. It exists so the interface can re-wrap and scroll,
+    // which the printing cannot: what went to a terminal cannot be asked back.
+    use crate::transcript::Kind;
+
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    let delta = |kind: &str, text: &str| ServerEvent {
+        request_id: 1,
+        session: None,
+        kind: ServerEventKind::Delta {
+            turn: 1,
+            delta: match kind {
+                "reasoning" => Delta::Reasoning {
+                    index: 0,
+                    text: text.to_owned(),
+                },
+                _ => Delta::Text {
+                    index: 0,
+                    text: text.to_owned(),
+                },
+            },
+        },
+    };
+
+    renderer
+        .event(&delta("reasoning", "thinking"))
+        .expect("event");
+    renderer.event(&delta("text", "Hel")).expect("event");
+    renderer.event(&delta("text", "lo")).expect("event");
+    renderer
+        .event(&todo_started("c1", &serde_json::json!([])))
+        .expect("event");
+
+    let entries = renderer.transcript.entries();
+    let kinds: Vec<Kind> = entries.iter().map(|entry| entry.kind).collect();
+    // At `medium` the thought is not kept: the spinner says the model is
+    // working, and the thought itself is the longest thing it writes and the
+    // least of it is worth reading. `high` asks for it, and the test below.
+    assert_eq!(
+        kinds,
+        [Kind::Answer, Kind::ToolStarted],
+        "each event is one entry, in the order they arrived: {entries:?}"
+    );
+    assert_eq!(
+        entries[0].lines,
+        ["Hello"],
+        "the two tokens are one answer, not two lines"
+    );
+    // And a tool starting closes the answer: what comes after is a new thing.
+    assert_eq!(entries[1].lines.len(), 1, "the header, and no command here");
+
+    // At `high` the thought is kept, and it is its own entry: the reasoning and
+    // the answer are not the same thing, and a transcript that merged them
+    // would read as one voice.
+    renderer.verbosity = crate::render::Verbosity::High;
+    renderer.transcript.clear();
+    renderer
+        .event(&delta("reasoning", "thinking"))
+        .expect("event");
+    renderer.event(&delta("text", "Hello")).expect("event");
+    // The thought leads the answer, and the gutter closes when the answer
+    // starts: a box that stayed open would put the answer inside it.
+    let entries = renderer.transcript.entries();
+    let thought = entries
+        .iter()
+        .find(|entry| entry.kind == Kind::Reasoning)
+        .expect("the thought is kept at high");
+    assert_eq!(thought.lines, ["thinking"]);
+    let answer = entries
+        .iter()
+        .position(|entry| entry.kind == Kind::Answer)
+        .expect("the answer follows");
+    let thought = entries
+        .iter()
+        .position(|entry| entry.kind == Kind::Reasoning)
+        .expect("and it is before it");
+    assert!(thought < answer, "the thought leads: {entries:?}");
 }

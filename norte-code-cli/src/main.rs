@@ -9,13 +9,13 @@
 //! `norte-code models` lists what the catalogue knows, filtered by provider,
 //! tool calling or reasoning.
 
+mod app;
 mod approval;
-mod code;
 mod commands;
 mod commands_registry;
 mod input;
 mod interaction;
-mod markdown;
+mod modal;
 mod models;
 mod prompt;
 mod render;
@@ -25,6 +25,7 @@ mod style;
 mod tabs;
 mod terminal;
 mod text;
+mod transcript;
 
 use approval::{clip_text, compact_json};
 use commands::{apply_extensions, database_path, duration_label, run};
@@ -51,7 +52,7 @@ use prompt::compose_selection;
 use render::budget_label;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -693,7 +694,13 @@ pub(crate) async fn new_session(
     // and the totals are: nothing else on screen says it, and after a resume it
     // is not the flag that was passed but what the config and the model resolve.
     renderer.set_reasoning(reasoning_setting_label(&effective));
-    let mut input = Some(InteractiveInput::start(style, Arc::clone(&pinned))?);
+    // The terminal belongs to the renderer: it is what knows when something
+    // changed, so it is what draws. A process with no terminal keeps the
+    // plain-text path and draws nothing.
+    if crate::terminal::is_interactive() {
+        renderer.screen = Some(crate::terminal::Guard::enter()?);
+    }
+    let mut input = Some(InteractiveInput::start(Arc::clone(&pinned))?);
     // The session exists before the first line is read, so the line's message
     // names it: a session created as a side effect of a message cannot be shown
     // in the footer before the message is sent.
@@ -860,7 +867,7 @@ async fn resume_session(
     refresh_effort(&service, &session, &mut renderer);
     let interactive = args.interactive;
     let mut input = if interactive {
-        Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
+        Some(InteractiveInput::start(Arc::clone(&pinned))?)
     } else {
         None
     };

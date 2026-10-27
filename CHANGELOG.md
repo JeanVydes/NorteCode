@@ -120,6 +120,30 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The whole interface draws with `ratatui`, and nothing else in the client
+  writes to the terminal. The transcript is data the client keeps — one entry
+  per thing that was said or done, wrapped when it is drawn and not when it
+  arrives — and the frame is a function of that state, so nothing can land on
+  top of anything. The layout divides the screen in constraints from the top
+  down, which makes a resize one more frame instead of a migration.
+
+  Commands that report something — `/tools`, `/debug`, `/help`, `/mcp`,
+  `/jobs`, `/revoke` — open a panel over the interface instead of printing into
+  the conversation. Escape closes it, the arrows walk it, and its bottom border
+  says how much of the report there is: a printed report was a report that
+  buried the work it was about.
+
+  The reasoning is a boxed gutter in the transcript, twelve lines at most, and
+  only at `--verbose high`: it is the longest thing a model writes and the
+  least of it is worth reading. Below that the spinner says the model is
+  working, which is what the animated bar was for — and the bar is gone, thread
+  and all, because a thread that repaints a line of its own is a second writer
+  on a terminal that has one.
+
+  Two files of drawing code went with it: `code.rs` and `markdown.rs`
+  highlighted syntax for a printer that no longer prints, and `input.rs` lost
+  the row arithmetic it used to place the draft.
+
 - The client draws with `ratatui`. The startup menu is the first screen to move:
   it was a hundred lines of hand-written escapes that moved the cursor by a
   count they kept themselves, which is a class of bug this repository has hit
@@ -1096,4 +1120,3 @@ log file gets the plain rows instead of the box drawing.
   characters instead of bytes, matching `read` for accented text.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev
-

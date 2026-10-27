@@ -86,6 +86,7 @@ impl Style {
     }
 
     /// Whether this style emits escape sequences at all.
+    #[cfg(test)]
     #[must_use]
     pub fn paints(self) -> bool {
         !matches!(self.colors, Colors::None)
@@ -99,6 +100,7 @@ impl Style {
     /// text carries no terminal control of its own.
     ///
     /// [`paint`]: Style::paint
+    #[allow(dead_code)]
     pub(crate) fn paint_raw(self, codes: &str, text: &str) -> String {
         match self.colors {
             Colors::None => text.to_owned(),
@@ -122,25 +124,8 @@ impl Style {
         }
     }
 
-    /// Paints with a fixed colour, degrading to what the terminal can show.
-    ///
-    /// The same three-step fallback as [`color`], exposed because the syntax
-    /// highlighting paints colours it chose itself rather than ones a named
-    /// method already carries.
-    ///
-    /// [`color`]: Style::color
-    #[must_use]
-    pub(crate) fn paint_color(
-        self,
-        rgb: (u8, u8, u8),
-        ansi256: u8,
-        ansi16: &str,
-        text: &str,
-    ) -> String {
-        self.paint_raw(&self.color_codes(rgb, ansi256, ansi16), text)
-    }
-
     /// The SGR codes for a colour at the depth this style can show.
+    #[allow(dead_code)]
     fn color_codes(self, rgb: (u8, u8, u8), ansi256: u8, ansi16: &str) -> String {
         match self.colors {
             // Nothing paints, so the code is the empty one and `paint_raw`
@@ -195,6 +180,12 @@ impl Style {
         ratatui::style::Style::new().fg(color)
     }
 
+    /// The widget style for a border, which is the frame's own ink.
+    #[must_use]
+    pub(crate) fn blue_span(self) -> ratatui::style::Style {
+        self.ratatui(BLUE, 39, "34")
+    }
+
     /// The widget style for dimmed text, which is the muted colour.
     #[must_use]
     pub(crate) fn dim_span(self) -> ratatui::style::Style {
@@ -227,21 +218,6 @@ impl Style {
     #[must_use]
     pub fn dim(self, text: impl Display) -> String {
         self.color(MUTED, 245, "2", text)
-    }
-
-    /// Dim italic, for the model's reasoning.
-    #[must_use]
-    pub fn thought(self, text: impl Display) -> String {
-        let codes = match self.colors {
-            Colors::None => return self.decorate("", text),
-            Colors::True => {
-                let (r, g, b) = MUTED;
-                format!("38;2;{r};{g};{b};3")
-            }
-            Colors::Ansi256 => "38;5;245;3".to_owned(),
-            Colors::Ansi16 => "2;3".to_owned(),
-        };
-        self.decorate(&codes, text)
     }
 
     /// Green, for a successful action.

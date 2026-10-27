@@ -30,6 +30,7 @@ pub(crate) use labels::{
     format_measure, parse_budget_action, parse_budget_unit, parse_reasoning_setting, scope_name,
     select_system_prompt, short, unit_name,
 };
+pub(crate) use loading::Wait;
 pub(crate) use renderer::{BudgetPrompt, Format, Renderer, Verbosity};
 
 // The shared names the submodules read through `super::`.
@@ -38,6 +39,6 @@ use super::{
     ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
     Delta, DiffStyle, ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning,
     ReasoningEffort, ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey,
-    Source, StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, Write,
-    clip_text, compact_json, duration_label,
+    Source, StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, clip_text,
+    compact_json, duration_label,
 };

@@ -15,10 +15,9 @@ use super::helpers::{cache_percent_label, human_tokens, short_path};
 use super::labels::{
     budget_action_name, budget_label, code_name, format_measure, scope_name, short, unit_name,
 };
-use super::loading::LoadingBar;
 use super::{
     BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, DiffStyle, HostFacts, Phase,
-    ServerEvent, ServerEventKind, Style, Write, clip_text, compact_json, duration_label,
+    ServerEvent, ServerEventKind, Style, clip_text, compact_json, duration_label,
 };
 
 /// How events are written.
@@ -152,6 +151,25 @@ pub(crate) struct Renderer {
     pub(crate) last_char: Option<char>,
     /// Buffered answer text, rendered as markdown on `end_blocks`.
     pub(crate) answer_buffer: String,
+    /// The terminal, when this process has one to draw on.
+    ///
+    /// The renderer is what knows when something changed — it is the thing
+    /// events are handed to — so it is what draws the frame. A process with no
+    /// terminal has none, and the plain-text path is what runs instead.
+    pub(crate) screen: Option<crate::terminal::Guard>,
+    /// The panel a command opened, over the interface.
+    ///
+    /// A report a person asked for (`/tools`, `/debug`) is a thing to read and
+    /// dismiss, not a thing to add to the conversation: as lines of the
+    /// transcript it would push the work away, and as prints it landed on top
+    /// of the frame.
+    pub(crate) modal: Option<crate::modal::Modal>,
+    /// The conversation, kept as data.
+    ///
+    /// It is filled from the same events that are printed, so the two are the
+    /// same conversation while the interface is moved onto it one part at a
+    /// time. When the last part has moved, the printing goes and this stays.
+    pub(crate) transcript: crate::transcript::Transcript,
     /// The path a `write` or `read` is working on, by call, until it finishes.
     pending_paths: BTreeMap<String, String>,
     pub(crate) model_name: Option<String>,
@@ -159,8 +177,12 @@ pub(crate) struct Renderer {
     /// names it. `None` until a turn has settled it, because before that the
     /// setting is whatever the next turn resolves.
     pub(crate) reasoning: Option<String>,
-    /// Animated loading bar shown while working.
-    pub(crate) loading_bar: Option<LoadingBar>,
+    /// What the client is waiting for, when a turn is in flight.
+    ///
+    /// It is a value and not a thread: the bar used to repaint a line of its
+    /// own from a thread of its own, which is a second writer on a terminal
+    /// that has one. The state says what is happening and the frame draws it.
+    pub(crate) waiting: Option<super::loading::Wait>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -284,10 +306,13 @@ impl Renderer {
             reasoning_placeholder: false,
             last_char: None,
             answer_buffer: String::new(),
+            transcript: crate::transcript::Transcript::new(),
+            modal: None,
+            screen: None,
             pending_paths: BTreeMap::new(),
             model_name: None,
             reasoning: None,
-            loading_bar: None,
+            waiting: None,
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -317,6 +342,97 @@ impl Renderer {
         }
     }
 
+    /// Keeps one event as a transcript entry.
+    ///
+    /// It is the same conversation the printing below produces, recorded rather
+    /// than drawn. Only the events that are something a person reads become
+    /// entries: a phase change or a counter is state the chrome shows, not a
+    /// thing that was said, and putting it in the conversation would fill the
+    /// scrollback with bookkeeping.
+    fn record(&mut self, kind: &ServerEventKind) {
+        use crate::transcript::Kind as Entry;
+        match kind {
+            ServerEventKind::Delta { delta, .. } => {
+                // The event already says which of the two it is, so the entry
+                // does not have to ask the renderer what block it is in: the
+                // wire is the authority and the block is a consequence.
+                let (entry, text) = match delta {
+                    // A refusal is what the model said instead of an answer,
+                    // and it reads as one: the two are the same entry.
+                    Delta::Text { text, .. } | Delta::Refusal { text, .. } => (Entry::Answer, text),
+                    // The thought is kept only where it is asked for. It is the
+                    // longest thing a model produces and the least of it is
+                    // worth reading, so below `high` the spinner says the model
+                    // is working and the thought itself stays out of the way.
+                    Delta::Reasoning { .. } if !self.verbosity.at_least(Verbosity::High) => return,
+                    Delta::Reasoning { text, .. } => (Entry::Reasoning, text),
+                    _ => return,
+                };
+                if !text.is_empty() {
+                    self.transcript.append(entry, text);
+                }
+            }
+            ServerEventKind::ToolStarted {
+                tool,
+                call_id,
+                arguments,
+                ..
+            } => {
+                self.transcript.close();
+                let mut entry = crate::transcript::Entry::line(
+                    Entry::ToolStarted,
+                    format!("→ {tool} #{}", short(call_id)),
+                );
+                if let Some(command) = Self::command_summary(arguments.as_ref()) {
+                    entry.push_line(format!("$ {command}"));
+                }
+                self.transcript.push(entry);
+            }
+            ServerEventKind::ToolOutput { text, .. } => {
+                self.transcript.append(Entry::ToolOutput, text);
+            }
+            ServerEventKind::ToolFinished { tool, is_error, .. } => {
+                self.transcript.close();
+                if *is_error {
+                    self.transcript
+                        .push(crate::transcript::Entry::line(Entry::Failure, tool.clone()));
+                }
+            }
+            ServerEventKind::MessageReplayed { role, text, .. } => {
+                self.transcript.close();
+                // The replay says who spoke, and it is not always the human: a
+                // resumed session replays the tool results and the model's own
+                // answers too.
+                let kind = if role == "user" {
+                    Entry::Said
+                } else {
+                    Entry::Answer
+                };
+                let mut entry = crate::transcript::Entry::new(kind);
+                entry.push_text(text);
+                self.transcript.push(entry);
+            }
+            ServerEventKind::Error { message, .. } => {
+                self.transcript.close();
+                self.transcript.push(crate::transcript::Entry::line(
+                    Entry::Failure,
+                    message.clone(),
+                ));
+            }
+            ServerEventKind::CompactionStarted { .. } => {
+                self.transcript.close();
+                self.transcript
+                    .push(crate::transcript::Entry::line(Entry::Notice, "compacting"));
+            }
+            ServerEventKind::RetryScheduled { .. } => {
+                self.transcript.close();
+                self.transcript
+                    .push(crate::transcript::Entry::line(Entry::Notice, "retrying"));
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn event(&mut self, event: &ServerEvent) -> Result<(), String> {
         self.session = event.session.as_ref().map(ToString::to_string);
         if self.pinned.take_resized() {
@@ -332,6 +448,7 @@ impl Renderer {
             println!("{line}");
             return Ok(());
         }
+        self.record(&event.kind);
         // The retry delay is over as soon as the next piece of work arrives.
         // Without this the footer would keep counting a wait that already ended.
         if matches!(
@@ -382,6 +499,201 @@ impl Renderer {
         Ok(())
     }
 
+    /// Opens a panel over the interface.
+    ///
+    /// The lines are kept plain: the panel is drawn by the frame, and a report
+    /// that carried escape codes into it would show them as text.
+    pub(crate) fn open_modal(&mut self, title: impl Into<String>, lines: Vec<String>) {
+        let lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| crate::select::strip_style(&line))
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        self.modal = Some(crate::modal::Modal::new(title, lines));
+        // The scroll a person left on the last report is not one they want on
+        // this one: a new panel opens at its top.
+        self.pinned.reset_modal_scroll();
+        self.pinned.set_modal_open(true);
+    }
+
+    /// Closes the panel, if one is open. `true` when it closed one.
+    pub(crate) fn close_modal(&mut self) -> bool {
+        let closed = self.modal.take().is_some();
+        if closed {
+            self.pinned.set_modal_open(false);
+        }
+        closed
+    }
+
+    /// Adds one line of news to the conversation.
+    ///
+    /// The text is plain: the ink comes from the kind of entry, so a line does
+    /// not carry escape codes into the data, where they would be text on the
+    /// next frame and not a colour.
+    pub(crate) fn notice(&mut self, text: impl std::fmt::Display) {
+        self.transcript.push(crate::transcript::Entry::line(
+            crate::transcript::Kind::Notice,
+            text.to_string(),
+        ));
+    }
+
+    /// Adds one line about something that went wrong.
+    pub(crate) fn failure(&mut self, text: impl std::fmt::Display) {
+        self.transcript.push(crate::transcript::Entry::line(
+            crate::transcript::Kind::Failure,
+            text.to_string(),
+        ));
+    }
+
+    /// Draws one frame, when there is a terminal to draw on.
+    ///
+    /// Called after every event and every keystroke, and never on a timer: the
+    /// frame is a function of the state, and the state only changes when one of
+    /// those arrives. ratatui diffs against the last frame, so a call with
+    /// nothing changed writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal is gone, which means the process is
+    /// ending anyway.
+    pub(crate) fn draw(&mut self) -> Result<(), String> {
+        if self.screen.is_none() {
+            return Ok(());
+        }
+        // Escape is read on the keyboard's thread and the panel is drawn on
+        // this one, so the request to close it arrives here: the frame is the
+        // one place that knows a panel is up and the one place that can take it
+        // down.
+        if self.pinned.take_modal_closed() {
+            self.close_modal();
+        }
+        // The scroll comes from the keyboard's thread as a number of lines:
+        // what it means in rows is the frame's business, because the frame is
+        // what knows how many of them fit.
+        if let Some(modal) = self.modal.as_mut() {
+            modal.scroll = self.pinned.modal_scroll();
+        }
+        let mut state = self.ui_state();
+        let modal = self.modal.clone();
+        if let Some(screen) = self.screen.as_mut() {
+            state.draw(screen, self.style)?;
+            // The panel is drawn over the frame, in the same frame: two draws
+            // would be a flicker between them.
+            if let Some(modal) = modal {
+                screen.draw(|frame| {
+                    let area = frame.area();
+                    modal.draw(frame, area, self.style);
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The state the interface draws, built from what the renderer holds.
+    ///
+    /// It is the one place the two meet: everything above is what the client
+    /// knows, everything below is what the screen shows, and this is the
+    /// translation between them.
+    fn ui_state(&self) -> crate::app::State {
+        let (input, cursor) = self.pinned.draft();
+        let completion = Self::completion_for(&input, cursor);
+        // The hint speaks only when no menu is up: an open menu is already
+        // saying what may be typed, and a row repeating the first candidate
+        // under it would say the same thing twice.
+        let suggestion = if completion.is_some() {
+            String::new()
+        } else {
+            Self::suggestion_for(&input, cursor)
+        };
+        crate::app::State {
+            transcript: self.transcript.clone(),
+            input,
+            cursor,
+            completion,
+            question: None,
+            // The status is built for a terminal that took escape codes, and
+            // the frame draws with spans: what reaches it is the text, and the
+            // ink is the widget's.
+            status: crate::select::strip_style(&self.session_status()),
+            tabs: self.tabs_label(),
+            tab_body: crate::select::strip_style(&self.tab_summary()),
+            suggestion,
+            waiting: self.waiting,
+            scroll: 0,
+        }
+    }
+
+    /// The completion the line offers, as the menu the frame draws.
+    ///
+    /// It is built here and not in the widget because the registry is not the
+    /// widget's to read: a widget that asked would need the command registry,
+    /// and the frame would stop being a function of the state it was given.
+    fn completion_for(text: &str, cursor: usize) -> Option<crate::app::Completion> {
+        let rows = crate::commands_registry::registry().candidates(text, cursor);
+        // One candidate is not a menu: the hint says what Tab would write, and
+        // opening a list for a single row would take the arrow keys away from
+        // the draft for a choice nobody has to make.
+        if rows.len() < 2 {
+            return None;
+        }
+        Some(crate::app::Completion {
+            text: rows[0].completion.clone(),
+            rows: rows
+                .iter()
+                .map(|row| {
+                    if row.note.is_empty() {
+                        row.text.clone()
+                    } else {
+                        format!("{} — {}", row.text, row.note)
+                    }
+                })
+                .collect(),
+            cursor: 0,
+        })
+    }
+
+    /// The row above the input that says what may be typed next.
+    ///
+    /// Plain text: the ink is the widget's, and a hint carrying escape codes
+    /// would show them as characters.
+    fn suggestion_for(text: &str, cursor: usize) -> String {
+        crate::interaction::command_suggestion(text, cursor)
+            .map_or_else(String::new, |suggestion| {
+                crate::select::strip_style(&suggestion.hint)
+            })
+    }
+
+    /// The row of tab names, with the active one marked.
+    ///
+    /// Plain names and not styled text: the frame draws with ratatui, where a
+    /// colour is a span's and not an escape code a string carries. The active
+    /// tab is the one in brackets, which is what the keyboard changes.
+    fn tabs_label(&self) -> String {
+        let active = self.pinned.tab();
+        crate::tabs::SessionTab::ALL
+            .iter()
+            .map(|tab| {
+                if *tab == active {
+                    format!("[{}]", tab.name())
+                } else {
+                    tab.name().to_owned()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(" · ")
+    }
+
+    /// The row the active tab shows.
+    ///
+    /// It is the summary the pinned handle already carries, which is built
+    /// where the session is: the tab is one row and what goes in it is decided
+    /// once, so a tab and the pinned line cannot disagree.
+    fn tab_summary(&self) -> String {
+        self.pinned.tab_body()
+    }
+
     /// Takes the pending `ask` budget stop, if any, so the CLI prompts once.
     pub(crate) fn take_budget_prompt(&mut self) -> Option<BudgetPrompt> {
         self.budget_prompt.take()
@@ -411,7 +723,10 @@ impl Renderer {
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
-        self.loading_bar = Some(LoadingBar::start(self.style));
+        self.failed = false;
+        self.cancelled = false;
+        self.waiting = Some(super::loading::Wait::Waiting);
+        self.set_activity(Some("waiting for the first token".to_owned()));
     }
 
     /// Stops the animated bar, if one is running.
@@ -424,10 +739,9 @@ impl Renderer {
     ///
     /// It is idempotent, so a writer that may already have stopped it — the
     /// answer's first token, a tool's output — can call it without checking.
+    /// Marks the wait as over.
     fn stop_bar(&mut self) {
-        if let Some(mut bar) = self.loading_bar.take() {
-            bar.stop();
-        }
+        self.waiting = None;
     }
 
     /// Records the reasoning effort the footer shows, and repaints it.
@@ -495,10 +809,13 @@ impl Renderer {
         if self.block != Block::Reasoning {
             return;
         }
-        if !self.reasoning_line_start {
-            eprintln!();
-        }
-        eprintln!("  {}", self.style.faint("╰"));
+        // The gutter's closing edge is a row of the conversation: the view
+        // draws it where the conversation is, and nothing has to know which
+        // line the cursor was on to put it there.
+        self.transcript.push(crate::transcript::Entry::line(
+            crate::transcript::Kind::Reasoning,
+            "╰",
+        ));
         self.block = Block::None;
         self.last_char = Some('\n');
     }
@@ -506,33 +823,22 @@ impl Renderer {
     /// Finishes any streamed block and leaves one blank line.
     pub(crate) fn end_blocks(&mut self) {
         self.reasoning_placeholder = false;
-        if let Some(mut bar) = self.loading_bar.take() {
-            bar.stop();
-        }
+        self.stop_bar();
         // A streamed output block is closed here too: whatever ends the turn or
         // takes the next line has to leave the block finished, or its closing
         // bracket lands after unrelated text.
         self.end_output_gutter();
         self.end_reasoning();
         if self.block == Block::Answer {
-            if !self.answer_buffer.is_empty() && self.verbosity.at_least(Verbosity::Medium) {
-                let rendered = crate::markdown::render(self.style, &self.answer_buffer);
-                print!("{rendered}");
-                if !rendered.ends_with('\n') {
-                    println!();
-                }
-            }
+            // The answer is already in the conversation, token by token, as the
+            // model wrote it. What the markdown does with it is a way of drawing
+            // it and not a second answer: rendering it here as well would put
+            // every answer in twice, once plain and once formatted.
             self.answer_buffer.clear();
-            if self.last_char != Some('\n') {
-                println!();
-            }
         }
         if self.block != Block::None {
             self.block = Block::None;
             self.last_char = Some('\n');
-        }
-        if self.verbosity.at_least(Verbosity::Medium) && self.last_char.is_some() {
-            eprintln!();
         }
     }
 
@@ -541,10 +847,12 @@ impl Renderer {
         if !self.verbosity.at_least(Verbosity::Medium) {
             return;
         }
-        if self.last_char != Some('\n') {
-            println!();
-        }
-        eprintln!();
+        // A blank row in the conversation, which is what separates two things
+        // that are not part of each other.
+        self.transcript.push(crate::transcript::Entry::line(
+            crate::transcript::Kind::Notice,
+            "",
+        ));
         self.last_char = Some('\n');
     }
 
@@ -559,21 +867,35 @@ impl Renderer {
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
-        if let Some(mut bar) = self.loading_bar.take() {
-            bar.stop();
-        }
+        self.stop_bar();
         self.end_blocks();
+        // The message is the conversation: it goes there once, and the view
+        // draws the `›` that marks who said it.
         let escaped = crate::text::terminal(text);
-        let mut lines = escaped.lines();
-        let first = lines.next().unwrap_or_default();
-        eprintln!("{} {first}", self.style.cyan("›"));
-        for line in lines {
-            eprintln!("  {line}");
-        }
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::Said);
+        entry.push_text(&escaped);
+        self.transcript.push(entry);
         self.last_char = Some('\n');
         if !self.failed && !self.cancelled {
             self.mark_working();
         }
+    }
+
+    /// Adds what the human said to the conversation.
+    ///
+    /// It is called when the message is sent and not when the engine applies
+    /// it: the person who typed it should see it immediately, and the engine's
+    /// own report of it is for the history, not for the screen.
+    pub(crate) fn said(&mut self, text: &str) {
+        if matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        self.end_blocks();
+        let escaped = crate::text::terminal(text);
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::Said);
+        entry.push_text(&escaped);
+        self.transcript.push(entry);
+        self.last_char = Some('\n');
     }
 
     /// Shows a message that reached the running request without the human
@@ -589,22 +911,16 @@ impl Renderer {
         }
         // The bar and the answer share this stream, so both are closed before a
         // line is written onto it.
-        if let Some(mut bar) = self.loading_bar.take() {
-            bar.stop();
-        }
+        self.stop_bar();
         self.end_blocks();
+        // The time is part of what was said: a job started minutes ago answers
+        // now, and the line without one reads as something typed just then.
         let when = chrono::Local::now().format("%H:%M:%S").to_string();
         let escaped = crate::text::terminal(text);
-        let mut lines = escaped.lines();
-        let first = lines.next().unwrap_or_default();
-        eprintln!(
-            "{} {}",
-            self.style.faint(when),
-            self.style.cyan(format!("◀ {first}"))
-        );
-        for line in lines {
-            eprintln!("    {line}");
-        }
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::Said);
+        entry.push_line(format!("◀ {when}"));
+        entry.push_text(&escaped);
+        self.transcript.push(entry);
         self.last_char = Some('\n');
         // The turn goes on: the request that just took the message is still
         // being answered.
@@ -625,59 +941,42 @@ impl Renderer {
         }
         // The working bar shares stderr with the transcript, so the replay stops
         // it before printing, exactly as the reasoning gutter does.
-        if let Some(mut bar) = self.loading_bar.take() {
-            bar.stop();
-        }
+        self.stop_bar();
         self.space();
-        match role {
-            "user" => {
-                let mut lines = text.lines();
-                let first = lines.next().unwrap_or_default();
-                eprintln!("{} {}", self.style.cyan("›"), first);
-                for line in lines {
-                    eprintln!("  {}", crate::text::terminal(line));
-                }
-            }
-            "assistant" => {
-                let rendered = crate::markdown::render(self.style, text);
-                eprint!("{rendered}");
-                if !rendered.ends_with('\n') {
-                    eprintln!();
-                }
-            }
-            other => {
-                let label = self.style.faint(format!("#{index} {other}"));
-                eprintln!("{label}");
-                for line in text.lines() {
-                    eprintln!("  {}", self.style.dim(line));
-                }
-            }
+        // The replay is the conversation that already happened, so it goes to
+        // the transcript in one piece: a resumed session shows what was said
+        // and not a second rendering of it.
+        let kind = if role == "user" {
+            crate::transcript::Kind::Said
+        } else {
+            crate::transcript::Kind::Answer
+        };
+        let mut entry = crate::transcript::Entry::new(kind);
+        if role != "user" && role != "assistant" {
+            // A role the client does not draw on its own says which it is: a
+            // system or developer message reads as neither side of the
+            // conversation.
+            entry.push_line(format!("#{index} {role}"));
         }
+        // The markdown is a way of drawing the answer, and the text is what was
+        // said: what is kept is the text, and the view decides how it looks.
+        entry.push_text(&crate::text::terminal(text));
+        self.transcript.push(entry);
         self.last_char = Some('\n');
     }
 
-    /// Writes reasoning into its own dim gutter.
+    /// Moves the renderer into the reasoning gutter.
+    ///
+    /// The text reaches the conversation through `record`, which is the one
+    /// place an event becomes an entry; what is left here is the block state
+    /// the rest of the renderer reads, and half a line with no text is not a
+    /// transition — a keepalive must not open a gutter.
     pub(crate) fn reasoning_delta(&mut self, text: &str) {
-        let mut rest = text;
-        while !rest.is_empty() {
-            if self.reasoning_line_start {
-                eprint!("  {} ", self.style.faint("│"));
-                self.reasoning_line_start = false;
-            }
-            if let Some(index) = rest.find('\n') {
-                let (line, tail) = rest.split_at(index);
-                eprint!("{}", self.style.thought(line));
-                eprintln!();
-                self.last_char = Some('\n');
-                self.reasoning_line_start = true;
-                rest = &tail[1..];
-            } else {
-                eprint!("{}", self.style.thought(rest));
-                self.last_char = rest.chars().last();
-                rest = "";
-            }
+        if text.is_empty() {
+            return;
         }
-        let _ = std::io::stderr().flush();
+        self.block = Block::Reasoning;
+        self.last_char = text.chars().last();
     }
 
     /// Writes one chunk of a tool's streamed output, in a box of its own.
@@ -703,7 +1002,6 @@ impl Renderer {
     /// chunk to finish. The chunk is assembled and written once: two writers
     /// share this stream, and a frame written in pieces can be broken in half.
     fn output_delta(&mut self, call_id: &str, stream: &str, text: &str) {
-        use std::fmt::Write as _;
         // The call already finished. A tool whose process outlives it can write
         // once more after that — the last chunk before it was let go of — and it
         // belongs to the box that closed, not to a second one: the same call
@@ -711,12 +1009,17 @@ impl Renderer {
         if self.closed_calls.contains(call_id) {
             return;
         }
-        let mut frame = String::new();
         if self.output_gutter.as_deref() != Some(call_id) {
-            if let Some(close) = self.close_output_gutter() {
-                frame.push_str(&close);
-            }
-            let _ = writeln!(frame, "  {}", self.style.faint("╭"));
+            // Whatever box was open closes first, and its rows are already in
+            // the conversation: what is left is to open this one.
+            self.close_output_gutter();
+            // The box opening is a row of the conversation and not a thing
+            // printed where the cursor happened to be: it goes to the
+            // transcript, which is what the view draws.
+            self.transcript.push(crate::transcript::Entry::line(
+                crate::transcript::Kind::ToolOutput,
+                "╭",
+            ));
             self.output_gutter = Some(call_id.to_owned());
             self.output_line_start = true;
         }
@@ -744,95 +1047,83 @@ impl Renderer {
             }
         }
         for line in whole {
-            self.write_output_row(&mut frame, &line);
+            self.keep_output_row(&line);
         }
         if !leftover.is_empty() {
-            self.write_partial_row(&mut frame, &leftover);
+            self.keep_partial_row(&leftover);
         }
         self.last_char = None;
-        if !frame.is_empty() {
-            let mut out = std::io::stderr().lock();
-            let _ = out.write_all(frame.as_bytes());
-            let _ = out.flush();
-        }
     }
 
-    /// Writes one whole line of tool output, inside the box.
+    /// Keeps one whole line of tool output, inside the box.
     ///
-    /// Rows are written as they come and never redrawn: redrawing the box to
-    /// make it scroll would need cursor movement over rows the renderer does not
-    /// own, and every other writer on this stream shares it. What bounds the box
-    /// is [`MAX_OUTPUT_ROWS`]: past it the oldest rows are no longer printed, and
-    /// the count of what was left out is printed in their place.
-    fn write_output_row(&mut self, frame: &mut String, line: &str) {
-        use std::fmt::Write as _;
+    /// The rows are what the box holds and the view draws: how many were kept,
+    /// and which of them, is decided here, and nothing about it depends on
+    /// where the cursor was.
+    fn keep_output_row(&mut self, line: &str) {
         self.output_rows_seen += 1;
-        let kept = self.output_rows_seen <= MAX_OUTPUT_ROWS;
-        if !kept {
-            // The oldest rows are already on screen; this one is not shown, and
-            // the count above said how many in total were left out.
+        if self.output_rows_seen > MAX_OUTPUT_ROWS {
+            // The oldest rows are already in the conversation; this one is not
+            // added, and the count says how many in total were left out.
             return;
         }
-        if self.output_line_start {
-            let _ = write!(frame, "  {} ", self.style.faint("│"));
-            self.output_line_start = false;
-        }
-        frame.push_str(&self.style.dim(crate::text::terminal(line)));
-        frame.push('\n');
-        self.output_line_start = true;
+        self.transcript.append(
+            crate::transcript::Kind::ToolOutput,
+            &format!("│ {}", crate::text::terminal(line)),
+        );
+        self.transcript.close();
     }
 
-    /// Writes a line that has not ended yet, ending it for the moment.
+    /// Keeps a line that has not ended yet, ending it for the moment.
     ///
     /// A chunk can stop mid-line and the rest may never come (a progress bar),
-    /// so the row is shown whole and the next chunk starts its own. Joining them
-    /// would need the box redrawn, which is the thing this rendering cannot do.
-    fn write_partial_row(&mut self, frame: &mut String, text: &str) {
-        use std::fmt::Write as _;
-        let _ = write!(frame, "  {} ", self.style.faint("│"));
-        let _ = writeln!(frame, "{}", self.style.dim(crate::text::terminal(text)));
-        self.output_line_start = true;
+    /// so the row is kept whole and the next chunk starts its own.
+    fn keep_partial_row(&mut self, text: &str) {
+        self.transcript.append(
+            crate::transcript::Kind::ToolOutput,
+            &format!("│ {}", crate::text::terminal(text)),
+        );
+        self.transcript.close();
     }
 
     /// Keeps what was left of a stream that ended without a newline.
-    fn flush_output_pending(&mut self, frame: &mut String) {
+    fn flush_output_pending(&mut self) {
         for text in std::mem::take(&mut self.output_pending).into_values() {
             if !text.is_empty() {
-                self.write_partial_row(frame, &text);
+                self.keep_partial_row(&text);
             }
         }
     }
 
-    /// The rows that close the open output box, if one is open.
-    fn close_output_gutter(&mut self) -> Option<String> {
-        use std::fmt::Write as _;
-        self.output_gutter.take()?;
-        let mut frame = String::new();
-        self.flush_output_pending(&mut frame);
-        // What the box did not print, said once, where the reader looks last.
+    /// Closes the open output box, if one is open.
+    ///
+    /// The rows go to the conversation rather than to the terminal, and the
+    /// count of what the box did not keep is said once, where the reader looks
+    /// last: a box that hid its own bound would be a box a person cannot tell
+    /// from a complete one.
+    fn close_output_gutter(&mut self) {
+        if self.output_gutter.take().is_none() {
+            return;
+        }
+        self.flush_output_pending();
         let hidden = self.output_rows_seen.saturating_sub(MAX_OUTPUT_ROWS);
         if hidden > 0 {
-            let _ = writeln!(
-                frame,
-                "  {} {}",
-                self.style.faint("│"),
-                self.style.yellow(format!("… {hidden} more line(s)"))
-            );
+            self.transcript.push(crate::transcript::Entry::line(
+                crate::transcript::Kind::ToolOutput,
+                format!("│ … {hidden} more line(s)"),
+            ));
         }
-        let _ = writeln!(frame, "  {}", self.style.faint("╰"));
+        self.transcript.push(crate::transcript::Entry::line(
+            crate::transcript::Kind::ToolOutput,
+            "╰",
+        ));
         self.output_rows_seen = 0;
         self.output_line_start = true;
-        Some(frame)
     }
 
     /// Closes the open streamed-output box, if there is one.
     fn end_output_gutter(&mut self) {
-        if let Some(frame) = self.close_output_gutter() {
-            let mut out = std::io::stderr().lock();
-            let _ = out.write_all(frame.as_bytes());
-            let _ = out.flush();
-            self.last_char = Some('\n');
-        }
+        self.close_output_gutter();
     }
 
     /// Writes answer text, closing reasoning and separating it first.
@@ -840,16 +1131,16 @@ impl Renderer {
         let text = crate::text::terminal(text);
         // The first answer token is the same signal as the first reasoning one.
         if !text.is_empty() {
-            if let Some(bar) = self.loading_bar.as_ref() {
-                bar.streaming();
-            }
+            self.waiting = Some(super::loading::Wait::Streaming);
         }
         if !self.verbosity.at_least(Verbosity::Medium) {
-            print!("{text}");
+            // `low` is the answer alone, and it is still the conversation: the
+            // entry is made by `record`, which is the one place an event
+            // becomes an entry. What the level changes is the chrome around it
+            // and not whether the answer is kept.
             if let Some(last) = text.chars().last() {
                 self.last_char = Some(last);
             }
-            let _ = std::io::stdout().flush();
             return;
         }
         // A delta with no text changes nothing: a keepalive or the stream's
@@ -860,9 +1151,7 @@ impl Renderer {
             return;
         }
         // Stop the loading bar on the first answer token.
-        if let Some(mut bar) = self.loading_bar.take() {
-            bar.stop();
-        }
+        self.stop_bar();
         if self.block == Block::Reasoning {
             self.end_reasoning();
             self.space();
@@ -873,6 +1162,9 @@ impl Renderer {
             self.block = Block::Answer;
         }
         self.block = Block::Answer;
+        // The answer reaches the conversation through `record`, which is the
+        // one place an event becomes an entry: writing it here as well put every
+        // token in twice.
         self.answer_buffer.push_str(&text);
         if let Some(last) = text.chars().last() {
             self.last_char = Some(last);
@@ -881,17 +1173,22 @@ impl Renderer {
 
     /// Renders a fenced block, so verbose tool activity stays readable and can
     /// be copied into a markdown report.
-    pub(crate) fn code_block(&self, language: &str, text: &str) {
-        eprintln!("  {}", self.style.faint(format!("```{language}")));
+    /// Keeps a fenced block, so verbose activity stays readable in the
+    /// conversation and can be copied out of it.
+    ///
+    /// The fence is part of the row: a block of JSON the model was asked with
+    /// is text a person reads, and it is drawn where it happened.
+    pub(crate) fn code_block(&mut self, language: &str, text: &str) {
         let text = crate::text::terminal(text);
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
+        entry.push_line(format!("```{language}"));
         if text.is_empty() {
-            eprintln!("  {}", self.style.faint("(empty)"));
+            entry.push_line("(empty)");
         } else {
-            for line in text.lines() {
-                eprintln!("  {line}");
-            }
+            entry.push_text(&text);
         }
-        eprintln!("  {}", self.style.faint("```"));
+        entry.push_line("```");
+        self.transcript.push(entry);
     }
 
     /// Renders tool activity: what started, and how it ended.
@@ -935,15 +1232,9 @@ impl Renderer {
                     }
                 } else {
                     self.end_blocks();
-                    eprintln!(
-                        "{} {} {}",
-                        self.style.blue("→"),
-                        self.style.tool(tool),
-                        self.style.faint(format!("#{}", short(call_id)))
-                    );
-                    if let Some(command) = &command {
-                        eprintln!("  {}", self.style.dim(format!("$ {command}")));
-                    }
+                    // The header goes to the conversation through `record`,
+                    // which is the one place an event becomes an entry.
+                    let _ = &command;
                     if let Some(diff) = &diff {
                         self.print_edit_diff(diff);
                     }
@@ -957,10 +1248,7 @@ impl Renderer {
                             let (text, truncated) = clip_text(&text, 4_000);
                             self.code_block("json", &text);
                             if truncated {
-                                eprintln!(
-                                    "  {}",
-                                    self.style.yellow("arguments shortened for display")
-                                );
+                                self.notice("arguments shortened for display");
                             }
                         }
                     }
@@ -989,7 +1277,7 @@ impl Renderer {
                             for line in error.lines() {
                                 let escaped = crate::text::terminal(line);
                                 let (text, _) = clip_text(&escaped, 400);
-                                eprintln!("  {text}");
+                                self.failure(text);
                             }
                         } else {
                             self.code_block("text", error);
@@ -1009,10 +1297,23 @@ impl Renderer {
                 // this one must not open another.
                 self.closed_calls.insert(call_id.clone());
                 if self.verbosity.at_least(Verbosity::Medium) {
-                    eprintln!(
-                        "{}",
-                        call_ending(self.style, tool, *is_error, *detached, *duration_ms)
+                    // How the call ended is a row of what it did, in the ink the
+                    // outcome deserves: a failure reads red and a call that was
+                    // let go of reads as neither.
+                    let text = call_ending(
+                        crate::style::Style::plain(),
+                        tool,
+                        *is_error,
+                        *detached,
+                        *duration_ms,
                     );
+                    let kind = if *is_error {
+                        crate::transcript::Kind::Failure
+                    } else {
+                        crate::transcript::Kind::ToolOutput
+                    };
+                    self.transcript
+                        .push(crate::transcript::Entry::line(kind, text));
                 }
                 if *is_error && !*detached && tool.as_str() != "edit" {
                     // A failure needs its reason whatever the verbosity. A
@@ -1020,7 +1321,7 @@ impl Renderer {
                     // model got, naming the job the process became — and it is
                     // shown below like any other result.
                     if let Some(error) = error {
-                        self.print_tool_result(error);
+                        self.keep_tool_result(error);
                     }
                 } else if *detached && !self.streamed_calls.remove(call_id) {
                     // The call answered with what it had and the name of the job
@@ -1031,7 +1332,7 @@ impl Renderer {
                         path.as_deref(),
                         output.as_deref(),
                     ) {
-                        self.print_tool_result(&result);
+                        self.keep_tool_result(&result);
                     }
                 } else if !self.streamed_calls.remove(call_id) {
                     // The output was printed as it arrived, so showing the
@@ -1043,13 +1344,13 @@ impl Renderer {
                         path.as_deref(),
                         output.as_deref(),
                     ) {
-                        self.print_tool_result(&result);
+                        self.keep_tool_result(&result);
                     }
                 }
                 // The turn is not over: the model has the result and is being
                 // asked again. Without this the rest of the turn ran with no
                 // signal at all, and a slow continuation looked like a hang.
-                if self.loading_bar.is_none() && !self.failed && !self.cancelled {
+                if self.waiting.is_none() && !self.failed && !self.cancelled {
                     self.mark_working();
                 }
                 if self.verbosity.at_least(Verbosity::High) {
@@ -1182,7 +1483,12 @@ impl Renderer {
     /// wants to read, so each section shows its first lines and a count replaces
     /// the rest. `stdout` and `stderr` are budgeted apart, because a long stdout
     /// would otherwise hide the line of stderr that explains a failure.
-    fn print_tool_result(&self, text: &str) {
+    /// Keeps the result of a finished tool, as the rows the view draws.
+    ///
+    /// The result is what the model was told, which is the one thing a person
+    /// has to be able to read after a call: it is bounded, and what the bound
+    /// dropped is counted rather than lost.
+    fn keep_tool_result(&mut self, text: &str) {
         let escaped = crate::text::terminal(text);
         let sections = tool_sections(&escaped);
         let labelled = sections
@@ -1190,62 +1496,72 @@ impl Renderer {
             .filter(|section| section.name.is_some())
             .count()
             > 1;
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
         let mut first = true;
         for section in &sections {
             if !first {
-                eprintln!();
+                entry.push_line("");
             }
             first = false;
             if labelled {
                 if let Some(name) = &section.name {
-                    eprintln!("  {}", self.style.faint(name.clone()));
+                    entry.push_line(name.clone());
                 }
             }
-            let hidden = print_tool_lines(self.style, &section.lines);
+            let mut kept = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
+            let hidden = tool_lines(&mut kept, &section.lines);
+            for line in kept.lines {
+                entry.push_line(line);
+            }
             if hidden > 0 {
-                eprintln!(
-                    "  {}",
-                    self.style.yellow(format!("… {hidden} more line(s)"))
-                );
+                entry.push_line(format!("… {hidden} more line(s)"));
             }
         }
+        self.transcript.push(entry);
     }
 
     /// Prints each edit as its own box: the original and resulting lines side by
     /// side, with line numbers and a little surrounding context. This is
     /// deliberately independent of `--quiet` and `--verbose`: changing a file is
     /// the one tool effect a human needs to see.
-    fn print_edit_diff(&self, preview: &EditPreview) {
+    fn print_edit_diff(&mut self, preview: &EditPreview) {
         let width = edit_box_width();
-        for (index, edit) in preview.boxes.iter().enumerate() {
-            if index > 0 {
-                eprintln!();
-            }
+        for edit in &preview.boxes {
             self.print_edit_box(&preview.path, edit, width);
         }
     }
 
     /// Renders one boxed edit in whichever shape `ui.diff_style` asks for.
-    fn print_edit_box(&self, path: &str, edit: &EditBox, width: usize) {
+    fn print_edit_box(&mut self, path: &str, edit: &EditBox, width: usize) {
         match self.diff_style {
-            DiffStyle::Unified => self.print_edit_box_unified(path, edit, width),
+            DiffStyle::Unified => self.keep_edit_box_unified(path, edit, width),
             DiffStyle::Split => self.print_edit_box_split(path, edit, width),
         }
     }
 
     /// Renders one boxed edit as a patch: one column, `-` for what left and
     /// `+` for what arrived.
-    fn print_edit_box_unified(&self, path: &str, edit: &EditBox, width: usize) {
+    /// Keeps the diff of one edit, as the rows the view draws.
+    ///
+    /// The rows are already plain text with the ink decided by `unified_lines`,
+    /// so what is left is to put them in the conversation: an edit's diff is a
+    /// thing that was done, and where it happened is where it is read.
+    fn keep_edit_box_unified(&mut self, path: &str, edit: &EditBox, width: usize) {
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
         for line in Self::unified_lines(self.style, path, edit, width) {
-            eprintln!("{line}");
+            entry.push_line(line);
         }
+        self.transcript.push(entry);
     }
     /// Renders one boxed edit side by side.
     ///
     /// The two panels are sized independently so the right border stays aligned
     /// on odd terminal widths.
     #[allow(clippy::too_many_lines)]
-    fn print_edit_box_split(&self, path: &str, edit: &EditBox, width: usize) {
+    /// Keeps the side-by-side diff of one edit, as the rows the view draws.
+    fn print_edit_box_split(&mut self, path: &str, edit: &EditBox, width: usize) {
+        use std::fmt::Write as _;
+        let mut out = String::new();
         let panel_left = width.saturating_sub(7) / 2;
         let panel_right = width.saturating_sub(7).saturating_sub(panel_left);
         if panel_left < 10 || panel_right < 10 {
@@ -1291,7 +1607,8 @@ impl Renderer {
         title.push(' ');
         let title = clip_plain(&title, width.saturating_sub(3));
         let fill = width.saturating_sub(title.chars().count() + 3);
-        eprintln!(
+        let _ = writeln!(
+            out,
             "  {}{}{}{}",
             self.style.blue("╭─"),
             self.style.bold(title),
@@ -1301,7 +1618,8 @@ impl Renderer {
 
         let left_label = format!("{:<panel_left$}", clip_plain(" original", panel_left));
         let right_label = format!("{:<panel_right$}", clip_plain(" result", panel_right));
-        eprintln!(
+        let _ = writeln!(
+            out,
             "  {} {} {} {} {}",
             self.style.blue("│"),
             self.style.cyan(left_label),
@@ -1311,7 +1629,8 @@ impl Renderer {
         );
         let left_segment = "─".repeat(panel_left + 2);
         let right_segment = "─".repeat(panel_right + 2);
-        eprintln!(
+        let _ = writeln!(
+            out,
             "  {}{}{}{}{}",
             self.style.blue("├"),
             self.style.blue(left_segment),
@@ -1335,7 +1654,8 @@ impl Renderer {
                 digits,
                 self.style,
             );
-            eprintln!(
+            let _ = writeln!(
+                out,
                 "  {} {} {} {} {}",
                 self.style.blue("│"),
                 left,
@@ -1348,19 +1668,24 @@ impl Renderer {
             let note = format!("… {} more line(s) …", edit.omitted);
             let inner = width.saturating_sub(4);
             let note = format!("{:<inner$}", clip_plain(&note, inner));
-            eprintln!(
+            let _ = writeln!(
+                out,
                 "  {} {} {}",
                 self.style.blue("│"),
                 self.style.yellow(note),
                 self.style.blue("│")
             );
         }
-        eprintln!(
+        let _ = writeln!(
+            out,
             "  {}{}{}",
             self.style.blue("╰"),
             self.style.blue("─".repeat(width.saturating_sub(2))),
             self.style.blue("╯")
         );
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
+        entry.push_text(&out);
+        self.transcript.push(entry);
     }
 
     /// Builds the unified box, one string per terminal row.
@@ -1637,29 +1962,18 @@ impl Renderer {
                         None => {}
                     }
                 }
-                eprintln!(
-                    "  {} {}",
-                    self.style.blue("↳"),
-                    parts.join(&self.style.faint(" · "))
-                );
+                self.notice(format!("↳ {}", parts.join(" · ")));
                 if *truncated {
-                    eprintln!(
-                        "  {}",
-                        self.style
-                            .yellow("warning: the answer hit the output limit")
-                    );
+                    self.notice("warning: the answer hit the output limit");
                 }
             }
             ServerEventKind::CostNotReported { requests }
                 if self.verbosity.at_least(Verbosity::Medium) && self.show_cost =>
             {
                 self.stop_bar();
-                eprintln!(
-                    "  {}",
-                    self.style.yellow(format!(
-                        "warning: {requests} request(s) carried no cost; the total is incomplete"
-                    ))
-                );
+                self.notice(format!(
+                    "warning: {requests} request(s) carried no cost; the total is incomplete"
+                ));
             }
             _ => {}
         }
@@ -1672,11 +1986,10 @@ impl Renderer {
             ServerEventKind::CompactionStarted { reason } => {
                 if self.verbosity.at_least(Verbosity::Medium) {
                     self.end_blocks();
-                    eprintln!(
-                        "{} {}",
-                        self.style.dim("compacting context…"),
-                        self.style.faint(format!("({reason})"))
-                    );
+                    self.transcript.push(crate::transcript::Entry::line(
+                        crate::transcript::Kind::Notice,
+                        format!("compacting context… ({reason})"),
+                    ));
                 }
                 self.set_activity(Some("compacting context…".to_owned()));
             }
@@ -1700,21 +2013,14 @@ impl Renderer {
                             .as_ref()
                             .map_or_else(String::new, |id| format!(" · new session {}", short(id)))
                     };
-                    eprintln!(
-                        "{}{}",
-                        self.style.green("✓ context compacted"),
-                        self.style.dim(detail)
-                    );
+                    self.notice(format!("✓ context compacted{detail}"));
                     if self.verbosity.at_least(Verbosity::High) {
                         if let Some(summary) = summary {
                             let escaped = crate::text::terminal(summary);
                             let (text, truncated) = clip_text(&escaped, 8_000);
                             self.code_block("markdown", &text);
                             if truncated {
-                                eprintln!(
-                                    "  {}",
-                                    self.style.yellow("summary shortened for display")
-                                );
+                                self.notice("summary shortened for display");
                             }
                         }
                     }
@@ -1722,12 +2028,9 @@ impl Renderer {
                     let detail = error
                         .as_ref()
                         .map_or_else(String::new, |reason| format!(": {reason}"));
-                    eprintln!(
-                        "{}{}",
-                        self.style
-                            .yellow("compaction did not happen; history is unchanged"),
-                        self.style.dim(detail)
-                    );
+                    self.notice(format!(
+                        "compaction did not happen; history is unchanged{detail}"
+                    ));
                 }
                 self.set_activity(None);
             }
@@ -1748,32 +2051,19 @@ impl Renderer {
                 let wait = duration_label(*delay_ms);
                 self.set_activity(Some(format!("retrying in {wait} (attempt {attempt})")));
                 if self.verbosity.at_least(Verbosity::Medium) {
-                    eprintln!(
-                        "{} {} {}",
-                        self.style.yellow("retrying"),
-                        self.style.dim(format!("in {wait} (attempt {attempt}):")),
-                        self.style.faint(reason)
-                    );
+                    self.notice(format!("retrying in {wait} (attempt {attempt}): {reason}"));
                 }
             }
             ServerEventKind::RetryStarted { attempt, .. } => {
                 self.end_blocks();
                 self.set_activity(None);
                 if self.verbosity.at_least(Verbosity::Medium) {
-                    eprintln!(
-                        "{}",
-                        self.style.dim(format!("retrying now (attempt {attempt})"))
-                    );
+                    self.notice(format!("retrying now (attempt {attempt})"));
                 }
             }
             ServerEventKind::Error { code, message } => {
                 self.end_blocks();
-                eprintln!(
-                    "{} {} {}",
-                    self.style.red("error:"),
-                    self.style.bold(message),
-                    self.style.dim(format!("({})", code_name(*code)))
-                );
+                self.failure(format!("error: {message} ({})", code_name(*code)));
                 if !self.cancelled {
                     self.failed = true;
                 }
@@ -1782,9 +2072,9 @@ impl Renderer {
                 if self.verbosity.at_least(Verbosity::Medium) {
                     self.end_blocks();
                     if *approved {
-                        eprintln!("{}", self.style.green("✓ approval granted"));
+                        self.notice("✓ approval granted");
                     } else {
-                        eprintln!("{}", self.style.red("✗ approval denied"));
+                        self.failure("✗ approval denied");
                     }
                 }
             }
@@ -1794,18 +2084,11 @@ impl Renderer {
                 self.end_blocks();
                 if !*committed && self.cancelled {
                     if self.verbosity.at_least(Verbosity::Medium) {
-                        eprintln!(
-                            "{}",
-                            self.style
-                                .yellow("turn cancelled · the session is saved and can be resumed")
-                        );
+                        self.notice("turn cancelled · the session is saved and can be resumed");
                         if self.show_cost && self.turn_requests == 0 {
-                            eprintln!(
-                                "  {}",
-                                self.style.dim(
-                                    "no provider usage arrived before the cancel, so no cost is \
-                                     shown; the cancelled request is still recorded in telemetry"
-                                )
+                            self.notice(
+                                "no provider usage arrived before the cancel, so no cost is \
+                                 shown; the cancelled request is still recorded in telemetry",
                             );
                         }
                     }
@@ -1816,24 +2099,21 @@ impl Renderer {
                         } else {
                             "stopped by budget; raise it and resume the session to continue"
                         };
-                        eprintln!("{}", self.style.yellow(message));
+                        self.notice(message);
                     }
                 } else if !*committed {
                     if let Some(reason) = self.stopped.take() {
                         // The host ended the turn on purpose; that is not a
                         // failure.
-                        eprintln!(
-                            "{}",
-                            self.style.yellow(format!("the turn was stopped: {reason}"))
-                        );
+                        self.notice(format!("the turn was stopped: {reason}"));
                     } else {
-                        eprintln!("{}", self.style.red("the turn did not commit"));
+                        self.failure("the turn did not commit");
                         self.failed = true;
                     }
                 } else if *phase == Phase::AwaitingApproval
                     && self.verbosity.at_least(Verbosity::Medium)
                 {
-                    eprintln!("{}", self.style.yellow("paused: waiting for approval"));
+                    self.failure("paused: waiting for approval");
                 }
                 let activity = if *phase == Phase::AwaitingApproval {
                     Some("waiting for approval".to_owned())
@@ -1851,17 +2131,13 @@ impl Renderer {
             } => {
                 if self.verbosity.at_least(Verbosity::Medium) {
                     self.stop_bar();
-                    eprintln!(
-                        "{} {}",
-                        self.style.yellow("budget warning:"),
-                        self.style.dim(format!(
-                            "{} {} of {} {}",
-                            scope_name(*scope),
-                            format_measure(*unit, *spent),
-                            format_measure(*unit, *limit),
-                            unit_name(*unit)
-                        ))
-                    );
+                    self.notice(format!(
+                        "budget warning: {} {} of {} {}",
+                        scope_name(*scope),
+                        format_measure(*unit, *spent),
+                        format_measure(*unit, *limit),
+                        unit_name(*unit)
+                    ));
                 }
             }
             ServerEventKind::BudgetExceeded {
@@ -1879,18 +2155,14 @@ impl Renderer {
                     limit: *limit,
                 });
                 self.stop_bar();
-                eprintln!(
-                    "{} {}",
-                    self.style.red("budget exceeded:"),
-                    self.style.dim(format!(
-                        "{} {} of {} {} ({})",
-                        scope_name(*scope),
-                        format_measure(*unit, *spent),
-                        format_measure(*unit, *limit),
-                        unit_name(*unit),
-                        budget_action_name(*action)
-                    ))
-                );
+                self.failure(format!(
+                    "budget exceeded: {} {} of {} {} ({})",
+                    scope_name(*scope),
+                    format_measure(*unit, *spent),
+                    format_measure(*unit, *limit),
+                    unit_name(*unit),
+                    budget_action_name(*action)
+                ));
             }
             ServerEventKind::BudgetChanged { budget } => {
                 // Raising or clearing the budget makes a stopped session
@@ -1900,12 +2172,10 @@ impl Renderer {
                 if self.verbosity.at_least(Verbosity::Medium) {
                     self.stop_bar();
                     match budget {
-                        Some(budget) => eprintln!(
-                            "{} {}",
-                            self.style.dim("budget set:"),
-                            self.style.dim(budget_label(budget))
-                        ),
-                        None => eprintln!("{}", self.style.dim("budget cleared")),
+                        Some(budget) => {
+                            self.notice(format!("budget set: {}", budget_label(budget)));
+                        }
+                        None => self.notice("budget cleared"),
                     }
                 }
             }
@@ -1913,26 +2183,19 @@ impl Renderer {
                 if self.verbosity.at_least(Verbosity::Medium) =>
             {
                 self.stop_bar();
-                eprintln!(
-                    "{} {}",
-                    self.style.dim("model switch queued:"),
-                    self.style.dim(model)
-                );
+                self.notice(format!("model switch queued: {model}"));
             }
             ServerEventKind::ModelChanged { model }
                 if self.verbosity.at_least(Verbosity::Medium) =>
             {
                 self.stop_bar();
-                eprintln!("{} {}", self.style.dim("model set:"), self.style.dim(model));
+                self.notice(format!("model set: {model}"));
             }
             ServerEventKind::TurnStopped { reason } => {
                 self.stopped = Some(reason.clone());
                 if self.verbosity.at_least(Verbosity::Medium) {
                     self.stop_bar();
-                    eprintln!(
-                        "{}",
-                        self.style.yellow(format!("the turn was stopped: {reason}"))
-                    );
+                    self.notice(format!("the turn was stopped: {reason}"));
                 }
             }
             _ => {}
@@ -1949,9 +2212,7 @@ impl Renderer {
                     return;
                 }
                 // The provider answered: the bar stops saying it is waiting.
-                if let Some(bar) = self.loading_bar.as_ref() {
-                    bar.streaming();
-                }
+                self.waiting = Some(super::loading::Wait::Streaming);
                 if self.verbosity.is_quiet() {
                     // `low` is the answer alone: not even the fact that the
                     // model is thinking is shown.
@@ -1963,32 +2224,30 @@ impl Renderer {
                     // while the bar ran, pushed the bar onto a line of its own so
                     // the old frame stayed on screen. With no bar there is
                     // nothing else saying it, so the line is printed.
-                    if !self.reasoning_placeholder && self.loading_bar.is_none() {
+                    if !self.reasoning_placeholder && self.waiting.is_none() {
                         self.reasoning_placeholder = true;
-                        eprintln!("  {}", self.style.dim("thinking…"));
+                        // The placeholder is chrome and not conversation: it says the model is
+                        // working, which is a state and not something it said.
+                        self.activity = Some("thinking…".to_owned());
                     }
                 } else {
                     // The bar and the gutter share stderr, so the first reasoning
                     // token clears the bar before the gutter writes over it.
-                    if let Some(mut bar) = self.loading_bar.take() {
-                        bar.stop();
-                    }
+                    self.stop_bar();
                     if self.block != Block::Reasoning {
                         if self.block == Block::Answer {
                             self.end_blocks();
                         } else if self.block == Block::None {
                             self.space();
                         }
-                        eprintln!("  {} {}", self.style.faint("┌"), self.style.dim("thinking"));
                         self.block = Block::Reasoning;
                         self.reasoning_line_start = true;
                     }
                     self.reasoning_delta(text);
                 }
             }
-            Delta::Refusal { text, .. } => {
+            Delta::Refusal { .. } => {
                 self.end_blocks();
-                eprintln!("{}", self.style.red(format!("refusal: {text}")));
                 self.failed = true;
             }
             Delta::ToolArguments { .. } | Delta::Media { .. } => {}
@@ -2126,7 +2385,7 @@ impl Renderer {
     }
 
     /// Writes the run's cost and tool summary, if the run made any requests.
-    pub(crate) fn summary(&self) {
+    pub(crate) fn summary(&mut self) {
         if matches!(self.format, Format::Jsonl)
             || !self.verbosity.at_least(Verbosity::Medium)
             || self.requests == 0
@@ -2164,20 +2423,21 @@ impl Renderer {
                 }
             }
         }
-        eprintln!();
-        eprintln!(
-            "  {} {}",
-            self.style.faint("──"),
-            parts.join(&self.style.faint(" · "))
-        );
+        // The summary of the turn is the last thing it said, and it belongs to
+        // the conversation it summarises.
+        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::Notice);
+        entry.push_line("");
+        entry.push_line(format!("── {}", parts.join(" · ")));
         if !self.tool_counts.is_empty() {
-            eprintln!("  {} {}", self.style.faint("tools"), self.tool_summary());
+            entry.push_line(format!("tools {}", self.tool_summary()));
         }
+        self.transcript.push(entry);
     }
 }
 
 /// How many lines of one section a tool result shows.
 const TOOL_RESULT_LINES: usize = 12;
+
 /// How wide one shown line may be before it is clipped.
 const TOOL_RESULT_LINE_CHARS: usize = 200;
 
@@ -2262,16 +2522,16 @@ pub(crate) fn tool_sections(text: &str) -> Vec<ToolSection> {
     }
     sections
 }
-
-/// Prints up to [`TOOL_RESULT_LINES`] of a section, returning how many it hid.
-fn print_tool_lines(style: Style, lines: &[String]) -> usize {
-    let mut hidden = lines.len().saturating_sub(TOOL_RESULT_LINES);
+/// Keeps the lines of one section that fit, and says how many did not.
+///
+/// The cap is per section and not per result: a command that printed forty
+/// lines of output should not hide the four lines of the failure that followed
+/// them, which is what one budget for the whole result did.
+fn tool_lines(entry: &mut crate::transcript::Entry, lines: &[String]) -> usize {
+    let hidden = lines.len().saturating_sub(TOOL_RESULT_LINES);
     for line in lines.iter().take(TOOL_RESULT_LINES) {
-        let (line, clipped) = clip_text(line, TOOL_RESULT_LINE_CHARS);
-        eprintln!("  {}", style.dim(line));
-        if clipped {
-            hidden += 1;
-        }
+        let (text, _) = clip_text(line, TOOL_RESULT_LINE_CHARS);
+        entry.push_line(text);
     }
     hidden
 }

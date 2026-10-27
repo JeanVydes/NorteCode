@@ -7,7 +7,7 @@
 //! running session totals, the dimmed command suggestion and the input line
 //! itself.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::tabs::SessionTab;
@@ -98,25 +98,6 @@ impl Asked {
     }
 }
 
-/// Everything the footer draws, read under one lock.
-///
-/// One lock for the lot: taking each field on its own lets a writer land
-/// between two of them, and the row would then show a summary belonging to a
-/// different paint than the tab name beside it.
-#[derive(Clone, Debug)]
-struct Snapshot {
-    /// The session status line, which is what the stats tab shows.
-    session: String,
-    /// The task list.
-    todos: Vec<TodoItem>,
-    /// Which tab is showing.
-    tab: SessionTab,
-    /// The one-row tools summary.
-    tool_summary: String,
-    /// The one-row MCP summary.
-    mcp_summary: String,
-}
-
 /// What the person did with a question.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
@@ -128,16 +109,40 @@ pub(crate) enum Answer {
     Left,
 }
 
+/// Everything the footer draws, read under one lock.
+///
+/// One lock for the lot: taking each field on its own lets a writer land
+/// between two of them, and the row would then show a summary belonging to a
+/// different paint than the tab name beside it.
+#[cfg(test)]
+struct Snapshot {
+    session: String,
+    todos: Vec<TodoItem>,
+    tab: SessionTab,
+    tool_summary: String,
+    mcp_summary: String,
+}
+
 /// The pinned text above the input line.
 ///
 /// The renderer owns the session totals; the input editor owns the terminal.
 /// Both share this handle: the renderer replaces the text, the editor redraws
 /// it when it changes.
-#[derive(Default)]
 pub(crate) struct Pinned {
     inner: Mutex<PinnedInner>,
     dirty: AtomicBool,
     resized: AtomicBool,
+    /// Whether a panel is on screen, and whether Escape has closed it.
+    ///
+    /// The keyboard is read on its own thread and the panel is drawn on the
+    /// other, so the two speak through here: the reader marks it closed and the
+    /// frame stops drawing it. Flags and not a channel, because the state is
+    /// one bit and the reader never waits for an answer.
+    modal_closed: AtomicBool,
+    /// Whether a panel is on screen right now.
+    modal_open: AtomicBool,
+    /// How far the panel is scrolled back from the end, in lines.
+    modal_scroll: AtomicUsize,
 }
 
 impl Default for PinnedInner {
@@ -150,6 +155,8 @@ impl Default for PinnedInner {
             pending_steers: Vec::new(),
             tool_summary: String::new(),
             mcp_summary: String::new(),
+            draft: String::new(),
+            draft_cursor: 0,
         }
     }
 }
@@ -170,6 +177,15 @@ struct PinnedInner {
     tool_summary: String,
     /// The one-row summary the MCP tab shows.
     mcp_summary: String,
+    /// The draft as the key reader last had it.
+    ///
+    /// It is a copy and not the buffer itself: the reader owns the buffer and
+    /// the frame reads this, so a frame never waits for a keystroke and a
+    /// keystroke never waits for a frame.
+    draft: String,
+    /// Where the cursor is in the draft, in characters.
+    draft_cursor: usize,
+
     /// The messages that reached the running request but are not in the
     /// transcript yet, oldest first.
     ///
@@ -179,6 +195,18 @@ struct PinnedInner {
     /// landed. It waits here instead, above the input, until the engine reports
     /// it applied and the transcript prints it where it belongs.
     pending_steers: Vec<String>,
+}
+impl Default for Pinned {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(PinnedInner::default()),
+            dirty: AtomicBool::new(false),
+            resized: AtomicBool::new(false),
+            modal_closed: AtomicBool::new(false),
+            modal_open: AtomicBool::new(false),
+            modal_scroll: AtomicUsize::new(0),
+        }
+    }
 }
 impl Pinned {
     /// A shared handle for the input editor and the event renderer.
@@ -371,6 +399,100 @@ impl Pinned {
         self.lock().todos.clone()
     }
 
+    /// Asks for the panel to be closed, and says whether one was open.
+    ///
+    /// The answer is what the reader needs: Escape means "close the panel" when
+    /// there is one and "cancel the turn" when there is not, and only the
+    /// screen knows which.
+    pub(crate) fn close_modal(&self) -> bool {
+        if self.modal_open.load(Ordering::Relaxed) {
+            self.modal_closed.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    /// Puts the panel back where it was opened, so a scroll somebody left
+    /// behind is not the one they meet on the next report.
+    pub(crate) fn reset_modal_scroll(&self) {
+        self.modal_scroll.store(0, Ordering::Relaxed);
+    }
+
+    /// Moves the panel, and says whether there was one to move.
+    ///
+    /// The offset is in lines and is added to whatever is there. The reader
+    /// never waits for an answer: the frame is what clamps, because it is what
+    /// knows how many rows fit.
+    pub(crate) fn scroll_modal(&self, delta: isize) -> bool {
+        if !self.modal_open.load(Ordering::Relaxed) {
+            return false;
+        }
+        // The offset is a line count a report never approaches; saturating
+        // keeps a wild one from wrapping into a negative scroll.
+        let at = self.modal_scroll.load(Ordering::Relaxed);
+        let moved = if delta < 0 {
+            at.saturating_sub(delta.unsigned_abs())
+        } else {
+            at.saturating_add(delta.unsigned_abs())
+        };
+        self.modal_scroll.store(moved, Ordering::Relaxed);
+        true
+    }
+
+    /// How far the panel should be scrolled.
+    pub(crate) fn modal_scroll(&self) -> usize {
+        self.modal_scroll.load(Ordering::Relaxed)
+    }
+
+    /// Records whether a panel is on screen, called by whoever draws it.
+    pub(crate) fn set_modal_open(&self, open: bool) {
+        self.modal_open.store(open, Ordering::Relaxed);
+        if !open {
+            self.modal_closed.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Takes the request to close the panel, if one was made.
+    pub(crate) fn take_modal_closed(&self) -> bool {
+        self.modal_closed.swap(false, Ordering::Relaxed)
+    }
+
+    /// Records the draft, so the frame draws what is being typed.
+    pub(crate) fn set_draft(&self, text: String, cursor: usize) {
+        let mut inner = self.lock();
+        if inner.draft != text || inner.draft_cursor != cursor {
+            inner.draft = text;
+            inner.draft_cursor = cursor;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The draft and where the cursor is in it.
+    pub(crate) fn draft(&self) -> (String, usize) {
+        let inner = self.lock();
+        (inner.draft.clone(), inner.draft_cursor)
+    }
+
+    /// The row the active tab shows.
+    ///
+    /// The tabs module decides what each one says from the state it holds, so
+    /// the row and the pinned line cannot disagree about the same fact.
+    pub(crate) fn tab_body(&self) -> String {
+        let inner = self.lock();
+        let todos: Vec<crate::input::TodoItem> = inner.todos.clone();
+        match inner.tab {
+            // `stats` has no body of its own: what it shows *is* the status
+            // line, and drawing it here as well put the same sentence on two
+            // rows — which is what a doubled footer looks like.
+            SessionTab::Stats => String::new(),
+            SessionTab::Todo => {
+                crate::input::unix::todo_line(crate::style::Style::plain(), &todos, 80)
+            }
+            SessionTab::Tools => inner.tool_summary.clone(),
+            SessionTab::Mcp => inner.mcp_summary.clone(),
+        }
+    }
+
     /// The tab that is showing.
     pub(crate) fn tab(&self) -> SessionTab {
         self.lock().tab
@@ -385,12 +507,14 @@ impl Pinned {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// The question and its cursor, for the editor that draws and drives it.
+    #[cfg(test)]
+    fn question(&self) -> Option<Asked> {
+        self.lock().asked.clone()
     }
 
+    /// Everything the footer draws, read under one lock.
+    #[cfg(test)]
     fn snapshot(&self) -> Snapshot {
         let inner = self.lock();
         Snapshot {
@@ -401,24 +525,11 @@ impl Pinned {
             mcp_summary: inner.mcp_summary.clone(),
         }
     }
-    /// The question and its cursor, for the editor that draws and drives it.
-    fn question(&self) -> Option<Asked> {
-        self.lock().asked.clone()
-    }
 
-    /// The messages waiting to reach the running request.
-    fn pending(&self) -> Vec<String> {
-        self.lock().pending_steers.clone()
-    }
-
-    fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
-    }
-
-    /// Notes that the terminal changed size and the renderer must forget the
-    /// column it thought it was on.
-    pub(crate) fn mark_resized(&self) {
-        self.resized.store(true, Ordering::Release);
+    fn lock(&self) -> std::sync::MutexGuard<'_, PinnedInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Consumes the resize notice, if one is pending.
@@ -431,102 +542,20 @@ impl Pinned {
 mod unix {
     use super::Attachment;
 
-    use std::collections::BTreeSet;
     use std::fmt::Write as _;
-    use std::io::{self, IsTerminal, Write};
-    use std::os::fd::AsRawFd;
+    use std::io::{self, IsTerminal};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::{self, JoinHandle};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-    use termios::{
-        ECHO, ECHOE, ECHOK, ECHONL, ICANON, ICRNL, ISIG, IXON, TCSANOW, Termios, VMIN, VTIME,
-        tcsetattr,
-    };
     use tokio::sync::mpsc;
 
-    use super::{Asked, Pinned, TodoItem, TodoStatus};
-    use crate::interaction::{CommandSuggestion, command_suggestion};
-    use crate::select::strip_style;
+    use super::{Pinned, TodoItem, TodoStatus};
+    use crate::interaction::command_suggestion;
     use crate::style::Style;
     use crate::tabs::SessionTab;
-
-    /// The most rows the input line may occupy, scrolling inside them.
-    ///
-    /// A draft rarely needs more; one that does keeps the row the cursor is on
-    /// in view rather than pushing the transcript off the screen.
-    const INPUT_ROWS: u16 = 6;
-
-    /// Rows reserved below the scroll region.
-    ///
-    /// The layout is built up from the bottom: the command suggestion, the
-    /// session status, the todo widget, the blank row under the todo widget,
-    /// and then the input block of up to [`INPUT_ROWS`]. The count has to cover
-    /// all of them, and it used to stop at the suggestion row: the region ended
-    /// two rows inside the input block, so every keypress cleared two rows of
-    /// the transcript to redraw the draft. That is what made the log vanish and
-    /// leave a hole while a tool was printing.
-    const FOOTER_ROWS: u16 = INPUT_ROWS + 4;
-
-    /// How many rows of the block the question itself may take.
-    ///
-    /// The block is six rows shared by the question, its choices, the box and
-    /// the hint. A question is a sentence or two; one long enough to fill the
-    /// whole block would leave the list and the box off the screen, and a dialog
-    /// whose answer cannot be reached is one nobody can answer. What does not fit
-    /// is cut, and the cut says so.
-    const QUESTION_ROWS: u16 = 2;
-
-    /// How many rows the waiting steering messages may take above the draft.
-    ///
-    /// A handful, not all of them: past this the draft itself would have nowhere
-    /// to go, and the count beside the last line says how many did not fit.
-    const MAX_STEER_ROWS: u16 = 3;
-
-    /// How long a drag must pause before its last size is applied.
-    const RESIZE_QUIET: Duration = Duration::from_millis(80);
-
-    /// The longest a drag may postpone applying a size.
-    const RESIZE_MAX_DELAY: Duration = Duration::from_millis(150);
-
-    /// Coalesces the stream of resize events a terminal drag produces.
-    ///
-    /// Resetting the scroll region on every step duplicates and breaks the
-    /// transcript, so the editor keeps the latest size and applies it after a
-    /// short pause. A maximum delay keeps a slow, continuous drag responsive.
-    #[derive(Debug, Default)]
-    struct ResizeDebounce {
-        pending: Option<(u16, u16)>,
-        deadline: Option<Instant>,
-        started: Option<Instant>,
-    }
-
-    impl ResizeDebounce {
-        /// Records the latest size and extends the quiet period.
-        fn note(&mut self, width: u16, height: u16, now: Instant) {
-            self.pending = Some((width, height.max(FOOTER_ROWS + 1)));
-            self.deadline = Some(now + RESIZE_QUIET);
-            self.started.get_or_insert(now);
-        }
-
-        /// Returns the size to apply once the drag has paused, if any.
-        fn take_due(&mut self, now: Instant) -> Option<(u16, u16)> {
-            let due = self.pending.is_some_and(|_| {
-                self.deadline.is_some_and(|deadline| now >= deadline)
-                    || self
-                        .started
-                        .is_some_and(|started| now.duration_since(started) >= RESIZE_MAX_DELAY)
-            });
-            if !due {
-                return None;
-            }
-            self.deadline = None;
-            self.started = None;
-            self.pending.take()
-        }
-    }
 
     /// What the editor handed the repl: a line, or something a keystroke asked
     /// for that is not a line.
@@ -562,68 +591,40 @@ mod unix {
     /// A running input line editor and its channel of lines and actions.
     pub(crate) struct InteractiveInput {
         events: mpsc::UnboundedReceiver<EditorEvent>,
-        /// The terminal settings to restore. Absent for a test that drives the
-        /// channel directly, which owns no terminal to put back.
-        _terminal: Option<TerminalGuard>,
+        /// The thread reading keys, stopped when this is dropped. Absent for a
+        /// test that drives the channel directly, which has no thread.
+        ///
+        /// It is never read, and that is the point: holding it is the whole of
+        /// its job, because its `Drop` is what ends the thread.
+        #[allow(dead_code)]
+        reader: Option<Reader>,
     }
 
     impl InteractiveInput {
-        /// Starts the editor on the current terminal.
-        pub(crate) fn start(style: Style, pinned: Arc<Pinned>) -> Result<Self, String> {
-            if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-                return Err("interactive input needs a terminal on stdin and stderr".to_owned());
+        /// Starts the key reader.
+        ///
+        /// It reads keys and reports what they meant; it does not draw. The
+        /// terminal belongs to whoever is drawing the frame, and there is one
+        /// such owner, so the reader is only the input half of the editor.
+        ///
+        /// The raw mode this needs is set by the terminal guard before this is
+        /// called: putting the terminal in raw mode twice, from two places,
+        /// would leave the restore answering a question nobody asked.
+        pub(crate) fn start(pinned: Arc<Pinned>) -> Result<Self, String> {
+            if !io::stdin().is_terminal() {
+                return Err("interactive input needs a terminal on stdin".to_owned());
             }
-            let fd = io::stdin().as_raw_fd();
-            let original = Termios::from_fd(fd)
-                .map_err(|error| format!("could not read the terminal settings: {error}"))?;
-            let mut edited = original;
-            // `ISIG` is the line that makes Ctrl-C work. Without it cleared,
-            // the terminal turns Ctrl-C into SIGINT and the editor never sees
-            // the key at all: the signal handler and the key reader were racing
-            // for the same keystroke, and the handler did not always win.
-            edited.c_lflag &= !(ICANON | ECHO | ECHOE | ECHOK | ECHONL | ISIG);
-            edited.c_iflag &= !(ICRNL | IXON);
-            edited.c_cc[VMIN] = 1;
-            edited.c_cc[VTIME] = 0;
-            tcsetattr(fd, TCSANOW, &edited).map_err(|error| {
-                format!("could not switch the terminal to line editing: {error}")
-            })?;
-
-            let (cols, rows) = match crossterm::terminal::size() {
-                Ok(size) => size,
-                Err(error) => {
-                    let _ = tcsetattr(fd, TCSANOW, &original);
-                    return Err(format!("could not measure the terminal: {error}"));
-                }
-            };
-            if rows < FOOTER_ROWS + 1 {
-                let _ = tcsetattr(fd, TCSANOW, &original);
-                return Err("the terminal is too small for the input line".to_owned());
-            }
-            if let Err(error) = enter_terminal(cols, rows) {
-                let _ = tcsetattr(fd, TCSANOW, &original);
-                return Err(error);
-            }
-
             let (sender, events) = mpsc::unbounded_channel();
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
-            let handle = match thread::Builder::new()
+            let handle = thread::Builder::new()
                 .name("norte-input".to_owned())
-                .spawn(move || run_editor(style, cols, rows, &pinned, &sender, &thread_stop))
-            {
-                Ok(handle) => handle,
-                Err(error) => {
-                    leave_terminal(rows);
-                    let _ = tcsetattr(fd, TCSANOW, &original);
-                    return Err(format!("could not start the input reader: {error}"));
-                }
-            };
+                .spawn(move || read_keys(&pinned, &sender, &thread_stop))
+                .map_err(|error| format!("could not start the input reader: {error}"))?;
 
             Ok(Self {
                 events,
-                _terminal: Some(TerminalGuard {
-                    original,
+                reader: Some(Reader {
                     stop,
                     handle: Some(handle),
                 }),
@@ -642,7 +643,7 @@ mod unix {
         pub(crate) fn from_events(events: mpsc::UnboundedReceiver<EditorEvent>) -> Self {
             Self {
                 events,
-                _terminal: None,
+                reader: None,
             }
         }
 
@@ -665,21 +666,22 @@ mod unix {
         }
     }
 
-    struct TerminalGuard {
-        original: Termios,
+    /// The thread reading keys, stopped when the input is dropped.
+    ///
+    /// It holds no terminal: what it owns is the thread, and stopping it is all
+    /// this has to do. The terminal is put back by the guard that took it, and
+    /// two guards restoring the same terminal would be one too many.
+    struct Reader {
         stop: Arc<AtomicBool>,
         handle: Option<JoinHandle<()>>,
     }
 
-    impl Drop for TerminalGuard {
+    impl Drop for Reader {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }
-            leave_terminal(crossterm::terminal::size().map_or(24, |(_, rows)| rows));
-            let fd = io::stdin().as_raw_fd();
-            let _ = tcsetattr(fd, TCSANOW, &self.original);
         }
     }
 
@@ -1038,15 +1040,15 @@ mod unix {
         }
     }
 
+    /// Reads keys and reports what they meant, until the terminal closes.
+    ///
+    /// It is the input half of the editor and nothing else: the frame is drawn
+    /// by whoever owns the terminal, from the state this updates. That split is
+    /// what lets a keypress and a server event be handled in the same loop,
+    /// which is what a frame needs and what two independent writers made
+    /// impossible.
     #[allow(clippy::too_many_lines)]
-    fn run_editor(
-        style: Style,
-        mut cols: u16,
-        mut rows: u16,
-        pinned: &Pinned,
-        sender: &mpsc::UnboundedSender<EditorEvent>,
-        stop: &AtomicBool,
-    ) {
+    fn read_keys(pinned: &Pinned, sender: &mpsc::UnboundedSender<EditorEvent>, stop: &AtomicBool) {
         let mut buffer = LineBuffer::default();
         let mut history: Vec<String> = Vec::new();
         let mut history_pos: Option<usize> = None;
@@ -1055,14 +1057,11 @@ mod unix {
         // person starts and where every key belongs; `Some(tab)` is the tab row
         // with that tab selected but not yet applied.
         let mut focus: Option<SessionTab> = None;
-
-        draw_block(style, cols, rows, pinned, &buffer, focus);
-        let mut resize = ResizeDebounce::default();
         // The draft the answer box stepped over, kept to be handed back.
         //
-        // The box draws on the same buffer the draft does, and an answer is not a
-        // draft: what was half-written before the question arrived is not part of
-        // the reply, and losing it would punish the person for answering.
+        // The box draws on the same buffer the draft does, and an answer is not
+        // a draft: what was half-written before the question arrived is not part
+        // of the reply, and losing it would punish the person for answering.
         let mut stashed: Option<LineBuffer> = None;
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -1073,7 +1072,6 @@ mod unix {
             // ended the question.
             if stashed.is_some() && !pinned.is_asking() {
                 buffer = stashed.take().unwrap_or_default();
-                draw_block(style, cols, rows, pinned, &buffer, focus);
             }
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => {
@@ -1082,6 +1080,28 @@ mod unix {
                         Ok(Event::Key(key))
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
+                            // A panel owns the keyboard while it is up: it is
+                            // over the interface, so Escape closes it and the
+                            // arrows walk it. A report longer than the screen is
+                            // read a page at a time, and the row under it says
+                            // how much there is.
+                            let scrolling = match key.code {
+                                KeyCode::Esc => Some(0),
+                                KeyCode::Up => Some(-1),
+                                KeyCode::Down => Some(1),
+                                KeyCode::PageUp => Some(-10),
+                                KeyCode::PageDown => Some(10),
+                                _ => None,
+                            };
+                            if let Some(delta) = scrolling {
+                                if key.code == KeyCode::Esc {
+                                    if pinned.close_modal() {
+                                        continue;
+                                    }
+                                } else if pinned.scroll_modal(delta) {
+                                    continue;
+                                }
+                            }
                             // A question owns the keyboard before anything
                             // else does: it is what the model is waiting on, and
                             // the draft is not what the person is working on
@@ -1231,13 +1251,18 @@ mod unix {
                             buffer.insert_paste(&text);
                             redraw = true;
                         }
-                        Ok(Event::Resize(width, height)) => {
-                            resize.note(width, height, Instant::now());
-                        }
+                        // A resize needs no handling here: the frame reads the
+                        // terminal's size when it draws, so the next frame is
+                        // already the right shape. Everything else the terminal
+                        // can send is not a key.
                         _ => {}
                     }
                     if redraw {
-                        draw_block(style, cols, rows, pinned, &buffer, focus);
+                        // The frame draws the draft, and the draft lives here:
+                        // this is the one place the two halves of the editor
+                        // meet, and it is a copy rather than the buffer so
+                        // neither waits for the other.
+                        pinned.set_draft(buffer.text(), buffer.cursor);
                     }
                 }
                 Ok(false) => {}
@@ -1245,21 +1270,6 @@ mod unix {
                     let _ = sender.send(EditorEvent::End);
                     break;
                 }
-            }
-            if let Some((width, height)) = resize.take_due(Instant::now()) {
-                let old_rows = rows;
-                cols = width;
-                rows = height;
-                resize_terminal(rows, old_rows);
-                pinned.mark_resized();
-                draw_block(style, cols, rows, pinned, &buffer, focus);
-            }
-            if pinned.take_dirty() {
-                // The question lives in the input block, and that block is what
-                // this repaints: waiting for a keypress to draw it left the
-                // choices off the screen until the first arrow, which is the
-                // one moment the person most needs to see them.
-                draw_block(style, cols, rows, pinned, &buffer, focus);
             }
         }
     }
@@ -1612,398 +1622,10 @@ mod unix {
         }
     }
 
-    /// The bottom row of the scroll region; the footer lives below it.
-    fn scroll_bottom(rows: u16) -> u16 {
-        rows.saturating_sub(FOOTER_ROWS).max(1)
-    }
-
-    /// The last row the input line may occupy.
-    ///
-    /// The three rows under it hold the pinned widgets, which are laid out from
-    /// the bottom, so the input grows upward from here.
-    fn input_bottom(rows: u16) -> u16 {
-        todo_row(rows).saturating_sub(1).max(1)
-    }
-
-    fn status_row(rows: u16) -> u16 {
-        rows.saturating_sub(2).max(1)
-    }
-
-    /// An empty line between the input block and the widgets, so the draft does
-    /// not touch the status line.
-    fn input_gap(rows: u16) -> u16 {
-        rows.saturating_sub(3).max(1)
-    }
-
-    fn suggestion_row(rows: u16) -> u16 {
-        rows.saturating_sub(1).max(1)
-    }
-
-    fn todo_row(rows: u16) -> u16 {
-        input_gap(rows)
-    }
-
-    fn enter_terminal(cols: u16, rows: u16) -> Result<(), String> {
-        let mut out = io::stderr().lock();
-        // Hide the cursor, enable bracketed paste, and push the keyboard
-        // protocol. The last one is what makes a modified Enter distinguishable:
-        // a terminal that does not report it sends the same carriage return for
-        // Enter and Shift+Enter, so the newline branch never fires. A terminal
-        // that does not support the sequence ignores it, and the pop on the way
-        // out is then a no-op.
-        write!(out, "\x1b[?25l\x1b[?2004h\x1b[>1u").map_err(|error| error.to_string())?;
-        // The startup and `--debug` blocks are printed before this point. Reset
-        // the scroll region, drop to the last row and scroll the footer height
-        // so those rows are blank; otherwise the first streamed lines would
-        // overwrite the last debug line.
-        write!(out, "\x1b[r\x1b[{rows};1H").map_err(|error| error.to_string())?;
-        for _ in 0..FOOTER_ROWS {
-            writeln!(out).map_err(|error| error.to_string())?;
-        }
-        set_region(&mut out, cols, rows).map_err(|error| error.to_string())?;
-        out.flush().map_err(|error| error.to_string())
-    }
-
-    fn leave_terminal(rows: u16) {
-        let mut out = io::stderr().lock();
-        let _ = write!(out, "\x1b[<u\x1b[?2004l\x1b[r");
-        // Only the footer rows: the region still holds the final summary.
-        for row in scroll_bottom(rows).saturating_add(1)..=rows.max(1) {
-            let _ = write!(out, "\x1b[{row};1H\x1b[2K");
-        }
-        let _ = write!(out, "\x1b[{};1H\x1b[?25h", rows.max(1));
-        let _ = out.flush();
-    }
-
-    /// Draws the bottom block: the question when one is on screen, the draft
-    /// otherwise, and the footer under both.
-    ///
-    /// The two live in the same rows, so the choice is made in one place: a
-    /// caller that draws one and forgets the other leaves the question off the
-    /// screen while the model waits for its answer.
-    fn draw_block(
-        style: Style,
-        cols: u16,
-        rows: u16,
-        pinned: &Pinned,
-        buffer: &LineBuffer,
-        focus: Option<SessionTab>,
-    ) {
-        let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
-        if let Some(asked) = pinned.question() {
-            draw_question(
-                style,
-                rows,
-                &asked,
-                buffer,
-                usize::from(cols).saturating_sub(2).max(1),
-            );
-        } else {
-            draw_input(
-                style,
-                cols,
-                rows,
-                buffer,
-                suggestion.as_ref(),
-                &pinned.pending(),
-            );
-        }
-        draw_footer(style, cols, rows, pinned, suggestion.as_ref(), focus);
-    }
-
-    /// Builds the frame that draws the question the model asked, over the rows
-    /// the input uses.
-    ///
-    /// It takes the input block's own rows rather than printing above them: the
-    /// person is looking there, and a question that scrolled the transcript away
-    /// would be asking about a screen it just moved. The choices are drawn with
-    /// a cursor, and the "something else" row is last because it is the one that
-    /// opens the box — until it is chosen there is no box, which is why nothing
-    /// is prompted for.
-    ///
-    /// The block is six rows for the question, the choices, the box and the
-    /// hint, so each part gets a budget instead of the whole block: the hint and
-    /// the box are reserved from the bottom up and the list scrolls on the row
-    /// the cursor is on. Filling the block in order pushed the box off it, and
-    /// the answer had nowhere to be typed — which is the bug this layout exists
-    /// to prevent.
-    fn question_frame(
-        style: Style,
-        rows: u16,
-        asked: &Asked,
-        buffer: &LineBuffer,
-        width: usize,
-    ) -> String {
-        let bottom = input_bottom(rows);
-        let top = bottom.saturating_sub(INPUT_ROWS).saturating_add(1).max(1);
-        let mut frame = String::from("\x1b7");
-        for row in top..=bottom {
-            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
-        }
-        // The bottom rows are spoken for before anything is drawn: the box while
-        // it is open, and the hint, which is the only thing that says what the
-        // keys do. Reserving them from the bottom up is what keeps them on
-        // screen — a question or a list that simply filled the block pushed the
-        // box off it, and the answer had nowhere to be typed.
-        let hint_row = bottom;
-        let box_row = bottom.saturating_sub(1);
-        let choices_end = if asked.typing { box_row } else { hint_row }.saturating_sub(1);
-
-        // Then the question, wrapped, and cut at the rows it was given. What the
-        // cut drops is marked, so a shortened question never reads as the whole
-        // one.
-        let prompt_rows = wrap_plain(&asked.prompt, width);
-        let kept = usize::from(QUESTION_ROWS).min(prompt_rows.len());
-        let mut at = top;
-        for (index, line) in prompt_rows.iter().take(kept).enumerate() {
-            if at >= choices_end {
-                break;
-            }
-            let text = if index + 1 == kept && kept < prompt_rows.len() {
-                format!("{line} …")
-            } else {
-                line.clone()
-            };
-            let _ = write!(frame, "\x1b[{at};1H");
-            frame.push_str(&clip_visible(&style.bold(text), width));
-            at += 1;
-        }
-
-        // Then the choices. The cursor marks where Enter would land, and a taken
-        // choice says so, because more than one may be taken.
-        let mut labels: Vec<(usize, String)> = asked
-            .choices
-            .iter()
-            .enumerate()
-            .map(|(index, choice)| {
-                let taken = asked.taken.contains(&index);
-                let mark = if taken { "[x]" } else { "[ ]" };
-                let label = if asked.multiple {
-                    format!("{mark} {choice}")
-                } else {
-                    choice.clone()
-                };
-                (index, label)
-            })
-            .collect();
-        labels.push((asked.other(), "(something else)".to_owned()));
-        // The list scrolls on the row the cursor is on, because that row is the
-        // one being chosen: a list that ran past the bottom of the block hid the
-        // rows the arrows were walking towards.
-        let room = if at <= choices_end {
-            usize::from(choices_end - at) + 1
-        } else {
-            0
-        };
-        let cursor_row = labels
-            .iter()
-            .position(|(index, _)| *index == asked.cursor)
-            .unwrap_or(0);
-        let first = cursor_row.saturating_add(1).saturating_sub(room.max(1));
-        let hidden = labels.len().saturating_sub(room);
-        if room > 0 {
-            for (index, label) in labels.iter().skip(first).take(room) {
-                let here = *index == asked.cursor;
-                let line = format!("{} {label}", if here { '›' } else { ' ' });
-                let line = if here {
-                    style.paint_raw("7", &strip_style(&line))
-                } else {
-                    style.dim(line)
-                };
-                let _ = write!(frame, "\x1b[{at};1H");
-                frame.push_str(&clip_visible(&line, width));
-                at += 1;
-            }
-        }
-        // The box, only when it was opened: it is the row the answer goes in.
-        if asked.typing {
-            let _ = write!(frame, "\x1b[{box_row};1H");
-            let _ = write!(frame, "{} ", style.cyan("answer"));
-            let typed = buffer.chars.iter().collect::<String>();
-            frame.push_str(&clip_visible(&typed, width.saturating_sub(7)));
-        }
-        // The hint is the last row, and what it says depends on what is left to
-        // say: the box, when it is open; the choices that did not fit, when some
-        // did not, because a hidden choice nobody is told about is one that
-        // cannot be chosen; and the keys, the rest of the time.
-        let hint = if asked.typing {
-            "enter to answer · esc to leave it unanswered".to_owned()
-        } else if hidden > 0 {
-            format!("↑↓ move · {hidden} more not shown · esc leave")
-        } else if asked.multiple {
-            "↑↓ move · space choose · enter answer · esc leave".to_owned()
-        } else {
-            "↑↓ move · enter choose · esc leave".to_owned()
-        };
-        let _ = write!(frame, "\x1b[{hint_row};1H");
-        frame.push_str(&clip_visible(&style.faint(hint), width));
-        frame.push_str("\x1b8");
-        frame
-    }
-
-    /// Writes the question the model asked over the block the input owns.
-    fn draw_question(style: Style, rows: u16, asked: &Asked, buffer: &LineBuffer, width: usize) {
-        write_frame(&question_frame(style, rows, asked, buffer, width));
-    }
-
-    /// Folds a plain string onto rows of at most `width` columns.
-    fn wrap_plain(text: &str, width: usize) -> Vec<String> {
-        let mut rows = Vec::new();
-        let mut current = String::new();
-        for word in text.split_whitespace() {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.chars().count() + 1 + word.chars().count() <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                rows.push(std::mem::take(&mut current));
-                current.push_str(word);
-            }
-        }
-        if !current.is_empty() {
-            rows.push(current);
-        }
-        if rows.is_empty() {
-            rows.push(String::new());
-        }
-        rows
-    }
-
-    /// Builds the frame that moves the scroll region after a resize.
-    ///
-    /// The frame is assembled first and written once: the renderer writes to
-    /// the same terminal from another thread, and a cursor move split across
-    /// writes is exactly how streamed text ends up duplicated or overwritten.
-    fn resize_frame(rows: u16, old_rows: u16) -> String {
-        let bottom = scroll_bottom(rows);
-        // Set the region first, so the clears below cannot scroll and the region
-        // is never absent: releasing it with `\x1b[r` left the renderer free to
-        // write over the footer until the new one was set.
-        let mut frame = format!("\x1b[1;{bottom}r");
-
-        // Clear each row that was, or is now, part of the footer. A set keeps
-        // an unchanged size from emitting the same clear twice.
-        let mut cleared = BTreeSet::new();
-        for row in scroll_bottom(old_rows).saturating_add(1)..=old_rows.max(1) {
-            if row <= rows.max(1) {
-                cleared.insert(row);
-            }
-        }
-        for row in bottom.saturating_add(1)..=rows.max(1) {
-            cleared.insert(row);
-        }
-        for row in cleared {
-            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
-        }
-
-        // Park the cursor on the last row of the region. No newline here: on the
-        // bottom row one scrolls the whole region, and every scroll leaves a
-        // blank line above the footer, so a drag walked the footer down the
-        // screen one row per resize event. The footer rows are repainted by the
-        // caller right after this frame.
-        let _ = write!(frame, "\x1b[{bottom};1H");
-        frame
-    }
-
-    fn resize_terminal(rows: u16, old_rows: u16) {
-        write_frame(&resize_frame(rows, old_rows));
-    }
-
-    /// Writes one complete terminal frame with a single flush.
-    fn write_frame(frame: &str) {
-        let mut out = io::stderr().lock();
-        let _ = out.write_all(frame.as_bytes());
-        let _ = out.flush();
-    }
-
-    fn set_region(out: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
-        let _ = cols;
-        let bottom = scroll_bottom(rows);
-        write!(out, "\x1b[1;{bottom}r\x1b[{bottom};1H")
-    }
-
-    /// Draws the pinned todo widget, session line and command suggestion.
-    ///
-    /// All rows are below the scroll region, so streamed output never touches
-    /// them. The cursor is saved and restored so the main thread's output
-    /// position is preserved.
-    fn draw_footer(
-        style: Style,
-        cols: u16,
-        rows: u16,
-        pinned: &Pinned,
-        suggestion: Option<&CommandSuggestion>,
-        focus: Option<SessionTab>,
-    ) {
-        let snapshot = pinned.snapshot();
-        let (session, todos, tab) = (&snapshot.session, &snapshot.todos, snapshot.tab);
-        let width = usize::from(cols).saturating_sub(2);
-        let suggestion_text = suggestion.map_or_else(String::new, |suggestion| {
-            style.faint(suggestion.hint.clone())
-        });
-        // What the active tab shows. Every tab has a widget of its own here:
-        // the conversation is the scroll region above, so the row under it is
-        // free, and each tab puts its summary there. The stats tab carries the
-        // session status it always did, and the other three count what they
-        // hold, because a row is all the room the footer has.
-        let body = match tab {
-            SessionTab::Stats => session.clone(),
-            SessionTab::Todo => todo_line(style, todos, width),
-            SessionTab::Tools => snapshot.tool_summary.clone(),
-            SessionTab::Mcp => snapshot.mcp_summary.clone(),
-        };
-        let tabs_text = tabs_line(style, focus.unwrap_or(tab), focus.is_some(), width);
-        let frame = format!(
-            "\x1b7\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b[{};1H\x1b[2K{}\x1b8",
-            todo_row(rows),
-            clip_visible(&tabs_text, width),
-            status_row(rows),
-            clip_visible(&body, width),
-            suggestion_row(rows),
-            clip_visible(&suggestion_text, width)
-        );
-        write_frame(&frame);
-    }
-
-    /// The row of tabs, with the active one in brackets.
-    ///
-    /// One dim line, because that is all the footer has: the active tab is the
-    /// only name in the foreground and bracketed, so where the person is reads
-    /// at a glance and the rest say what is a keystroke away. The key that
-    /// cycles is named once, at the end, only when it fits.
-    fn tabs_line(style: Style, selected: SessionTab, focused: bool, max: usize) -> String {
-        let mut rendered = String::new();
-        for (index, tab) in SessionTab::ALL.iter().enumerate() {
-            if index > 0 {
-                rendered.push_str(&style.faint(" · "));
-            }
-            let name = tab.name();
-            rendered.push_str(&if *tab == selected && focused {
-                // The focus is on the row: the selection is what Enter would
-                // apply, so it is drawn as the one under the cursor.
-                style.bold(format!("›{name}‹"))
-            } else if *tab == selected {
-                style.bold(format!("[{name}]"))
-            } else {
-                style.faint(name.to_owned())
-            });
-        }
-        // What the keys do depends on where the keyboard is, so the hint says
-        // which row is listening rather than naming a key that would not work.
-        let hint = if focused { "  ←→ enter" } else { "  ^T" };
-        // What is shown, not what is written: the row carries `style` codes,
-        // and counting those made every hint too wide to fit.
-        if visible_width(&rendered) + hint.chars().count() <= max {
-            rendered.push_str(&style.faint(hint));
-        }
-        rendered
-    }
-
     /// Builds the one-line todo widget: progress, the current item first, then
     /// pending items that fit. Completed items are represented by the count,
     /// and a `+N` says how many actionable items did not fit.
-    fn todo_line(style: Style, todos: &[TodoItem], max: usize) -> String {
+    pub(crate) fn todo_line(style: Style, todos: &[TodoItem], max: usize) -> String {
         if todos.is_empty() {
             return String::new();
         }
@@ -2115,51 +1737,6 @@ mod unix {
         (out, truncated)
     }
 
-    /// Clips a styled line to `max` visible columns, keeping ANSI escapes.
-    /// How many columns a string with style codes occupies.
-    fn visible_width(text: &str) -> usize {
-        let mut width = 0usize;
-        let mut chars = text.chars();
-        while let Some(character) = chars.next() {
-            if character == '\x1b' {
-                for next in chars.by_ref() {
-                    if next == 'm' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            width += 1;
-        }
-        width
-    }
-
-    fn clip_visible(text: &str, max: usize) -> String {
-        let mut out = String::new();
-        let mut visible = 0usize;
-        let mut chars = text.chars();
-        while let Some(character) = chars.next() {
-            if character == '\x1b' {
-                out.push(character);
-                for next in chars.by_ref() {
-                    out.push(next);
-                    if next == 'm' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            if visible >= max {
-                out.push('…');
-                out.push_str("\x1b[0m");
-                break;
-            }
-            out.push(character);
-            visible += 1;
-        }
-        out
-    }
-
     /// The buffer as the rows the input line draws.
     ///
     /// A logical line (one separated by `\n`) becomes as many rows as it needs
@@ -2249,176 +1826,16 @@ mod unix {
         out
     }
 
-    fn input_lines(buffer: &LineBuffer, window: usize, width: usize) -> Vec<String> {
-        let width = width.max(1);
-        // Where each logical line starts and ends in the buffer.
-        let mut spans: Vec<(usize, usize)> = Vec::new();
-        let mut start = 0usize;
-        for (index, character) in buffer.chars.iter().enumerate() {
-            if *character == '\n' {
-                spans.push((start, index));
-                start = index + 1;
-            }
-        }
-        spans.push((start, buffer.chars.len()));
-
-        // Every visual row, as the buffer range it shows, and which one holds
-        // the cursor.
-        let mut rows: Vec<(usize, usize)> = Vec::new();
-        let mut cursor_row = 0usize;
-        for (from, to) in spans {
-            let mut row = from;
-            loop {
-                let end = (row + width).min(to);
-                if buffer.cursor >= row && buffer.cursor <= end {
-                    cursor_row = rows.len();
-                }
-                rows.push((row, end));
-                if end == to {
-                    break;
-                }
-                row = end;
-            }
-        }
-
-        let first = cursor_row.saturating_add(1).saturating_sub(window.max(1));
-        let mut rendered = Vec::new();
-        for (from, to) in rows.iter().skip(first).take(window.max(1)).copied() {
-            let mut line = String::new();
-            for index in from..to {
-                let character = buffer.chars[index];
-                if index == buffer.cursor {
-                    line.push_str("\x1b[7m");
-                    line.push(character);
-                    line.push_str("\x1b[27m");
-                } else {
-                    line.push(character);
-                }
-            }
-            // A cursor at the very end of a row still needs a cell, and an empty
-            // logical line still needs one row to itself.
-            if buffer.cursor == to {
-                line.push_str("\x1b[7m \x1b[27m");
-            }
-            rendered.push(line);
-        }
-        rendered
-    }
-
-    fn draw_input(
-        style: Style,
-        cols: u16,
-        rows: u16,
-        buffer: &LineBuffer,
-        suggestion: Option<&CommandSuggestion>,
-        pending: &[String],
-    ) {
-        let prompt = format!("{} ", style.cyan("›"));
-        let prompt_width = 2usize;
-        let available = usize::from(cols).saturating_sub(prompt_width + 1).max(1);
-        let last_row = input_bottom(rows);
-        let block_top = last_row.saturating_sub(INPUT_ROWS).saturating_add(1).max(1);
-
-        // A message waiting to reach the running request is shown above the
-        // draft, on rows the input reserves and rarely fills. The draft's window
-        // shrinks by as many rows as they take, so the two never overlap.
-        let shown = pending.len().min(usize::from(MAX_STEER_ROWS));
-        let window = usize::from(INPUT_ROWS).saturating_sub(shown).max(1);
-        let lines = input_lines(buffer, window, available);
-        let first_row = last_row
-            .saturating_sub(u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX));
-
-        let mut frame = String::from("\x1b7");
-        // Every row the input may occupy is cleared first, then the rows it
-        // needs are written. Clearing only the rows being drawn left the ones a
-        // taller draft had used on screen, so deleting a line left copies of it
-        // behind; and the first row moves down as the draft shrinks, so the row
-        // it used to start on would not even be addressed.
-        for row in block_top..=last_row {
-            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
-        }
-        // The waiting messages lead, because they are the oldest thing on screen
-        // and the one that will move into the transcript first. The last shown
-        // carries a count of the ones that did not fit, so a hidden message is
-        // never silent.
-        for (index, text) in pending.iter().take(shown).enumerate() {
-            let row = block_top.saturating_add(u16::try_from(index).unwrap_or(0));
-            let tail = if index + 1 == shown && pending.len() > shown {
-                format!("  +{}", pending.len() - shown)
-            } else {
-                String::new()
-            };
-            let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            let label = style.faint(format!("⋯ {one}{tail}"));
-            let _ = write!(frame, "\x1b[{row};1H");
-            frame.push_str(&clip_visible(
-                &label,
-                usize::from(cols).saturating_sub(1).max(1),
-            ));
-        }
-        for (offset, line) in lines.iter().enumerate() {
-            let row = first_row.saturating_add(u16::try_from(offset).unwrap_or(0));
-            let _ = write!(frame, "\x1b[{row};1H");
-            // Continuation rows keep the prompt column blank so the text stays
-            // aligned under the first line.
-            if offset == 0 {
-                frame.push_str(&prompt);
-            } else {
-                frame.push_str(&" ".repeat(prompt_width));
-            }
-            // Already wrapped to the width; clipping here would cut the rows
-            // the wrap just made.
-            frame.push_str(line);
-        }
-        // The completion hint belongs on the cursor row and only makes sense
-        // while the draft is a single line.
-        if lines.len() == 1 {
-            if let Some(suggestion) = suggestion {
-                if !suggestion.completion.is_empty() {
-                    let typed = buffer.chars.len().min(available);
-                    let room = available.saturating_sub(typed + 1);
-                    if room > 0 {
-                        frame.push_str(&clip_visible(
-                            &style.faint(suggestion.completion.clone()),
-                            room,
-                        ));
-                    }
-                }
-            }
-        }
-        frame.push_str("\x1b8");
-        write_frame(&frame);
-    }
-
     #[cfg(test)]
     mod tests {
-        use std::time::{Duration, Instant};
-
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        use crate::style::Style;
         use crate::tabs::SessionTab;
 
         use super::{
-            Asked, EditorEvent, FOOTER_ROWS, INPUT_ROWS, KeyOutcome, LineBuffer, ResizeDebounce,
-            TabRowKey, TodoItem, TodoStatus, clip_visible, handle_key, input_bottom, input_lines,
-            question_frame, resize_frame, scroll_bottom, status_row, suggestion_row, tab_row_key,
-            todo_line, todo_row, visible_width,
+            EditorEvent, KeyOutcome, LineBuffer, TabRowKey, TodoItem, TodoStatus, handle_key,
+            tab_row_key, todo_line,
         };
-
-        #[test]
-        fn the_hint_is_measured_without_its_colour_codes() {
-            // The width of styled text is what is seen, not what is written:
-            // counting the escapes made every hint look too wide to fit, which
-            // is why the row always showed the shorter one.
-            assert_eq!(visible_width("plain"), 5);
-            assert_eq!(
-                visible_width("\x1b[38;5;244mtodo\x1b[0m"),
-                4,
-                "the codes are not columns"
-            );
-            assert_eq!(visible_width(""), 0);
-        }
 
         #[test]
         fn the_tab_row_reads_its_own_keys() {
@@ -2566,159 +1983,6 @@ mod unix {
                 &sender,
             );
             assert_eq!(buffer.text(), "2");
-        }
-
-        #[test]
-        fn resize_debounce_waits_for_the_drag_to_pause() {
-            let start = Instant::now();
-            let mut resize = ResizeDebounce::default();
-            resize.note(80, 24, start);
-            assert_eq!(resize.take_due(start + Duration::from_millis(79)), None);
-            assert_eq!(
-                resize.take_due(start + Duration::from_millis(80)),
-                Some((80, 24))
-            );
-            assert_eq!(resize.take_due(start + Duration::from_millis(200)), None);
-        }
-
-        #[test]
-        fn resize_debounce_applies_a_long_drag_without_waiting_for_it_to_end() {
-            let start = Instant::now();
-            let mut resize = ResizeDebounce::default();
-            resize.note(80, 24, start);
-            resize.note(100, 30, start + Duration::from_millis(100));
-            // The quiet period has not elapsed since the last event...
-            assert_eq!(resize.take_due(start + Duration::from_millis(149)), None);
-            // ...but the maximum delay since the first event wins.
-            assert_eq!(
-                resize.take_due(start + Duration::from_millis(150)),
-                Some((100, 30))
-            );
-        }
-
-        #[test]
-        fn resize_debounce_keeps_room_for_the_footer() {
-            let start = Instant::now();
-            let mut resize = ResizeDebounce::default();
-            resize.note(80, 1, start);
-            assert_eq!(
-                resize.take_due(start + Duration::from_millis(200)),
-                Some((80, FOOTER_ROWS + 1))
-            );
-        }
-
-        #[test]
-        fn resize_frame_clears_each_footer_row_once() {
-            let frame = resize_frame(24, 24);
-            let bottom = scroll_bottom(24);
-            // The region is set, never released: `\x1b[r` left the renderer free
-            // to write over the footer until the new one was set.
-            assert!(!frame.contains("\x1b[r"), "{frame:?}");
-            assert!(frame.starts_with(&format!("\x1b[1;{bottom}r")), "{frame:?}");
-            for row in bottom + 1..=24 {
-                assert_eq!(
-                    frame.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
-                    1,
-                    "row {row} should be cleared once"
-                );
-            }
-            assert!(frame.ends_with(&format!("\x1b[{bottom};1H")), "{frame:?}");
-        }
-
-        #[test]
-        fn resize_frame_never_scrolls() {
-            // A newline on the bottom row of the region scrolls it, and each
-            // scroll leaves a blank line above the footer. A drag fires the
-            // resize many times, so the footer walked down the screen.
-            for (rows, old_rows) in [(24, 24), (30, 24), (24, 30), (5, 5)] {
-                let frame = resize_frame(rows, old_rows);
-                assert!(
-                    !frame.contains('\n'),
-                    "the frame for {rows}/{old_rows} must not scroll: {frame:?}"
-                );
-                assert!(!frame.contains('\r'), "{frame:?}");
-            }
-        }
-
-        #[test]
-        fn resize_frame_clears_old_and_new_footer_rows() {
-            let grown = resize_frame(30, 24);
-            let old_bottom = scroll_bottom(24);
-            let new_bottom = scroll_bottom(30);
-            let mut cleared: Vec<u16> = (old_bottom + 1..=24).collect();
-            cleared.extend(new_bottom + 1..=30);
-            for row in cleared {
-                assert_eq!(
-                    grown.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
-                    1,
-                    "row {row} should be cleared once"
-                );
-            }
-            // Every row that is neither an old footer row nor a new one is the
-            // scroll area and is left alone.
-            for row in 1..=30u16 {
-                let old_footer = row > old_bottom && row <= 24;
-                let new_footer = row > new_bottom;
-                if !old_footer && !new_footer {
-                    assert!(
-                        !grown.contains(&format!("\x1b[{row};1H\x1b[2K")),
-                        "scroll row {row} must be preserved"
-                    );
-                }
-            }
-            assert!(
-                grown.ends_with(&format!("\x1b[{new_bottom};1H")),
-                "{grown:?}"
-            );
-
-            let shrunk = resize_frame(24, 30);
-            let shrunk_bottom = scroll_bottom(24);
-            for row in shrunk_bottom + 1..=24 {
-                assert_eq!(
-                    shrunk.matches(&format!("\x1b[{row};1H\x1b[2K")).count(),
-                    1,
-                    "row {row} should be cleared once"
-                );
-            }
-            for row in 25..=30 {
-                assert!(
-                    !shrunk.contains(&format!("\x1b[{row};1H\x1b[2K")),
-                    "rows beyond the new height must not be addressed"
-                );
-            }
-            assert!(
-                shrunk.ends_with(&format!("\x1b[{shrunk_bottom};1H")),
-                "{shrunk:?}"
-            );
-        }
-
-        #[test]
-        fn footer_rows_stay_below_the_scroll_region() {
-            // The widget rows sit at the bottom, the todo row and its gap
-            // above them, and the input's own rows above those. The scroll
-            // region ends below all of it.
-            assert_eq!(suggestion_row(24), 23);
-            assert_eq!(status_row(24), 22);
-            assert_eq!(todo_row(24), 21);
-            assert_eq!(input_bottom(24), 20);
-            assert_eq!(scroll_bottom(24), 14);
-            // The first row the input clears is the top of its own block, and it
-            // must be *below* the region: the region is where the transcript is
-            // written, so a repaint that reached into it erased streamed output
-            // on every keypress.
-            for rows in 11..=60u16 {
-                let block_top = input_bottom(rows)
-                    .saturating_sub(INPUT_ROWS)
-                    .saturating_add(1);
-                assert!(
-                    scroll_bottom(rows) < block_top,
-                    "rows {rows}: the region ends at {} but the input clears from {block_top}",
-                    scroll_bottom(rows)
-                );
-                assert!(input_bottom(rows) < todo_row(rows), "rows {rows}");
-                assert!(todo_row(rows) < status_row(rows), "rows {rows}");
-                assert!(status_row(rows) < suggestion_row(rows), "rows {rows}");
-            }
         }
 
         fn item(content: &str, status: TodoStatus) -> TodoItem {
@@ -3196,32 +2460,6 @@ mod unix {
         }
 
         #[test]
-        fn a_multi_line_draft_is_drawn_on_its_own_rows() {
-            // Shift+Enter adds a newline; before this the editor drew one row
-            // and ignored the break, so the extra lines were invisible.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("one\ntwo");
-            let lines = input_lines(&buffer, 4, 80);
-            assert_eq!(lines.len(), 2, "each logical line gets a row: {lines:?}");
-            assert!(lines[0].starts_with("one"), "{lines:?}");
-            assert!(lines[1].starts_with("two"), "{lines:?}");
-            // The cursor is at the end of the second line and must be visible.
-            assert!(lines[1].contains("\x1b[7m"), "{lines:?}");
-        }
-
-        #[test]
-        fn a_draft_taller_than_the_window_scrolls_to_the_cursor_line() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("a\nb\nc\nd\ne");
-            let lines = input_lines(&buffer, 2, 80);
-            assert_eq!(lines.len(), 2, "only the window is drawn: {lines:?}");
-            assert!(
-                lines[1].contains('e'),
-                "the window follows the cursor to the last line: {lines:?}"
-            );
-        }
-
-        #[test]
         fn the_arrows_move_inside_the_draft_before_the_history() {
             let mut buffer = LineBuffer::default();
             // Two lines, the cursor at the end of the second.
@@ -3244,147 +2482,6 @@ mod unix {
             // The second line is two wide, so the column is clamped to its end.
             assert_eq!(buffer.text(), "abcdef\nxy");
             assert_eq!(buffer.cursor, 9, "clamped to the shorter line");
-        }
-
-        #[test]
-        fn the_whole_input_block_is_cleared_every_frame() {
-            // The rows a taller draft used stay on screen unless the frame
-            // clears them: deleting a line left copies of it above the prompt.
-            // The block is the input's reserved rows, whatever the draft needs.
-            let mut frame = String::from("\x1b7");
-            let last_row = input_bottom(24);
-            let block_top = last_row.saturating_sub(INPUT_ROWS) + 1;
-            for row in block_top..=last_row {
-                use std::fmt::Write as _;
-                let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
-            }
-            for row in block_top..=last_row {
-                assert!(
-                    frame.contains(&format!("\x1b[{row};1H\x1b[2K")),
-                    "row {row} must be cleared"
-                );
-            }
-            assert_eq!(
-                block_top,
-                last_row - INPUT_ROWS + 1,
-                "the block is the input's own rows"
-            );
-        }
-
-        #[test]
-        fn the_box_and_the_hint_survive_a_long_question() {
-            // The block is six rows shared by four things, and a question that
-            // filled it pushed the box off the screen: the answer had nowhere to
-            // be typed, which is what the person hit when the box "stuck".
-            let style = Style::plain();
-            let asked = Asked {
-                prompt: "why ".repeat(80),
-                choices: (0..12).map(|n| format!("choice {n}")).collect(),
-                cursor: 0,
-                multiple: false,
-                taken: Vec::new(),
-                typing: true,
-            };
-            let buffer = LineBuffer::default();
-            let frame = question_frame(style, 24, &asked, &buffer, 40);
-            let bottom = input_bottom(24);
-            assert!(
-                frame.contains(&format!("\x1b[{};1H", bottom.saturating_sub(1))),
-                "the box has its own row above the hint: {frame:?}"
-            );
-            assert!(
-                frame.contains("answer "),
-                "the box is drawn where the answer is typed: {frame:?}"
-            );
-            assert!(
-                frame.contains(&format!("\x1b[{bottom};1H")),
-                "the hint holds the last row: {frame:?}"
-            );
-            // The row being chosen is always on screen, however long the list.
-            assert!(
-                frame.contains('›'),
-                "the row being chosen is drawn: {frame:?}"
-            );
-        }
-
-        #[test]
-        fn a_long_question_says_what_it_left_out() {
-            // A shortened question that reads as the whole one asks about
-            // something the person was never shown.
-            let style = Style::plain();
-            let asked = Asked {
-                prompt: (0..20)
-                    .map(|n| format!("word{n}"))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                choices: vec!["a".to_owned()],
-                cursor: 0,
-                multiple: false,
-                taken: Vec::new(),
-                typing: false,
-            };
-            let buffer = LineBuffer::default();
-            let frame = question_frame(style, 24, &asked, &buffer, 30);
-            assert!(
-                frame.contains('…'),
-                "the cut is marked, not silent: {frame:?}"
-            );
-        }
-
-        #[test]
-        fn a_long_list_says_how_many_choices_it_did_not_show() {
-            // Twelve choices do not fit in six rows. The ones that do not fit
-            // are still reachable with the arrows, and the hint is where that is
-            // said: a choice nobody is told about is one nobody can pick.
-            let style = Style::plain();
-            let asked = Asked {
-                prompt: "pick one".to_owned(),
-                choices: (0..12).map(|n| format!("choice {n}")).collect(),
-                cursor: 0,
-                multiple: false,
-                taken: Vec::new(),
-                typing: false,
-            };
-            let buffer = LineBuffer::default();
-            let frame = question_frame(style, 24, &asked, &buffer, 40);
-            assert!(
-                frame.contains("more not shown"),
-                "the count of what is hidden is on screen: {frame:?}"
-            );
-        }
-
-        #[test]
-        fn a_long_draft_wraps_instead_of_losing_its_tail() {
-            // It used to be clipped to the width with a `…`, so the end of a
-            // long message was simply not on screen.
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text("abcdefghij");
-            let lines = input_lines(&buffer, 8, 4);
-            assert_eq!(lines.len(), 3, "ten characters at width four: {lines:?}");
-            assert!(lines[0].contains('a'), "{lines:?}");
-            assert!(lines[1].contains('e'), "{lines:?}");
-            assert!(
-                lines[2].contains('i'),
-                "the tail is on its own row: {lines:?}"
-            );
-            assert!(
-                !lines.iter().any(|line| line.contains('…')),
-                "nothing is elided: {lines:?}"
-            );
-        }
-
-        #[test]
-        fn the_wrapped_window_follows_the_cursor() {
-            let mut buffer = LineBuffer::default();
-            buffer.insert_text(&"x".repeat(40));
-            // Two rows of window, width ten: the cursor is on the last row, so
-            // the window shows the last two rows and not the first ones.
-            let lines = input_lines(&buffer, 2, 10);
-            assert_eq!(lines.len(), 2, "{lines:?}");
-            assert!(
-                lines[1].contains("\x1b[7m"),
-                "the cursor row is drawn: {lines:?}"
-            );
         }
 
         #[test]
@@ -3458,16 +2555,6 @@ mod unix {
                 &sender,
             );
             assert_eq!(buffer.text(), "/reasoning auto");
-        }
-
-        #[test]
-        fn footer_clipping_counts_visible_columns_and_keeps_styles() {
-            // Six visible characters plus two escape sequences.
-            let text = "\x1b[2mabcdef\x1b[0m";
-            assert_eq!(clip_visible(text, 10), text);
-            let clipped = clip_visible(text, 3);
-            assert_eq!(clipped, "\x1b[2mabc…\x1b[0m");
-            assert_eq!(clip_visible("plain", 5), "plain");
         }
     }
 }

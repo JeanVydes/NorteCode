@@ -337,15 +337,38 @@ pub(crate) fn strip_style(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(character) = chars.next() {
-        if character == '\x1b' {
-            for next in chars.by_ref() {
-                if next == 'm' {
-                    break;
-                }
-            }
+        if character != '\x1b' {
+            out.push(character);
             continue;
         }
-        out.push(character);
+        // An escape sequence ends at its final byte, and only `[` and `]`
+        // introduce one that carries parameters. Eating everything up to the
+        // next `m` — which is what this did — swallowed the text between a
+        // cursor move and the colour that followed it, and left the colour's
+        // own parameters behind: `[26;10H154;160;166m` on screen is that
+        // mistake, and it is why a footer came out with escapes in it.
+        match chars.next() {
+            Some('[') => {
+                // CSI: parameters, then a final byte in `@`..`~`.
+                for next in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: runs to BEL or to the ST terminator.
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if next == '\u{7}' || (previous == '\x1b' && next == '\\') {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            // A two-character sequence, or a lone escape at the end.
+            Some(_) | None => {}
+        }
     }
     out
 }

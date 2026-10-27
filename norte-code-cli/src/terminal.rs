@@ -32,7 +32,10 @@
 use std::io::{self, IsTerminal, Write};
 
 use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -88,7 +91,17 @@ impl Guard {
         // Bracketed paste makes a pasted block one event instead of a burst of
         // keystrokes: without it a pasted paragraph arrives as typing and its
         // newlines submit it line by line.
-        let _ = execute!(out, EnableBracketedPaste);
+        //
+        // The keyboard protocol is what makes a modified Enter distinguishable:
+        // a terminal that does not report it sends the same carriage return for
+        // Enter and Shift+Enter, so the newline branch never fires and a draft
+        // can never be more than one line. A terminal that does not support the
+        // sequence ignores it, and the pop on the way out is then a no-op.
+        let _ = execute!(
+            out,
+            EnableBracketedPaste,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
         let screen = Terminal::with_options(
             CrosstermBackend::new(io::stdout()),
             TerminalOptions {
@@ -129,7 +142,12 @@ impl Drop for Guard {
         // still in raw mode and the cursor is still hidden.
         drop(self.screen.take());
         let mut out = io::stdout();
-        let _ = execute!(out, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            out,
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = out.flush();
         let _ = disable_raw_mode();
     }

@@ -22,11 +22,12 @@
 use std::fmt;
 
 /// What a session tab shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SessionTab {
     /// What the session has spent and what it holds, which is where a client
     /// starts: it is the line the footer already carried, given a name so the
     /// other tabs have somewhere to sit beside it.
+    #[default]
     Stats,
     /// The model's task list.
     Todo,

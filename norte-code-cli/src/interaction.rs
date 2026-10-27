@@ -17,6 +17,14 @@ use crate::render::{
 };
 use crate::tabs::SessionTab;
 use norte_code_commands::Invocation;
+/// How often the interface redraws while nothing else is happening, in ms.
+///
+/// It is what keeps a typed character and a spinner on screen. Sixty
+/// milliseconds is more than a terminal needs for either and few enough that a
+/// client at a prompt costs nothing: the frame is diffed against the last one,
+/// so a tick with nothing changed writes nothing.
+const READER_TICK_MS: u64 = 60;
+
 /// The wire's own attachment, named apart from the editor's: they carry the
 /// same three fields today, and they are not the same type — one is what a
 /// keystroke produced and the other is what goes on the wire.
@@ -334,11 +342,11 @@ pub(crate) async fn interactive_loop(
     message_budget: Option<Budget>,
     reasoning: Option<Reasoning>,
 ) -> Result<Option<SessionKey>, String> {
+    // The interactive hint is on screen already: the tabs row and the footer
+    // say what there is, and a line printed above them would be a second
+    // welcome that the frame then draws over.
     if renderer.verbosity.at_least(Verbosity::Medium) {
-        eprintln!(
-            "{}",
-            style.dim("interactive: /help for commands; /compact, /allow, /deny, /refresh, /exit")
-        );
+        let _ = &style;
     }
     let mut request_id = 2_u64;
     // The tabs open on something: without this the tools and MCP rows stay
@@ -347,7 +355,7 @@ pub(crate) async fn interactive_loop(
     refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
     loop {
         let Some((text, attachments)) =
-            read_repl_line(service, session.as_ref(), input, style).await?
+            read_repl_line(service, session.as_ref(), input, renderer, style).await?
         else {
             break;
         };
@@ -355,26 +363,22 @@ pub(crate) async fn interactive_loop(
             None => None,
             Some(Ok(command)) => Some(command),
             Some(Err(message)) => {
-                eprintln!("{}", style.yellow(message));
+                renderer.notice(message);
                 continue;
             }
         };
         if let Some(command) = command {
             match command {
                 ChatCommand::Exit => break,
-                ChatCommand::Help => print_chat_help(style),
+                ChatCommand::Help => print_chat_help(renderer, style),
                 // The report is built now, not at startup: the tools, the model
                 // and the servers are all things that change while the process
                 // runs, so the useful moment to ask is after they have.
                 ChatCommand::Debug => report_debug(service, session.as_ref(), renderer, style),
-                ChatCommand::Tools => report_tools_now(service, session.as_ref(), style),
+                ChatCommand::Tools => report_tools_now(service, session.as_ref(), renderer, style),
                 ChatCommand::Compact => {
                     let Some(current) = session.clone() else {
-                        eprintln!(
-                            "{}",
-                            style
-                                .yellow("there is no session to compact yet; send a message first")
-                        );
+                        renderer.notice("there is no session to compact yet; send a message first");
                         continue;
                     };
                     renderer.mark_working();
@@ -394,18 +398,15 @@ pub(crate) async fn interactive_loop(
                         break;
                     }
                 }
-                ChatCommand::Refresh => report_refresh(service, style).await,
+                ChatCommand::Refresh => report_refresh(service, renderer).await,
                 ChatCommand::Rename { title } => match session.clone() {
                     Some(current) => {
-                        rename_session(service, current, title, renderer, style).await;
+                        rename_session(service, current, title, renderer).await;
                     }
-                    None => eprintln!(
-                        "{}",
-                        style.yellow("there is no session yet; send a message first")
-                    ),
+                    None => renderer.notice("there is no session yet; send a message first"),
                 },
                 ChatCommand::Mcp { action, server } => {
-                    report_mcp(service, action, server.as_deref(), style);
+                    report_mcp(service, action, server.as_deref(), renderer, style);
                     refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
                 }
                 ChatCommand::Approval {
@@ -423,23 +424,20 @@ pub(crate) async fn interactive_loop(
                         } else {
                             "for this session"
                         };
-                        eprintln!("{}", style.green(format!("{verb} `{tool}` {scope}")));
+                        renderer.notice(format!("{verb} `{tool}` {scope}"));
                         // The rule just changed, so the row that counts the
                         // rules is stale until it is rebuilt.
                         refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
                     }
                     Err(error) => {
-                        eprintln!("{}", style.red(format!("could not set the rule: {error}")));
+                        renderer.failure(format!("could not set the rule: {error}"));
                     }
                 },
                 ChatCommand::Reasoning { scope, reasoning } => {
                     if let Some(current) = session.clone() {
-                        run_reasoning(service, current, scope, reasoning, renderer, style).await;
+                        run_reasoning(service, current, scope, reasoning, renderer).await;
                     } else {
-                        eprintln!(
-                            "{}",
-                            style.yellow("there is no session yet; send a message first")
-                        );
+                        renderer.notice("there is no session yet; send a message first");
                     }
                 }
                 // `/tab` is the way to change tabs that does not need a
@@ -448,25 +446,25 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::Tab { target } => {
                     let wanted = match target.as_deref() {
                         None => {
-                            eprintln!(
-                                "{}",
-                                style.dim(format!(
-                                    "tabs: {}",
-                                    SessionTab::ALL
-                                        .iter()
-                                        .map(|tab| format!(
-                                            "{}{}",
-                                            if *tab == renderer.pinned.tab() {
-                                                "*"
-                                            } else {
-                                                " "
-                                            },
-                                            tab.name()
-                                        ))
-                                        .collect::<Vec<_>>()
-                                        .join("  ")
-                                ))
-                            );
+                            // Which tab is showing is state, and the list of
+                            // them is a report: it is read and dismissed.
+                            let lines = vec![format!(
+                                "tabs: {}",
+                                SessionTab::ALL
+                                    .iter()
+                                    .map(|tab| format!(
+                                        "{}{}",
+                                        if *tab == renderer.pinned.tab() {
+                                            "*"
+                                        } else {
+                                            " "
+                                        },
+                                        tab.name()
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join("  ")
+                            )];
+                            renderer.open_modal("tabs", lines);
                             continue;
                         }
                         Some(target) => target
@@ -477,17 +475,14 @@ pub(crate) async fn interactive_loop(
                     };
                     match wanted {
                         Some(tab) => renderer.pinned.set_tab(tab),
-                        None => eprintln!(
-                            "{}",
-                            style.yellow(format!(
-                                "no tab `{target:?}`; use {}",
-                                SessionTab::ALL
-                                    .iter()
-                                    .map(|tab| tab.name())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ))
-                        ),
+                        None => renderer.notice(format!(
+                            "no tab `{target:?}`; use {}",
+                            SessionTab::ALL
+                                .iter()
+                                .map(|tab| tab.name())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
                     }
                 }
                 ChatCommand::Model { model } => {
@@ -501,29 +496,29 @@ pub(crate) async fn interactive_loop(
                             .as_ref()
                             .and_then(|current| provider_of(service, current));
                         let Some(provider) = provider else {
-                            eprintln!(
-                                "{}",
-                                style.yellow("there is no session yet; send a message first")
-                            );
+                            renderer.notice("there is no session yet; send a message first");
                             continue;
                         };
                         let catalog = service.catalog();
-                        eprintln!("{}", style.bold(format!("Models for {provider}:")));
+                        // The model list is a report: it is read and dismissed,
+                        // and as lines of the conversation a catalogue of
+                        // hundreds would bury the work.
+                        let mut lines = vec![format!("Models for {provider}:")];
                         if let Some(p) = catalog.provider(&provider) {
                             let mut models: Vec<String> = p.models.keys().cloned().collect();
                             models.sort();
                             for m in &models {
-                                eprintln!("  {}", style.cyan(m));
+                                lines.push(format!("  {m}"));
                             }
                             if models.is_empty() {
-                                eprintln!("  {}", style.dim("(none in catalogue)"));
+                                lines.push("  (none in catalogue)".to_owned());
                             }
                         } else {
-                            eprintln!(
-                                "  {}",
-                                style.dim("(provider not in catalogue; any model name accepted)")
+                            lines.push(
+                                "  (provider not in catalogue; any model name accepted)".to_owned(),
                             );
                         }
+                        renderer.open_modal(format!("models of {provider}"), lines);
                     } else if let Some(current) = session.clone() {
                         // If model doesn't contain '/', prepend the provider from
                         // the renderer's current model name.
@@ -537,18 +532,15 @@ pub(crate) async fn interactive_loop(
                         } else {
                             let provider = provider_of(service, &current);
                             let Some(provider) = provider else {
-                                eprintln!("{}", style.yellow("the session has no provider yet"));
+                                renderer.notice("the session has no provider yet");
                                 continue;
                             };
                             format!("{provider}/{model}")
                         };
                         renderer.model_name = Some(full_model.clone());
-                        run_model(service, current, full_model, renderer, style).await;
+                        run_model(service, current, full_model, renderer).await;
                     } else {
-                        eprintln!(
-                            "{}",
-                            style.yellow("there is no session yet; send a message first")
-                        );
+                        renderer.notice("there is no session yet; send a message first");
                     }
                 }
                 ChatCommand::Provider { provider } => {
@@ -556,7 +548,7 @@ pub(crate) async fn interactive_loop(
                         // List available providers
                         let catalog = service.catalog();
                         let config = service.config();
-                        eprintln!("{}", style.bold("Providers:"));
+                        let mut lines = vec!["Providers:".to_owned()];
                         let mut providers: Vec<String> =
                             catalog.providers.keys().cloned().collect();
                         for id in config.providers.keys() {
@@ -568,8 +560,9 @@ pub(crate) async fn interactive_loop(
                         for p in &providers {
                             let in_catalog = catalog.provider(p).is_some();
                             let tag = if in_catalog { "catalog" } else { "config" };
-                            eprintln!("  {} ({})", style.cyan(p), style.dim(tag));
+                            lines.push(format!("  {p} ({tag})"));
                         }
+                        renderer.open_modal("providers", lines);
                     } else if let Some(current) = session.clone() {
                         // Switch provider while keeping the current model. The
                         // model is the session's own, read from its spec: the
@@ -580,30 +573,23 @@ pub(crate) async fn interactive_loop(
                             .unwrap_or_else(|| "default".to_owned());
                         let full = format!("{provider}/{model_name}");
                         renderer.model_name = Some(full.clone());
-                        run_model(service, current, full, renderer, style).await;
+                        run_model(service, current, full, renderer).await;
                     } else {
-                        eprintln!(
-                            "{}",
-                            style.yellow("there is no session yet; send a message first")
-                        );
+                        renderer.notice("there is no session yet; send a message first");
                     }
                 }
                 ChatCommand::Revoke { grant } => {
                     if let Some(current) = session.clone() {
-                        run_revoke(service, current, grant, style).await;
+                        run_revoke(service, current, grant, renderer).await;
                     } else {
-                        eprintln!(
-                            "{}",
-                            style.yellow("there is no session yet; send a message first")
-                        );
+                        renderer.notice("there is no session yet; send a message first");
                     }
                 }
                 ChatCommand::Jobs { action, id } => match session.clone() {
-                    Some(current) => report_jobs(service, current, action, id, style).await,
-                    None => eprintln!(
-                        "{}",
-                        style.yellow("there is no session yet; send a message first")
-                    ),
+                    Some(current) => {
+                        report_jobs(service, current, action, id, renderer, style).await;
+                    }
+                    None => renderer.notice("there is no session yet; send a message first"),
                 },
                 // A restart drops the session and starts a fresh one. The
                 // service creates a session on the first message, so clearing
@@ -612,18 +598,17 @@ pub(crate) async fn interactive_loop(
                 // still writing to the session being dropped.
                 ChatCommand::Restart => {
                     session = None;
-                    eprintln!(
-                        "{}",
-                        style.green(
-                            "starting a fresh session; the previous one is saved and can be \
-                             resumed"
-                        )
+                    renderer.notice(
+                        "starting a fresh session; the previous one is saved and can be resumed",
                     );
                 }
             }
             continue;
         }
-        echo_user_message(style, &text);
+        // The message is the conversation, so it goes to the transcript and the
+        // frame draws it where the conversation is. Printed onto the terminal,
+        // it landed on top of the input.
+        renderer.said(&text);
         renderer.mark_working();
         // The first message of a session that has no title is what the title is
         // made from, and it is asked for now so the request runs beside the turn
@@ -677,7 +662,6 @@ async fn run_reasoning(
     scope: ReasoningScope,
     reasoning: Reasoning,
     renderer: &mut Renderer,
-    style: Style,
 ) {
     let kind = ClientRequestKind::SetReasoning {
         session,
@@ -687,22 +671,16 @@ async fn run_reasoning(
     match drain_request(service, kind).await {
         Ok(events) => {
             if let Some(message) = stream_error(&events) {
-                eprintln!(
-                    "{}",
-                    style.red(format!("could not set reasoning: {message}"))
-                );
+                renderer.failure(format!("could not set reasoning: {message}"));
             } else {
                 let label = match scope {
                     ReasoningScope::Session => "for this session",
                     ReasoningScope::Message => "for the next message",
                 };
-                eprintln!(
-                    "{}",
-                    style.green(format!(
-                        "reasoning set to {} {label}",
-                        reasoning_setting_label(&reasoning)
-                    ))
-                );
+                renderer.notice(format!(
+                    "reasoning set to {} {label}",
+                    reasoning_setting_label(&reasoning)
+                ));
                 // The footer carries the effort, so setting it and not showing
                 // it would leave the one place it appears saying the old value.
                 if scope == ReasoningScope::Session {
@@ -710,7 +688,7 @@ async fn run_reasoning(
                 }
             }
         }
-        Err(error) => eprintln!("{}", style.red(format!("could not set reasoning: {error}"))),
+        Err(error) => renderer.failure(format!("could not set reasoning: {error}")),
     }
 }
 
@@ -740,8 +718,7 @@ async fn steer_text(
     service: &Arc<Service>,
     session: SessionKey,
     text: String,
-    style: Style,
-    quiet: bool,
+    renderer: &mut Renderer,
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let outcome = drain_request(
@@ -756,16 +733,17 @@ async fn steer_text(
     match outcome {
         Ok(events) => {
             if let Some(message) = stream_error(&events) {
-                eprintln!("{}", style.red(format!("could not steer: {message}")));
+                renderer.failure(format!("could not steer: {message}"));
                 return None;
             }
-            if !quiet {
-                eprintln!("{}", style.dim("steered into the running turn"));
-            }
+            // The message waits above the input until the engine reports it
+            // applied, so this line says it left and no more than that: a
+            // second notice for a message the person just typed is noise.
+            renderer.notice("steered into the running turn");
             Some(id)
         }
         Err(error) => {
-            eprintln!("{}", style.red(format!("could not steer: {error}")));
+            renderer.failure(format!("could not steer: {error}"));
             None
         }
     }
@@ -818,24 +796,20 @@ async fn handle_live_command(
         // while the model is working.
         ChatCommand::Tab { target } => match tab_target(target.as_deref(), renderer) {
             Ok(tab) => renderer.pinned.set_tab(tab),
-            Err(message) => eprintln!("{}", style.yellow(message)),
+            Err(message) => renderer.notice(message),
         },
-        ChatCommand::Exit => eprintln!(
-            "{}",
-            style.yellow("wait until the current turn finishes, then /exit")
-        ),
-        ChatCommand::Help => print_chat_help(style),
+        ChatCommand::Exit => renderer.notice("wait until the current turn finishes, then /exit"),
+        ChatCommand::Help => print_chat_help(renderer, style),
         // The report needs no turn boundary: it reads state that is already
         // settled, so it is the one command that works mid-turn.
         ChatCommand::Debug => report_debug(service, current, renderer, style),
-        ChatCommand::Tools => report_tools_now(service, current, style),
-        ChatCommand::Compact => eprintln!(
-            "{}",
-            style.yellow("wait until the current turn finishes, then /compact")
-        ),
-        ChatCommand::Refresh => report_refresh(service, style).await,
+        ChatCommand::Tools => report_tools_now(service, current, renderer, style),
+        ChatCommand::Compact => {
+            renderer.notice("wait until the current turn finishes, then /compact");
+        }
+        ChatCommand::Refresh => report_refresh(service, renderer).await,
         ChatCommand::Mcp { action, server } => {
-            report_mcp(service, action, server.as_deref(), style);
+            report_mcp(service, action, server.as_deref(), renderer, style);
             refresh_tab_summaries(service, current, &renderer.pinned, style);
         }
         ChatCommand::Approval {
@@ -853,28 +827,22 @@ async fn handle_live_command(
                 } else {
                     "for this session"
                 };
-                eprintln!("{}", style.green(format!("{verb} `{tool}` {scope}")));
+                renderer.notice(format!("{verb} `{tool}` {scope}"));
             }
-            Err(error) => eprintln!("{}", style.red(format!("could not set the rule: {error}"))),
+            Err(error) => renderer.failure(format!("could not set the rule: {error}")),
         },
         ChatCommand::Reasoning { scope, reasoning } => {
             if let Some(session) = current {
-                run_reasoning(service, session.clone(), scope, reasoning, renderer, style).await;
+                run_reasoning(service, session.clone(), scope, reasoning, renderer).await;
             } else {
-                eprintln!(
-                    "{}",
-                    style.yellow("the session is not ready yet; try again")
-                );
+                renderer.notice("the session is not ready yet; try again");
             }
         }
         ChatCommand::Model { model } => {
             if let Some(session) = current {
-                run_model(service, session.clone(), model, renderer, style).await;
+                run_model(service, session.clone(), model, renderer).await;
             } else {
-                eprintln!(
-                    "{}",
-                    style.yellow("the session is not ready yet; try again")
-                );
+                renderer.notice("the session is not ready yet; try again");
             }
         }
         // A provider switch is a model switch: the same request, with the
@@ -884,10 +852,7 @@ async fn handle_live_command(
         // wait for the current one to end and then remember to ask again.
         ChatCommand::Provider { provider } => {
             if provider.is_empty() {
-                eprintln!(
-                    "{}",
-                    style.yellow("wait until the current turn finishes, then /provider")
-                );
+                renderer.notice("wait until the current turn finishes, then /provider");
             } else if let Some(session) = current {
                 let model_name =
                     model_name_of(service, session).unwrap_or_else(|| "default".to_owned());
@@ -896,42 +861,36 @@ async fn handle_live_command(
                     session.clone(),
                     format!("{provider}/{model_name}"),
                     renderer,
-                    style,
                 )
                 .await;
             } else {
-                eprintln!(
-                    "{}",
-                    style.yellow("the session is not ready yet; try again")
-                );
+                renderer.notice("the session is not ready yet; try again");
             }
         }
         ChatCommand::Revoke { grant } => {
             if let Some(session) = current {
-                run_revoke(service, session.clone(), grant, style).await;
+                run_revoke(service, session.clone(), grant, renderer).await;
             } else {
-                eprintln!(
-                    "{}",
-                    style.yellow("the session is not ready yet; try again")
-                );
+                renderer.notice("the session is not ready yet; try again");
             }
         }
         ChatCommand::Jobs { action, id } => match current {
-            Some(session) => report_jobs(service, session.clone(), action, id, style).await,
-            None => eprintln!("{}", style.yellow("no session yet; send a message first")),
+            Some(session) => {
+                report_jobs(service, session.clone(), action, id, renderer, style).await;
+            }
+            None => renderer.notice("no session yet; send a message first"),
         },
         // A restart ends the session, so it cannot wait for the turn; the
         // turn loop does it, where the boundary is known.
         ChatCommand::Rename { title } => match current {
-            Some(current) => rename_session(service, current.clone(), title, renderer, style).await,
-            None => eprintln!("{}", style.yellow("no session yet; send a message first")),
+            Some(current) => rename_session(service, current.clone(), title, renderer).await,
+            None => renderer.notice("no session yet; send a message first"),
         },
         // A restart ends the session, so it cannot wait for the turn; the
         // turn loop does it, where the boundary is known.
-        ChatCommand::Restart => eprintln!(
-            "{}",
-            style.yellow("wait until the current turn finishes, then /restart")
-        ),
+        ChatCommand::Restart => {
+            renderer.notice("wait until the current turn finishes, then /restart");
+        }
     }
 }
 
@@ -946,22 +905,18 @@ async fn rename_session(
     session: SessionKey,
     title: Option<String>,
     renderer: &mut Renderer,
-    style: Style,
 ) {
     // Nothing typed, so the model picks the name. It is the same request the
     // first message triggers, asked late: the session already has the history
     // to read from, and the answer is worth waiting for here.
     let Some(title) = title else {
-        eprintln!("{}", style.dim("asking the model for a name…"));
+        renderer.notice("asking the model for a name…");
         match service.retitle_session(&session).await {
             Ok(title) => {
                 renderer.set_title(title.clone());
-                eprintln!("{}", style.green(format!("named `{title}`")));
+                renderer.notice(format!("named `{title}`"));
             }
-            Err(error) => eprintln!(
-                "{}",
-                style.red(format!("could not name the session: {error}"))
-            ),
+            Err(error) => renderer.failure(format!("could not name the session: {error}")),
         }
         return;
     };
@@ -970,7 +925,7 @@ async fn rename_session(
     // listens for.
     let title = title.trim().to_owned();
     if title.is_empty() {
-        eprintln!("{}", style.yellow("usage: /rename <title>  or  /rename"));
+        renderer.notice("usage: /rename <title>  or  /rename");
         return;
     }
     let request = ClientRequestKind::RenameSession {
@@ -980,13 +935,13 @@ async fn rename_session(
     match drain_request(service, request).await {
         Ok(events) => {
             if let Some(error) = stream_error(&events) {
-                eprintln!("{}", style.red(format!("could not rename: {error}")));
+                renderer.failure(format!("could not rename: {error}"));
             } else {
                 renderer.set_title(title.clone());
-                eprintln!("{}", style.green(format!("named `{title}`")));
+                renderer.notice(format!("named `{title}`"));
             }
         }
-        Err(error) => eprintln!("{}", style.red(format!("could not rename: {error}"))),
+        Err(error) => renderer.failure(format!("could not rename: {error}")),
     }
 }
 
@@ -1001,10 +956,16 @@ async fn rename_session(
 ///
 /// It goes to stderr with the other diagnostics, not into the answer: it is
 /// what the person asked the client, not what the model said.
-fn report_tools_now(service: &Arc<Service>, session: Option<&SessionKey>, style: Style) {
-    for line in report_tool_rules(style, service, session) {
-        eprintln!("{line}");
-    }
+fn report_tools_now(
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    renderer: &mut Renderer,
+    style: Style,
+) {
+    // A report is a panel and not a print: the frame owns the terminal, and
+    // lines written onto it land on top of the conversation.
+    let lines = report_tool_rules(style, service, session);
+    renderer.open_modal("tools", lines);
 }
 
 /// Rebuilds the one-row summaries the tools and MCP tabs show.
@@ -1026,7 +987,7 @@ fn refresh_tab_summaries(
 fn report_debug(
     service: &Arc<Service>,
     session: Option<&SessionKey>,
-    renderer: &Renderer,
+    renderer: &mut Renderer,
     style: Style,
 ) {
     let config = service.config();
@@ -1062,9 +1023,9 @@ fn report_debug(
         .clone()
         .unwrap_or_else(|| "(not resolved yet)".to_owned());
     lines.extend(report_reasoning(style, &effort));
-    for line in lines {
-        eprintln!("{line}");
-    }
+    // The whole report is one panel: it is what the process knows about itself,
+    // asked for and dismissed, and it does not belong in the conversation.
+    renderer.open_modal("debug", lines);
 }
 
 /// Asks for a new limit after the budget stopped the turn.
@@ -1076,19 +1037,16 @@ async fn prompt_budget_limit(
     session: &SessionKey,
     input: &mut InteractiveInput,
     interrupts: &mut mpsc::Receiver<()>,
-    style: Style,
+    renderer: &mut Renderer,
     prompt: BudgetPrompt,
 ) -> Result<Option<f64>, String> {
-    eprintln!(
-        "{}",
-        style.yellow(format!(
-            "budget exhausted for the {} ({} of {} {}); enter a new limit, or leave it empty to stop",
-            scope_name(prompt.scope),
-            format_measure(prompt.unit, prompt.spent),
-            format_measure(prompt.unit, prompt.limit),
-            unit_name(prompt.unit)
-        ))
-    );
+    renderer.notice(format!(
+        "budget exhausted for the {} ({} of {} {}); enter a new limit, or leave it empty to stop",
+        scope_name(prompt.scope),
+        format_measure(prompt.unit, prompt.spent),
+        format_measure(prompt.unit, prompt.limit),
+        unit_name(prompt.unit)
+    ));
     loop {
         match prompt_input("new limit> ", input, interrupts).await? {
             PromptInput::Line(line) => {
@@ -1101,12 +1059,9 @@ async fn prompt_budget_limit(
                 match parse_budget_limit(prompt.unit, line) {
                     Ok(limit) => return Ok(Some(limit)),
                     Err(error) => {
-                        eprintln!("{}", style.yellow(error));
-                        eprintln!(
-                            "{}",
-                            style.dim("that is not a limit; it is steered into the session")
-                        );
-                        steer_text(service, session.clone(), line.to_owned(), style, true).await;
+                        renderer.notice(error);
+                        renderer.notice("that is not a limit; it is steered into the session");
+                        steer_text(service, session.clone(), line.to_owned(), renderer).await;
                     }
                 }
             }
@@ -1164,7 +1119,6 @@ async fn run_model(
     session: SessionKey,
     model: String,
     renderer: &mut Renderer,
-    style: Style,
 ) {
     // Cloned: the refresh below needs the key after the request consumed it.
     let key = session.clone();
@@ -1175,7 +1129,7 @@ async fn run_model(
                 match event.kind {
                     ServerEventKind::ModelChanged { model } => {
                         reported = true;
-                        eprintln!("{}", style.green(format!("model set to {model}")));
+                        renderer.notice(format!("model set to {model}"));
                         // A new model can refuse the effort in force — the
                         // service downgrades it to one the model declares — so
                         // the value the footer shows is recomputed rather than
@@ -1184,28 +1138,22 @@ async fn run_model(
                     }
                     ServerEventKind::ModelQueued { model } => {
                         reported = true;
-                        eprintln!(
-                            "{}",
-                            style.yellow(format!(
-                                "model switch to {model} queued for the next turn boundary"
-                            ))
-                        );
+                        renderer.notice(format!(
+                            "model switch to {model} queued for the next turn boundary"
+                        ));
                     }
                     ServerEventKind::Error { message, .. } => {
                         reported = true;
-                        eprintln!(
-                            "{}",
-                            style.red(format!("could not switch model: {message}"))
-                        );
+                        renderer.failure(format!("could not switch model: {message}"));
                     }
                     _ => {}
                 }
             }
             if !reported {
-                eprintln!("{}", style.yellow("the model switch was not acknowledged"));
+                renderer.notice("the model switch was not acknowledged");
             }
         }
-        Err(error) => eprintln!("{}", style.red(format!("could not switch model: {error}"))),
+        Err(error) => renderer.failure(format!("could not switch model: {error}")),
     }
 }
 
@@ -1213,23 +1161,25 @@ async fn run_revoke(
     service: &Arc<Service>,
     session: SessionKey,
     grant: Option<String>,
-    style: Style,
+    renderer: &mut Renderer,
 ) {
     let grants = match fetch_grants(service, session.clone()).await {
         Ok(grants) => grants,
         Err(error) => {
-            eprintln!("{}", style.red(format!("could not list grants: {error}")));
+            renderer.failure(format!("could not list grants: {error}"));
             return;
         }
     };
     let Some(choice) = grant else {
         if grants.is_empty() {
-            eprintln!("{}", style.dim("no approval grants"));
+            renderer.notice("no approval grants");
             return;
         }
-        eprintln!("{}", style.bold("approval grants"));
+        // The listing is a report: it is read and dismissed, and as lines of
+        // the conversation it would push the work away.
+        let mut lines = vec!["approval grants".to_owned()];
         for grant in grants {
-            eprintln!(
+            lines.push(format!(
                 "  {}{}  tool {}  {}  approval {}  issued {}",
                 crate::text::terminal(&grant.grant),
                 if grant.revoked { " (revoked)" } else { "" },
@@ -1237,8 +1187,9 @@ async fn run_revoke(
                 grant_scope_label(grant.scope),
                 crate::text::terminal(&grant.approval),
                 crate::text::terminal(&grant.issued_at),
-            );
+            ));
         }
+        renderer.open_modal("approval grants", lines);
         return;
     };
     let matching: Vec<_> = grants
@@ -1248,21 +1199,15 @@ async fn run_revoke(
     let found = match matching.as_slice() {
         [grant] => *grant,
         [] => {
-            eprintln!(
-                "{}",
-                style.yellow(format!(
-                    "no active grant matches `{choice}`; use /revoke to list grants"
-                ))
-            );
+            renderer.notice(format!(
+                "no active grant matches `{choice}`; use /revoke to list grants"
+            ));
             return;
         }
         _ => {
-            eprintln!(
-                "{}",
-                style.yellow(format!(
-                    "`{choice}` matches more than one grant; use the full grant id"
-                ))
-            );
+            renderer.notice(format!(
+                "`{choice}` matches more than one grant; use the full grant id"
+            ));
             return;
         }
     };
@@ -1279,10 +1224,10 @@ async fn run_revoke(
     .await
     {
         Ok(events) => match stream_error(&events) {
-            Some(message) => eprintln!("{}", style.red(format!("could not revoke: {message}"))),
-            None => eprintln!("{}", style.green(format!("grant {grant} revoked"))),
+            Some(message) => renderer.failure(format!("could not revoke: {message}")),
+            None => renderer.notice(format!("grant {grant} revoked")),
         },
-        Err(error) => eprintln!("{}", style.red(format!("could not revoke: {error}"))),
+        Err(error) => renderer.failure(format!("could not revoke: {error}")),
     }
 }
 
@@ -1311,6 +1256,7 @@ async fn report_jobs(
     session: SessionKey,
     action: JobListAction,
     id: Option<String>,
+    renderer: &mut Renderer,
     style: Style,
 ) {
     match action {
@@ -1333,91 +1279,84 @@ async fn report_jobs(
                         }
                     }
                     match stopped {
-                        Some(0) => eprintln!(
-                            "{}",
-                            style.yellow(match &id {
-                                Some(id) => format!("no running job `{id}`"),
-                                None => "no background job was running".to_owned(),
-                            })
-                        ),
-                        Some(count) => eprintln!(
-                            "{}",
-                            style.green(format!("stopped {count} background job(s)"))
-                        ),
-                        None => eprintln!("{}", style.yellow("the jobs could not be stopped")),
+                        Some(0) => renderer.notice(match &id {
+                            Some(id) => format!("no running job `{id}`"),
+                            None => "no background job was running".to_owned(),
+                        }),
+                        Some(count) => {
+                            renderer.notice(format!("stopped {count} background job(s)"));
+                        }
+                        None => renderer.notice("the jobs could not be stopped"),
                     }
                 }
-                Err(error) => eprintln!(
-                    "{}",
-                    style.yellow(format!("warning: could not stop the jobs: {error}"))
-                ),
+                Err(error) => renderer.notice(format!("warning: could not stop the jobs: {error}")),
             }
         }
         JobListAction::List | JobListAction::Check => {
             let jobs = match fetch_jobs(service, session).await {
                 Ok(jobs) => jobs,
                 Err(error) => {
-                    eprintln!("{}", style.red(format!("could not list the jobs: {error}")));
+                    renderer.failure(format!("could not list the jobs: {error}"));
                     return;
                 }
             };
             if let (JobListAction::Check, Some(id)) = (&action, &id) {
                 match jobs.iter().find(|job| &job.id == id) {
-                    Some(job) => print_job(job, style),
-                    None => eprintln!(
-                        "{}",
-                        style.yellow(format!("no job `{id}`; /jobs lists the ones there are"))
-                    ),
+                    Some(job) => print_job(job, renderer, style),
+                    None => {
+                        renderer.notice(format!("no job `{id}`; /jobs lists the ones there are"));
+                    }
                 }
             } else {
                 if jobs.is_empty() {
-                    eprintln!("{}", style.dim("no background jobs in this session"));
+                    renderer.notice("no background jobs in this session");
                     return;
                 }
-                eprintln!(
-                    "{}",
-                    style.bold(format!("{} background job(s)", jobs.len()))
-                );
+                // The listing is a report: it is read and dismissed.
+                let mut lines = vec![format!("{} background job(s)", jobs.len())];
                 for job in &jobs {
-                    eprintln!(
+                    lines.push(format!(
                         "  {} {} {}",
                         crate::text::terminal(&job.id),
-                        job_state_label(&job.state, style),
-                        style.dim(&job.script)
-                    );
+                        job_state_label(&job.state, crate::style::Style::plain()),
+                        job.script
+                    ));
                 }
+                renderer.open_modal("background jobs", lines);
             }
         }
     }
 }
 
 /// One job, with what it has written.
-fn print_job(job: &JobInfo, style: Style) {
-    eprintln!(
+fn print_job(job: &JobInfo, renderer: &mut Renderer, style: Style) {
+    let _ = style;
+    let mut lines = vec![format!(
         "{} {}{} ({} ms)",
         crate::text::terminal(&job.id),
-        job_state_label(&job.state, style),
+        job_state_label(&job.state, crate::style::Style::plain()),
         match job.exit_code {
             Some(code) => format!(", exit {code}"),
             None => String::new(),
         },
         job.elapsed_ms
-    );
-    eprintln!("  {}", style.dim(&job.script));
+    )];
+    lines.push(format!("  {}", job.script));
     if job.timed_out {
-        eprintln!("  {}", style.yellow("it reached its time bound"));
+        lines.push("  it reached its time bound".to_owned());
     }
     if job.dropped {
-        eprintln!(
-            "  {}",
-            style.yellow("older output was dropped to stay within the buffer")
-        );
+        lines.push("  older output was dropped to stay within the buffer".to_owned());
     }
     if job.output.is_empty() {
-        eprintln!("  {}", style.dim("(no output yet)"));
+        lines.push("  (no output yet)".to_owned());
         return;
     }
-    eprintln!("{}", crate::text::terminal(&job.output));
+    lines.push(String::new());
+    for line in crate::text::terminal(&job.output).lines() {
+        lines.push(line.to_owned());
+    }
+    renderer.open_modal(format!("job {}", job.id), lines);
 }
 
 /// The state of a job as it is printed.
@@ -1548,25 +1487,19 @@ fn stream_error(events: &[ServerEvent]) -> Option<String> {
 /// are the three things that can change underneath a running agent, so one
 /// command covers them: what a person means by "refresh" is not one of the
 /// three, and asking them to remember which is which was the mistake.
-async fn report_refresh(service: &Arc<Service>, style: Style) {
-    report_reload(service, style);
+async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
+    report_reload(service, renderer);
     let count = service.refresh_skills();
-    eprintln!("{}", style.green(format!("skills refreshed: {count}")));
+    renderer.notice(format!("skills refreshed: {count}"));
     let recovered = service.retry_mcp().await;
     match recovered {
         0 => {
             let failed = service.mcp_failures();
             if !failed.is_empty() {
-                eprintln!(
-                    "{}",
-                    style.yellow(format!("{} mcp server(s) still unreachable", failed.len()))
-                );
+                renderer.notice(format!("{} mcp server(s) still unreachable", failed.len()));
             }
         }
-        count => eprintln!(
-            "{}",
-            style.green(format!("mcp server(s) connected: {count}"))
-        ),
+        count => renderer.notice(format!("mcp server(s) connected: {count}")),
     }
 }
 
@@ -1575,103 +1508,65 @@ async fn report_refresh(service: &Arc<Service>, style: Style) {
 /// A server's tools ride in every prompt, so the count is worth seeing; a server
 /// that is off keeps its process, which is what makes turning it back on
 /// instant.
-fn report_mcp(service: &Arc<Service>, action: McpAction, server: Option<&str>, style: Style) {
+fn report_mcp(
+    service: &Arc<Service>,
+    action: McpAction,
+    server: Option<&str>,
+    renderer: &mut Renderer,
+    style: Style,
+) {
     if let Some(name) = server {
         let active = action == McpAction::Enable;
         match service.set_mcp_active(name, active) {
             Some(state) => {
                 let word = if state { "enabled" } else { "disabled" };
-                eprintln!("{}", style.green(format!("mcp server `{name}` {word}")));
+                // Turning a server on or off is something that happened, so it
+                // is a line of the conversation and not a panel: the person
+                // wants to see it was done and carry on.
+                renderer.notice(format!("mcp server `{name}` {word}"));
                 if !state {
-                    eprintln!(
-                        "{}",
-                        style.dim("its tools leave the next turn; the process stays up")
-                    );
+                    renderer.notice("its tools leave the next turn; the process stays up");
                 }
             }
-            None => eprintln!(
-                "{}",
-                style.yellow(format!("no mcp server named `{name}` connected"))
-            ),
+            None => renderer.failure(format!("no mcp server named `{name}` connected")),
         }
         return;
     }
 
-    let status = service.mcp_status();
-    if status.is_empty() {
-        eprintln!("{}", style.dim("no MCP server connected"));
+    // The listing is a report: it is read and dismissed, and as lines of the
+    // conversation it would push the work away.
+    let lines = render_mcp(style, service);
+    if lines.is_empty() {
+        renderer.notice("no MCP server connected");
         return;
     }
-    for server in &status {
-        let mark = if server.active {
-            style.green("on")
-        } else {
-            style.faint("off")
-        };
-        eprintln!(
-            "{} {} {} {}",
-            mark,
-            style.bold(server.name.clone()),
-            style.dim(server.command.clone()),
-            style.dim(format!("{} tool(s)", server.tools.len()))
-        );
-        if server.active {
-            for tool in &server.tools {
-                eprintln!("  {}", style.dim(tool.clone()));
-            }
-        }
-        for warning in &server.filtered {
-            eprintln!("  {}", style.yellow(warning.clone()));
-        }
-    }
-}
-
-/// Echoes a message the human sent into the transcript, above the footer.
-pub(crate) fn echo_user_message(style: Style, text: &str) {
-    let mut lines = text.lines();
-    match lines.next() {
-        Some(first) => eprintln!("{} {}", style.cyan("›"), first),
-        None => eprintln!("{}", style.cyan("›")),
-    }
-    for line in lines {
-        eprintln!("  {}", crate::text::terminal(line));
-    }
+    renderer.open_modal("mcp servers", lines);
 }
 
 /// Re-reads the configuration and reports what happened.
 ///
 /// The per-session rules and the model a session already resolved are session
 /// state and are not rebuilt, so the notice names what needs a new session.
-fn report_reload(service: &Arc<Service>, style: Style) {
+fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
     match service.reload_config() {
         Ok(reloaded) => {
-            eprintln!(
-                "{}",
-                style.green(format!(
-                    "configuration reloaded ({} providers)",
-                    reloaded.config.providers.len()
-                ))
-            );
+            renderer.notice(format!(
+                "configuration reloaded ({} providers)",
+                reloaded.config.providers.len()
+            ));
             for warning in &reloaded.warnings {
-                eprintln!(
-                    "{}",
-                    style.yellow(format!(
-                        "warning: unknown config key `{}`",
-                        crate::text::terminal(warning)
-                    ))
-                );
+                renderer.notice(format!(
+                    "warning: unknown config key `{}`",
+                    crate::text::terminal(warning)
+                ));
             }
-            eprintln!(
-                "{}",
-                style.dim(
-                    "the open session keeps its model and its rules; a new session uses the new default"
-                )
+            renderer.notice(
+                "the open session keeps its model and its rules; a new session uses the new default",
             );
         }
-        Err(error) => eprintln!(
-            "{}",
-            style.red(format!("could not reload the configuration: {error}"))
-        ),
+        Err(error) => {
+            renderer.failure(format!("could not reload the configuration: {error}"));
+        }
     }
 }
 
@@ -1681,9 +1576,13 @@ fn report_reload(service: &Arc<Service>, style: Style) {
 /// command that is listed and the two cannot drift. The usage column is
 /// measured from the lines themselves rather than being a number kept beside
 /// them: a command that grows an argument would push the summaries out of line.
-pub(crate) fn print_chat_help(style: Style) {
+pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
     let registry = crate::commands_registry::registry();
-    eprintln!("{}", style.bold("chat commands"));
+    let mut lines = vec![style.bold("chat commands")];
+    // The width the usage lines share, so the summaries line up and the list
+    // reads down rather than across. It is measured from the lines themselves
+    // instead of being a number kept beside them: a command that grows an
+    // argument would otherwise push its summary out of line.
     let usages: Vec<String> = registry
         .commands()
         .iter()
@@ -1691,27 +1590,17 @@ pub(crate) fn print_chat_help(style: Style) {
         .collect();
     let width = usages.iter().map(String::len).max().unwrap_or(0);
     for (spec, usage) in registry.commands().iter().zip(&usages) {
-        eprintln!(
-            "  {}  {}",
-            style.cyan(format!("{usage:<width$}")),
-            style.dim(spec.summary.clone())
-        );
+        lines.push(format!("{usage:<width$}  {}", spec.summary));
+        // An alias is a name a person may type, so it is named where the
+        // command it belongs to is named.
         if !spec.aliases.is_empty() {
-            eprintln!(
-                "  {}  {}",
-                " ".repeat(width),
-                style.dim(format!("(also {})", spec.aliases.join(", ")))
-            );
+            lines.push(format!("{:width$}  (also {})", "", spec.aliases.join(", ")));
         }
     }
-    eprintln!(
-        "{}",
-        style.dim("  text typed while a turn runs is steered into that turn")
-    );
-    eprintln!(
-        "{}",
-        style.dim("  an approval scope defaults to session; global writes the user config")
-    );
+    lines.push(String::new());
+    lines.push("text typed while a turn runs is steered into that turn".to_owned());
+    lines.push("an approval scope defaults to session; global writes the user config".to_owned());
+    renderer.open_modal("help", lines);
 }
 
 /// Prints the interactive prompt and waits for the next message.
@@ -1727,24 +1616,33 @@ pub(crate) async fn read_repl_line(
     service: &Arc<Service>,
     session: Option<&SessionKey>,
     input: &mut InteractiveInput,
+    renderer: &mut Renderer,
     style: Style,
 ) -> Result<Option<(String, Vec<Attachment>)>, String> {
     let _ = style;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(READER_TICK_MS));
     loop {
         let event = tokio::select! {
             biased;
             // A signal can still arrive from outside the terminal, so it keeps
             // its old meaning: leave the loop.
             _ = tokio::signal::ctrl_c() => {
-                eprintln!();
                 return Ok(None);
             }
             event = input.recv() => event,
+            // The tick is what keeps a typed character on screen: a keystroke
+            // is not a server event, so without a clock the draft would appear
+            // only when something else happened to arrive.
+            _ = tick.tick() => {
+                renderer.draw()?;
+                continue;
+            }
         };
+        // A keystroke changed the draft, and the draft is what the frame shows.
+        renderer.draw()?;
         let (line, attachments) = match event {
             Some(EditorEvent::Line(line, attachments)) => (line, attachments),
             Some(EditorEvent::End) | None => {
-                eprintln!();
                 return Ok(None);
             }
             Some(EditorEvent::Action(EditorAction::CancelJobs)) => {
@@ -1752,10 +1650,9 @@ pub(crate) async fn read_repl_line(
                 else {
                     // No job to stop: the key means what it always meant at the
                     // prompt, which is to leave.
-                    eprintln!();
                     return Ok(None);
                 };
-                stop_jobs(service, session.clone(), style).await;
+                stop_jobs(service, session.clone(), renderer).await;
                 continue;
             }
             // Nothing is running at the prompt, so nothing to cancel or detach.
@@ -1776,7 +1673,11 @@ pub(crate) async fn read_repl_line(
 }
 
 /// Stops every background job of the session, and reports what it reached.
-pub(crate) async fn stop_jobs(service: &Arc<Service>, session: SessionKey, style: Style) {
+pub(crate) async fn stop_jobs(
+    service: &Arc<Service>,
+    session: SessionKey,
+    renderer: &mut Renderer,
+) {
     let request = ClientRequest {
         request_id: 0,
         kind: ClientRequestKind::StopJobs { session, id: None },
@@ -1790,18 +1691,12 @@ pub(crate) async fn stop_jobs(service: &Arc<Service>, session: SessionKey, style
                 }
             }
             match stopped {
-                Some(0) => eprintln!("{}", style.yellow("no background job was running")),
-                Some(count) => eprintln!(
-                    "{}",
-                    style.yellow(format!("stopped {count} background job(s)"))
-                ),
-                None => eprintln!("{}", style.yellow("the jobs could not be stopped")),
+                Some(0) => renderer.notice("no background job was running"),
+                Some(count) => renderer.notice(format!("stopped {count} background job(s)")),
+                None => renderer.notice("the jobs could not be stopped"),
             }
         }
-        Err(error) => eprintln!(
-            "{}",
-            style.yellow(format!("warning: could not stop the jobs: {error}"))
-        ),
+        Err(error) => renderer.notice(format!("warning: could not stop the jobs: {error}")),
     }
 }
 
@@ -1941,18 +1836,15 @@ pub(crate) async fn drive_turns_titled(
                             EditorAction::CancelTurn => {
                                 if let Some(session) = current.clone() {
                                     renderer.mark_cancelled();
-                                    eprintln!("{}", style.yellow("cancelling the running turn…"));
+                                    renderer.notice("cancelling the running turn…");
                                     let request = ClientRequest {
                                         request_id: 0,
                                         kind: ClientRequestKind::CancelTurn { session },
                                     };
                                     if let Err(error) = service.submit(request).await {
-                                        eprintln!(
-                                            "{}",
-                                            style.yellow(format!(
-                                                "warning: could not cancel the turn: {error}"
-                                            ))
-                                        );
+                                        renderer.notice(format!(
+                                            "warning: could not cancel the turn: {error}"
+                                        ));
                                     }
                                 }
                                 continue;
@@ -1966,10 +1858,10 @@ pub(crate) async fn drive_turns_titled(
                                     continue;
                                 };
                                 if !service.has_running_jobs(&session) {
-                                    eprintln!("{}", style.dim("no background job is running"));
+                                    renderer.notice("no background job is running");
                                     continue;
                                 }
-                                stop_jobs(service, session, style).await;
+                                stop_jobs(service, session, renderer).await;
                                 continue;
                             }
                             EditorAction::Detach => {
@@ -1981,12 +1873,9 @@ pub(crate) async fn drive_turns_titled(
                                     kind: ClientRequestKind::DetachTurn { session },
                                 };
                                 if let Err(error) = service.submit(request).await {
-                                    eprintln!(
-                                        "{}",
-                                        style.yellow(format!(
-                                            "warning: could not detach the turn: {error}"
-                                        ))
-                                    );
+                                    renderer.notice(format!(
+                                        "warning: could not detach the turn: {error}"
+                                    ));
                                 }
                                 continue;
                             }
@@ -1997,28 +1886,20 @@ pub(crate) async fn drive_turns_titled(
                             continue;
                         };
                         if cancel_requested {
-                            eprintln!("{}", style.red("interrupted; forcing exit"));
                             return Err("interrupted".to_owned());
                         }
                         cancel_requested = true;
                         renderer.mark_cancelled();
-                        eprintln!("{}", style.yellow("cancelling the running turn…"));
-                        eprintln!(
-                        "  {}",
-                        style.dim(
-                            "the running tool is being stopped; press Ctrl-C again to force quit"
-                        )
-                    );
+                        renderer.notice("cancelling the running turn…");
+                        renderer.notice(
+                            "the running tool is being stopped; press Ctrl-C again to force quit",
+                        );
                         let request = ClientRequest {
                             request_id: 0,
                             kind: ClientRequestKind::CancelTurn { session },
                         };
                         if let Err(error) = service.submit(request).await {
-                            eprintln!(
-                                "{}",
-                                style
-                                    .yellow(format!("warning: could not cancel the turn: {error}"))
-                            );
+                            renderer.notice(format!("warning: could not cancel the turn: {error}"));
                         }
                         continue;
                     }
@@ -2032,12 +1913,9 @@ pub(crate) async fn drive_turns_titled(
                         // it. An attachment typed mid-turn is said rather than
                         // dropped: the next message can carry it.
                         if !attachments.is_empty() {
-                            eprintln!(
-                                "{}",
-                                style.yellow(
-                                    "an attached file cannot be steered into a running turn; \
-                                     send it with the next message"
-                                )
+                            renderer.notice(
+                                "an attached file cannot be steered into a running turn; \
+                                 send it with the next message",
                             );
                         }
                         match parse_chat_command(&text) {
@@ -2051,13 +1929,10 @@ pub(crate) async fn drive_turns_titled(
                                 )
                                 .await;
                             }
-                            Some(Err(message)) => eprintln!("{}", style.yellow(message)),
+                            Some(Err(message)) => renderer.notice(message),
                             None => {
                                 let Some(session) = current.clone() else {
-                                    eprintln!(
-                                        "{}",
-                                        style.yellow("the session is not ready yet; try again")
-                                    );
+                                    renderer.notice("the session is not ready yet; try again");
                                     continue;
                                 };
                                 // The message is not in the history until the
@@ -2066,14 +1941,8 @@ pub(crate) async fn drive_turns_titled(
                                 // human can still see what they sent, and moves
                                 // into the transcript when the engine reports
                                 // that it landed.
-                                if let Some(id) = steer_text(
-                                    service,
-                                    session,
-                                    text.clone(),
-                                    style,
-                                    !renderer.verbosity.at_least(Verbosity::Medium),
-                                )
-                                .await
+                                if let Some(id) =
+                                    steer_text(service, session, text.clone(), renderer).await
                                 {
                                     steered.push((id, text));
                                     let waiting: Vec<String> =
@@ -2099,10 +1968,7 @@ pub(crate) async fn drive_turns_titled(
                     }
                     Wake::Title(Err(error)) => {
                         if renderer.verbosity.at_least(Verbosity::High) {
-                            eprintln!(
-                                "{}",
-                                style.dim(format!("could not name the session: {error}"))
-                            );
+                            renderer.notice(format!("could not name the session: {error}"));
                         }
                         continue;
                     }
@@ -2152,11 +2018,8 @@ pub(crate) async fn drive_turns_titled(
                     }
                     ApprovalOutcome::Cancelled => {
                         renderer.mark_cancelled();
-                        eprintln!(
-                            "{}",
-                            style.yellow(
-                                "approval left pending; the session is saved and can be resumed"
-                            )
+                        renderer.notice(
+                            "approval left pending; the session is saved and can be resumed",
                         );
                         return Ok(DriveOutcome {
                             session: current,
@@ -2174,18 +2037,18 @@ pub(crate) async fn drive_turns_titled(
                 .await?
                 {
                     renderer.mark_cancelled();
-                    eprintln!(
-                        "{}",
-                        style.yellow(
-                            "question left pending; the session is saved and can be resumed"
-                        )
-                    );
+                    renderer
+                        .notice("question left pending; the session is saved and can be resumed");
                     return Ok(DriveOutcome {
                         session: current,
                         parked: true,
                     });
                 }
                 renderer.event(&event)?;
+                // One frame per event, and never on a timer: the frame is a
+                // function of the state, and the state only moves when
+                // something arrives.
+                renderer.draw()?;
                 if matches!(
                     &event.kind,
                     ServerEventKind::TurnFinished {
@@ -2203,7 +2066,7 @@ pub(crate) async fn drive_turns_titled(
                                     &session,
                                     receiver,
                                     &mut interrupt_rx,
-                                    style,
+                                    renderer,
                                     prompt,
                                 )
                                 .await?
@@ -2238,20 +2101,14 @@ pub(crate) async fn drive_turns_titled(
                                                 renderer.mark_working();
                                                 streams.push_back(next);
                                             }
-                                            Err(error) => eprintln!(
-                                                "{}",
-                                                style.yellow(format!(
-                                                    "warning: budget raised but the session was not resumed: {error}"
-                                                ))
-                                            ),
+                                            Err(error) => renderer.notice(format!(
+                                                "warning: budget raised but the session was not resumed: {error}"
+                                            )),
                                         }
                                         }
-                                        Err(error) => eprintln!(
-                                            "{}",
-                                            style.yellow(format!(
-                                                "warning: could not raise the budget: {error}"
-                                            ))
-                                        ),
+                                        Err(error) => renderer.notice(format!(
+                                            "warning: could not raise the budget: {error}"
+                                        )),
                                     }
                                 }
                             }
@@ -2265,13 +2122,10 @@ pub(crate) async fn drive_turns_titled(
             match service.submit(request).await {
                 Ok(next) => streams.push_back(next),
                 Err(error) => {
-                    eprintln!(
-                        "{}",
-                        style.yellow(format!(
-                            "warning: could not resolve approval {}: {error}",
-                            short(&approval)
-                        ))
-                    );
+                    renderer.notice(format!(
+                        "warning: could not resolve approval {}: {error}",
+                        short(&approval)
+                    ));
                 }
             }
         }
@@ -2309,10 +2163,7 @@ pub(crate) async fn drive_turns_titled(
                 streams.push_back(next);
             }
             Err(error) => {
-                eprintln!(
-                    "{}",
-                    style.yellow(format!("warning: could not apply the steer: {error}"))
-                );
+                renderer.notice(format!("warning: could not apply the steer: {error}"));
                 break;
             }
         }
