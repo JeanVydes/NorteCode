@@ -27,6 +27,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A session is named after its first message. The title is asked for by a
+  request of its own — a scratch session holding one instruction, no tools, no
+  reasoning, a capped output — so the naming never enters the conversation it is
+  naming, and the model that answers may be a cheaper one (`titling.model`).
+  `titling.enabled = false` turns it off. The reply is sanitised before it is
+  stored: a title reaches a footer and a startup row, so control characters and
+  bidi overrides are dropped, only the first line is kept, and a reply that is
+  not a name leaves the session with its key.
+
 - The startup menu and the model picker are walked with the arrow keys and
   Enter instead of answered with a number. Typing narrows the list, which is
   what the numbered prompt's typed name became; when the filter matches nothing,

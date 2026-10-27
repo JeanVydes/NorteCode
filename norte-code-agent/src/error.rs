@@ -88,6 +88,9 @@ pub enum ServiceError {
     /// Compaction could not produce a safe summary.
     #[error("compaction: {0}")]
     Compaction(String),
+    /// A session could not be named after its first message.
+    #[error("titling: {0}")]
+    Titling(String),
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),

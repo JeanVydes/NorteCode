@@ -23,6 +23,7 @@ mod screenshots;
 mod sessions;
 mod skills;
 mod steering;
+mod titling;
 mod tooling;
 mod turns;
 mod workspace;
