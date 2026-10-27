@@ -1052,10 +1052,13 @@ impl Service {
         turn: u64,
         usage: &Usage,
     ) -> norte_code_store_sqlite::RequestRecord {
-        let model = self.model_label(key);
-        let (provider, model) = model.split_once('/').map_or_else(
-            || (String::new(), model.clone()),
-            |(p, m)| (p.to_owned(), m.to_owned()),
+        // Both halves come from the session's own spec, which carries them
+        // apart. They used to be recovered by splitting the label, which put an
+        // empty provider on the row whenever a model id carried a slash of its
+        // own: the label is for people to read, not for the host to take apart.
+        let (provider, model) = self.lock_sessions().get(key).map_or_else(
+            || (String::new(), String::new()),
+            |record| (record.spec.provider.clone(), record.spec.model.clone()),
         );
         norte_code_store_sqlite::RequestRecord {
             id: uuid::Uuid::new_v4().to_string(),

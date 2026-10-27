@@ -815,12 +815,21 @@ pub(crate) async fn interactive_loop(
                 }
                 ChatCommand::Model { model } => {
                     if model.is_empty() {
-                        // List available models for the current provider
-                        let provider = renderer
-                            .model_name
+                        // List available models for the current provider. It is
+                        // the session's own provider, read from its spec: the
+                        // renderer's name is the model in flight, and guessing
+                        // `openai` when there is no session listed the wrong
+                        // catalogue under the right heading.
+                        let provider = session
                             .as_ref()
-                            .and_then(|m| m.split_once('/').map(|(p, _)| p.to_owned()))
-                            .unwrap_or_else(|| "openai".to_owned());
+                            .and_then(|current| provider_of(service, current));
+                        let Some(provider) = provider else {
+                            eprintln!(
+                                "{}",
+                                style.yellow("there is no session yet; send a message first")
+                            );
+                            continue;
+                        };
                         let catalog = service.catalog();
                         eprintln!("{}", style.bold(format!("Models for {provider}:")));
                         if let Some(p) = catalog.provider(&provider) {
@@ -841,14 +850,19 @@ pub(crate) async fn interactive_loop(
                     } else if let Some(current) = session.clone() {
                         // If model doesn't contain '/', prepend the provider from
                         // the renderer's current model name.
+                        // A model named with its provider is sent as it was
+                        // written, because the client does not take a reference
+                        // apart and a model id may carry a slash of its own. A
+                        // bare name is completed with the session's provider,
+                        // which is read from the spec rather than guessed.
                         let full_model = if model.contains('/') {
                             model
                         } else {
-                            let provider = renderer
-                                .model_name
-                                .as_ref()
-                                .and_then(|m| m.split_once('/').map(|(p, _)| p.to_owned()))
-                                .unwrap_or_else(|| "openai".to_owned());
+                            let provider = provider_of(service, &current);
+                            let Some(provider) = provider else {
+                                eprintln!("{}", style.yellow("the session has no provider yet"));
+                                continue;
+                            };
                             format!("{provider}/{model}")
                         };
                         renderer.model_name = Some(full_model.clone());
@@ -880,11 +894,12 @@ pub(crate) async fn interactive_loop(
                             eprintln!("  {} ({})", style.cyan(p), style.dim(tag));
                         }
                     } else if let Some(current) = session.clone() {
-                        // Switch provider while keeping the current model name.
-                        let model_name = renderer
-                            .model_name
-                            .as_ref()
-                            .and_then(|m| m.split_once('/').map(|(_, name)| name.to_owned()))
+                        // Switch provider while keeping the current model. The
+                        // model is the session's own, read from its spec: the
+                        // renderer's name is the one in flight, and taking the
+                        // old reference apart to find the model would break on a
+                        // model id that contains a slash.
+                        let model_name = model_name_of(service, &current)
                             .unwrap_or_else(|| "default".to_owned());
                         let full = format!("{provider}/{model_name}");
                         renderer.model_name = Some(full.clone());
@@ -1027,10 +1042,19 @@ async fn run_reasoning(
 /// A provider switch keeps the model and replaces the provider, so the name has
 /// to come from the session's own spec rather than from the renderer: during a
 /// turn the renderer is mid-answer and its name is the one already in flight.
+///
+/// The provider is not read here and the label is not split to find it: the spec
+/// carries the two apart, and a model id may contain a slash of its own, which is
+/// why a model is never taken apart to find its provider.
 fn model_name_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
-    service
-        .session_model(session)
-        .and_then(|reference| reference.split_once('/').map(|(_, name)| name.to_owned()))
+    service.session_spec(session).map(|spec| spec.model)
+}
+
+/// The provider a session is on.
+///
+/// The other half of the same fact, read the same way: from the spec's own field.
+fn provider_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
+    service.session_spec(session).map(|spec| spec.provider)
 }
 
 /// Steers a message into the running turn and names it, so the client can
