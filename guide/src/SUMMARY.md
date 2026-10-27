@@ -15,6 +15,7 @@
 - [Cost and budgets](concepts/cost-and-budgets.md)
 - [Storage and durability](concepts/storage-and-durability.md)
 - [Agent Skills](concepts/skills.md)
+- [The interface](concepts/interface.md)
 - [Configuration](concepts/configuration.md)
 
 # Guides
