@@ -56,6 +56,11 @@ pub(crate) struct State {
     pub(crate) question: Option<Question>,
     /// The status row: the model, the dial, the cost, the effort.
     pub(crate) status: String,
+    /// The rows a plugin put beside the conversation, with their plugin's name.
+    ///
+    /// Empty when nothing was loaded, which is every ordinary run: the column
+    /// takes no space when there is nothing to put in it.
+    pub(crate) sidebar: Vec<(String, Vec<norte_code_plugins::SidebarRow>)>,
     /// The tab row, already rendered by the tabs module.
     pub(crate) tabs: String,
     /// The row under the tabs: what the active tab shows.
@@ -160,6 +165,21 @@ impl State {
             let area = frame.area();
             let input = self.input_height(area.width);
             let waiting = u16::from(self.waiting.is_some());
+            // The sidebar takes a column on the right, and only when a plugin
+            // asked for one: a run with no plugins draws exactly what it drew
+            // before there were plugin columns.
+            let body = if self.sidebar.is_empty() {
+                area
+            } else {
+                let [main, _gap, side] = Layout::horizontal([
+                    Constraint::Fill(1),
+                    Constraint::Length(2),
+                    Constraint::Percentage(25),
+                ])
+                .areas(area);
+                draw_sidebar(frame, side, self, style);
+                main
+            };
             let [conversation, spinner, entry, status, tabs_row, suggestion] = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(waiting),
@@ -170,7 +190,7 @@ impl State {
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
-            .areas(area);
+            .areas(body);
 
             draw_transcript(frame, conversation, self, style);
             if waiting > 0 {
@@ -464,6 +484,68 @@ pub(crate) fn ink(kind: Kind, style: Style) -> ratatui::style::Style {
         Kind::ToolOutput => style.faint_span(),
         Kind::Failure => style.ratatui((0xE0, 0x6C, 0x75), 204, "31"),
     }
+}
+
+/// Cuts plain text to a number of columns, saying that it did.
+///
+/// It is for text a plugin wrote: the row has as many columns as the layout
+/// gave it and no more, and a row that ran past the edge would be cut by the
+/// terminal at a place nobody chose.
+#[must_use]
+fn clip_visible(text: &str, columns: usize) -> String {
+    if text.chars().count() <= columns {
+        return text.to_owned();
+    }
+    let mut cut: String = text.chars().take(columns.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
+/// Draws the column a plugin asked for, beside the conversation.
+///
+/// It is drawn in the area the layout gave it and nowhere else, and every row
+/// is clipped to the width: a plugin says what to read and the host decides how
+/// much of it fits. A plugin that asked for more rows than there are gets the
+/// beginning of its list and a count of what did not fit — the rule every
+/// bounded list in this client follows.
+fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let width = area.width;
+    let mut rows: Vec<Line> = Vec::new();
+    for (plugin, list) in &state.sidebar {
+        // The name leads, because a column of rows with no attribution is one
+        // nobody can turn off.
+        rows.push(Line::from(Span::styled(
+            clip_visible(&style.faint(plugin.clone()), usize::from(width)),
+            style.faint_span(),
+        )));
+        for row in list {
+            let ink = if row.heading {
+                Style::bold_span()
+            } else {
+                style.dim_span()
+            };
+            rows.push(Line::from(Span::styled(
+                clip_visible(&crate::text::terminal(&row.text), usize::from(width)),
+                ink,
+            )));
+        }
+        rows.push(Line::default());
+    }
+    let take = usize::from(area.height).min(rows.len());
+    let hidden = rows.len().saturating_sub(take);
+    let mut shown = rows[..take].to_vec();
+    if hidden > 0 {
+        if let Some(last) = shown.last_mut() {
+            *last = Line::from(Span::styled(
+                format!("… {hidden} more"),
+                style.yellow_span(),
+            ));
+        }
+    }
+    Paragraph::new(shown).render(area, frame.buffer_mut());
 }
 
 /// Draws the input block: the draft, the completion and the question.

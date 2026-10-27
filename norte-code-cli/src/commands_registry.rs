@@ -36,9 +36,42 @@ pub(crate) const MCP_ACTIONS: &[&str] = &["list", "enable", "disable"];
 /// The tabs `/tab` can show, as the footer names them.
 pub(crate) const TAB_NAMES: &[&str] = &["stats", "todo", "tools", "mcp"];
 
+/// The registry every part of the client reads.
+///
+/// It is built once, with the plugins already in it, and handed out by
+/// reference. The alternative — every caller building its own — is nine places
+/// that would each have to remember the plugins, which is nine places for a
+/// command to be parsed but not completed.
+static REGISTRY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+
+/// The registry, built on first use.
+///
+/// The first caller builds it, and everything after that shares it. A plugin
+/// registered after this has been read is not in it: plugins load at startup,
+/// before the first command is typed, and a registry that changed under a frame
+/// would need a lock in the reading path.
+#[must_use]
+pub(crate) fn shared() -> &'static Registry {
+    REGISTRY.get_or_init(built)
+}
+
+/// Loads the plugins this client ships and adds their commands.
+///
+/// A plugin's command is a command: it parses, completes and lists exactly like
+/// the client's own, and whoever types it cannot tell the difference. That is
+/// what the registry was made for — it knows nothing about what a command does,
+/// so a plugin is not a special case in it.
+///
+/// `NORTE_CODE_PLUGINS` names a directory, and the command names a binary in it.
+fn plugins() -> norte_code_plugins::Plugins {
+    let mut plugins = norte_code_plugins::Plugins::new();
+    crate::plugin_loader::load(&mut plugins);
+    plugins
+}
+
 /// Every command the client answers to, in the order `/help` lists them.
 #[must_use]
-pub(crate) fn registry() -> Registry {
+pub(crate) fn built() -> Registry {
     let mut registry = Registry::new();
     registry.register(CommandSpec::new("/help", "show this list"));
     registry.register(CommandSpec::new(
@@ -119,6 +152,12 @@ pub(crate) fn registry() -> Registry {
         "what the process knows: model, tools, paths, servers",
     ));
     registry.register(CommandSpec::new("/exit", "leave the chat").aliased(&["/quit"]));
+    // The plugins lead: a command of theirs that names one of the client's is
+    // the one that wins, because the plugin was asked for by name and the
+    // client was not.
+    for plugin in plugins().commands() {
+        registry.register(plugin);
+    }
     registry
 }
 
@@ -132,7 +171,7 @@ mod tests {
         // never completed, and the help named four commands fewer than the
         // client answered to. Reading one declaration is what makes that
         // impossible rather than unlikely.
-        let registry = registry();
+        let registry = built();
         let names: Vec<String> = registry
             .commands()
             .iter()
@@ -167,7 +206,7 @@ mod tests {
         // width is measured rather than kept beside the list. This is that
         // measurement, checked where it can be seen: a command that grows an
         // argument must not push every summary out of line.
-        let registry = registry();
+        let registry = built();
         let usages: Vec<String> = registry
             .commands()
             .iter()
@@ -190,7 +229,7 @@ mod tests {
     #[test]
     fn the_command_that_was_missing_from_the_completion_is_there() {
         // The bug that started this: `/tools` was parsed and never offered.
-        let registry = registry();
+        let registry = built();
         let candidates = registry.candidates("/to", 3);
         assert!(
             candidates
@@ -203,7 +242,7 @@ mod tests {
     #[test]
     fn the_efforts_are_offered_while_typing_one() {
         // Nobody should have to remember that it is `xhigh` and not `x-high`.
-        let registry = registry();
+        let registry = built();
         let candidates = registry.candidates("/reasoning xh", "/reasoning xh".len());
         assert_eq!(candidates.len(), 1, "{candidates:?}");
         assert_eq!(candidates[0].text, "xhigh");
@@ -214,7 +253,7 @@ mod tests {
     fn a_scope_is_offered_after_the_effort_and_not_before_it() {
         // `/reasoning high ` has one word left, and it is the scope; the effort
         // is already given and offering it again would be noise.
-        let registry = registry();
+        let registry = built();
         let candidates = registry.candidates("/reasoning high ", "/reasoning high ".len());
         let values: Vec<&str> = candidates
             .iter()
@@ -225,7 +264,7 @@ mod tests {
 
     #[test]
     fn an_alias_is_offered_beside_the_name_it_belongs_to() {
-        let registry = registry();
+        let registry = built();
         let candidates = registry.candidates("/re", 3);
         let texts: Vec<&str> = candidates
             .iter()
@@ -240,7 +279,7 @@ mod tests {
 
     #[test]
     fn a_command_with_no_arguments_offers_nothing_after_it() {
-        let registry = registry();
+        let registry = built();
         assert!(
             registry.candidates("/help ", "/help ".len()).is_empty(),
             "there is nothing to say after a command that takes nothing"
@@ -252,7 +291,7 @@ mod tests {
         // Every command in the list resolves, which is the other half of the
         // drift: a name the completion offers and the parser does not know is
         // a name that does nothing.
-        let registry = registry();
+        let registry = built();
         for spec in registry.commands() {
             for spelling in spec.spellings() {
                 let parsed = registry

@@ -18,6 +18,8 @@ mod input;
 mod interaction;
 mod modal;
 mod models;
+mod plugin_loader;
+mod plugins;
 mod prompt;
 mod render;
 mod select;
@@ -680,6 +682,13 @@ pub(crate) async fn new_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
+    // What the plugins draw, asked for once: the columns and the status field
+    // are theirs, and the frame draws what it was given.
+    renderer.sidebar = crate::plugins::all()
+        .sidebar()
+        .into_iter()
+        .map(|(name, rows)| (name.to_owned(), rows))
+        .collect();
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
@@ -851,6 +860,13 @@ async fn resume_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
+    // What the plugins draw, asked for once: the columns and the status field
+    // are theirs, and the frame draws what it was given.
+    renderer.sidebar = crate::plugins::all()
+        .sidebar()
+        .into_iter()
+        .map(|(name, rows)| (name.to_owned(), rows))
+        .collect();
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;

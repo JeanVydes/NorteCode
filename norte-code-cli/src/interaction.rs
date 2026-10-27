@@ -125,6 +125,12 @@ pub(crate) enum ChatCommand {
     /// capabilities, the tools, the servers, the paths. Built when it is asked
     /// for, not captured at startup, so the tools are the ones registered now.
     Debug,
+    /// A command a plugin declared.
+    ///
+    /// It arrives parsed and not as text: the registry that completed it is the
+    /// same one that parsed it, so a plugin's command is a command like any
+    /// other and the plugin is handed what it declared.
+    Plugin(norte_code_commands::Invocation),
 }
 
 /// What `/jobs` was asked to do.
@@ -162,7 +168,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             "/steer was removed; type the text directly while a turn is running".to_owned(),
         ));
     }
-    let invocation = match crate::commands_registry::registry().parse(text)? {
+    let invocation = match crate::commands_registry::shared().parse(text)? {
         Ok(invocation) => invocation,
         Err(problem) => return Some(Err(problem)),
     };
@@ -214,11 +220,10 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/rename" => ChatCommand::Rename {
             title: invocation.arg("title").map(str::to_owned),
         },
-        other => {
-            return Some(Err(format!(
-                "`{other}` is declared and not implemented; this is a bug"
-            )));
-        }
+        // Everything else the registry knows came from a plugin: the client's
+        // own names are all above, and a gap here would be a command declared
+        // and not implemented. The tests check the two lists agree.
+        _ => ChatCommand::Plugin(invocation),
     };
     Some(Ok(command))
 }
@@ -313,7 +318,7 @@ pub(crate) struct CommandSuggestion {
 /// is a hint and not a list, and taking the arrows for a choice nobody has to
 /// make is how a menu ends up feeling broken.
 pub(crate) fn completion_rows(text: &str, cursor: usize) -> usize {
-    crate::commands_registry::registry()
+    crate::commands_registry::shared()
         .candidates(text, cursor)
         .len()
 }
@@ -325,14 +330,14 @@ pub(crate) fn completion_rows(text: &str, cursor: usize) -> usize {
 /// longer offered is worse than completing to the first one.
 #[must_use]
 pub(crate) fn completion_text(text: &str, cursor: usize, pick: usize) -> Option<String> {
-    let rows = crate::commands_registry::registry().candidates(text, cursor);
+    let rows = crate::commands_registry::shared().candidates(text, cursor);
     rows.get(pick.min(rows.len().saturating_sub(1)))
         .map(|row| row.completion.clone())
         .filter(|completion| !completion.is_empty())
 }
 
 pub(crate) fn command_suggestion(text: &str, cursor: usize) -> Option<CommandSuggestion> {
-    let rows = crate::commands_registry::registry().candidates(text, cursor);
+    let rows = crate::commands_registry::shared().candidates(text, cursor);
     if rows.is_empty() {
         return None;
     }
@@ -412,6 +417,21 @@ pub(crate) async fn interactive_loop(
                 // runs, so the useful moment to ask is after they have.
                 ChatCommand::Debug => report_debug(service, session.as_ref(), renderer, style),
                 ChatCommand::Tools => report_tools_now(service, session.as_ref(), renderer, style),
+                // A command from a plugin: the plugin answers with the lines
+                // of a panel, and the frame draws it like any other. The client
+                // does not know what the command is for and does not need to:
+                // what comes back is text.
+                ChatCommand::Plugin(invocation) => {
+                    let plugins = crate::plugins::all();
+                    match plugins.run(&invocation) {
+                        Some(lines) => renderer.open_modal(invocation.command.clone(), lines),
+                        None => renderer.failure(format!(
+                            "`{}` was declared by a plugin and nothing answered it",
+                            invocation.command
+                        )),
+                    }
+                }
+
                 ChatCommand::Compact => {
                     let Some(current) = session.clone() else {
                         renderer.notice("there is no session to compact yet; send a message first");
@@ -840,6 +860,21 @@ async fn handle_live_command(
         // settled, so it is the one command that works mid-turn.
         ChatCommand::Debug => report_debug(service, current, renderer, style),
         ChatCommand::Tools => report_tools_now(service, current, renderer, style),
+        // A command from a plugin: the plugin answers with the lines
+        // of a panel, and the frame draws it like any other. The client
+        // does not know what the command is for and does not need to:
+        // what comes back is text.
+        ChatCommand::Plugin(invocation) => {
+            let plugins = crate::plugins::all();
+            match plugins.run(&invocation) {
+                Some(lines) => renderer.open_modal(invocation.command.clone(), lines),
+                None => renderer.failure(format!(
+                    "`{}` was declared by a plugin and nothing answered it",
+                    invocation.command
+                )),
+            }
+        }
+
         ChatCommand::Compact => {
             renderer.notice("wait until the current turn finishes, then /compact");
         }
@@ -1613,7 +1648,7 @@ fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
 /// measured from the lines themselves rather than being a number kept beside
 /// them: a command that grows an argument would push the summaries out of line.
 pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
-    let registry = crate::commands_registry::registry();
+    let registry = crate::commands_registry::shared();
     let mut lines = vec![style.bold("chat commands")];
     // The width the usage lines share, so the summaries line up and the list
     // reads down rather than across. It is measured from the lines themselves
@@ -2252,7 +2287,7 @@ mod tests {
 
     /// The usage line the registry writes for a command.
     fn usage_of(name: &str) -> Option<String> {
-        crate::commands_registry::registry()
+        crate::commands_registry::shared()
             .get(name)
             .map(norte_code_commands::CommandSpec::usage)
     }
@@ -2263,7 +2298,7 @@ mod tests {
     /// they exist for was a command that was parsed and missing from it. Asking
     /// the registry is the same question and cannot go stale.
     fn offered(name: &str) -> bool {
-        crate::commands_registry::registry()
+        crate::commands_registry::shared()
             .commands()
             .iter()
             .any(|spec| spec.spellings().contains(&name))

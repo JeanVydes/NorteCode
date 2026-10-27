@@ -300,7 +300,7 @@ fn a_selection_is_composed_as_the_one_answer_the_model_reads() {
 fn chat_approval_commands_default_to_the_session_and_reject_bad_scopes() {
     // What a rule names is a tool, and the completion offers none of them here:
     // which tools exist is the engine's answer and not a list in the client.
-    let registry = crate::commands_registry::registry();
+    let registry = crate::commands_registry::shared();
     let allow = registry
         .parse("/allow command")
         .expect("a command")

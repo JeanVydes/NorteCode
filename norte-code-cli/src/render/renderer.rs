@@ -189,6 +189,12 @@ pub(crate) struct Renderer {
     /// wait ends, which is what the row beside the spinner counts: a number
     /// that outlived the wait would keep counting after the answer arrived.
     pub(crate) waiting_since: Option<u128>,
+    /// The rows the plugins asked for, read once at startup.
+    ///
+    /// Kept rather than asked for per row: the plugins are a value the host
+    /// built, and a frame that reached for them would be a frame that could
+    /// stall on somebody else's code.
+    pub(crate) sidebar: Vec<(String, Vec<norte_code_plugins::SidebarRow>)>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -320,6 +326,7 @@ impl Renderer {
             reasoning: None,
             waiting: None,
             waiting_since: None,
+            sidebar: Vec::new(),
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -639,6 +646,10 @@ impl Renderer {
         };
         crate::app::State {
             transcript: self.transcript.clone(),
+            // Asked for on every frame rather than kept: a plugin that shows a
+            // number wants it to move, and one that wants it still returns the
+            // same text, which the frame's diff then writes nothing for.
+            sidebar: self.sidebar.clone(),
             input,
             cursor,
             completion,
@@ -662,7 +673,7 @@ impl Renderer {
     /// widget's to read: a widget that asked would need the command registry,
     /// and the frame would stop being a function of the state it was given.
     fn completion_for(&self, text: &str, cursor: usize) -> Option<crate::app::Completion> {
-        let rows = crate::commands_registry::registry().candidates(text, cursor);
+        let rows = crate::commands_registry::shared().candidates(text, cursor);
         // One candidate is not a menu: the hint says what Tab would write, and
         // opening a list for a single row would take the arrow keys away from
         // the draft for a choice nobody has to make.

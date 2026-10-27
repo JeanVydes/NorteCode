@@ -1263,6 +1263,7 @@ dependencies = [
  "norte-code-commands",
  "norte-code-config",
  "norte-code-cost",
+ "norte-code-plugins",
  "norte-code-protocol",
  "norte-code-skills",
  "norte-code-store-sqlite",
@@ -1295,6 +1296,13 @@ dependencies = [
  "norte-code-protocol",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "norte-code-plugins"
+version = "0.1.0"
+dependencies = [
+ "norte-code-commands",
 ]
 
 [[package]]

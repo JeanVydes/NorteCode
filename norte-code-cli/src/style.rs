@@ -186,6 +186,12 @@ impl Style {
         self.ratatui(BLUE, 39, "34")
     }
 
+    /// The widget style for something that wants attention.
+    #[must_use]
+    pub(crate) fn yellow_span(self) -> ratatui::style::Style {
+        self.ratatui(YELLOW, 180, "33")
+    }
+
     /// The widget style for a heading, which is the bold default ink.
     #[must_use]
     pub(crate) const fn bold_span() -> ratatui::style::Style {

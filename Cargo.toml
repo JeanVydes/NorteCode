@@ -7,6 +7,7 @@ members = [
     "norte-code-commands",
     "norte-code-config",
     "norte-code-cost",
+    "norte-code-plugins",
     "norte-code-protocol",
     "norte-code-skills",
     "norte-code-store-sqlite",
