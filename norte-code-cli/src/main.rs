@@ -46,7 +46,7 @@ use commands::cost_summary;
 #[cfg(test)]
 use interaction::parse_approval_command;
 #[cfg(test)]
-use prompt::{compose_selection, parse_selection};
+use prompt::compose_selection;
 #[cfg(test)]
 use render::budget_label;
 

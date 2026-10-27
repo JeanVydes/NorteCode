@@ -2,7 +2,7 @@ use super::{
     ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions, Style,
     apply_extensions, approval_request, argument_preview, budget_label, budget_warning,
     compose_selection, cost_summary, parse_approval_choice, parse_approval_command,
-    parse_reasoning_setting, parse_selection, select_system_prompt,
+    parse_reasoning_setting, select_system_prompt,
 };
 use crate::commands::{RequestSummary, bucket_label, telemetry_table};
 use chrono::{DateTime, Utc};
@@ -281,38 +281,19 @@ fn vendor_extensions_are_parsed_into_the_config() {
 }
 
 #[test]
-fn closed_question_selections_are_parsed() {
+fn a_selection_is_composed_as_the_one_answer_the_model_reads() {
+    // The choices are taken by the cursor now, so what is left to check is how
+    // they reach the model: one answer, in the order they were taken.
     let options = ["Read".to_owned(), "Write".to_owned()];
-    assert_eq!(
-        parse_selection("1", &options, false),
-        Some((vec![0], false))
-    );
-    assert_eq!(
-        parse_selection("write", &options, false),
-        Some((vec![1], false))
-    );
-    assert_eq!(
-        parse_selection("3", &options, false),
-        Some((Vec::new(), true))
-    );
-    assert_eq!(
-        parse_selection("1, 2", &options, true),
-        Some((vec![0, 1], false))
-    );
-    assert_eq!(
-        parse_selection("1, 3", &options, true),
-        Some((vec![0], true))
-    );
-    assert_eq!(
-        parse_selection("all", &options, true),
-        Some((vec![0, 1], false))
-    );
-    assert_eq!(parse_selection("1, 2", &options, false), None);
-    assert_eq!(parse_selection("0", &options, false), None);
+    assert_eq!(compose_selection(&options, &[0], None), "Read");
+    assert_eq!(compose_selection(&options, &[1, 0], None), "Write, Read");
     assert_eq!(
         compose_selection(&options, &[0, 1], Some("something custom")),
         "Read, Write, something custom"
     );
+    // Nothing taken and nothing typed is an empty answer, which the caller
+    // refuses rather than sending: it is not a choice someone made.
+    assert_eq!(compose_selection(&options, &[], None), "");
 }
 
 #[test]

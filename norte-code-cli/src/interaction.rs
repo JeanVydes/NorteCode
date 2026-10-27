@@ -1755,7 +1755,10 @@ pub(crate) async fn read_repl_line(
                 continue;
             }
             // Nothing is running at the prompt, so nothing to cancel or detach.
-            Some(EditorEvent::Action(_)) => continue,
+            // No question reaches this loop: one is answered inside the turn
+            // that asked it, and an action at the prompt has no question to
+            // belong to.
+            Some(EditorEvent::Question(_) | EditorEvent::Action(_)) => continue,
         };
         let line = line.trim();
         if line.is_empty() {
@@ -1898,6 +1901,11 @@ pub(crate) async fn drive_turns_titled(
                                 Wake::Line(line, attachments)
                             }
                             Some(EditorEvent::Action(action)) => Wake::Action(action),
+                            // The answer itself is read by the turn that asked
+                            // the question, which is parked on it: this loop is
+                            // driving a turn, and a question is not a line for
+                            // it to steer.
+                            Some(EditorEvent::Question(_)) => continue,
                             Some(EditorEvent::End) | None => Wake::Eof,
                         },
                         next = stream.next() => Wake::Event(Box::new(next)),
@@ -2152,7 +2160,14 @@ pub(crate) async fn drive_turns_titled(
                         });
                     }
                 }
-                if answer_if_asked(service, &event, input.as_deref_mut(), &mut interrupt_rx).await?
+                if answer_if_asked(
+                    service,
+                    &renderer.pinned,
+                    &event,
+                    input.as_deref_mut(),
+                    &mut interrupt_rx,
+                )
+                .await?
                 {
                     renderer.mark_cancelled();
                     eprintln!(

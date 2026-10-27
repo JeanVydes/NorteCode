@@ -57,6 +57,56 @@ impl TodoStatus {
     }
 }
 
+/// A question from the model, waiting for an answer.
+///
+/// It is drawn where the draft is drawn, because that is the part of the screen
+/// the person is already looking at, and the editor is the only thing that can
+/// read a key while a turn runs. The choices come first and the input box is
+/// last: the box is only the answer once "something else" is chosen, so until
+/// then the arrow keys walk the list and the box stays out of the way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Asked {
+    /// The question itself, on the row above the choices.
+    pub(crate) prompt: String,
+    /// The choices, in the order the model offered them.
+    pub(crate) choices: Vec<String>,
+    /// Where the cursor is: `0..choices.len()` is a choice, `choices.len()` is
+    /// the "something else" row the editor adds itself.
+    pub(crate) cursor: usize,
+    /// Whether more than one choice may be taken.
+    pub(crate) multiple: bool,
+    /// The choices taken so far, when more than one may be.
+    pub(crate) taken: Vec<usize>,
+    /// Whether the input box is the answer, which it is once "something else"
+    /// was chosen.
+    pub(crate) typing: bool,
+    /// Whether the person left the question unanswered.
+    pub(crate) cancelled: bool,
+}
+
+impl Asked {
+    /// The index of the "something else" row, which is not in `choices`.
+    pub(crate) fn other(&self) -> usize {
+        self.choices.len()
+    }
+
+    /// Whether the cursor is on the row that opens the box.
+    pub(crate) fn on_other(&self) -> bool {
+        self.cursor >= self.other()
+    }
+}
+
+/// What the person did with a question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    /// The answer typed into the box.
+    Typed(String),
+    /// The choices taken, in the order they were taken.
+    Taken(Vec<usize>),
+    /// The question was left unanswered.
+    Left,
+}
+
 /// The pinned text above the input line.
 ///
 /// The renderer owns the session totals; the input editor owns the terminal.
@@ -74,6 +124,7 @@ impl Default for PinnedInner {
         Self {
             session: String::new(),
             todos: Vec::new(),
+            asked: None,
             tab: SessionTab::Chat,
             pending_steers: Vec::new(),
         }
@@ -83,6 +134,8 @@ impl Default for PinnedInner {
 struct PinnedInner {
     session: String,
     todos: Vec<TodoItem>,
+    /// The question being answered, when the model asked one.
+    asked: Option<Asked>,
     /// Which tab is showing. The conversation is the default because that is
     /// what a client opens on.
     tab: SessionTab,
@@ -129,6 +182,118 @@ impl Pinned {
         }
     }
 
+    /// Puts a question on screen, with the cursor on the first choice.
+    ///
+    /// It marks the footer dirty, which is what makes the editor repaint it: the
+    /// editor draws the question, and this is the only writer it has.
+    pub(crate) fn ask(&self, prompt: String, choices: Vec<String>, multiple: bool) {
+        let mut inner = self.lock();
+        inner.asked = Some(Asked {
+            prompt,
+            choices,
+            cursor: 0,
+            multiple,
+            taken: Vec::new(),
+            typing: false,
+            cancelled: false,
+        });
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Moves the cursor of the question on screen.
+    fn move_cursor(&self, delta: isize) {
+        let mut inner = self.lock();
+        let Some(asked) = inner.asked.as_mut() else {
+            return;
+        };
+        if asked.typing {
+            return;
+        }
+        let last = asked.other();
+        asked.cursor = if delta < 0 {
+            asked.cursor.saturating_sub(delta.unsigned_abs())
+        } else {
+            asked.cursor.saturating_add(delta.unsigned_abs()).min(last)
+        };
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Marks or unmarks the choice under the cursor, when several may be taken.
+    ///
+    /// A single-choice question moves the cursor instead, which is what makes
+    /// space mean "select this one" in both without a separate keymap.
+    fn toggle(&self) {
+        let mut inner = self.lock();
+        let Some(asked) = inner.asked.as_mut() else {
+            return;
+        };
+        if asked.typing || asked.on_other() {
+            return;
+        }
+        if !asked.multiple {
+            asked.cursor = asked.cursor.min(asked.other());
+        } else if let Some(at) = asked.taken.iter().position(|index| *index == asked.cursor) {
+            asked.taken.remove(at);
+        } else {
+            asked.taken.push(asked.cursor);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Opens the input box, which is the answer once "something else" is chosen.
+    fn type_answer(&self) -> bool {
+        let mut inner = self.lock();
+        let Some(asked) = inner.asked.as_mut() else {
+            return false;
+        };
+        asked.typing = true;
+        self.dirty.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Marks the question as left unanswered, so the reader can say so.
+    ///
+    /// The decision is not the editor's to make: it reads a key and says what
+    /// the key meant. Whether leaving is an error, a default or a note to the
+    /// model belongs to whoever asked the question.
+    fn leave(&self) {
+        let mut inner = self.lock();
+        if let Some(asked) = inner.asked.as_mut() {
+            asked.cancelled = true;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes the question off screen and hands back what was answered.
+    pub(crate) fn take_answer(&self) -> Option<Answer> {
+        let mut inner = self.lock();
+        let asked = inner.asked.take()?;
+        self.dirty.store(true, Ordering::Relaxed);
+        if asked.cancelled {
+            return Some(Answer::Left);
+        }
+        if asked.typing {
+            return None;
+        }
+        if asked.multiple {
+            return Some(Answer::Taken(asked.taken.clone()));
+        }
+        if asked.on_other() {
+            return None;
+        }
+        Some(Answer::Taken(vec![asked.cursor]))
+    }
+
+    /// Whether the input box belongs to the question rather than to the draft.
+    fn asking(&self) -> bool {
+        self.lock().asked.as_ref().is_some_and(|asked| asked.typing)
+    }
+
+    /// Whether a question is on screen at all.
+    pub(crate) fn is_asking(&self) -> bool {
+        self.lock().asked.is_some()
+    }
+
     /// Replaces the todo widget. An empty list clears it.
     pub(crate) fn set_todos(&self, todos: Vec<TodoItem>) {
         let mut inner = self.lock();
@@ -167,6 +332,11 @@ impl Pinned {
     fn snapshot(&self) -> (String, Vec<TodoItem>, SessionTab) {
         let inner = self.lock();
         (inner.session.clone(), inner.todos.clone(), inner.tab)
+    }
+
+    /// The question and its cursor, for the editor that draws and drives it.
+    fn question(&self) -> Option<Asked> {
+        self.lock().asked.clone()
     }
 
     /// The messages waiting to reach the running request.
@@ -210,8 +380,9 @@ mod unix {
     };
     use tokio::sync::mpsc;
 
-    use super::{Pinned, TodoItem, TodoStatus};
+    use super::{Asked, Pinned, TodoItem, TodoStatus};
     use crate::interaction::{CommandSuggestion, command_suggestion};
+    use crate::select::strip_style;
     use crate::style::Style;
     use crate::tabs::SessionTab;
 
@@ -294,6 +465,8 @@ mod unix {
         Line(String, Vec<Attachment>),
         /// A keystroke asked for something that is not a line.
         Action(EditorAction),
+        /// The question on screen was answered.
+        Question(crate::input::Answer),
         /// The editor ended: end of input.
         End,
     }
@@ -406,7 +579,10 @@ mod unix {
             loop {
                 match self.events.recv().await {
                     Some(EditorEvent::Line(line, _)) => return Some(Some(line)),
-                    Some(EditorEvent::Action(_)) => {}
+                    // A question answered while another prompt wanted a line:
+                    // the answer is not that line, and dropping it would leave
+                    // the question on screen with nothing driving it.
+                    Some(EditorEvent::Question(_) | EditorEvent::Action(_)) => {}
                     Some(EditorEvent::End) | None => return Some(None),
                 }
             }
@@ -826,13 +1002,49 @@ mod unix {
                         Ok(Event::Key(key))
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
-                            // While the focus is on the tab row the key is the
-                            // row's, not the draft's. A key the row does not
-                            // use drops the focus and falls through, so typing
-                            // brings a person back to the input without
-                            // swallowing the character that did it.
+                            // A question owns the keyboard before anything
+                            // else does: it is what the model is waiting on, and
+                            // the draft is not what the person is working on
+                            // while it is on screen. The box opens only once
+                            // "something else" is chosen, so until then every
+                            // key belongs to the list and a stray letter is not
+                            // an answer.
+                            let asking = pinned.is_asking();
+                            let typing = pinned.asking();
                             let mut to_input = true;
-                            if let Some(selected) = focus {
+                            if asking {
+                                to_input = false;
+                                match asked_key(key, typing) {
+                                    AskedKey::Up => pinned.move_cursor(-1),
+                                    AskedKey::Down => pinned.move_cursor(1),
+                                    AskedKey::Toggle => pinned.toggle(),
+                                    // Enter on "something else" is what opens the
+                                    // box. Enter anywhere else is the answer, and
+                                    // the reader submits it: the editor does not
+                                    // know what a question is, only what it drew.
+                                    AskedKey::Accept => {
+                                        if pinned.question().is_some_and(|asked| asked.on_other()) {
+                                            pinned.type_answer();
+                                        } else {
+                                            let _ = sender
+                                                .send(EditorEvent::Line(String::new(), Vec::new()));
+                                        }
+                                    }
+                                    // Leaving is a decision, so the editor
+                                    // reports it rather than making it.
+                                    AskedKey::Leave => {
+                                        pinned.leave();
+                                        let _ =
+                                            sender.send(EditorEvent::Question(super::Answer::Left));
+                                    }
+                                    // A key the question does not use goes to the
+                                    // box while it is open and nowhere while it
+                                    // is not.
+                                    AskedKey::Input => to_input = typing,
+                                }
+                                redraw = true;
+                            }
+                            if let Some(selected) = focus.filter(|_| !asking) {
                                 match tab_row_key(key, selected) {
                                     TabRowKey::Select(tab) => {
                                         focus = Some(tab);
@@ -932,14 +1144,28 @@ mod unix {
                     }
                     if redraw {
                         let suggestion = command_suggestion(&buffer.text(), buffer.cursor);
-                        draw_input(
-                            style,
-                            cols,
-                            rows,
-                            &buffer,
-                            suggestion.as_ref(),
-                            &pinned.pending(),
-                        );
+                        // A question takes the input block and leaves the footer
+                        // alone: the tabs and the totals are still true, and the
+                        // rows the draft would occupy are the ones a person is
+                        // already looking at.
+                        if let Some(asked) = pinned.question() {
+                            draw_question(
+                                style,
+                                rows,
+                                &asked,
+                                &buffer,
+                                usize::from(cols).saturating_sub(2).max(1),
+                            );
+                        } else {
+                            draw_input(
+                                style,
+                                cols,
+                                rows,
+                                &buffer,
+                                suggestion.as_ref(),
+                                &pinned.pending(),
+                            );
+                        }
                         draw_footer(style, cols, rows, pinned, suggestion.as_ref(), focus);
                     }
                 }
@@ -996,6 +1222,45 @@ mod unix {
         /// The user asked to stop waiting for the running call and leave its
         /// process running (Ctrl-G).
         Detach,
+    }
+
+    /// What a key means while a question is on screen.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AskedKey {
+        /// Move the cursor up the choices.
+        Up,
+        /// Move the cursor down the choices.
+        Down,
+        /// Mark or unmark the choice under the cursor.
+        Toggle,
+        /// Take the answer: opens the box on "something else", submits it
+        /// anywhere else.
+        Accept,
+        /// Leave the question unanswered.
+        Leave,
+        /// Something the question does not use: the box, when it is open.
+        Input,
+    }
+
+    /// Reads one key while a question is on screen.
+    ///
+    /// `typing` is whether the box is already open, and it changes what Enter
+    /// means: while it is closed Enter is what opens it on the "something else"
+    /// row and what submits an answer anywhere else, and while it is open Enter
+    /// is a line like any other.
+    fn asked_key(key: KeyEvent, typing: bool) -> AskedKey {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Up if !typing => AskedKey::Up,
+            KeyCode::Down if !typing => AskedKey::Down,
+            // Space selects without committing, which is the only way to take
+            // more than one choice, and it is what every list does.
+            KeyCode::Char(' ') if !typing => AskedKey::Toggle,
+            KeyCode::Enter => AskedKey::Accept,
+            KeyCode::Esc => AskedKey::Leave,
+            KeyCode::Char('c' | 'g') if control => AskedKey::Leave,
+            _ => AskedKey::Input,
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1343,6 +1608,118 @@ mod unix {
         }
         let _ = write!(out, "\x1b[{};1H\x1b[?25h", rows.max(1));
         let _ = out.flush();
+    }
+
+    /// Draws the question the model asked, over the rows the input uses.
+    ///
+    /// It takes the input block's own rows rather than printing above them: the
+    /// person is looking there, and a question that scrolled the transcript away
+    /// would be asking about a screen it just moved. The choices are drawn with
+    /// a cursor, and the "something else" row is last because it is the one that
+    /// opens the box — until it is chosen there is no box, which is why nothing
+    /// is prompted for.
+    ///
+    /// A question longer than the room it has is folded onto as many rows as it
+    /// needs and no more: a dialog that runs off the screen is one nobody can
+    /// answer.
+    fn draw_question(style: Style, rows: u16, asked: &Asked, buffer: &LineBuffer, width: usize) {
+        let bottom = input_bottom(rows);
+        let top = bottom.saturating_sub(INPUT_ROWS).saturating_add(1).max(1);
+        let mut frame = String::from("\x1b7");
+        for row in top..=bottom {
+            let _ = write!(frame, "\x1b[{row};1H\x1b[2K");
+        }
+        let mut at = top;
+        // The question first, wrapped to the width of the block.
+        for line in wrap_plain(&asked.prompt, width) {
+            if at > bottom {
+                break;
+            }
+            let _ = write!(frame, "\x1b[{at};1H");
+            frame.push_str(&clip_visible(&style.bold(line), width));
+            at += 1;
+        }
+        // Then the choices. The cursor marks where Enter would land, and a taken
+        // choice says so, because more than one may be taken.
+        let mut shown: Vec<(usize, String)> = asked
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                let taken = asked.taken.contains(&index);
+                let mark = if taken { "[x]" } else { "[ ]" };
+                let label = if asked.multiple {
+                    format!("{mark} {choice}")
+                } else {
+                    choice.clone()
+                };
+                (index, label)
+            })
+            .collect();
+        shown.push((asked.other(), "(something else)".to_owned()));
+        for (index, label) in shown {
+            if at > bottom {
+                break;
+            }
+            let here = index == asked.cursor;
+            let line = format!("{} {label}", if here { '›' } else { ' ' });
+            let line = if here {
+                style.paint_raw("7", &strip_style(&line))
+            } else {
+                style.dim(line)
+            };
+            let _ = write!(frame, "\x1b[{at};1H");
+            frame.push_str(&clip_visible(&line, width));
+            at += 1;
+        }
+        // The box, only when it was opened. It is drawn last because it is the
+        // last thing that happens, and with the prompt the draft usually has, so
+        // it does not look like a new kind of screen.
+        if asked.typing && at <= bottom {
+            let _ = write!(frame, "\x1b[{at};1H");
+            let _ = write!(frame, "{} ", style.cyan("answer"));
+            let typed = buffer.chars.iter().collect::<String>();
+            frame.push_str(&clip_visible(&typed, width.saturating_sub(7)));
+            at += 1;
+        }
+        // The last row is the hint, which is what says the box is not open yet.
+        let hint = if asked.typing {
+            "enter to answer · esc to leave it unanswered"
+        } else if asked.multiple {
+            "↑↓ move · space choose · enter answer · esc leave"
+        } else {
+            "↑↓ move · enter choose · esc leave"
+        };
+        if at <= bottom {
+            let _ = write!(frame, "\x1b[{at};1H");
+            frame.push_str(&clip_visible(&style.faint(hint), width));
+        }
+        frame.push_str("\x1b8");
+        write_frame(&frame);
+    }
+
+    /// Folds a plain string onto rows of at most `width` columns.
+    fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut current = String::new();
+        for word in text.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                rows.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            rows.push(current);
+        }
+        if rows.is_empty() {
+            rows.push(String::new());
+        }
+        rows
     }
 
     /// Builds the frame that moves the scroll region after a resize.
@@ -2958,7 +3335,7 @@ pub(crate) use unix::{EditorAction, EditorEvent, InteractiveInput};
 
 #[cfg(test)]
 mod pinned_tests {
-    use super::{Pinned, TodoItem, TodoStatus};
+    use super::{Answer, Pinned, TodoItem, TodoStatus};
 
     use crate::tabs::SessionTab;
 
@@ -3006,5 +3383,109 @@ mod pinned_tests {
             pinned.pending_steers().is_empty(),
             "clearing the list leaves nothing waiting"
         );
+    }
+
+    #[test]
+    fn a_question_is_walked_with_the_arrows_and_the_box_waits_for_something_else() {
+        // The point of the whole thing: the choices are walked, and the input
+        // box is not the answer until the person says the answer is not on the
+        // list. A box that is open from the start is one nobody knows what to
+        // type into.
+        let pinned = Pinned::new();
+        pinned.ask(
+            "which file?".to_owned(),
+            vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()],
+            false,
+        );
+        assert!(pinned.is_asking(), "the question is on screen");
+        assert!(
+            !pinned.asking(),
+            "and the box is closed: nothing is typed yet"
+        );
+        let asked = pinned.question().expect("a question");
+        assert_eq!(asked.cursor, 0, "the cursor starts on the first choice");
+        assert_eq!(asked.other(), 2, "the extra row is after the choices");
+        assert!(!asked.on_other());
+
+        pinned.move_cursor(1);
+        assert_eq!(pinned.question().expect("a question").cursor, 1);
+        // The cursor reaches the "something else" row and holds there.
+        pinned.move_cursor(1);
+        assert!(pinned.question().expect("a question").on_other());
+        pinned.move_cursor(1);
+        assert_eq!(
+            pinned.question().expect("a question").cursor,
+            2,
+            "the last row is the end of the list"
+        );
+        pinned.move_cursor(-1);
+        pinned.move_cursor(-1);
+        pinned.move_cursor(-1);
+        assert_eq!(pinned.question().expect("a question").cursor, 0);
+
+        // Enter on a choice answers with it; the box never opened.
+        let answer = pinned.take_answer();
+        assert_eq!(answer, Some(Answer::Taken(vec![0])));
+        assert!(!pinned.is_asking(), "the question left the screen");
+    }
+
+    #[test]
+    fn opening_the_box_is_what_makes_the_input_the_answer() {
+        let pinned = Pinned::new();
+        pinned.ask(
+            "what is it?".to_owned(),
+            vec!["a".to_owned(), "b".to_owned()],
+            false,
+        );
+        // Move to the "something else" row and open the box there.
+        pinned.move_cursor(2);
+        assert!(pinned.question().expect("a question").on_other());
+        pinned.type_answer();
+        assert!(pinned.asking(), "the box is open, so keys are its own");
+        // While the box is open there is nothing to take: the line is the answer.
+        assert_eq!(pinned.take_answer(), None);
+    }
+
+    #[test]
+    fn several_choices_may_be_taken_and_they_keep_their_order() {
+        let pinned = Pinned::new();
+        pinned.ask(
+            "which ones?".to_owned(),
+            vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+            true,
+        );
+        pinned.toggle();
+        pinned.move_cursor(2);
+        pinned.toggle();
+        let question = pinned.question().expect("a question");
+        assert_eq!(question.taken, vec![0, 2], "in the order they were marked");
+        // Marking the same one again unmarks it.
+        pinned.toggle();
+        assert_eq!(pinned.question().expect("a question").taken, vec![0]);
+        assert_eq!(pinned.take_answer(), Some(Answer::Taken(vec![0])));
+    }
+
+    #[test]
+    fn leaving_a_question_is_not_an_answer() {
+        // Escape is a decision of its own: the reader says so rather than
+        // inventing a choice nobody made.
+        let pinned = Pinned::new();
+        pinned.ask("which?".to_owned(), vec!["a".to_owned()], false);
+        pinned.leave();
+        assert_eq!(pinned.take_answer(), Some(Answer::Left));
+        assert!(!pinned.is_asking());
+    }
+
+    #[test]
+    fn a_question_with_no_choices_still_has_something_else() {
+        // A model may ask a question and offer nothing: the list is then just
+        // the row that opens the box, which is the only thing to do.
+        let pinned = Pinned::new();
+        pinned.ask("what do you think?".to_owned(), Vec::new(), false);
+        let asked = pinned.question().expect("a question");
+        assert_eq!(asked.other(), 0);
+        assert!(asked.on_other(), "the only row is the box");
+        pinned.type_answer();
+        assert!(pinned.asking());
     }
 }

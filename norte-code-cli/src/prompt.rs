@@ -7,16 +7,19 @@ use super::{
     mpsc,
 };
 
-/// Answers a `QuestionAsked` event, prompting on a terminal and leaving a note
-/// when the client is not interactive.
+/// Answers a `QuestionAsked` event, walking the choices with the arrow keys.
 ///
-/// With closed `options`, the prompt is a numbered list plus an automatic
-/// "Something else" entry. Picking that entry (or `other`) asks for free-form
-/// text, which travels through the same [`ClientRequestKind::AnswerQuestion`]
-/// channel as a plain answer. A multi-select answer joins the chosen option
-/// strings with `, `.
+/// With closed `options` the choices are drawn as a list the cursor walks, and
+/// the last row is "something else": choosing it opens the input box, which is
+/// why nothing is prompted for until it is chosen. Before that there is no box
+/// to type in — a prompt that asks for a line and then asks for a line again is
+/// asking one question twice, and the second one has no question in it.
+///
+/// A multi-select answer takes every marked choice, in the order they were
+/// marked, and composes them the way a single answer composes one.
 pub(crate) async fn answer_if_asked(
     service: &Arc<Service>,
+    pinned: &Arc<crate::input::Pinned>,
     event: &ServerEvent,
     input: Option<&mut crate::input::InteractiveInput>,
     interrupts: &mut mpsc::Receiver<()>,
@@ -36,64 +39,66 @@ pub(crate) async fn answer_if_asked(
         .clone()
         .ok_or("a question arrived without a session")?;
     let question = question.clone();
-    eprintln!("? {}", crate::text::terminal(prompt));
     let Some(input) = input else {
+        eprintln!("? {}", crate::text::terminal(prompt));
         eprintln!("(no interactive client; answering with a note)");
         let answer =
             "(no interactive client is attached; continue with your best judgment)".to_owned();
         return submit_answer(service, session, question, answer).await;
     };
-    let answer = if options.is_empty() {
-        match prompt_input("answer> ", input, interrupts).await? {
+    // No choices: there is nothing to walk, so the box is the whole answer and
+    // it opens at once.
+    if options.is_empty() {
+        eprintln!("? {}", crate::text::terminal(prompt));
+        let answer = match prompt_input("answer> ", input, interrupts).await? {
             PromptInput::Line(line) => line,
             PromptInput::Eof => {
                 "(no interactive client is attached; continue with your best judgment)".to_owned()
             }
             PromptInput::Cancelled => return Ok(true),
+        };
+        return submit_answer(service, session, question, answer).await;
+    }
+
+    // The question is drawn where the draft is drawn: the editor owns those rows
+    // and is the only thing that can read a key while a turn runs.
+    pinned.ask(
+        crate::text::terminal(prompt).into_owned(),
+        options.clone(),
+        *multiple,
+    );
+    let answer = loop {
+        let next = tokio::select! {
+            biased;
+            Some(()) = interrupts.recv() => break None,
+            event = input.recv() => event,
+        };
+        // An empty line is Enter on a choice: the editor draws the list and the
+        // shared handle is what knows which row the cursor was on.
+        if let Some(answer) = pinned.take_answer() {
+            break Some(answer);
         }
-    } else {
-        for (index, option) in options.iter().enumerate() {
-            eprintln!("  {}. {}", index + 1, crate::text::terminal(option));
+        match next {
+            Some(crate::input::EditorEvent::Line(text, _)) => {
+                // The box was open, so the line is the text itself.
+                pinned.take_answer();
+                break Some(crate::input::Answer::Typed(text));
+            }
+            Some(crate::input::EditorEvent::Question(answer)) => break Some(answer),
+            Some(crate::input::EditorEvent::End) | None => break None,
+            // Escape, Ctrl-C and the rest reach the editor as actions while a
+            // question is on screen, and the question's own keys turn into a
+            // `Question` event or a line. An action here is a key that had
+            // nothing to do with the question.
+            Some(crate::input::EditorEvent::Action(_)) => {}
         }
-        eprintln!("  {}. Something else (type it)", options.len() + 1);
-        eprintln!(
-            "  {}",
-            if *multiple {
-                "choose one or more numbers, separated by commas"
-            } else {
-                "choose a number, or type an option"
-            }
-        );
-        loop {
-            let line = match prompt_input("choice> ", input, interrupts).await? {
-                PromptInput::Line(line) => line,
-                PromptInput::Eof => {
-                    break "(no interactive client is attached; continue with your best judgment)"
-                        .to_owned();
-                }
-                PromptInput::Cancelled => return Ok(true),
-            };
-            let Some((selected, other)) = parse_selection(&line, options, *multiple) else {
-                eprintln!("  choose a listed number");
-                continue;
-            };
-            let extra = if other {
-                match prompt_input("something else> ", input, interrupts).await? {
-                    PromptInput::Line(text) => Some(text),
-                    PromptInput::Eof => {
-                        break "(no interactive client is attached; continue with your best judgment)"
-                            .to_owned();
-                    }
-                    PromptInput::Cancelled => return Ok(true),
-                }
-            } else {
-                None
-            };
-            if selected.is_empty() && extra.as_deref().is_none_or(str::is_empty) {
-                eprintln!("  type an answer, or choose a listed number");
-                continue;
-            }
-            break compose_selection(options, &selected, extra.as_deref());
+    };
+    let answer = match answer {
+        Some(crate::input::Answer::Taken(taken)) => compose_selection(options, &taken, None),
+        Some(crate::input::Answer::Typed(text)) => text,
+        Some(crate::input::Answer::Left) | None => {
+            eprintln!("(the question was left unanswered)");
+            "(the question was left unanswered; continue with your best judgment)".to_owned()
         }
     };
     submit_answer(service, session, question, answer).await
@@ -150,70 +155,6 @@ pub(crate) async fn prompt_input(
     match line {
         Some(Some(line)) => Ok(PromptInput::Line(line)),
         Some(None) | None => Ok(PromptInput::Eof),
-    }
-}
-
-/// Parses a numbered selection. Returns the zero-based option indexes and
-/// whether the automatic "Something else" entry was chosen.
-pub(crate) fn parse_selection(
-    line: &str,
-    options: &[String],
-    multiple: bool,
-) -> Option<(Vec<usize>, bool)> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-    if !multiple {
-        if line.eq_ignore_ascii_case("other") || line.eq_ignore_ascii_case("o") {
-            return Some((Vec::new(), true));
-        }
-        if let Some(index) = options
-            .iter()
-            .position(|option| option.eq_ignore_ascii_case(line))
-        {
-            return Some((vec![index], false));
-        }
-    }
-    let tokens: Vec<&str> = line
-        .split(|character: char| character == ',' || character.is_whitespace())
-        .filter(|token| !token.is_empty())
-        .collect();
-    if tokens.is_empty() || (!multiple && tokens.len() != 1) {
-        return None;
-    }
-    if tokens.len() == 1 && tokens[0].eq_ignore_ascii_case("all") {
-        return multiple.then(|| ((0..options.len()).collect(), false));
-    }
-    let mut selected = Vec::new();
-    let mut other = false;
-    for token in tokens {
-        if token.eq_ignore_ascii_case("other") || token.eq_ignore_ascii_case("o") {
-            if !multiple && other {
-                return None;
-            }
-            other = true;
-        } else if let Ok(number) = token.parse::<usize>() {
-            if number == 0 || number > options.len() + 1 {
-                return None;
-            }
-            if number == options.len() + 1 {
-                if !multiple && other {
-                    return None;
-                }
-                other = true;
-            } else if !selected.contains(&(number - 1)) {
-                selected.push(number - 1);
-            }
-        } else {
-            return None;
-        }
-    }
-    if selected.is_empty() && !other {
-        None
-    } else {
-        selected.sort_unstable();
-        Some((selected, other))
     }
 }
 

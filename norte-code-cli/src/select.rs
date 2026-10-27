@@ -335,7 +335,7 @@ fn page() -> isize {
 /// The selected row is drawn inverted, and nesting a colour inside the inversion
 /// leaves the two fighting: the inner reset turns the highlight off halfway
 /// across the line.
-fn strip_style(text: &str) -> String {
+pub(crate) fn strip_style(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(character) = chars.next() {

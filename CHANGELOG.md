@@ -27,6 +27,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A question from the model is a list the arrow keys walk, drawn where the draft
+  is drawn. The "something else" row opens the input box, and until it is chosen
+  there is no box and nothing is prompted for: the choices are the answer, and a
+  second prompt asking for text after the first one already asked for text was
+  asking one question twice. Space marks more than one choice when the model
+  allows it, and Escape leaves the question unanswered.
+
 - The footer leads with the session's title and keeps its short key in brackets,
   because the title is what a person recognises a session by while the key is
   what `resume` is given. A session with no title yet leads with the key alone,
