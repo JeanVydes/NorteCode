@@ -180,6 +180,42 @@ impl Style {
         ratatui::style::Style::new().fg(color)
     }
 
+    /// The colour of the frame's own ink, for a widget that sets its own.
+    ///
+    /// A markdown run is drawn on the ink of the thing it belongs to and
+    /// overrides the colour and not the whole style: a heading is the answer's
+    /// ink plus a colour, and replacing the style would drop the row's own.
+    #[must_use]
+    pub(crate) fn blue_color(self) -> ratatui::style::Color {
+        self.pick_color(BLUE, 39, "34")
+    }
+
+    /// The colour of a code span and a list's bullet.
+    #[must_use]
+    pub(crate) fn cyan_color(self) -> ratatui::style::Color {
+        self.pick_color(CYAN, 44, "36")
+    }
+
+    /// The colour of a quote, a fence and anything read past.
+    #[must_use]
+    pub(crate) fn muted_color(self) -> ratatui::style::Color {
+        self.pick_color(MUTED, 245, "2")
+    }
+
+    /// The palette's answer for one named colour at this depth.
+    fn pick_color(self, rgb: (u8, u8, u8), ansi256: u8, ansi16: &str) -> ratatui::style::Color {
+        use ratatui::style::Color;
+        match self.colors {
+            // A terminal with no colour draws every run in its own foreground,
+            // which is what "no colour" means: the emphasis and the shape are
+            // what is left.
+            Colors::None => Color::Reset,
+            Colors::True => Color::Rgb(rgb.0, rgb.1, rgb.2),
+            Colors::Ansi256 => Color::Indexed(ansi256),
+            Colors::Ansi16 => ansi16_color(ansi16),
+        }
+    }
+
     /// The widget style for a border, which is the frame's own ink.
     #[must_use]
     pub(crate) fn blue_span(self) -> ratatui::style::Style {

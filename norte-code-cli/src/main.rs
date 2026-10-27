@@ -16,6 +16,7 @@ mod commands;
 mod commands_registry;
 mod input;
 mod interaction;
+mod markdown;
 mod modal;
 mod models;
 mod plugin_loader;

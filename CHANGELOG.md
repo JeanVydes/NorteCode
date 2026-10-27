@@ -8,6 +8,31 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A model's answer is drawn as markdown. The rendering was deleted with the
+  printer it belonged to — `markdown.rs` and `code.rs` wrote SGR codes into a
+  string, which a frame shows as the characters they are — and the answers came
+  out with their markers: `**bold**` arrived with its asterisks, a fence arrived
+  as three backticks, and a list arrived as a column of dashes. It is back as
+  **runs**: `norte-code-cli/src/markdown.rs` renders a whole answer into text
+  plus an emphasis, and the view turns the emphasis into a colour, which is the
+  rule every other row in the transcript already follows.
+
+  What is drawn: headings without their hashes, lists with a bullet and their
+  numbers kept, quotes with a bar, rules, links showing what they read as *and*
+  where they go — a terminal cannot click one — and fenced blocks with the
+  language on the rule. Inside a fence nothing is markdown, and the code is
+  highlighted for the languages it knows: strings, comments, numbers and
+  keywords. A language it does not know is drawn plainly, because a wrong
+  colour is worse than none.
+
+  What it does not do: tables, footnotes, HTML and nested emphasis inside a code
+  span. A terminal has no room for the first three, and the fourth is where a
+  hand-written markdown renderer starts to be wrong. A construct it cannot pair
+  is printed as it arrived — an unclosed `**` is two asterisks — because
+  swallowing it would change what the line says.
+
+### Added
+
 - `/telemetry` reports p50 and p95 beside the average latency. An average is
   dragged by a handful of slow calls and says nothing about the request a person
   is waiting on now: this machine's own ledger reads 6.0s average, 4.0s p50 and

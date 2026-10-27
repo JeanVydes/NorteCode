@@ -501,9 +501,20 @@ pub(crate) struct Row {
     /// What kind of entry the row belongs to.
     pub(crate) kind: Kind,
     /// The text of this row, already wrapped.
+    ///
+    /// It is what the row *says*, with no markup in it: a rank of a list and a
+    /// bold word are text here and emphasis in `runs`. It is also what a
+    /// selection copies, and what the tests assert on.
     pub(crate) text: String,
     /// Which part of a box it is, for an entry the view frames.
     pub(crate) frame: Option<Frame>,
+    /// The runs the row is drawn from, when it is more than one ink.
+    ///
+    /// Empty for a row that is one piece of text, which is most of them: a
+    /// tool's output, a notice, a message. A model's answer is markdown, and it
+    /// arrives with a heading, a list and a fenced block in it, so it is a run
+    /// per emphasis — and the view is what turns an emphasis into a colour.
+    pub(crate) runs: Vec<crate::markdown::Run>,
 }
 
 /// Draws the conversation: the part that fits, newest at the bottom.
@@ -622,13 +633,59 @@ fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
                 _ => style.dim_span(),
             };
             let bar = margin(row.kind);
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(bar.to_owned(), bar_ink),
-                Span::styled(row.text.clone(), ink),
-            ])
+            let mut spans = vec![Span::raw(" "), Span::styled(bar.to_owned(), bar_ink)];
+            spans.extend(row_spans(row, ink, style));
+            Line::from(spans)
         }
     }
+}
+
+/// The spans one row's text is drawn from.
+///
+/// A row that is one piece of text is one span, which is most of them. A row of
+/// a model's answer is a run per emphasis, and each run is the row's own ink
+/// with the emphasis on top: a heading is the answer's colour and bold, not a
+/// colour of its own — the answer is still the answer.
+fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'static>> {
+    use ratatui::style::Modifier;
+    if row.runs.is_empty() {
+        return vec![Span::styled(row.text.clone(), ink)];
+    }
+    row.runs
+        .iter()
+        .map(|run| {
+            let mut draw = ink;
+            match run.emphasis {
+                // Bold and italic are modifiers and not colours: the run keeps
+                // the ink of the thing it belongs to, so a bold word inside an
+                // answer reads as an emphasised answer and not as a label.
+                crate::markdown::Emphasis::Bold => draw = draw.add_modifier(Modifier::BOLD),
+                crate::markdown::Emphasis::Italic => draw = draw.add_modifier(Modifier::ITALIC),
+                crate::markdown::Emphasis::Heading => {
+                    draw = draw.add_modifier(Modifier::BOLD).fg(style.cyan_color());
+                }
+                // A code span is its own ink in every terminal: it is a
+                // different kind of thing from the prose around it, and a
+                // modifier alone would not say so on a terminal that renders
+                // none.
+                // A code span and a list's bullet are the same ink: both are
+                // punctuation the reader is meant to tell apart from the prose
+                // at a glance, and neither is prose.
+                crate::markdown::Emphasis::Code | crate::markdown::Emphasis::Bullet => {
+                    draw = draw.fg(style.cyan_color());
+                }
+                // A quote and a fenced block are both text a person reads
+                // past, so they share the quiet ink the rest of the client
+                // gives an aside.
+                crate::markdown::Emphasis::Quote | crate::markdown::Emphasis::Fence => {
+                    draw = draw.fg(style.muted_color());
+                }
+                crate::markdown::Emphasis::Link => draw = draw.fg(style.blue_color()),
+                crate::markdown::Emphasis::Plain => {}
+            }
+            Span::styled(run.text.clone(), draw)
+        })
+        .collect()
 }
 
 /// Every entry of the conversation as the rows a terminal would show.
@@ -648,7 +705,39 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
                 kind: entry.kind,
                 text: entry.title.clone().unwrap_or_default(),
                 frame: Some(Frame::Top),
+                runs: Vec::new(),
             });
+        }
+        // A model's answer is markdown, and it is rendered as a whole and not a
+        // line at a time: a fence spans lines, so a renderer that saw one line
+        // would draw the code as prose and the prose as code. Everything else is
+        // text — a command's bytes, a notice's sentence — and a `**` in one of
+        // those is two asterisks.
+        //
+        // The render is where the width is known and where an emphasis becomes a
+        // run the widget draws: the data holds what arrived, and how it is drawn
+        // is the view's.
+        if entry.kind == Kind::Answer {
+            for rendered in crate::markdown::render(
+                &entry
+                    .lines
+                    .iter()
+                    .map(|line| line.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ) {
+                push_rendered(&mut out, entry.kind, &rendered, width);
+            }
+            if entry.dropped > 0 {
+                out.push(Row {
+                    ink: Some(Ink::Yellow),
+                    kind: Kind::Notice,
+                    text: format!("… {} earlier line(s) left out", entry.dropped),
+                    frame: None,
+                    runs: Vec::new(),
+                });
+            }
+            continue;
         }
         for (index, line) in entry.lines.iter().enumerate() {
             // A call that is out says so on the row it will end on: a glyph
@@ -701,6 +790,7 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
                     kind: entry.kind,
                     text,
                     frame,
+                    runs: Vec::new(),
                 });
             }
         }
@@ -712,6 +802,7 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
                 kind: Kind::Notice,
                 text: format!("… {} earlier line(s) left out", entry.dropped),
                 frame: entry.boxed.then_some(Frame::Inside),
+                runs: Vec::new(),
             });
         }
         if entry.boxed {
@@ -720,10 +811,71 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
                 kind: entry.kind,
                 text: String::new(),
                 frame: Some(Frame::Bottom),
+                runs: Vec::new(),
             });
         }
     }
     out
+}
+
+/// Pushes one rendered markdown line as the rows it wraps to.
+///
+/// The indent is drawn as leading spaces inside every row the line wraps to, so
+/// a list item's continuation lines up under its text and not at the margin: a
+/// wrapped bullet whose second row started at the left would read as a second
+/// item.
+///
+/// The runs are split at the wrap and rebuilt per row, so a bold word that
+/// straddles the break is bold on both sides of it. What is carried per row is
+/// the emphasis of each piece, which is what the widget draws.
+fn push_rendered(out: &mut Vec<Row>, kind: Kind, rendered: &crate::markdown::Rendered, width: u16) {
+    let indent = rendered.indent.min(crate::markdown::max_indent());
+    let pad = " ".repeat(indent);
+    let room = usize::from(width).saturating_sub(indent).max(1);
+    // The runs are laid out into physical rows first, so a break can land in
+    // the middle of a run and the two halves keep its emphasis.
+    let mut rows: Vec<Vec<crate::markdown::Run>> = vec![Vec::new()];
+    let mut used = 0usize;
+    for run in &rendered.runs {
+        let mut piece = String::new();
+        for word in run.text.split_inclusive(' ') {
+            let size = word.chars().count();
+            if used > 0 && used + size > room {
+                if !piece.is_empty() {
+                    rows.last_mut().expect("a row").push(crate::markdown::Run {
+                        text: std::mem::take(&mut piece),
+                        emphasis: run.emphasis,
+                    });
+                }
+                rows.push(Vec::new());
+                used = 0;
+            }
+            piece.push_str(word);
+            used += size;
+        }
+        if !piece.is_empty() {
+            rows.last_mut().expect("a row").push(crate::markdown::Run {
+                text: piece,
+                emphasis: run.emphasis,
+            });
+        }
+    }
+    for runs in rows {
+        // Every row of a wrapped line is indented, not only the first: a
+        // continuation that started at the margin would read as a new item.
+        let mut whole = runs;
+        if !pad.is_empty() {
+            whole.insert(0, crate::markdown::Run::plain(pad.clone()));
+        }
+        let text: String = whole.iter().map(|run| run.text.as_str()).collect();
+        out.push(Row {
+            ink: None,
+            kind,
+            text,
+            frame: None,
+            runs: whole,
+        });
+    }
 }
 
 /// How long a call that is still out has been running, as the row says it.
@@ -1579,6 +1731,84 @@ mod tests {
             "no glyph on a call that ended: {finished:?}"
         );
         assert!(!finished.contains("0s"), "and no clock: {finished:?}");
+    }
+
+    #[test]
+    fn an_answer_is_drawn_as_markdown_and_a_notice_is_not() {
+        // The data holds what arrived; the view is what knows it is markdown.
+        // A tool's output is a command's bytes and a notice is a sentence, and
+        // a `**` in either of those is two asterisks.
+        let mut state = State::new();
+        state.transcript.push(Entry::line(
+            Kind::Answer,
+            "## Title\n\n- one\n- two\n\nA **bold** word.",
+        ));
+        let rows = transcript_lines(&state.transcript, 60);
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|line| line.contains("Title")),
+            "the heading survives: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|line| line.contains('#')),
+            "and its hashes do not: {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|line| line.trim_start().starts_with("• one")),
+            "a list is drawn with bullets: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|line| line.contains("**")),
+            "and emphasis markers are gone: {texts:?}"
+        );
+        let bold = rows
+            .iter()
+            .flat_map(|row| row.runs.iter())
+            .find(|run| run.text == "bold")
+            .expect("the bold word is a run of its own");
+        assert_eq!(bold.emphasis, crate::markdown::Emphasis::Bold);
+
+        // The same text as a notice is left alone.
+        let mut state = State::new();
+        state
+            .transcript
+            .push(Entry::line(Kind::Notice, "## not a title and **not bold**"));
+        let rows = transcript_lines(&state.transcript, 60);
+        assert!(
+            rows[0].text.contains("## not a title and **not bold**"),
+            "a notice is text: {:?}",
+            rows[0].text
+        );
+        assert!(rows[0].runs.is_empty(), "and it is one span");
+    }
+
+    #[test]
+    fn a_fenced_block_is_drawn_as_code_on_every_row_it_spans() {
+        // A fence is state that spans lines, which is why the answer is
+        // rendered whole and not a line at a time.
+        let mut state = State::new();
+        state
+            .transcript
+            .push(Entry::line(Kind::Answer, "```rust\nlet x = 1;\n```"));
+        let rows = transcript_lines(&state.transcript, 60);
+        let code = rows
+            .iter()
+            .find(|row| row.text.contains("let x = 1;"))
+            .expect("the code row");
+        assert!(
+            code.runs
+                .iter()
+                .any(|run| run.emphasis == crate::markdown::Emphasis::Fence),
+            "drawn as code and not as prose: {:?}",
+            code.runs
+        );
+        assert!(
+            rows.iter().any(|row| row.text.contains("rust")),
+            "the language leads the block: {:?}",
+            rows.iter().map(|row| row.text.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
