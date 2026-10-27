@@ -148,8 +148,13 @@ fn the_report_and_the_footer_name_the_same_effort() {
         "the report names it: {report:?}"
     );
     assert!(
-        renderer.session_status().contains("think high"),
+        renderer.session_status().contains("high"),
         "and the footer agrees: {}",
+        renderer.session_status()
+    );
+    assert!(
+        renderer.session_status().contains('█'),
+        "as a bar, not as a word: {}",
         renderer.session_status()
     );
 }
@@ -161,14 +166,14 @@ fn the_reasoning_effort_is_on_the_footer_and_goes_when_it_is_unset() {
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     assert!(
-        !renderer.session_status().contains("think"),
-        "an unset effort says nothing: {}",
+        !renderer.session_status().contains('█'),
+        "an unset effort draws no bar: {}",
         renderer.session_status()
     );
     renderer.set_reasoning("high".to_owned());
     assert!(
-        renderer.session_status().contains("think high"),
-        "the effort is shown: {}",
+        renderer.session_status().contains("███· high"),
+        "the effort is shown, and the bar says which rung it is: {}",
         renderer.session_status()
     );
 }
@@ -1170,4 +1175,64 @@ fn the_box_stops_printing_rows_past_its_height() {
         last: true,
     });
     assert_eq!(renderer.output_rows_seen(), 0, "closing resets the count");
+}
+
+#[test]
+fn every_reasoning_level_draws_its_own_bar() {
+    // A control that cannot be told apart from the one below it is not showing
+    // anything, so the levels are checked to be distinct rather than merely
+    // plausible -- and in the order the settings are ordered by, which is the
+    // one thing a bar is for.
+    let style = Style::plain();
+    let plain: Vec<String> = ["off", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .map(|level| crate::render::dial::reasoning_bar(style, level))
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for (level, bar) in ["off", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .zip(&plain)
+    {
+        assert!(
+            seen.insert(bar.clone()),
+            "`{level}` draws a bar already used: {bar}"
+        );
+    }
+    let filled = |bar: &str| bar.chars().filter(|c| *c == '\u{2588}').count();
+    assert_eq!(filled(&plain[0]), 0, "off is the empty bar: {} ", plain[0]);
+    assert!(
+        filled(&plain[1]) > 0,
+        "low is almost nothing, not nothing: {}",
+        plain[1]
+    );
+    assert!(
+        plain
+            .windows(2)
+            .all(|pair| filled(&pair[0]) <= filled(&pair[1])),
+        "the bar never shrinks as the effort grows: {plain:?}"
+    );
+    assert_eq!(filled(&plain[5]), 4, "max fills it: {}", plain[5]);
+    // The label stays beside the bar: the bar says where, the word says what.
+    for (level, bar) in ["off", "low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .zip(&plain)
+    {
+        assert!(bar.contains(level), "`{level}` is named: {bar}");
+    }
+}
+
+#[test]
+fn a_setting_that_is_not_a_rung_draws_no_bar() {
+    // `auto` and a token budget are settings of another kind. Drawing a bar for
+    // them would claim an effort on a scale they are not on.
+    let style = Style::plain();
+    let auto = crate::render::dial::reasoning_bar(style, "auto");
+    assert!(!auto.contains('\u{2588}'), "auto claims no rung: {auto}");
+    assert!(auto.contains("auto"), "{auto}");
+    let budget = crate::render::dial::reasoning_bar(style, "budget 4096 tokens");
+    assert!(
+        !budget.contains('\u{2588}'),
+        "a budget claims no rung: {budget}"
+    );
+    assert!(budget.contains("4096"), "{budget}");
 }

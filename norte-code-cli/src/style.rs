@@ -42,6 +42,7 @@ const YELLOW: (u8, u8, u8) = (0xE5, 0xC0, 0x7B);
 const CYAN: (u8, u8, u8) = (0x56, 0xB6, 0xC2);
 const BLUE: (u8, u8, u8) = (0x61, 0xAF, 0xEF);
 const MAGENTA: (u8, u8, u8) = (0xC6, 0x78, 0xDD);
+const ORANGE: (u8, u8, u8) = (0xD1, 0x9A, 0x66);
 const MUTED: (u8, u8, u8) = (0x9A, 0xA0, 0xA6);
 const FAINT: (u8, u8, u8) = (0x7A, 0x78, 0x74);
 impl Style {
@@ -229,6 +230,16 @@ impl Style {
     #[must_use]
     pub fn magenta(self, text: impl Display) -> String {
         self.color(MAGENTA, 141, "35", text)
+    }
+
+    /// Orange, for an effort above the middle.
+    ///
+    /// The only colour here without a classic sixteen-colour name: a terminal
+    /// that cannot show 256 colours falls back to yellow, which is the closest
+    /// thing the palette has and still reads as "a lot, but not the most".
+    #[must_use]
+    pub fn orange(self, text: impl Display) -> String {
+        self.color(ORANGE, 208, "33", text)
     }
 
     /// Muted, for rules and quiet chrome. Kept distinct from [`dim`] so a theme

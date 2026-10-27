@@ -97,6 +97,67 @@ pub(crate) fn reasoning_label(reasoning: &ReasoningInfo) -> String {
     reasoning.efforts.join(",")
 }
 
+/// How many cells the reasoning bar draws.
+const REASONING_CELLS: usize = 4;
+
+/// How much of the bar an effort fills, from none to all of it.
+///
+/// The scale is the one the settings are ordered by, and every level is a step
+/// of its own so two of them never draw the same bar: a control that cannot be
+/// told apart from the one below it is not showing anything. `off` is empty and
+/// grey; `max` is full and purple, and the colour says which level it is even
+/// when the bar is too short to count the cells.
+fn effort_fraction(effort: &str) -> (usize, u8) {
+    match effort {
+        // off is the empty bar: nothing is filled, and grey is what "nothing"
+        // looks like. It is not a low effort, it is the absence of one.
+        "off" | "none" | "disabled" => (0, 0),
+        // The lowest efforts are "almost nothing, but not nothing", which is why
+        // they fill one cell rather than none.
+        "minimal" | "low" => (1, 1),
+        "medium" => (2, 2),
+        "high" => (3, 3),
+        "xhigh" => (4, 4),
+        "max" => (REASONING_CELLS, 5),
+        // `auto` and a token budget are not rungs: they are a setting of another
+        // kind, and a bar would claim an effort nobody chose. Seven is the
+        // colour the caller paints them, and the label carries the meaning.
+        _ => (0, 7),
+    }
+}
+
+/// The reasoning effort as a bar, coloured by how much is being asked.
+///
+/// The footer used to say `think high`, which is a word a person has to map to
+/// an order in their head. A bar says where the setting sits on the scale
+/// without spelling the scale out, and the colour repeats it for the settings
+/// whose names — `xhigh`, `max` — are the ones that cost the most.
+///
+/// `auto` and a token budget draw an empty bar in their own colour: neither is
+/// a rung of the ladder, so neither claims one.
+pub(crate) fn reasoning_bar(style: Style, label: &str) -> String {
+    let (filled, colour) = effort_fraction(label);
+    let text = format!(
+        "{}{} {label}",
+        "█".repeat(filled),
+        "·".repeat(REASONING_CELLS.saturating_sub(filled))
+    );
+    match colour {
+        // `off`: the bar is empty and grey, which is what "no effort" looks
+        // like. It is the one level whose colour is not a colour.
+        0 => style.faint(text),
+        1 => style.green(text),
+        2 => style.yellow(text),
+        3 => style.orange(text),
+        4 => style.red(text),
+        5 => style.magenta(text),
+        // `auto` and a token budget: a setting of another kind, so the bar stays
+        // empty and unnamed rather than claiming an effort, and the label after
+        // it is the setting itself.
+        _ => style.blue(text),
+    }
+}
+
 pub(crate) fn source_label(source: Source) -> &'static str {
     match source {
         Source::Cache | Source::NotModified => "cache",

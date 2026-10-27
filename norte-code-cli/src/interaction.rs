@@ -933,6 +933,16 @@ pub(crate) async fn interactive_loop(
         }
         echo_user_message(style, &text);
         renderer.mark_working();
+        // The first message of a session that has no title is what the title is
+        // made from, and it is asked for now so the request runs beside the turn
+        // instead of in front of it. `renderer.title.is_none()` is the whole
+        // condition: it is set the moment one arrives, so a session is asked
+        // about once and a resumed one that already has a name is not asked
+        // about at all.
+        let titling = match (session.as_ref(), renderer.title.is_none(), text.as_str()) {
+            (Some(key), true, first) => Titling::start(service, key.clone(), first.to_owned()),
+            _ => Titling::none(),
+        };
         let stream = service
             .submit(ClientRequest {
                 request_id,
@@ -957,7 +967,9 @@ pub(crate) async fn interactive_loop(
             .await
             .map_err(|error| error.to_string())?;
         request_id = request_id.saturating_add(1);
-        let outcome = drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
+        let outcome =
+            drive_turns_titled(service, stream, renderer, style, Some(&mut *input), titling)
+                .await?;
         renderer.ensure_newline();
         session = outcome.session.or(session);
         if outcome.parked || renderer.budget_stopped {
@@ -1607,6 +1619,75 @@ fn grant_scope_label(scope: GrantScope) -> &'static str {
     }
 }
 
+/// A title request that is on its way back.
+///
+/// The title is asked for at the moment the first message is sent and runs
+/// beside the turn, not before it: waiting for a name would make every session
+/// pay a second round trip before its first token, and the name is not what the
+/// person is waiting for. The request goes out on a task of its own, so the
+/// answer arrives wherever the loop happens to be — which is why it is a
+/// channel, and why the reader selects over it.
+pub(crate) struct Titling {
+    /// `None` when no title was asked for, so nothing ever arrives.
+    receiver: Option<mpsc::UnboundedReceiver<Result<(SessionKey, String), String>>>,
+}
+
+impl Titling {
+    /// Nothing asked for: a session that already has a title keeps it, and one
+    /// whose titling is switched off is never named.
+    pub(crate) fn none() -> Self {
+        Self { receiver: None }
+    }
+
+    /// Asks for a title, on a task of its own.
+    ///
+    /// The request is started, not awaited: it is deliberately the cheapest the
+    /// service makes, and it still has no business holding up the turn it names.
+    pub(crate) fn start(
+        service: &Arc<Service>,
+        session: SessionKey,
+        first_message: String,
+    ) -> Self {
+        if !service.config().titling.enabled {
+            return Self::none();
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let service = Arc::clone(service);
+        tokio::spawn(async move {
+            let title = service
+                .title_session(&session, &first_message)
+                .await
+                .map(|title| (session, title))
+                .map_err(|error| error.to_string());
+            // A receiver that is gone means the session ended before the title
+            // did, which is nobody left to name and not a failure to report.
+            let _ = sender.send(title);
+        });
+        Self {
+            receiver: Some(receiver),
+        }
+    }
+
+    /// The next title, for as long as one is on its way.
+    ///
+    /// With nothing asked for this never resolves, and it has to be that rather
+    /// than returning at once: a select arm that is always ready spins the loop
+    /// it sits in — the outer `loop` re-enters the select, and with `biased` the
+    /// arm is taken again before anything else is polled, so the task burns a
+    /// core and never yields.
+    pub(crate) async fn next(&mut self) -> Option<Result<(SessionKey, String), String>> {
+        let answer = match self.receiver.as_mut() {
+            Some(receiver) => receiver.recv().await,
+            None => std::future::pending().await,
+        };
+        // One request, one answer. Dropping the receiver is what keeps the arm
+        // from being selected again: a channel whose sender is gone answers
+        // `None` for ever, which is the same spin by a slower road.
+        self.receiver = None;
+        answer
+    }
+}
+
 /// Sends one request and drains its acknowledgement.
 async fn drain_request(
     service: &Arc<Service>,
@@ -1747,6 +1828,8 @@ enum Wake {
     Eof,
     /// The next server event.
     Event(Box<Option<ServerEvent>>),
+    /// A title arrived, or the request for one failed.
+    Title(Result<(SessionKey, String), String>),
 }
 
 /// Streams the primary turn, then any turns resumed by an approval.
@@ -1762,7 +1845,25 @@ pub(crate) async fn drive_turns(
     // The editor itself, not one of its channels: a turn needs the lines *and*
     // the actions, and asking for them through one handle is what keeps the
     // select below honest.
+    input: Option<&mut crate::input::InteractiveInput>,
+) -> Result<DriveOutcome, String> {
+    drive_turns_titled(service, primary, renderer, style, input, Titling::none()).await
+}
+
+/// The same loop, with a title request running beside it.
+///
+/// It is a second entry point rather than a parameter everywhere: a turn that
+/// names nothing — every turn after the first — has no channel to select over,
+/// and asking its callers to say so would be asking them to write `Titling::none`
+/// at a dozen sites to say nothing at all.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn drive_turns_titled(
+    service: &Arc<Service>,
+    primary: EventStream,
+    renderer: &mut Renderer,
+    style: Style,
     mut input: Option<&mut crate::input::InteractiveInput>,
+    mut titling: Titling,
 ) -> Result<DriveOutcome, String> {
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
@@ -1800,12 +1901,23 @@ pub(crate) async fn drive_turns(
                             Some(EditorEvent::End) | None => Wake::Eof,
                         },
                         next = stream.next() => Wake::Event(Box::new(next)),
+                        title = titling.next() => match title {
+                            Some(title) => Wake::Title(title),
+                            // The channel closed with nothing in it, which is a
+                            // request that was never made. There is no title
+                            // coming, so the arm stops being selected.
+                            None => continue,
+                        },
                     }
                 } else {
                     tokio::select! {
                         biased;
                         Some(()) = interrupt_rx.recv() => Wake::Interrupt,
                         event = stream.next() => Wake::Event(Box::new(event)),
+                        title = titling.next() => match title {
+                            Some(title) => Wake::Title(title),
+                            None => continue,
+                        },
                     }
                 };
                 let event = match wake {
@@ -1962,6 +2074,24 @@ pub(crate) async fn drive_turns(
                     }
                     Wake::Eof => {
                         input = None;
+                        continue;
+                    }
+                    // The title was asked for beside this turn and has nothing
+                    // to do with it: the footer gains a name, and a request that
+                    // failed is said once at `high` and then forgotten. A
+                    // session that could not be named keeps its key, which is
+                    // what it had, and the turn it is running is undisturbed.
+                    Wake::Title(Ok((_, title))) => {
+                        renderer.set_title(title);
+                        continue;
+                    }
+                    Wake::Title(Err(error)) => {
+                        if renderer.verbosity.at_least(Verbosity::High) {
+                            eprintln!(
+                                "{}",
+                                style.dim(format!("could not name the session: {error}"))
+                            );
+                        }
                         continue;
                     }
                     Wake::Event(event) => *event,

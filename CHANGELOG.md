@@ -27,6 +27,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The footer leads with the session's title and keeps its short key in brackets,
+  because the title is what a person recognises a session by while the key is
+  what `resume` is given. A session with no title yet leads with the key alone,
+  which is what it had before one was asked for.
+
+- The reasoning effort is a bar rather than the word `think <effort>`: the word
+  had to be mapped to an order in the reader's head, and the bar's colour says
+  which rung it is on at a glance. `off` is an empty grey bar, the lowest efforts
+  fill one cell, and the bar turns green, yellow, orange, red and purple as the
+  effort climbs to `max`. `auto` and a token budget draw no bar, because neither
+  is a rung.
+
 - A session is named after its first message. The title is asked for by a
   request of its own — a scratch session holding one instruction, no tools, no
   reasoning, a capped output — so the naming never enters the conversation it is

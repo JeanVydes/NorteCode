@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::input::{Pinned, TodoItem};
 
 use super::argument::{todo_item, todo_items};
-use super::dial::{context_dial, token_ratio};
+use super::dial::{context_dial, reasoning_bar, token_ratio};
 use super::edit::{
     EditBox, EditPreview, Side, clip_command, clip_plain, edit_box_width, edit_preview, line_range,
     preview_path, render_panel,
@@ -117,6 +117,12 @@ pub(crate) struct Renderer {
     pub(crate) verbosity: Verbosity,
     /// The session key, for the footer. The server sends it on every event.
     pub(crate) session: Option<String>,
+    /// The session's title, when it has one.
+    ///
+    /// It is what the footer leads with: a key says nothing about what a
+    /// session was for, and the title is what a person recognises it by. The
+    /// key stays beside it, because the key is what `resume` is given.
+    pub(crate) title: Option<String>,
     pub(crate) show_cost: bool,
     /// The facts only the host knows, printed by `/debug`.
     pub(crate) host_facts: Option<HostFacts>,
@@ -253,6 +259,7 @@ impl Renderer {
             format,
             verbosity,
             session: None,
+            title: None,
             host_facts: None,
             show_cost,
             cost_silent: false,
@@ -408,6 +415,19 @@ impl Renderer {
     pub(crate) fn set_reasoning(&mut self, label: String) {
         if self.reasoning.as_deref() != Some(label.as_str()) {
             self.reasoning = Some(label);
+            self.refresh_footer();
+        }
+    }
+
+    /// Records the session's title and repaints the footer.
+    ///
+    /// The title arrives from a request that runs beside the first turn, so it
+    /// lands at no particular moment in the conversation; the footer is where it
+    /// shows, and the repaint is part of the update rather than something the
+    /// caller has to remember.
+    pub(crate) fn set_title(&mut self, title: String) {
+        if self.title.as_deref() != Some(title.as_str()) {
+            self.title = Some(title);
             self.refresh_footer();
         }
     }
@@ -1911,19 +1931,32 @@ impl Renderer {
         }
         // The reasoning effort the session will ask for, which nothing else on
         // screen shows: after `/reasoning`, a downgrade to fit a new model, or a
-        // resume, the transcript alone cannot say what the next turn sends.
+        // resume, the transcript alone cannot say what the next turn sends. It
+        // is a bar rather than the word for two reasons: the word has to be
+        // mapped to an order in the reader's head, and the bar's colour says
+        // which rung it is on at a glance, which is the thing that costs money.
         if let Some(effort) = &self.reasoning {
-            parts.push(self.style.magenta(format!("think {effort}")));
+            parts.push(reasoning_bar(self.style, effort));
         }
         let prefix = self.activity.as_ref().map_or_else(
             || self.style.faint("session"),
             |activity| self.style.yellow(activity.clone()),
         );
-        // The key, shortened, so a session can be named again without scrolling
-        // back to the startup block it was printed in.
+        // What names the session, in front of the totals. The title comes first
+        // because it is what a person recognises the session by; the key follows
+        // in brackets, because the key is what `resume` is given and a title is
+        // not unique. A session with no title yet leads with the key alone,
+        // which is what it had before one was asked for.
         if self.verbosity.at_least(Verbosity::Medium) {
             if let Some(key) = &self.session {
-                parts.insert(0, self.style.faint(short(key).to_owned()));
+                let short = short(key).to_owned();
+                match self.title.as_deref().map(str::trim) {
+                    Some(title) if !title.is_empty() => {
+                        parts.insert(0, self.style.faint(format!("({short})")));
+                        parts.insert(0, self.style.cyan(title.to_owned()));
+                    }
+                    _ => parts.insert(0, self.style.faint(short)),
+                }
             }
         }
         format!("{} {}", prefix, parts.join(&self.style.faint(" · ")))
