@@ -591,17 +591,73 @@ impl Renderer {
         if lines.is_empty() {
             return;
         }
-        self.modal = Some(crate::modal::Modal::new(title, lines));
+        self.set_modal(crate::modal::Modal::report(title, lines));
+    }
+
+    /// Opens a panel that can be acted on.
+    ///
+    /// A report and an editor are one widget: what makes the difference is
+    /// whether its rows carry an action, and that is what the cursor walks.
+    pub(crate) fn open_editable(&mut self, title: impl Into<String>, rows: Vec<crate::modal::Row>) {
+        if rows.is_empty() {
+            return;
+        }
+        self.set_modal(crate::modal::Modal::editable(title, rows));
+    }
+
+    /// Puts a panel on screen and tells the keyboard it is there.
+    fn set_modal(&mut self, modal: crate::modal::Modal) {
+        // The keyboard reads this on its own thread: it is the one thing that
+        // decides which keys belong to the panel and which to the report's
+        // scroll, and the panel itself is not shared across the two threads.
+        self.pinned.set_modal_editable(modal.editable);
+        self.modal = Some(modal);
         // The scroll a person left on the last report is not one they want on
         // this one: a new panel opens at its top.
         self.pinned.reset_modal_scroll();
         self.pinned.set_modal_open(true);
     }
 
+    /// How many rows the panel has room for, which bounds its scroll.
+    ///
+    /// It is the size the panel is drawn at and not the terminal's: the panel
+    /// takes most of the screen and its border and title take a row or two, and
+    /// a scroll clamped to the terminal would let the list scroll past what a
+    /// person can see.
+    fn screen_rows(&self) -> usize {
+        let Some(screen) = self.screen.as_ref() else {
+            return 20;
+        };
+        // The panel is four fifths of the height and two rows are its border.
+        let (_, height) = screen.size();
+        usize::from(height).saturating_mul(4) / 5
+    }
+
+    /// What the panel decided about a key, and what to do about it.
+    ///
+    /// The panel produces the intent — allow a tool, switch a server off — and
+    /// this is where it is carried out, because the service is here and the
+    /// panel has no idea one exists.
+    pub(crate) fn modal_key(
+        &mut self,
+        key: crate::modal::Key,
+    ) -> Option<(crate::modal::Action, crate::modal::Scope)> {
+        let modal = self.modal.as_mut()?;
+        match modal.key(key) {
+            crate::modal::Choice::None => None,
+            crate::modal::Choice::Closed => {
+                self.close_modal();
+                None
+            }
+            crate::modal::Choice::Act { action, scope } => Some((action, scope)),
+        }
+    }
+
     /// Closes the panel, if one is open. `true` when it closed one.
     pub(crate) fn close_modal(&mut self) -> bool {
         let closed = self.modal.take().is_some();
         if closed {
+            self.pinned.set_modal_editable(false);
             self.pinned.set_modal_open(false);
         }
         closed
@@ -676,8 +732,23 @@ impl Renderer {
             modal.top = self.pinned.modal_scroll();
         }
         let mut state = self.ui_state();
-        let modal = self.modal.clone();
         let pinned = std::sync::Arc::clone(&self.pinned);
+        // The panel's cursor moves with the scroll the keyboard asked for, and
+        // the frame is what knows how many rows fit.
+        let rows = self.screen_rows();
+        if let Some(modal) = self.modal.as_mut() {
+            // The keyboard sends the offset it wants, and the frame moves the
+            // panel's top to it. The difference is what a scroll is, in either
+            // direction, and the panel clamps it to what it holds.
+            let offset = self.pinned.modal_scroll();
+            if offset != modal.top {
+                let delta = isize::try_from(offset)
+                    .unwrap_or(isize::MAX)
+                    .saturating_sub(isize::try_from(modal.top).unwrap_or(isize::MAX));
+                modal.scroll_by(delta, rows);
+            }
+        }
+        let modal = self.modal.clone();
         if let Some(screen) = self.screen.as_mut() {
             state.draw(screen, self.style, &pinned)?;
             // The panel is drawn over the frame, in the same frame: two draws

@@ -138,6 +138,38 @@ impl ApprovalRules {
             .insert(tool.to_owned());
     }
 
+    /// Forgets every global rule a tool has, so a call to it asks again.
+    ///
+    /// Both lists, because a tool with an allow and a deny is a tool somebody
+    /// changed their mind about: forgetting one and leaving the other is a rule
+    /// nobody wrote.
+    pub(super) fn forget_global(&self, tool: &str) {
+        self.global_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(tool);
+        self.global_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(tool);
+    }
+
+    /// The session's rules for a tool, forgotten.
+    pub(super) fn forget_session(&self, session: SessionId, tool: &str) {
+        self.session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session)
+            .or_default()
+            .remove(tool);
+        self.session_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session)
+            .or_default()
+            .remove(tool);
+    }
+
     pub(super) fn allow_session(&self, session: SessionId, tool: &str) {
         self.session_deny
             .lock()
@@ -332,6 +364,51 @@ impl Service {
             .collect();
         statuses.sort_by(|left, right| left.name.cmp(&right.name));
         statuses
+    }
+
+    /// Forgets a tool's rule, so a call to it asks again.
+    ///
+    /// It is the third state a rule panel offers and the service has not had:
+    /// a tool is allowed or denied, and "ask" is what is left when neither is
+    /// written down. The rule is removed from both sides — the live registry
+    /// and the session or the config file — because a rule that is forgotten in
+    /// memory and kept on disk comes back at the next restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Approval`] when the tool is unnamed or no
+    /// session is open and the rule was a session's.
+    pub async fn forget_approval_rule(
+        &self,
+        session: Option<&SessionKey>,
+        tool: &str,
+        global: bool,
+    ) -> Result<(), ServiceError> {
+        let tool = tool.trim();
+        if tool.is_empty() {
+            return Err(ServiceError::Approval(
+                "the approval rule needs a tool name".to_owned(),
+            ));
+        }
+        if global {
+            return self.forget_global_rule(tool);
+        }
+        let session = session.ok_or_else(|| {
+            ServiceError::Approval(
+                "a session rule needs an open session; send a message first".to_owned(),
+            )
+        })?;
+        let (nid, _, _) = self.require_record(session)?;
+        {
+            let mut records = self.lock_sessions();
+            let record = records
+                .get_mut(session)
+                .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
+            record.denied_tools.retain(|denied| denied != tool);
+            record.allowed_tools.retain(|allowed| allowed != tool);
+        }
+        self.approval_rules.forget_session(nid, tool);
+        self.persist(session).await
     }
 
     /// Sets one approval rule for a session or the user config.

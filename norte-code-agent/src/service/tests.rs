@@ -4623,6 +4623,93 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
 }
 
 #[tokio::test]
+async fn forgetting_a_global_rule_clears_memory_and_the_config() {
+    // "Ask again" is what the third press of the tools panel does, and it has to
+    // reach the config file for the same reason a global rule does: a rule
+    // forgotten in memory and kept on disk comes back at the next start.
+    let path = std::env::temp_dir().join(format!(
+        "norte-code-forget-rule-{}-{}.json",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let service = service();
+    service.set_config_path(Some(path.clone()));
+    let session = SessionId::new();
+
+    service
+        .remember_global_rule("write", false)
+        .expect("deny rule");
+    assert!(service.approval_rules.denies(session, "write"));
+
+    service
+        .forget_approval_rule(None, "write", true)
+        .await
+        .expect("forget");
+    assert!(
+        !service.approval_rules.denies(session, "write"),
+        "the memory rule is gone"
+    );
+    let loaded = Config::load(Some(&path), None).expect("config");
+    assert!(
+        loaded.config.approvals.deny.is_empty(),
+        "and the file does not carry it back"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn forgetting_a_session_rule_clears_memory_and_the_record() {
+    let service = service();
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    let nid = service.require_record(&key).expect("record").0;
+
+    service
+        .set_approval_rule(Some(&key), "command", false, false)
+        .await
+        .expect("deny");
+    assert!(service.approval_rules.denies(nid, "command"));
+
+    service
+        .forget_approval_rule(Some(&key), "command", false)
+        .await
+        .expect("forget");
+    assert!(
+        !service.approval_rules.denies(nid, "command"),
+        "the live rule is gone"
+    );
+    {
+        let records = service.lock_sessions();
+        let record = records.get(&key).expect("session");
+        assert!(record.denied_tools.is_empty(), "and the record too");
+        assert!(record.allowed_tools.is_empty(), "and there is no allow");
+    }
+
+    assert!(
+        service
+            .forget_approval_rule(None, "command", false)
+            .await
+            .is_err(),
+        "a session rule needs an open session"
+    );
+}
+
+#[tokio::test]
 async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
     // The end of the paste path. A client pastes a file, the draft carries its
     // path, and the message the model is asked about has to hold the image as a

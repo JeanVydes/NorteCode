@@ -120,6 +120,19 @@ impl Guard {
         })
     }
 
+    /// How big the terminal is right now.
+    ///
+    /// It is read from the backend and not kept: a resize is one more frame,
+    /// and a size this cached would be the size before it.
+    #[must_use]
+    pub(crate) fn size(&self) -> (u16, u16) {
+        let Some(screen) = self.screen.as_ref() else {
+            return (0, 0);
+        };
+        let size = screen.size().unwrap_or_default();
+        (size.width, size.height)
+    }
+
     /// Draws one frame.
     ///
     /// Called once per change, never in a loop: ratatui diffs against the

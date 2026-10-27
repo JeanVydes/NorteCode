@@ -20,6 +20,8 @@ use super::names::{
     cache_name, feature_set, modality_set, reasoning_capabilities, streaming_name, structured_set,
     tool_kind_set, yes_no,
 };
+use crate::modal::{Action, Row};
+
 use super::{ApprovalMode, RuleScope, SessionKey, ToolRule};
 use super::{Config, ModelSpec, Path, Reasoning, Service, Source, Style};
 use super::{approval_label, source_label};
@@ -276,6 +278,65 @@ pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>)
     lines
 }
 
+/// The tools panel, as rows a person can act on.
+///
+/// Every tool is a row whose action is the next state of its rule, and the key
+/// walks the rule through the three it has: an allow becomes a deny, a deny
+/// becomes an ask — the rule is forgotten, on both sides, and a call is decided
+/// by the mode again — and an ask becomes an allow. Setting a rule and taking it
+/// back are the same key, which is why the row carries an action rather than a
+/// pair of buttons. The scope is the panel's, not the row's — a person denying
+/// ten tools denies them for the same reach — which is why it is not on the row.
+///
+/// It reads the same `tool_rules` the report does, so the row and the rule
+/// beside it cannot disagree.
+pub(crate) fn tools_panel(
+    style: Style,
+    service: &Service,
+    session: Option<&SessionKey>,
+) -> Vec<Row> {
+    let statuses = service.tool_rules(session);
+    if statuses.is_empty() {
+        return vec![Row::text(style.yellow("no tools are registered"))];
+    }
+    let mut rows = vec![Row::heading(format!(
+        "approval mode: {}",
+        match service.config().approval_mode {
+            ApprovalMode::Ask => "ask (writes and commands are approved)",
+            ApprovalMode::AutoEdit => "auto-edit (commands are approved)",
+            ApprovalMode::Yolo => "yolo (nothing is approved)",
+        }
+    ))];
+    let widest = statuses
+        .iter()
+        .map(|status| status.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for status in &statuses {
+        let (word, action) = match status.rule {
+            // The key walks the rule through its three states, so the row's own
+            // word is what the next press does: an allow becomes a deny and a
+            // deny becomes an ask — the rule is forgotten and a call to it is
+            // decided by the mode again — and an ask becomes an allow. Setting
+            // and clearing both, from the panel, is why there are three: a rule
+            // a person set by hand is one they must be able to take back.
+            ToolRule::Allow => ("allow", Action::Deny(status.name.clone())),
+            ToolRule::Deny => ("deny", Action::Forget(status.name.clone())),
+            ToolRule::Ask => ("ask", Action::Allow(status.name.clone())),
+        };
+        let scope = match status.scope {
+            RuleScope::Session => "this session",
+            RuleScope::Global => "every session",
+            RuleScope::Mode => "by the mode",
+        };
+        rows.push(
+            Row::actable(format!("{:<widest$}", status.name), action)
+                .noted(format!("{word}  {scope}")),
+        );
+    }
+    rows
+}
+
 /// The tools the model can reach, one per line, with what each is for.
 ///
 /// Built from the registry rather than from a list kept beside it, so a tool
@@ -308,56 +369,51 @@ pub(crate) fn report_tools(style: Style, service: &Service) -> Vec<String> {
     lines
 }
 
-/// Every tool with how a call to it is decided, for `/tools`.
+/// The MCP panel, as rows a person can act on.
 ///
-/// The footer has counts and this is where the names are: a summary saying
-/// three tools are denied is useless without saying which three. The scope is
-/// printed beside each one because a rule of this session and a rule of every
-/// session read the same otherwise, and which it is decides who else it binds.
-pub(crate) fn report_tool_rules(
-    style: Style,
-    service: &Service,
-    session: Option<&SessionKey>,
-) -> Vec<String> {
-    let statuses = service.tool_rules(session);
-    if statuses.is_empty() {
-        return vec![style.yellow("no tools are registered")];
+/// A server's row switches it: Enter turns off the one that is on and on the
+/// one that is off, and the row's own word says which way it will go. The tools
+/// the server publishes are rows that are not actable — they are what the server
+/// brought, and a tool is refused with `/deny`, not by turning its server off.
+///
+/// A server that failed to start is a row too, and not an actable one: there is
+/// nothing running to switch, and a key that did nothing would say the press was
+/// wrong rather than the server.
+pub(crate) fn mcp_panel(style: Style, service: &Service) -> Vec<Row> {
+    let connected = service.mcp_status();
+    let failures = service.mcp_failures();
+    if connected.is_empty() && failures.is_empty() {
+        return Vec::new();
     }
-    let mut lines = vec![heading(style, "tools")];
-    lines.push(fact(
-        "approval mode",
-        match service.config().approval_mode {
-            ApprovalMode::Ask => "ask (writes and commands are approved)",
-            ApprovalMode::AutoEdit => "auto-edit (commands are approved)",
-            ApprovalMode::Yolo => "yolo (nothing is approved)",
-        },
-    ));
-    // The widest name decides the column, so the rule beside each one lines up
-    // and the list reads down rather than across.
-    let widest = statuses
-        .iter()
-        .map(|status| status.name.chars().count())
-        .max()
-        .unwrap_or(0);
-    for status in &statuses {
-        let (mark, word) = match status.rule {
-            ToolRule::Allow => (style.green("✓"), "allow"),
-            ToolRule::Deny => (style.red("✗"), "deny"),
-            ToolRule::Ask => (style.yellow("?"), "ask"),
-        };
-        let scope = match status.scope {
-            RuleScope::Session => "this session",
-            RuleScope::Global => "every session",
-            RuleScope::Mode => "by the mode",
-        };
-        lines.push(format!(
-            "  {mark} {name:<widest$}  {word}  {scope}",
-            name = style.bold(status.name.clone()),
-            word = style.dim(word),
-            scope = style.faint(scope),
-        ));
+    let mut rows = vec![Row::heading("mcp servers")];
+    for server in &connected {
+        let state = if server.active { "on" } else { "off" };
+        rows.push(
+            Row::actable(
+                format!(
+                    "{:<14} {} · {} tool(s)",
+                    server.name,
+                    server.command,
+                    server.tools.len()
+                ),
+                Action::Toggle(server.name.clone()),
+            )
+            .noted(format!("{state}  (enter switches)")),
+        );
+        for tool in &server.tools {
+            rows.push(Row::text(format!("    {tool}")));
+        }
+        for warning in &server.filtered {
+            rows.push(Row::text(format!("    {}", style.yellow(warning.clone()))));
+        }
     }
-    lines
+    for (name, reason) in &failures {
+        rows.push(Row::text(format!(
+            "{} failed: {reason}",
+            style.red(name.clone())
+        )));
+    }
+    rows
 }
 
 /// The MCP servers, connected or not, with their tools.

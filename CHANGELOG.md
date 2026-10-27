@@ -8,6 +8,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/tools` and `/mcp` are panels a person acts on, not text to read and
+  dismiss. The tools list is where a tool's rule is decided: Enter walks the row
+  through its three states — allow, deny, and "ask again", which forgets the
+  rule in memory and on disk so the approval mode decides the next call — and
+  `Ctrl-G` flips whether the rule binds this session or every one. A rule set by
+  hand used to be one nobody could take back without editing the config; the MCP
+  list switches a server off and on where its name is, instead of typing
+  `/mcp disable <name>` from memory. The row says what the rule is and the
+  footer says what the keys do.
+
+### Added
+
 - A model's answer is drawn as markdown. The rendering was deleted with the
   printer it belonged to — `markdown.rs` and `code.rs` wrote SGR codes into a
   string, which a frame shows as the characters they are — and the answers came

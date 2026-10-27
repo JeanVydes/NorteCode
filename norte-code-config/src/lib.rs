@@ -1326,6 +1326,66 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), ConfigError> {
     })
 }
 
+/// Removes a tool from the config's approval lists.
+///
+/// It is what "ask again" means, and it has to touch the file for the same
+/// reason [`update_user_approval`] does: a rule forgotten in memory and kept on
+/// disk comes back at the next restart, which is a rule nobody can get rid of.
+///
+/// A tool that is in neither list is not an error: forgetting a rule that was
+/// never written is what a person asks for when they press the key twice, and
+/// refusing would be the panel arguing with the press.
+///
+/// # Errors
+///
+/// Returns a [`ConfigError`] when the tool is unnamed, when the file is not a
+/// JSON object, or when it cannot be read or written.
+pub fn forget_user_approval(path: &Path, tool: &str) -> Result<(), ConfigError> {
+    let tool = tool.trim();
+    if tool.is_empty() {
+        return Err(invalid("approvals", "the tool name is empty"));
+    }
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut root = read_value(path)?;
+    let Some(root) = root.as_object_mut() else {
+        return Err(invalid(
+            "approvals",
+            "the config root must be a JSON object",
+        ));
+    };
+    let Some(approvals) = root.get_mut("approvals").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    let mut changed = false;
+    for list in ["allow", "deny"] {
+        if let Some(entries) = approvals.get_mut(list).and_then(Value::as_array_mut) {
+            let before = entries.len();
+            entries.retain(|entry| entry.as_str() != Some(tool));
+            changed |= entries.len() != before;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut body = serde_json::to_string_pretty(&root).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    body.push('\n');
+    atomic_write(path, body.as_bytes())
+}
+
 /// Adds one global approval rule to the user config, preserving the rest of
 /// the file.
 ///
@@ -1833,6 +1893,47 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn forgetting_a_rule_removes_it_from_both_lists() {
+        // What "ask again" writes: the tool is gone from the file, so the next
+        // start does not read a rule back. Both lists are touched, because a
+        // tool with an allow and a deny is a tool somebody changed their mind
+        // about.
+        let path = temp_file("{}");
+        update_user_approval(&path, "command", true).expect("allow");
+        forget_user_approval(&path, "command").expect("forget");
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert!(
+            loaded.config.approvals.allow.is_empty(),
+            "the allow is gone"
+        );
+        assert!(
+            loaded.config.approvals.deny.is_empty(),
+            "and no deny either"
+        );
+
+        // A deny that is forgotten goes the same way.
+        update_user_approval(&path, "write", false).expect("deny");
+        forget_user_approval(&path, "write").expect("forget");
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert!(
+            loaded.config.approvals.deny.is_empty(),
+            "the deny is gone too"
+        );
+
+        // A tool that is not there is not an error: the key is idempotent, so a
+        // second press is not the panel arguing with the person.
+        forget_user_approval(&path, "write").expect("forget a rule that is not there");
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn forgetting_a_rule_needs_a_tool_name() {
+        let path = temp_file("{}");
+        assert!(forget_user_approval(&path, "  ").is_err());
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 
     #[cfg(unix)]

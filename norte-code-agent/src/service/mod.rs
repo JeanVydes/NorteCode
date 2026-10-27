@@ -852,6 +852,33 @@ impl Service {
         Ok(())
     }
 
+    /// Removes one tool-wide rule from the user config and forgets it in memory.
+    ///
+    /// It is what "ask again" means: the rule is dropped from the file and from
+    /// the live registry together, so a call to the tool is decided by the mode
+    /// from the next turn on and the rule does not come back at the next start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Approval`] when there is no config path to write
+    /// to, which is the same condition a global rule has.
+    fn forget_global_rule(&self, tool: &str) -> Result<(), ServiceError> {
+        let path = self
+            .config_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .or_else(norte_code_config::user_config_path)
+            .ok_or_else(|| {
+                ServiceError::Approval(
+                    "no user config path; set --config before choosing a global rule".to_owned(),
+                )
+            })?;
+        norte_code_config::forget_user_approval(&path, tool)?;
+        self.approval_rules.forget_global(tool);
+        Ok(())
+    }
+
     /// Re-scans the skill roots and returns how many valid skills remain.
     ///
     /// The next engine build registers the refreshed tools; a turn already in

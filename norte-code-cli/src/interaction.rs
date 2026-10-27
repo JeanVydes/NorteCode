@@ -11,9 +11,9 @@ use crate::input::{Attachment, EditorAction, EditorEvent, InteractiveInput};
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
-    BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
-    report_mcp as render_mcp, report_prompt, report_reasoning, report_start, report_tool_rules,
-    report_tools, scope_name, unit_name,
+    BudgetPrompt, Verbosity, format_measure, mcp_panel, parse_reasoning_setting,
+    reasoning_setting_label, report_mcp as render_mcp, report_prompt, report_reasoning,
+    report_start, report_tools, scope_name, tools_panel, unit_name,
 };
 use norte_code_commands::Invocation;
 /// How often a running turn redraws, in ms.
@@ -938,9 +938,85 @@ fn report_tools_now(
     style: Style,
 ) {
     // A report is a panel and not a print: the frame owns the terminal, and
-    // lines written onto it land on top of the conversation.
-    let lines = report_tool_rules(style, service, session);
-    renderer.open_modal("tools", lines);
+    // lines written onto it land on top of the conversation. This one is also
+    // where a rule is set, which is what `tools_panel` builds the rows for: a
+    // person reading the list is one key from changing what it says, instead of
+    // typing `/allow shell global` from memory while looking at the list that
+    // names the tool.
+    let rows = tools_panel(style, service, session);
+    renderer.open_editable("tools", rows);
+}
+
+/// Carries out what the tools panel decided.
+///
+/// The panel produces the intent and this is where it is carried out, because
+/// the service is here and the panel has no idea one exists. The panel is
+/// rebuilt after every decision and opened again, so the row a person just
+/// changed says what it became — a rule that changed with the list still saying
+/// the old word is a list nobody can trust.
+async fn apply_tool_action(
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    renderer: &mut Renderer,
+    style: Style,
+    action: crate::modal::Action,
+    scope: crate::modal::Scope,
+) {
+    let global = scope == crate::modal::Scope::Global;
+    // A rule is set or forgotten, and which of the two the key asks for is the
+    // action the row carried. The two are one call here because the panel shows
+    // one row per tool: setting an allow and setting a deny are the same write
+    // to a different list, and forgetting removes the tool from both.
+    let (tool, rule) = match &action {
+        crate::modal::Action::Allow(tool) => (tool.clone(), Some(true)),
+        crate::modal::Action::Deny(tool) => (tool.clone(), Some(false)),
+        crate::modal::Action::Forget(tool) => (tool.clone(), None),
+        // The MCP panel's own action: a server is switched and not a rule set,
+        // so it takes its own path.
+        crate::modal::Action::Toggle(name) => {
+            apply_mcp_action(
+                service,
+                renderer,
+                style,
+                &crate::modal::Action::Toggle(name.clone()),
+            );
+            return;
+        }
+    };
+    let outcome = match rule {
+        Some(allow) => {
+            service
+                .set_approval_rule(session, &tool, allow, global)
+                .await
+        }
+        None => service.forget_approval_rule(session, &tool, global).await,
+    };
+    match outcome {
+        Ok(()) => {
+            let reach = if global {
+                "globally"
+            } else {
+                "for this session"
+            };
+            match rule {
+                Some(true) => renderer.notice(format!("allowed `{tool}` {reach}")),
+                Some(false) => renderer.notice(format!("denied `{tool}` {reach}")),
+                None => renderer.notice(format!("`{tool}` asks again {reach}")),
+            }
+            // The list is rebuilt from the rules, so the row says what the rule
+            // now is: a panel that kept its old text after a change is a panel
+            // that lies about what a key did.
+            let rows = tools_panel(style, service, session);
+            if rows.is_empty() {
+                renderer.close_modal();
+            } else {
+                renderer.open_editable("tools", rows);
+            }
+        }
+        Err(error) => {
+            renderer.failure(format!("could not change the rule for `{tool}`: {error}"));
+        }
+    }
 }
 
 fn report_debug(
@@ -1492,14 +1568,54 @@ fn report_mcp(
         return;
     }
 
-    // The listing is a report: it is read and dismissed, and as lines of the
-    // conversation it would push the work away.
-    let lines = render_mcp(style, service);
-    if lines.is_empty() {
+    // The listing is a panel and not a print, and it is one a person can act
+    // on: reading the list that names a server is the moment they know which
+    // one to switch off, and typing `/mcp disable <name>` from memory while
+    // looking at it is a command line doing a panel's job.
+    let rows = mcp_panel(style, service);
+    if rows.is_empty() {
         renderer.notice("no MCP server connected");
         return;
     }
-    renderer.open_modal("mcp servers", lines);
+    renderer.open_editable("mcp servers", rows);
+}
+
+/// Carries out what the MCP panel decided.
+///
+/// The panel produces the intent and this is where it is carried out. The panel
+/// is rebuilt after every switch and opened again, so the row says what the
+/// server became: a list that kept the word it had is a list that lies about
+/// what a key did.
+fn apply_mcp_action(
+    service: &Arc<Service>,
+    renderer: &mut Renderer,
+    style: Style,
+    action: &crate::modal::Action,
+) {
+    let crate::modal::Action::Toggle(name) = action else {
+        return;
+    };
+    let active = service
+        .mcp_status()
+        .iter()
+        .find(|server| server.name == *name)
+        .is_some_and(|server| !server.active);
+    match service.set_mcp_active(name, active) {
+        Some(state) => {
+            let word = if state { "enabled" } else { "disabled" };
+            renderer.notice(format!("mcp server `{name}` {word}"));
+            if !state {
+                renderer.notice("its tools leave the next turn; the process stays up");
+            }
+            let rows = mcp_panel(style, service);
+            if rows.is_empty() {
+                renderer.close_modal();
+            } else {
+                renderer.open_editable("mcp servers", rows);
+            }
+        }
+        None => renderer.failure(format!("no mcp server named `{name}` connected")),
+    }
 }
 
 /// Re-reads the configuration and reports what happened.
@@ -1630,6 +1746,17 @@ pub(crate) async fn read_repl_line(
             }
             Some(EditorEvent::End) | None => {
                 return Ok(None);
+            }
+            // A panel key at the prompt: the panel decides what it means and
+            // this carries the decision out. It is `async`, so it can: the
+            // caller is the loop that owns the service, and asking it to make
+            // the call would be a round trip for something already here.
+            Some(EditorEvent::Action(EditorAction::Panel(press))) => {
+                if let Some((decision, scope)) = renderer.modal_key(press) {
+                    apply_tool_action(service, session, renderer, style, decision, scope).await;
+                }
+                renderer.draw()?;
+                continue;
             }
             Some(EditorEvent::Action(EditorAction::CancelJobs)) => {
                 let Some(session) = session.filter(|session| service.has_running_jobs(session))
@@ -1861,6 +1988,25 @@ pub(crate) async fn drive_turns_titled(
                     // decisions are made here, where that is known.
                     Wake::Action(action) => {
                         match action {
+                            // A key the panel owns: the panel decides what it
+                            // means and the loop carries the decision out,
+                            // because the service is here and the panel has no
+                            // idea one exists.
+                            EditorAction::Panel(press) => {
+                                if let Some((decision, scope)) = renderer.modal_key(press) {
+                                    apply_tool_action(
+                                        service,
+                                        current.as_ref(),
+                                        renderer,
+                                        style,
+                                        decision,
+                                        scope,
+                                    )
+                                    .await;
+                                }
+                                renderer.draw()?;
+                                continue;
+                            }
                             EditorAction::CancelTurn => {
                                 if let Some(session) = current.clone() {
                                     renderer.mark_cancelled();

@@ -183,6 +183,8 @@ pub(crate) struct Pinned {
     modal_closed: AtomicBool,
     /// Whether a panel is on screen right now.
     modal_open: AtomicBool,
+    /// Whether it can be acted on.
+    modal_editable: AtomicBool,
     /// How far the panel is scrolled back from the end, in lines.
     modal_scroll: AtomicUsize,
     /// Whether the left button is down, so a drag is a selection.
@@ -245,6 +247,7 @@ impl Default for Pinned {
             resized: AtomicBool::new(false),
             modal_closed: AtomicBool::new(false),
             modal_open: AtomicBool::new(false),
+            modal_editable: AtomicBool::new(false),
             modal_scroll: AtomicUsize::new(0),
             selecting: AtomicBool::new(false),
             completion_pick: AtomicUsize::new(0),
@@ -667,6 +670,20 @@ impl Pinned {
         self.lock().painted = rows;
     }
 
+    /// Whether the panel on screen can be acted on.
+    ///
+    /// It is a copy of what the frame holds and not the panel itself: the two
+    /// are on different threads, and the reader only needs to know which keys
+    /// belong to the panel and which to the report's scroll.
+    pub(crate) fn set_modal_editable(&self, editable: bool) {
+        self.modal_editable.store(editable, Ordering::Relaxed);
+    }
+
+    /// Whether the panel on screen takes the keys that act on a row.
+    pub(crate) fn modal_is_editable(&self) -> bool {
+        self.modal_editable.load(Ordering::Relaxed)
+    }
+
     /// Consumes the resize notice, if one is pending.
     pub(crate) fn take_resized(&self) -> bool {
         self.resized.swap(false, Ordering::Acquire)
@@ -719,6 +736,9 @@ mod unix {
         /// Ctrl-G, on a running turn: stop waiting for the call, leave the
         /// process running.
         Detach,
+        /// A key a panel owns: the panel decides what it means, and the loop
+        /// that owns the service carries the decision out.
+        Panel(crate::modal::Key),
     }
 
     /// A running input line editor and its channel of lines and actions.
@@ -1225,6 +1245,44 @@ mod unix {
                             // arrows walk it. A report longer than the screen is
                             // read a page at a time, and the row under it says
                             // how much there is.
+                            // A panel that can be acted on owns the keys it
+                            // needs: the arrows walk its rows and Enter acts
+                            // on one. The decision is the panel's — it is the
+                            // thing that knows which row is under the cursor —
+                            // so what travels is the key and not a scroll
+                            // offset, and the reader that owns the service is
+                            // what carries the decision out.
+                            //
+                            // A report has no rows to act on, so its arrows
+                            // scroll it, which is what a long list of text
+                            // needs and all it needs.
+                            if pinned.modal_is_editable() {
+                                let key_for_panel = match key.code {
+                                    KeyCode::Esc => Some(crate::modal::Key::Escape),
+                                    KeyCode::Up => Some(crate::modal::Key::Up),
+                                    KeyCode::Down => Some(crate::modal::Key::Down),
+                                    KeyCode::PageUp => Some(crate::modal::Key::PageUp),
+                                    KeyCode::PageDown => Some(crate::modal::Key::PageDown),
+                                    KeyCode::Enter => Some(crate::modal::Key::Enter),
+                                    KeyCode::Char('g')
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                    {
+                                        Some(crate::modal::Key::ToggleScope)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(press) = key_for_panel {
+                                    if sender
+                                        .send(EditorEvent::Action(EditorAction::Panel(press)))
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                    continue;
+                                }
+                            }
+                            // A report owns the keyboard while it is up: Escape
+                            // closes it and the arrows walk it.
                             let scrolling = match key.code {
                                 KeyCode::Esc => Some(0),
                                 KeyCode::Up => Some(-1),
