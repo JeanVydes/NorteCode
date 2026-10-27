@@ -694,12 +694,10 @@ mod unix {
 
         /// The range of the line the cursor is on, and its column in it.
         fn current_line(&self) -> ((usize, usize), usize) {
-            let mut start = 0usize;
-            for index in 0..self.cursor {
-                if self.chars[index] == '\n' {
-                    start = index + 1;
-                }
-            }
+            let start = self.chars[..self.cursor]
+                .iter()
+                .rposition(|character| *character == '\n')
+                .map_or(0, |index| index + 1);
             let mut end = self.chars.len();
             for (index, character) in self.chars.iter().enumerate().skip(start) {
                 if *character == '\n' {
@@ -721,12 +719,10 @@ mod unix {
             }
             // The line above runs from its own newline to the one that ends it.
             let above_end = start - 1;
-            let mut above_start = 0usize;
-            for index in 0..above_end {
-                if self.chars[index] == '\n' {
-                    above_start = index + 1;
-                }
-            }
+            let above_start = self.chars[..above_end]
+                .iter()
+                .rposition(|character| *character == '\n')
+                .map_or(0, |index| index + 1);
             let width = above_end - above_start;
             self.cursor = above_start + column.min(width);
             true
@@ -2997,12 +2993,18 @@ mod pinned_tests {
         // The list the editor draws comes from the same handle the repl writes,
         // so a message stays on screen until it is applied and leaves then.
         let pinned = Pinned::new();
-        assert!(pinned.pending_steers().is_empty());
+        assert!(
+            pinned.pending_steers().is_empty(),
+            "nothing is waiting before one is set"
+        );
         pinned.set_pending_steers(vec!["first".to_owned(), "second".to_owned()]);
         assert_eq!(pinned.pending_steers(), ["first", "second"]);
         pinned.set_pending_steers(vec!["second".to_owned()]);
         assert_eq!(pinned.pending_steers(), ["second"]);
         pinned.set_pending_steers(Vec::new());
-        assert!(pinned.pending_steers().is_empty());
+        assert!(
+            pinned.pending_steers().is_empty(),
+            "clearing the list leaves nothing waiting"
+        );
     }
 }

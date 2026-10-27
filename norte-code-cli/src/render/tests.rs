@@ -745,7 +745,10 @@ fn a_successful_todo_call_updates_the_footer() {
             ]),
         ))
         .expect("started");
-    assert!(pinned.todos().is_empty());
+    assert!(
+        pinned.todos().is_empty(),
+        "the footer waits for the call to finish"
+    );
     renderer
         .event(&tool_finished("call-1", "todo", false))
         .expect("finished");
@@ -802,7 +805,7 @@ fn an_empty_todo_list_clears_the_footer() {
     renderer
         .event(&tool_finished("call-2", "todo", false))
         .expect("finished");
-    assert!(pinned.todos().is_empty());
+    assert!(pinned.todos().is_empty(), "an empty list clears the footer");
 }
 
 #[test]
@@ -818,7 +821,10 @@ fn a_non_todo_call_does_not_touch_the_footer() {
     renderer
         .event(&tool_finished("call-1", "write", false))
         .expect("finished");
-    assert!(pinned.todos().is_empty());
+    assert!(
+        pinned.todos().is_empty(),
+        "a call that is not `todo` leaves the footer alone"
+    );
 }
 
 #[test]
