@@ -23,6 +23,7 @@ mod select;
 mod startup;
 mod style;
 mod tabs;
+mod terminal;
 mod text;
 
 use approval::{clip_text, compact_json};

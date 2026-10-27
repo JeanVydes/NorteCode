@@ -120,6 +120,20 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The client draws with `ratatui`. The startup menu is the first screen to move:
+  it was a hundred lines of hand-written escapes that moved the cursor by a
+  count they kept themselves, which is a class of bug this repository has hit
+  more than once. It is now a widget — a title, a list and a hint in a layout
+  that divides what the terminal has — and the escapes are gone.
+
+  Nothing about how it looks changes yet. This is the ground the rest of the
+  interface moves onto: one owner of the terminal, one frame at a time, and the
+  layout deciding where things go instead of each writer negotiating it.
+
+  `crossterm` is pinned to 0.28, the version `ratatui` 0.29 depends on. Two of
+  them in one binary would be two readers of the same descriptor and two owners
+  of the terminal's raw mode.
+
 - The footer and the per-request line say less at `medium`, which is the level a
   person works at. The footer drops the request count, the input and output
   totals and the input:output ratio; the line under each answer drops the same

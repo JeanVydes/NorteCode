@@ -28,12 +28,16 @@ futures-util = { workspace = true }
 norte = { workspace = true }
 serde_json = { workspace = true }
 pulldown-cmark = "0.13"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 tokio = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-crossterm = "0.29"
+# Pinned to the version ratatui 0.29 depends on. Two crossterms in one binary
+# are two readers of the same fd and two owners of the terminal's raw mode: the
+# library that draws and the library that reads keys have to be the same one.
+crossterm = "0.28"
 termios = "0.3"
 
 [dev-dependencies]

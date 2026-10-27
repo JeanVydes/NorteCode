@@ -169,6 +169,54 @@ impl Style {
         self.decorate(&codes, text)
     }
 
+    /// The same colour, as the widget library wants it.
+    ///
+    /// The palette lives here and nowhere else: a widget that picked its own
+    /// colours would drift from the lines the rest of the client prints, and
+    /// the two are on screen at the same time. The three-step fallback is the
+    /// one [`Style::color`] makes, so a terminal that cannot show 24-bit gets
+    /// the same 256 or 16-colour answer either way.
+    #[must_use]
+    pub(crate) fn ratatui(
+        self,
+        rgb: (u8, u8, u8),
+        ansi256: u8,
+        ansi16: &str,
+    ) -> ratatui::style::Style {
+        use ratatui::style::Color;
+        let color = match self.colors {
+            // Nothing paints: the widget gets no colour, which is what a
+            // terminal with no colour support is for.
+            Colors::None => return ratatui::style::Style::new(),
+            Colors::True => Color::Rgb(rgb.0, rgb.1, rgb.2),
+            Colors::Ansi256 => Color::Indexed(ansi256),
+            Colors::Ansi16 => ansi16_color(ansi16),
+        };
+        ratatui::style::Style::new().fg(color)
+    }
+
+    /// The widget style for dimmed text, which is the muted colour.
+    #[must_use]
+    pub(crate) fn dim_span(self) -> ratatui::style::Style {
+        self.ratatui(MUTED, 245, "2")
+    }
+
+    /// The widget style for faint text, a step quieter than dim.
+    #[must_use]
+    pub(crate) fn faint_span(self) -> ratatui::style::Style {
+        self.ratatui(FAINT, 244, "90")
+    }
+
+    /// The widget style for a selected row.
+    ///
+    /// It is an inversion and not a colour of the palette: the cursor is what
+    /// the eye follows, and inverting works on a terminal whose colours are not
+    /// the ones this client picked.
+    #[must_use]
+    pub(crate) const fn selected() -> ratatui::style::Style {
+        ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::REVERSED)
+    }
+
     /// Bold, for names and headings.
     #[must_use]
     pub fn bold(self, text: impl Display) -> String {
@@ -263,6 +311,23 @@ impl Style {
             Colors::Ansi16 => "1;34".to_owned(),
         };
         self.decorate(&codes, text)
+    }
+}
+
+/// The named colour an ANSI-16 code stands for.
+///
+/// The codes are the bright set the palette uses; a terminal that only shows
+/// sixteen colours gets the closest of them rather than nothing.
+fn ansi16_color(code: &str) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match code {
+        "91" => Color::LightRed,
+        "92" => Color::LightGreen,
+        "93" => Color::LightYellow,
+        "94" => Color::LightBlue,
+        "95" => Color::LightMagenta,
+        "96" => Color::LightCyan,
+        _ => Color::White,
     }
 }
 

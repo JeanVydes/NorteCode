@@ -18,8 +18,6 @@
 //! entry exactly, so a provider or a session key that fell off the end of a
 //! bounded list is still two keystrokes away.
 
-use std::fmt::Write as _;
-
 use crate::style::Style;
 
 /// How many rows the menu shows at once.
@@ -352,119 +350,6 @@ pub(crate) fn strip_style(text: &str) -> String {
     out
 }
 
-/// The rows a menu is drawn in, so the next paint replaces them in place.
-///
-/// A menu that appended its rows would walk the transcript off the screen one
-/// keystroke at a time — and it is asking about the very block it would be
-/// pushing away.
-#[derive(Default)]
-pub(crate) struct Screen {
-    /// How many rows the last paint wrote.
-    painted: usize,
-}
-
-impl Screen {
-    /// A screen with nothing painted on it.
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Draws the menu, replacing the previous paint.
-    pub(crate) fn draw(&mut self, menu: &Menu, style: Style, title: &str) {
-        let mut rows: Vec<String> = vec![format!("\x1b[2K{}", style.dim(title.to_owned()))];
-        if menu.is_empty() {
-            rows.push(format!(
-                "\x1b[2K  {}",
-                style.yellow(format!("nothing matches `{}`", menu.filter()))
-            ));
-        }
-        let (window, above, below) = menu.window();
-        let hidden = above + below;
-        for (offset, index) in window.clone().enumerate() {
-            let item = &menu.items[menu.visible[index]];
-            let here = index == menu.cursor;
-            let label = if item.fixed {
-                style.bold(item.label.clone())
-            } else {
-                style.cyan(item.label.clone())
-            };
-            // The marker is what survives a terminal that paints nothing; the
-            // inversion is what makes the row easy to follow where colour is on.
-            let mut line = format!("{} {label}", if here { '›' } else { ' ' });
-            if let Some(note) = &item.note {
-                line.push_str(&style.dim(format!(" · {note}")));
-            }
-            let line = if here {
-                style.paint_raw("7", &strip_style(&line))
-            } else {
-                line
-            };
-            rows.push(format!("\x1b[2K{line}"));
-            // The count belongs beside the last row it is about: it is a
-            // statement about that row being the end of what is drawn.
-            if window.start + offset + 1 == window.end && hidden > 0 {
-                rows.push(format!(
-                    "\x1b[2K  {}",
-                    style.faint(format!("… {hidden} more, type to narrow the list"))
-                ));
-            }
-        }
-        rows.push(format!("\x1b[2K{}", style.faint(hint(menu.filter()))));
-
-        let mut out = String::new();
-        if self.painted > 0 {
-            let _ = write!(out, "\x1b[{}A", self.painted);
-        }
-        for row in &rows {
-            out.push_str(row);
-            out.push('\n');
-        }
-        // A paint with fewer rows than the last one leaves the old rows behind
-        // unless they are cleared, and the cursor has to come back up: a filter
-        // that matches nothing draws two rows where twelve were.
-        if self.painted > rows.len() {
-            let extra = self.painted - rows.len();
-            for _ in 0..extra {
-                out.push_str("\x1b[2K\n");
-            }
-            let _ = write!(out, "\x1b[{extra}A");
-        }
-        self.painted = rows.len();
-        write_out(&out);
-    }
-
-    /// Erases the paint, so what follows starts on a clean line.
-    pub(crate) fn clear(&mut self) {
-        if self.painted == 0 {
-            return;
-        }
-        let mut out = format!("\x1b[{}A", self.painted);
-        for _ in 0..self.painted {
-            out.push_str("\x1b[2K\n");
-        }
-        let _ = write!(out, "\x1b[{}A", self.painted);
-        write_out(&out);
-        self.painted = 0;
-    }
-}
-
-/// The one dim line under the list that says what the keys do.
-fn hint(filter: &str) -> String {
-    if filter.is_empty() {
-        "↑↓ move · enter open · esc back · type to filter".to_owned()
-    } else {
-        format!("↑↓ move · enter open · esc back · filter `{filter}` (ctrl-u clears)")
-    }
-}
-
-/// Writes one complete frame to stderr, where the rest of the chrome goes.
-fn write_out(text: &str) {
-    use std::io::Write as _;
-    let mut stderr = std::io::stderr().lock();
-    let _ = stderr.write_all(text.as_bytes());
-    let _ = stderr.flush();
-}
-
 /// What running a menu produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -482,26 +367,39 @@ pub(crate) enum Outcome {
     Left,
 }
 
+/// The one dim line under the list that says what the filter is doing.
+///
+/// It is a function of the filter alone rather than part of the drawing, so
+/// what it says is checked without a terminal to read it back from.
+fn hint(filter: &str) -> String {
+    if filter.is_empty() {
+        "↑↓ move · enter open · esc back · type to filter".to_owned()
+    } else {
+        format!("↑↓ move · enter open · esc back · filter `{filter}` (ctrl-u clears)")
+    }
+}
+
 /// Runs a menu until the person chooses or leaves.
 ///
 /// The answer is the caller's to read: [`Outcome::Chosen`] indexes the `items`
 /// that were passed in, and what nobody answered is [`Outcome::Left`], because
 /// whether that is an error or a default is not the menu's decision to make.
+///
+/// A frame is drawn when something changed and not otherwise: the loop is
+/// blocked on reading a key, so there is nothing to redraw between them, and
+/// the terminal is one thing this process does not have to keep busy.
 #[cfg(unix)]
 pub(crate) fn run(items: Vec<Item>, title: &str, style: Style) -> Result<Outcome, String> {
-    use std::io::IsTerminal as _;
+    use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-    use crossterm::event::{self, Event, KeyEventKind};
-
-    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+    if !crate::terminal::is_interactive() {
         return Err(format!(
             "`{title}` needs a terminal to be answered on; answer it on the command line instead"
         ));
     }
     let mut menu = Menu::new(items);
-    let mut screen = Screen::new();
-    let guard = RawGuard::enter()?;
-    screen.draw(&menu, style, title);
+    let mut terminal = crate::terminal::Guard::enter()?;
+    draw(&mut terminal, &menu, title, style)?;
     let outcome = loop {
         let Ok(event) = event::read() else {
             // A terminal that cannot be read is a terminal that cannot answer,
@@ -515,14 +413,84 @@ pub(crate) fn run(items: Vec<Item>, title: &str, style: Style) -> Result<Outcome
             continue;
         }
         match menu.key(press_of(key)) {
-            Step::Continue => screen.draw(&menu, style, title),
+            Step::Continue => draw(&mut terminal, &menu, title, style)?,
             Step::Accept => break chosen(&menu),
             Step::Cancel => break Outcome::Left,
         }
     };
-    screen.clear();
-    drop(guard);
     Ok(outcome)
+}
+
+/// Draws one frame of the menu.
+///
+/// The layout is what decides where everything goes: the list takes what is
+/// left after the title and the hint, and the rows inside it are cut to the
+/// width the terminal has at that moment. Nothing here knows a number of
+/// columns or rows, which is what makes a resize one more frame.
+#[cfg(unix)]
+fn draw(
+    terminal: &mut crate::terminal::Guard,
+    menu: &Menu,
+    title: &str,
+    style: Style,
+) -> Result<(), String> {
+    use ratatui::layout::{Constraint, Layout};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+
+    let (rows, above, below) = menu.window();
+    let hidden = above + below;
+    let mut state = ListState::default();
+    state.select(Some(menu.cursor));
+
+    // The rows are built here and drawn by the widget, so nothing in this
+    // function writes to the terminal: the frame is one buffer, and the buffer
+    // is what rustui diffs against the last one.
+    let listed: Vec<ListItem> = rows
+        .clone()
+        .map(|index| {
+            let item = &menu.items[menu.visible[index]];
+            let mut line = Line::from(vec![Span::raw(item.label.clone())]);
+            if let Some(note) = &item.note {
+                line.push_span(Span::styled(format!(" · {note}"), style.dim_span()));
+            }
+            ListItem::new(line)
+        })
+        .collect();
+    // What the row says depends on what is left to say: a filter that matched
+    // nothing says so, a list longer than the window counts what it hid, and
+    // the rest of the time it names the keys.
+    let footer = if menu.is_empty() {
+        format!("nothing matches `{}`", menu.filter())
+    } else if hidden > 0 {
+        format!("… {hidden} more, type to narrow the list")
+    } else {
+        hint(menu.filter())
+    };
+
+    terminal.draw(|frame| {
+        let area = frame.area();
+        // What the menu needs, in the order it reads: the title, the rows, the
+        // hint. The rows take the slack and the others keep their one line.
+        let [title_area, list_area, hint_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(title.to_owned(), style.dim_span())),
+            title_area,
+        );
+        let list = List::new(listed)
+            .highlight_style(Style::selected())
+            .highlight_symbol("› ");
+        frame.render_stateful_widget(list, list_area, &mut state);
+        frame.render_widget(
+            Paragraph::new(Line::styled(footer, style.faint_span())).block(Block::new()),
+            hint_area,
+        );
+    })
 }
 
 /// What Enter produced: a row, or the typed name when there was no row.
@@ -561,53 +529,6 @@ fn press_of(key: crossterm::event::KeyEvent) -> Press {
             Press::Char(character)
         }
         _ => Press::Other,
-    }
-}
-
-/// Raw mode for the length of the menu, so the arrow keys arrive as keys.
-///
-/// Its own small guard rather than the editor's: the editor's takes the terminal
-/// for the life of the process — a scroll region, a pinned footer, a reader
-/// thread — and the menu runs before any of that exists. This puts the terminal
-/// back in `Drop`, so an error on the way out does not leave a shell without
-/// echo, which is a state a person cannot type their way out of.
-#[cfg(unix)]
-struct RawGuard {
-    original: termios::Termios,
-}
-
-#[cfg(unix)]
-impl RawGuard {
-    fn enter() -> Result<Self, String> {
-        use std::io::IsTerminal as _;
-        use std::os::fd::AsRawFd as _;
-        use termios::{ECHO, ICANON, ISIG, TCSANOW, Termios, VMIN, VTIME, tcsetattr};
-
-        if !std::io::stdin().is_terminal() {
-            return Err("the menu needs a terminal on stdin".to_owned());
-        }
-        let fd = std::io::stdin().as_raw_fd();
-        let original = Termios::from_fd(fd)
-            .map_err(|error| format!("could not read the terminal: {error}"))?;
-        let mut edited = original;
-        // Line buffering and echo off so a keystroke arrives as it is pressed,
-        // and `ISIG` off so Ctrl-C is a key the menu reads rather than a signal
-        // that kills the process in the middle of a paint.
-        edited.c_lflag &= !(ICANON | ECHO | ISIG);
-        edited.c_cc[VMIN] = 1;
-        edited.c_cc[VTIME] = 0;
-        tcsetattr(fd, TCSANOW, &edited)
-            .map_err(|error| format!("could not switch the terminal to raw mode: {error}"))?;
-        Ok(Self { original })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for RawGuard {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd as _;
-        let fd = std::io::stdin().as_raw_fd();
-        let _ = termios::tcsetattr(fd, termios::TCSANOW, &self.original);
     }
 }
 
