@@ -19,13 +19,13 @@
 
 # Guides
 
-- [Run a prompt](guides/run-a-prompt.md)
+- [Start a session](guides/run-a-prompt.md)
 - [Continue a session](guides/continue-a-session.md)
 - [Approve a tool](guides/approve-a-tool.md)
 - [Set a budget](guides/set-a-budget.md)
 - [Use the sandbox](guides/use-the-sandbox.md)
 - [Configure a provider](guides/configure-a-provider.md)
-- [Script with JSONL](guides/script-with-jsonl.md)
+- [Script against the protocol](guides/script-with-jsonl.md)
 - [Add a host tool](guides/add-a-tool.md)
 - [Test without a network](guides/test-without-a-network.md)
 

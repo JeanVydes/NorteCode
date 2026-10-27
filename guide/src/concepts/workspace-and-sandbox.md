@@ -58,9 +58,9 @@ for one run or resume. `--sandbox-network` requires the sandbox. `--no-sandbox`
 cannot be combined with either.
 
 ```sh
-norte-code run --sandbox "run the test suite"
-norte-code run --sandbox --sandbox-network on "fetch the dependency"
-norte-code run --no-sandbox "inspect the host toolchain"
+norte-code new --sandbox
+norte-code new --sandbox --sandbox-network on
+norte-code new --no-sandbox
 ```
 
 ## Extra writable roots

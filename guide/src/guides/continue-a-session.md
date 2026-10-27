@@ -14,7 +14,7 @@ The listing shows the key, title, model, creation time and phase.
 ## Continue inside `run`
 
 ```sh
-norte-code run --session <key> "Now add the missing test"
+norte-code resume <key>
 ```
 
 `--session` reuses the existing history and approval rules. Without it, `run`
@@ -41,7 +41,7 @@ session stopped by `action = "stop"` is allowed to proceed.
 ## Keep the conversation open
 
 ```sh
-norte-code run -i "start here"
+norte-code new
 norte-code resume <key> -i
 ```
 

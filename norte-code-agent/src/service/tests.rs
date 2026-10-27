@@ -158,7 +158,7 @@ fn spec(model: &str) -> ModelSpec {
 /// `std::fs::write` truncates before it writes, so a test that read the file
 /// while another rewrote it saw an empty one: the key then fell through to the
 /// catalogue's `env`, and `a_model_switch_while_parked_is_applied_at_the_next_turn_boundary`
-/// failed with "no value in any of: TEST_API_KEY" in a full run while passing on
+/// failed with "no value in any of: `TEST_API_KEY`" in a full run while passing on
 /// its own. A unique name per call is what makes the tests independent; the
 /// atomic write means even a shared name could not be seen half-written.
 fn key_file(tag: &str) -> std::path::PathBuf {

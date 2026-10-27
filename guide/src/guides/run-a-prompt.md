@@ -1,80 +1,96 @@
-# Run a prompt
+# Start a session
 
 ## The basic shape
 
 ```sh
-norte-code run "Explain the repository layout"
+norte-code
 ```
 
-`run` creates a session unless `--session` names an existing one, streams the
-answer, and exits. Text is written to stdout; reasoning, tool activity and usage
-go to stderr.
+With no arguments the command asks which session to open — a new one, the last
+one, or any of the saved ones — and then reads messages from the terminal. The
+first line typed is the first message of the session; `/exit` leaves.
+
+To skip the menu:
+
+```sh
+norte-code new
+```
+
+`new` creates a session and stays in it. It takes no prompt: a session is read,
+not handed a message.
 
 ## Choose a model
 
 The default comes from `default_model` in the config, or from `--model`:
 
 ```sh
-norte-code run --model openrouter/anthropic/claude-sonnet-4 "review the diff"
+norte-code new --model openrouter/anthropic/claude-sonnet-4
 ```
 
-If neither names a model, the command explains both options instead of guessing.
-`norte-code models` shows what the catalogue knows.
+When `default_model` is not configured and no flag names one, the startup flow
+asks: it lists the providers named in the configuration first and the catalogue's
+after them, then the models of the one chosen, and writes the answer to the config
+file as `default_model`, so the question is asked once. `norte-code models` shows
+what the catalogue knows.
 
 ## Change the prompt or endpoint
 
 ```sh
-norte-code run --system-prompt "Answer as a terse reviewer." "review"
-norte-code run --endpoint https://openrouter.ai/api/v1 "review"
+norte-code new --system-prompt "Answer as a terse reviewer."
+norte-code new --endpoint https://openrouter.ai/api/v1
 ```
 
-`--system-prompt` replaces the base prompt for this run. `AGENTS.md` in the
+`--system-prompt` replaces the base prompt for this session. `AGENTS.md` in the
 workspace is appended after it. `--endpoint` overrides the provider endpoint
 without editing the config.
 
 ## Reasoning and approvals
 
 ```sh
-norte-code run --reasoning high "plan the migration"
-norte-code run --approval-mode auto-edit "fix the typo"
-norte-code run --approval-mode yolo "run the formatter"
+norte-code new --reasoning high
+norte-code new --approval-mode auto-edit
+norte-code new --approval-mode yolo
 ```
 
 The reasoning setting is validated against the selected model before the turn
 starts. `auto-edit` lets edits run but still asks for commands; `yolo` runs
-everything. Deny rules still win in `yolo`.
+everything. Deny rules still win in `yolo`. Both are also at `/reasoning` and
+`/allow`, `/deny` once the session is open.
 
 ## Limits and extensions
 
 ```sh
-norte-code run --max-iterations 12 "keep going until the tests pass"
-norte-code run \
-  --extension 'openai.chat:provider.order=["deepinfra"]' \
-  "review the patch"
+norte-code new --max-iterations 12
+norte-code new --extension 'openai.chat:provider.order=["deepinfra"]'
 ```
 
-`--max-iterations` caps the engine's iterations for this run. `--extension` is
-repeatable; malformed JSON is rejected before the turn.
+`--max-iterations` caps the engine's iterations. `--extension` is repeatable;
+malformed JSON is rejected before the turn.
 
-## Output modes
+## Verbs and levels
 
 ```sh
-norte-code run --quiet "summarise the module"
-norte-code run --verbose "fix the failing test"
-norte-code run --debug "why did that fail?"
-norte-code run --jsonl "list the files"
+norte-code new --verbose high
+norte-code --verbose low
 ```
 
-- `--quiet` redacts reasoning to one `thinking…` marker per turn and hides tool
-  activity and usage.
-- `--verbose` prints each tool call's effective arguments and result, shortened
-  when large.
-- `--debug` prints startup paths, model capabilities, effective reasoning and
-  prompt provenance. It never prints keys or endpoint URLs.
-- `--jsonl` writes one protocol event per line to stdout and nothing else.
+- `--verbose high` prints each tool call's effective arguments and result,
+  shortened when large.
+- `--verbose medium` (the default) also says that a tool is running and that the
+  model is thinking.
+- `--verbose low` shows the answer alone.
+- `/debug` at the prompt prints startup paths, model capabilities, effective
+  reasoning and prompt provenance. It never prints keys or endpoint URLs.
+
+## Sending one message
+
+`new` is for a session someone reads. A client that wants to send one message and
+read the events speaks the protocol instead; see
+[the protocol reference](../reference/protocol.md) and
+[scripting against it](../guides/script-with-jsonl.md).
 
 ## Exit status
 
-`0` means the turn ended normally. A failed turn exits with `1`. A command-line
-or configuration error exits with `2`. A turn that parks for approval or a
-question is not an error; the session is left in a resumable phase.
+`0` means the session ended normally. A failed turn exits with `1`. A
+command-line or configuration error exits with `2`. A turn that parks for
+approval or a question is not an error; the session is left in a resumable phase.

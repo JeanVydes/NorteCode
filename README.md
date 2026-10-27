@@ -94,19 +94,15 @@ exact revision and is committed.
 ## Running
 
 ```sh
-norte-code run "explain this repository"
-norte-code run --interactive "start here"
-norte-code run --session <key> "continue with the tests"
+norte-code                     # pick a session, then talk to it
+norte-code new                 # a new session, on default_model
+norte-code new --model openai/gpt-5
+norte-code resume <key>
 norte-code resume <key> --budget 20000 --budget-unit tokens
 norte-code sessions
 norte-code cost
 norte-code telemetry --bucket day
 norte-code skills list
-
-# Startup details, tool I/O and a vendor extension
-norte-code run --debug --verbose \
-  --extension 'openai.chat:provider.order=["deepinfra"]' \
-  "review the diff"
 ```
 
 `--debug` prints the session id, model, wire, approval mode, iteration limit,
@@ -152,10 +148,9 @@ sent together as the next message, even after a failed or cancelled turn.
 approval rule without waiting for a pending call. The scope defaults to the
 current session; `global` writes the user config. Setting an allow rule is also
 how a previous deny is revoked. `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
-leave. `run --interactive` may omit its first prompt and start at the prompt;
-`resume --interactive` reopens a parked session and then continues the
-conversation. It needs a terminal and cannot be combined with `--jsonl`. The
-interactive prompt shares stdin with approvals and questions, so lines typed
+leave. A bare `norte-code`, `new` and `resume` all open this prompt, so a
+session is read rather than handed a message on the command line. It needs a
+terminal. The prompt shares stdin with approvals and questions, so lines typed
 ahead are consumed in order by the next prompt that needs them.
 
 Vendor-specific request fields use Norte's extension mechanism: a key is
@@ -207,7 +202,7 @@ in that database, so a session can be resumed after a restart. Effectful tool
 calls are journaled: if a process dies after a write or command may have run,
 the next process refuses to run that same call again rather than repeat it.
 
-When a tool needs approval, `norte-code run` prints the call and its arguments
+When a tool needs approval, the session prints the call and its arguments
 and offers six choices on stdin: allow once (`y`), allow this tool for the
 session (`s`), allow this tool always (`a`), deny once (`n`), deny this tool for
 the session (`ns`) or deny this tool always (`ng`). `n <message>` (and the
@@ -217,7 +212,7 @@ session; “always” rules are written to `approvals.allow` / `approvals.deny` 
 the user config, so they survive a restart. A global deny wins over a global
 allow. Approving resumes the same turn; input is read from the terminal, never
 from the model. With no interactive terminal the session stays parked, which is
-what `--jsonl` scripts and other clients expect. Reasoning streams in dim italic
+what a protocol client expects. Reasoning streams in dim italic
 and tool, usage and turn summaries are colourised only when the output is a
 terminal; `NO_COLOR`, `TERM=dumb` and pipes keep it plain. With `--quiet`,
 reasoning is redacted to one `thinking…` marker per turn instead of disappearing
@@ -259,8 +254,7 @@ on, so pass `--sandbox` or enable it in the config; it cannot be combined with
 `--no-sandbox`, and `--sandbox` and `--no-sandbox` are mutually exclusive.
 
 ```bash
-norte-code run --sandbox --sandbox-network on \
-  "fetch the changelog and summarise it"
+norte-code new --sandbox --sandbox-network on
 ```
 
 The sandbox needs the platform binary (`apt install bubblewrap`, `dnf install

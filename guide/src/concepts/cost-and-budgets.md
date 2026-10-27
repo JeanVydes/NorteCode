@@ -59,7 +59,7 @@ truncate history: the turn ends at the safe point and the session stays intact.
 `run` and `resume` accept a one-off budget:
 
 ```sh
-norte-code run --budget 20000 --budget-unit tokens --budget-action stop "review"
+norte-code new --budget 20000 --budget-unit tokens --budget-action stop
 ```
 
 `resume --budget` replaces the session budget before continuing, which is how a

@@ -59,9 +59,8 @@ OpenRouter is an OpenAI-compatible chat endpoint:
 Upstream routing is a vendor extension, not a Norte Code setting:
 
 ```sh
-norte-code run \
-  --extension 'openai.chat:provider.order=["deepinfra"]' \
-  "review the patch"
+norte-code new \
+  --extension 'openai.chat:provider.order=["deepinfra"]'
 ```
 
 The config form is:
@@ -102,10 +101,9 @@ OPENROUTER_API_KEY=... norte-code --config ./openrouter-messages.json run \
 The same override can stay out of the config for one run:
 
 ```sh
-OPENROUTER_API_KEY=... norte-code run \
+OPENROUTER_API_KEY=... norte-code new \
   --model openrouter/anthropic/claude-sonnet-4.5 \
-  --wire messages --auth bearer \
-  "Reply with exactly: ok"
+  --wire messages --auth bearer
 ```
 
 The catalogue supplies the base URL (`https://openrouter.ai/api/v1`), and the

@@ -3,67 +3,82 @@
 The binary is `norte-code`. It is a client of the in-process `Service`; it does
 not start a daemon.
 
+Run with no arguments it opens a session: a menu of the saved sessions, and then
+the editor.
+
+```text
+norte-code [OPTIONS]
+```
+
 ## Global options
 
 | Option | Meaning |
 | --- | --- |
-| `--config PATH` | Use this user config file instead of the platform path. |
+| `--config PATH` | Use this user config file instead of the platform path. A `default_model` chosen at startup is written here. |
 | `--offline` | Never touch the network for the catalogue. |
 | `--refresh` | Revalidate the catalogue even when the cache is fresh. |
 | `--verbose` | Show tool failures and more detail. |
 | `--debug` | Print startup details, model metadata, paths and extensions. |
 
-## `run`
+## `new`
 
 ```text
-norte-code run [OPTIONS] [PROMPT]
+norte-code new [OPTIONS]
 ```
 
-`PROMPT` is optional only with `--interactive`.
+Starts a session and stays in it: the first line typed is the first message.
+There is no prompt argument and no `--session`, because the session is read
+rather than handed a message; a client that wants to send one message and exit
+speaks the protocol.
 
 | Option | Meaning |
 | --- | --- |
-| `-m, --model MODEL` | Override the default model (name only, no provider). |
+| `-m, --model MODEL` | A `provider/model` reference, overriding `default_model`. |
 | `--provider PROVIDER` | Override the provider id (e.g. `openai`, `groq`, `disabled`). |
-| `--system-prompt TEXT` | Replace the base system prompt for this run. |
+| `--system-prompt TEXT` | Replace the base system prompt for this session. |
 | `--endpoint URL` | Override the provider endpoint. |
 | `--wire WIRE` | Override the provider wire: `responses`, `chat`, `messages` or `generate-content`. |
 | `--auth AUTH` | Override the credential scheme: `bearer`, `x-api-key`, `x-goog-api-key` or `disabled`. |
 | `--api-key-env VAR` | Read the key from this environment variable instead of the configured one. |
 | `--disable-prompt-cache-key` | Omit `prompt_cache_key` for providers that reject it. |
-| `--budget LIMIT` | A limit for this message. |
+| `--budget LIMIT` | A limit for the first message. |
 | `--budget-unit usd\|tokens\|requests` | What the limit measures. Default `usd`. |
 | `--budget-action warn\|ask\|stop` | What to do at the limit. Default `stop` for `--budget`. |
 | `--compaction-threshold FRACTION` | Override the compaction threshold in `(0, 1]`. |
-| `--sandbox` / `--no-sandbox` | Override `tools.sandbox.enabled`. |
+| `--sandbox` / `--no-sandbox` | Override `tools.confinement.sandbox.enabled`. |
 | `--sandbox-network on\|off` | Override sandbox networking; requires the sandbox. |
 | `--reasoning SETTING` | `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. |
 | `--approval-mode ask\|auto-edit\|yolo` | Override the approval mode. |
-| `--max-iterations N` | Cap model iterations for this run. |
+| `--max-iterations N` | Cap model iterations for this session. |
 | `--extension KEY=JSON` | Add a vendor request field; repeatable. |
-| `--jsonl` | One protocol event per line on stdout. |
-| `--quiet` | Redact reasoning and hide tool activity and usage. The `command` tool still prints the command it ran. |
-| `--session KEY` | Continue an existing logical session. |
-| `-i, --interactive` | Keep the session open after each turn. |
+
+Without `--model` or `--provider` the session opens on `default_model`, and when
+that is not configured the startup flow asks which provider and model to use and
+writes the answer to the config file as `default_model`.
 
 ## `resume`
 
 ```text
-norte-code resume [OPTIONS] <SESSION>
+norte-code resume [OPTIONS] [SESSION]
 ```
 
-Continues a parked, stopped or interrupted session.
+Continues a session. With no `SESSION` the startup menu asks which one to open.
 
 | Option | Meaning |
 | --- | --- |
+| `SESSION` | The session key, or a prefix of it. |
 | `--system-prompt TEXT` | Replace the base prompt for this resume. |
+| `--model MODEL` | Resume with this model, replacing the one the session holds. |
 | `--budget LIMIT` | Replace the session budget before resuming. |
 | `--budget-unit`, `--budget-action` | Unit and action for that budget. |
 | `--compaction-threshold FRACTION` | Override the threshold for this resume. |
 | `--sandbox`, `--no-sandbox`, `--sandbox-network` | Sandbox overrides. |
 | `--max-iterations N` | Keep the config limit when omitted. |
 | `--extension KEY=JSON` | Vendor request field; repeatable. |
-| `--jsonl`, `--quiet`, `-i, --interactive` | Output and interaction modes. |
+| `-i, --interactive` | Keep the session open after each turn. |
+
+A resume of a session whose turn is over replays the transcript and makes no
+request; one that was interrupted continues where it stopped.
 
 ## `models`
 
@@ -134,7 +149,7 @@ numbers.
 
 ## Chat commands
 
-`norte-code run --interactive` and `norte-code resume --interactive` read
+A session opened by `norte-code`, `norte-code new` or `norte-code resume` reads
 commands from the same line editor. A command is recognised as soon as it
 starts with `/`; anything else is a message. Commands that take arguments
 reject unknown values instead of forwarding them to the model.

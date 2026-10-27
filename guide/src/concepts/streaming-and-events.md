@@ -42,11 +42,12 @@ A `Committed` event means Norte accepted the commit at a new version. A
 `TurnFinished` with `committed: false` means the turn ended without an assistant
 message; this is normal when a turn ends in a tool call or is cancelled.
 
-## JSONL
+## A client reads them
 
-The CLI's `--jsonl` mode writes one serialized `ServerEvent` per line to stdout
-and nothing else. Diagnostics stay on stderr. See
-[Script with JSONL](../guides/script-with-jsonl.md).
+A client reads one serialized `ServerEvent` per frame and nothing else;
+diagnostics are its own. The CLI's interactive commands consume the same stream
+to draw the conversation. See
+[Script against the protocol](../guides/script-with-jsonl.md).
 
 ## Cancellation and streams
 

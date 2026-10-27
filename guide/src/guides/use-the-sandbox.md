@@ -17,7 +17,7 @@
 Or for one run:
 
 ```sh
-norte-code run --sandbox "run the test suite"
+norte-code new --sandbox
 ```
 
 `--sandbox` overrides `tools.sandbox.enabled`; `--no-sandbox` overrides it the
@@ -29,7 +29,7 @@ The sandbox denies the network by default. Allow it only when the command needs
 it:
 
 ```sh
-norte-code run --sandbox --sandbox-network on "fetch the dependency metadata"
+norte-code new --sandbox --sandbox-network on
 ```
 
 `--sandbox-network` requires the sandbox. It cannot be combined with

@@ -1,15 +1,11 @@
-# Script with JSONL
+# Script against the protocol
 
-## One event per line
+## One event per frame
 
-```sh
-norte-code run --jsonl "list the files" | jq -c '.kind.event'
-```
-
-In JSONL mode, stdout carries only serialized `ServerEvent` frames. Reasoning,
-diagnostics and human-readable summaries stay off stdout. The format is stable
-enough to parse because request and event frames use tagged serde JSON and deny
-unknown fields.
+The `new` and `resume` commands read the terminal, so they carry no event stream.
+A script drives the same protocol through the `Service` API, and this is the shape
+of what it reads: one serialized `ServerEvent` per frame, stable enough to parse
+because request and event frames use tagged serde JSON and deny unknown fields.
 
 A successful turn contains frames like:
 
@@ -38,21 +34,15 @@ terminal, the CLI leaves the session parked rather than guessing. Use the
 
 ## Keep the session
 
-The `session` field is the logical key. Store it and continue later:
-
-```sh
-key=$(norte-code run --jsonl "start" | jq -r 'select(.session != null) | .session' | head -1)
-norte-code run --session "$key" --jsonl "continue"
-```
-
-Do not parse human output to find the key; use the JSON field or
-`norte-code sessions --json`.
+The `session` field is the logical key. A client stores it and passes it back on
+the next request, or a person continues it with `norte-code resume <key>`. The
+key is shown in the footer while the session runs and listed by
+`norte-code sessions --json`; do not parse human output for it.
 
 ## Errors and exit codes
 
-`--jsonl` does not turn a failed turn into a zero exit. A terminal `error` frame
-is emitted and the process exits non-zero. A command-line or configuration error
-exits `2` and writes a diagnostic to stderr.
+A terminal `error` frame is a failed turn, not a successful one. A
+command-line or configuration error exits `2` and writes a diagnostic to stderr.
 
 ## What not to do
 

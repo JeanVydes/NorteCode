@@ -8,6 +8,34 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `norte-code` with no arguments opens the startup flow: a menu of *New
+  session*, *Last session* and the saved sessions, and then the editor. The
+  session is created before the first message, so the key shown in the footer is
+  the one the message goes to rather than one invented as a side effect of
+  sending it. `resume` with no key reaches the same menu; `resume <KEY>` keeps
+  its old path, `--jsonl` included.
+
+- The startup flow asks which provider and which model when `default_model` is
+  not configured, listing the providers named in the configuration first and the
+  catalogue's after them — the catalogue is the whole of models.dev, and
+  printing all of it buried the two or three providers a host actually has. A
+  bounded list says what it left out, and a name past the bound is still
+  reachable by typing it. The choice is written to the config file the process
+  was started with (`--config FILE`, else the platform user path) as
+  `default_model`, so the question is asked once; a file that cannot be written
+  is reported and the session opens on the chosen model anyway.
+
+### Changed
+
+- `run` is `new`. It starts a session and stays in it, which is what the command
+  does now: the prompt argument and `--session` are gone, because a session is
+  read from the terminal rather than handed a message on the command line.
+  `--model` and `--provider` still override what `default_model` would have
+  chosen, so `norte-code new --model openai/gpt-5` opens on that model while a
+  bare `norte-code` opens on the configured default. Scripts that sent a prompt
+  have the protocol client and `--jsonl`, which this command no longer carries.
+
+
 - A `browser_use` screenshot reaches the model as an image. The tool answers
   with the PNG as base64 inside its result, and a tool result carries text only
   on the `chat` wire, so the model was told how large the capture was and never

@@ -62,7 +62,7 @@ The repository also keeps the longer [`CONFIG.md`](https://github.com/JeanVydes/
 ## Run one prompt
 
 ```sh
-norte-code run "Explain the repository layout"
+norte-code new
 ```
 
 Text goes to stdout. Reasoning, tool activity and usage go to stderr when they
@@ -70,19 +70,19 @@ are enabled. The command prints the session key, so the next command can
 continue the same conversation:
 
 ```sh
-norte-code run --session <key> "Now list the tests"
+norte-code resume <key>
 ```
 
 `--model` overrides the default for this run:
 
 ```sh
-norte-code run --model openrouter/anthropic/claude-sonnet-4 "review the diff"
+norte-code new --model openrouter/anthropic/claude-sonnet-4
 ```
 
 ## Stay in the session
 
 ```sh
-norte-code run --interactive "start here"
+norte-code new
 ```
 
 The prompt keeps the same session open. It is a line editor: the arrow keys,
@@ -95,7 +95,7 @@ command or argument you are typing. Type `/help` to see the chat commands,
 `/exit` or Ctrl-D to leave. A first prompt is optional with `--interactive`:
 
 ```sh
-norte-code run -i
+norte-code
 ```
 
 ## Inspect what happened

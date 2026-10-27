@@ -3,7 +3,7 @@
 ## One run
 
 ```sh
-norte-code run \
+norte-code new \
   --budget 20000 \
   --budget-unit tokens \
   --budget-action stop \
