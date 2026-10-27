@@ -355,6 +355,14 @@ impl Renderer {
             ServerEventKind::SessionTodos { todos } => {
                 self.pinned.set_todos(todos.iter().map(todo_item).collect());
             }
+            // The session was named, by `/rename` here or by another client
+            // that shares the session. The footer is where the name shows, so
+            // it repaints from the event rather than from whoever asked: the
+            // two paths that set a title have to agree, and this is the one
+            // that holds for both.
+            ServerEventKind::SessionRenamed { title } => {
+                self.set_title(title.clone());
+            }
             kind => self.status_event(kind),
         }
         Ok(())
@@ -1440,30 +1448,42 @@ impl Renderer {
                 if self.block != Block::None {
                     self.end_blocks();
                 }
+                // Four things, in the order they are worth reading: which model
+                // answered, how fast it went, how much of the prompt its cache
+                // served, and what it cost. At `high` the rest joins them --
+                // the token counts, the wall time, the first-token wait, the
+                // input:output ratio and the tools. `medium` is the line a
+                // person reads while working; it is not a report, and a line
+                // that grows to eleven fields is one nobody finishes.
+                let high = self.verbosity.at_least(Verbosity::High);
                 let mut parts = Vec::new();
                 if let Some(name) = &self.model_name {
                     parts.push(self.style.dim(name.clone()));
                 }
-                if let Some(input) = usage.input_tokens {
-                    parts.push(self.style.dim(format!("{} in", human_tokens(input))));
-                }
-                if let Some(output) = usage.output_tokens {
-                    parts.push(self.style.dim(format!("{} out", human_tokens(output))));
+                if high {
+                    if let Some(input) = usage.input_tokens {
+                        parts.push(self.style.dim(format!("{} in", human_tokens(input))));
+                    }
+                    if let Some(output) = usage.output_tokens {
+                        parts.push(self.style.dim(format!("{} out", human_tokens(output))));
+                    }
                 }
                 if let Some(rate) = tokens_per_second {
                     parts.push(self.style.dim(format!("{rate:.1} tok/s")));
                 }
-                if *duration_ms > 0 {
-                    parts.push(
-                        self.style
-                            .dim(format!("took {}", duration_label(*duration_ms))),
-                    );
-                }
-                if let Some(first) = first_token_ms {
-                    parts.push(
-                        self.style
-                            .dim(format!("latency {}", duration_label(*first))),
-                    );
+                if high {
+                    if *duration_ms > 0 {
+                        parts.push(
+                            self.style
+                                .dim(format!("took {}", duration_label(*duration_ms))),
+                        );
+                    }
+                    if let Some(first) = first_token_ms {
+                        parts.push(
+                            self.style
+                                .dim(format!("latency {}", duration_label(*first))),
+                        );
+                    }
                 }
                 if let (Some(cache), Some(input)) = (usage.cache_read_tokens, usage.input_tokens) {
                     parts.push(
@@ -1473,14 +1493,16 @@ impl Renderer {
                 } else if *cache_hit {
                     parts.push(self.style.dim("cache hit".to_owned()));
                 }
-                if let (Some(input), Some(output)) = (usage.input_tokens, usage.output_tokens) {
-                    parts.push(
-                        self.style
-                            .dim(format!("in:out {}", token_ratio(input, output))),
-                    );
-                }
-                if !tools.is_empty() {
-                    parts.push(self.style.dim(format!("tools {}", Self::tool_list(tools))));
+                if high {
+                    if let (Some(input), Some(output)) = (usage.input_tokens, usage.output_tokens) {
+                        parts.push(
+                            self.style
+                                .dim(format!("in:out {}", token_ratio(input, output))),
+                        );
+                    }
+                    if !tools.is_empty() {
+                        parts.push(self.style.dim(format!("tools {}", Self::tool_list(tools))));
+                    }
                 }
                 if self.show_cost {
                     match cost_usd {
@@ -1881,8 +1903,11 @@ impl Renderer {
     /// The running session totals for the pinned footer.
     ///
     /// One line, always the same fields, so the footer only ever updates in
-    /// place: requests, input and output tokens, the average cache-read share,
-    /// the total input:output ratio and the reported cost.
+    /// place. What it says depends on the verbosity, and the difference is the
+    /// point: `medium` is the line a person reads while working — what the
+    /// context is doing, how much of it the cache served, what it has cost —
+    /// and `high` adds the counters that are for looking at rather than
+    /// reading: requests, input and output totals, and the input:output ratio.
     pub(crate) fn session_status(&self) -> String {
         // The dial shows the live context against the model's window, so a turn
         // that is filling the window is visible before compaction hits. It is red
@@ -1891,28 +1916,33 @@ impl Renderer {
             .activity
             .as_deref()
             .is_some_and(|activity| activity.starts_with("compacting"));
-        let mut parts = vec![
-            self.style.cyan(format!("{} req", self.requests)),
-            self.style.dim(format!("{} in", human_tokens(self.input))),
-            self.style.dim(format!("{} out", human_tokens(self.output))),
-            context_dial(
-                self.style,
-                self.context_used,
-                self.max_context,
-                self.compaction_threshold,
-                compacting,
-            ),
-        ];
+        let mut parts = Vec::new();
+        if self.verbosity.at_least(Verbosity::High) {
+            parts.push(self.style.cyan(format!("{} req", self.requests)));
+            parts.push(self.style.dim(format!("{} in", human_tokens(self.input))));
+            parts.push(self.style.dim(format!("{} out", human_tokens(self.output))));
+        }
+        // The dial stays at both levels: it is the one number that changes
+        // while a turn runs, and the one that decides when compaction hits.
+        parts.push(context_dial(
+            self.style,
+            self.context_used,
+            self.max_context,
+            self.compaction_threshold,
+            compacting,
+        ));
         if self.cache_reported && self.input > 0 {
             parts.push(self.style.blue(format!(
                 "cache {}",
                 cache_percent_label(self.cache_read, self.input)
             )));
         }
-        parts.push(
-            self.style
-                .dim(format!("in:out {}", token_ratio(self.input, self.output))),
-        );
+        if self.verbosity.at_least(Verbosity::High) {
+            parts.push(
+                self.style
+                    .dim(format!("in:out {}", token_ratio(self.input, self.output))),
+            );
+        }
         if self.show_cost {
             if self.requests > 0 && self.unpriced == self.requests {
                 if !self.cost_silent {

@@ -203,6 +203,41 @@ impl Service {
         Ok(title)
     }
 
+    /// Names the session after the first message it already holds.
+    ///
+    /// This is the manual half of the feature: a session that has been running
+    /// without a title -- one opened before titling existed, or one whose title
+    /// request failed -- can be named now, from the message the conversation
+    /// actually starts with. It reads that message out of the history rather
+    /// than asking the client for it, because the client does not have it: the
+    /// transcript belongs to the engine, and only the session's own id is the
+    /// host's.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when the session is unknown, its history cannot
+    /// be read, it has no message from the user to be named after, or the title
+    /// request fails.
+    pub async fn retitle_session(
+        &self,
+        key: &norte_code_protocol::SessionKey,
+    ) -> Result<String, ServiceError> {
+        let (nid, spec, _) = self.require_record(key)?;
+        let history = self.engine(&spec)?.history(nid).await?;
+        // The first thing the person said, not the system prompt and not the
+        // summary a compaction seeded: those are the host's words, and a name
+        // has to come from the conversation's own.
+        let first = history
+            .iter()
+            .find(|message| message.role == Role::User)
+            .map(norte::Message::text)
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| {
+                ServiceError::Titling("the session has no message to be named after".to_owned())
+            })?;
+        self.title_session(key, &first).await
+    }
+
     /// The model a title is asked of.
     ///
     /// `titling.model` when set, the session's own otherwise. The resolution is

@@ -121,6 +121,9 @@ pub(crate) enum ChatCommand {
     Model { model: String },
     /// Set the current provider.
     Provider { provider: String },
+    /// Name the session. A bare `/rename` asks the model for a title from the
+    /// first message the session holds.
+    Rename { title: Option<String> },
     /// List the background jobs, read one, or stop one.
     Jobs {
         action: JobListAction,
@@ -239,6 +242,15 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
     }
     if let Some(rest) = command_rest(text, "/provider") {
         return Some(parse_provider_command(rest));
+    }
+    if let Some(rest) = command_rest(text, "/rename") {
+        // Everything after the command is the title, spaces and all: a name is
+        // not a word, and splitting it would make `/rename fix the footer` a
+        // usage error instead of the name it obviously is.
+        let title = rest.trim();
+        return Some(Ok(ChatCommand::Rename {
+            title: (!title.is_empty()).then(|| title.to_owned()),
+        }));
     }
     None
 }
@@ -365,6 +377,7 @@ const CHAT_COMMANDS: &[&str] = &[
     "/jobs",
     "/restart",
     "/tab",
+    "/rename",
     "/debug",
     "/exit",
     "/quit",
@@ -464,6 +477,7 @@ fn command_usage(command: &str) -> Option<&'static str> {
         "/mcp" => Some("/mcp [list|enable|disable] [server]"),
         "/jobs" => Some("/jobs [list|check|stop] [job-id]"),
         "/restart" => Some("/restart"),
+        "/rename" => Some("/rename [title]"),
         "/debug" => Some("/debug"),
         "/exit" => Some("/exit"),
         "/quit" => Some("/quit"),
@@ -628,6 +642,7 @@ pub(crate) fn print_chat_help(style: Style) {
     eprintln!("  /deny <tool> [session|global]   refuse without asking");
     eprintln!("  /reasoning <setting> [session|message]  set reasoning");
     eprintln!("  /tab [name|number]        switch tab (chat, todo); bare lists them");
+    eprintln!("  /rename [title]           name the session; bare asks the model");
     eprintln!("  /debug                    what the process knows: model, tools, paths");
     eprintln!("  /model <model>             switch model (uses current provider)");
     eprintln!("  /provider <provider>       switch provider (keeps current model)");
@@ -731,6 +746,15 @@ pub(crate) async fn interactive_loop(
                     }
                 }
                 ChatCommand::Refresh => report_refresh(service, style).await,
+                ChatCommand::Rename { title } => match session.clone() {
+                    Some(current) => {
+                        rename_session(service, current, title, renderer, style).await;
+                    }
+                    None => eprintln!(
+                        "{}",
+                        style.yellow("there is no session yet; send a message first")
+                    ),
+                },
                 ChatCommand::Mcp { action, server } => {
                     report_mcp(service, action, server.as_deref(), style);
                 }
@@ -1094,6 +1118,37 @@ async fn steer_text(
     }
 }
 
+/// The tab a `/tab` argument names, or the tab a bare one would list.
+///
+/// `None` is a name no tab has. It is shared by the two paths that run a
+/// command — the repl between turns and the live handler during one — because
+/// they have to accept the same words: `/tab 2` and `/tab todo` mean the same
+/// thing whichever path reads them, and one of them used to answer that tabs
+/// needed a terminal it was standing in front of.
+fn tab_target(target: Option<&str>, renderer: &Renderer) -> Result<SessionTab, String> {
+    match target {
+        // Bare during a turn: the tab after the current one, which is what
+        // `Ctrl-T` does. The repl path lists the tabs instead, because it has
+        // the room and a person between turns is asking what there is.
+        None => Ok(renderer.pinned.tab().next()),
+        Some(target) => target
+            .parse::<usize>()
+            .ok()
+            .and_then(SessionTab::numbered)
+            .or_else(|| SessionTab::named(target))
+            .ok_or_else(|| {
+                format!(
+                    "no tab `{target}`; use {}",
+                    SessionTab::ALL
+                        .iter()
+                        .map(|tab| tab.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_live_command(
     service: &Arc<Service>,
@@ -1103,11 +1158,15 @@ async fn handle_live_command(
     style: Style,
 ) {
     match command {
-        // Without a terminal there are no tabs to switch: the same command
-        // would change a view nobody can see, so it says so.
-        ChatCommand::Tab { .. } => {
-            eprintln!("{}", style.yellow("tabs need an interactive terminal"));
-        }
+        // The tab changes while the turn runs. There is a terminal -- this is
+        // the interactive turn loop, and the footer is on screen -- so the old
+        // message claiming otherwise was simply wrong, and the command is the
+        // one that helps most here: Ctrl-T is a keystroke a person reaches for
+        // while the model is working.
+        ChatCommand::Tab { target } => match tab_target(target.as_deref(), renderer) {
+            Ok(tab) => renderer.pinned.set_tab(tab),
+            Err(message) => eprintln!("{}", style.yellow(message)),
+        },
         ChatCommand::Exit => eprintln!(
             "{}",
             style.yellow("wait until the current turn finishes, then /exit")
@@ -1208,10 +1267,71 @@ async fn handle_live_command(
         },
         // A restart ends the session, so it cannot wait for the turn; the
         // turn loop does it, where the boundary is known.
+        ChatCommand::Rename { title } => match current {
+            Some(current) => rename_session(service, current.clone(), title, renderer, style).await,
+            None => eprintln!("{}", style.yellow("no session yet; send a message first")),
+        },
+        // A restart ends the session, so it cannot wait for the turn; the
+        // turn loop does it, where the boundary is known.
         ChatCommand::Restart => eprintln!(
             "{}",
             style.yellow("wait until the current turn finishes, then /restart")
         ),
+    }
+}
+
+/// Names the session, from the text given or from the model.
+///
+/// `/rename fix the footer` writes what was typed and does not call anything:
+/// a person who has already decided what the session is called should not wait
+/// for a model to agree. A bare `/rename` asks the model, from the first message
+/// the session holds, which is the path a session that predates titling takes.
+async fn rename_session(
+    service: &Arc<Service>,
+    session: SessionKey,
+    title: Option<String>,
+    renderer: &mut Renderer,
+    style: Style,
+) {
+    // Nothing typed, so the model picks the name. It is the same request the
+    // first message triggers, asked late: the session already has the history
+    // to read from, and the answer is worth waiting for here.
+    let Some(title) = title else {
+        eprintln!("{}", style.dim("asking the model for a name…"));
+        match service.retitle_session(&session).await {
+            Ok(title) => {
+                renderer.set_title(title.clone());
+                eprintln!("{}", style.green(format!("named `{title}`")));
+            }
+            Err(error) => eprintln!(
+                "{}",
+                style.red(format!("could not name the session: {error}"))
+            ),
+        }
+        return;
+    };
+    // What was typed. It goes through the rename request, so the session's own
+    // rules judge it and the event that comes back is the one the footer
+    // listens for.
+    let title = title.trim().to_owned();
+    if title.is_empty() {
+        eprintln!("{}", style.yellow("usage: /rename <title>  or  /rename"));
+        return;
+    }
+    let request = ClientRequestKind::RenameSession {
+        session: session.clone(),
+        title: title.clone(),
+    };
+    match drain_request(service, request).await {
+        Ok(events) => {
+            if let Some(error) = stream_error(&events) {
+                eprintln!("{}", style.red(format!("could not rename: {error}")));
+            } else {
+                renderer.set_title(title.clone());
+                eprintln!("{}", style.green(format!("named `{title}`")));
+            }
+        }
+        Err(error) => eprintln!("{}", style.red(format!("could not rename: {error}"))),
     }
 }
 
@@ -2399,6 +2519,57 @@ mod tests {
             parse_chat_command("/reasoning budget:0"),
             Some(Err(_))
         ));
+    }
+
+    #[test]
+    fn tab_is_resolved_the_same_way_wherever_the_command_runs() {
+        // `/tab` used to answer "tabs need an interactive terminal" during a
+        // turn, which was false: the live handler runs inside the editor, with
+        // the footer on screen. What it means is the same on both paths.
+        assert_eq!(
+            parse_chat_command("/tab todo"),
+            Some(Ok(ChatCommand::Tab {
+                target: Some("todo".to_owned())
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/tab 2"),
+            Some(Ok(ChatCommand::Tab {
+                target: Some("2".to_owned())
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/tab"),
+            Some(Ok(ChatCommand::Tab { target: None }))
+        );
+    }
+
+    #[test]
+    fn rename_takes_the_whole_line_and_a_bare_one_asks_the_model() {
+        // A name is not a word: everything after the command is the title, so
+        // a name with spaces in it is the name and not a usage error.
+        assert_eq!(
+            parse_chat_command("/rename fix the footer overflow"),
+            Some(Ok(ChatCommand::Rename {
+                title: Some("fix the footer overflow".to_owned())
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/rename   spaced   out  "),
+            Some(Ok(ChatCommand::Rename {
+                title: Some("spaced   out".to_owned())
+            }))
+        );
+        // Bare, it is the model that picks, which is the path a session that
+        // predates titling takes.
+        assert_eq!(
+            parse_chat_command("/rename"),
+            Some(Ok(ChatCommand::Rename { title: None }))
+        );
+        assert!(CHAT_COMMANDS.contains(&"/rename"));
+        assert_eq!(command_usage("/rename"), Some("/rename [title]"));
+        // A word that merely starts with it is still a message.
+        assert_eq!(parse_chat_command("/renamed"), None);
     }
 
     #[test]

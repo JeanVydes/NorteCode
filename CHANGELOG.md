@@ -25,7 +25,22 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `default_model`, so the question is asked once; a file that cannot be written
   is reported and the session opens on the chosen model anyway.
 
+- `/rename [title]` names the session. With a title it writes what was typed and
+  calls nothing: a person who has already decided what the session is called
+  should not wait for a model to agree. Bare, it asks the model from the first
+  message the session holds, which is the path a session that predates titling
+  takes — the history is read out of the engine, because the transcript belongs
+  to it and not to the client.
+
 ### Changed
+
+- The footer and the per-request line say less at `medium`, which is the level a
+  person works at. The footer drops the request count, the input and output
+  totals and the input:output ratio; the line under each answer drops the same
+  counts along with the wall time, the first-token wait and the tools. What
+  stays is what is read while working: the context dial, the cache share, the
+  cost, the model and the tokens per second. `--verbose high` shows everything
+  it showed before.
 
 - A question from the model is a list the arrow keys walk, drawn where the draft
   is drawn. The "something else" row opens the input box, and until it is chosen
@@ -418,6 +433,20 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - The footer has a context dial: a ring whose filled share is how much of the
   model's window the last request used, blue below the compaction threshold,
   amber near it and red with `compact` once it is reached.
+
+### Fixed
+
+- `/tab` answered "tabs need an interactive terminal" during a turn. That was
+  false: the live command handler runs inside the editor, with the footer on
+  screen. It switches the tab now, and resolves the argument the same way the
+  between-turns path does, so `/tab todo` and `/tab 2` mean one thing.
+
+- The provider was recovered by splitting a `provider/model` label in `/model`,
+  `/provider` and the telemetry fallback, which put an empty provider on a row
+  whenever a model id carried a slash of its own. They read the spec, which
+  holds the two apart, and `/model` with no session no longer lists the
+  catalogue under a provider nobody chose.
+
 
 ### Removed
 
@@ -967,3 +996,4 @@ log file gets the plain rows instead of the box drawing.
   characters instead of bytes, matching `read` for accented text.
 
 [Unreleased]: https://github.com/JeanVydes/NorteCode/commits/dev
+
