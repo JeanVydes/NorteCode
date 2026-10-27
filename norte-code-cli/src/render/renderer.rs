@@ -8,8 +8,8 @@ use crate::input::{Pinned, TodoItem};
 use super::argument::{todo_item, todo_items};
 use super::dial::{context_dial, reasoning_bar, token_ratio};
 use super::edit::{
-    EditBox, EditPreview, Side, clip_command, clip_plain, edit_box_width, edit_preview, line_range,
-    preview_path, render_panel,
+    EditBox, EditPreview, Side, UnifiedKind, clip_command, clip_plain, edit_box_width,
+    edit_preview, edit_range, line_range, preview_path, render_panel, unify,
 };
 use super::helpers::{cache_percent_label, human_tokens, short_path};
 use super::labels::{
@@ -17,8 +17,8 @@ use super::labels::{
 };
 use super::loading::LoadingBar;
 use super::{
-    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, HostFacts, Phase, ServerEvent,
-    ServerEventKind, Style, Write, clip_text, compact_json, duration_label,
+    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, DiffStyle, HostFacts, Phase,
+    ServerEvent, ServerEventKind, Style, Write, clip_text, compact_json, duration_label,
 };
 
 /// How events are written.
@@ -129,6 +129,12 @@ pub(crate) struct Renderer {
     /// session was for, and the title is what a person recognises it by. The
     /// key stays beside it, because the key is what `resume` is given.
     pub(crate) title: Option<String>,
+    /// How an `edit` call's diff is drawn, from `ui.diff_style`.
+    ///
+    /// It lives here because the renderer draws it, and it is set once at
+    /// startup: changing it mid-run would leave one transcript with two shapes
+    /// in it and no way to tell which row was which.
+    pub(crate) diff_style: DiffStyle,
     pub(crate) show_cost: bool,
     /// The facts only the host knows, printed by `/debug`.
     pub(crate) host_facts: Option<HostFacts>,
@@ -267,6 +273,7 @@ impl Renderer {
             session: None,
             show_workdir: true,
             title: None,
+            diff_style: DiffStyle::default(),
             host_facts: None,
             show_cost,
             cost_silent: false,
@@ -440,6 +447,15 @@ impl Renderer {
     /// lands at no particular moment in the conversation; the footer is where it
     /// shows, and the repaint is part of the update rather than something the
     /// caller has to remember.
+    /// Sets how an `edit` call's diff is drawn, from `ui.diff_style`.
+    ///
+    /// A setter rather than another argument to [`Renderer::new`], which already
+    /// takes the shape of the run: this is a display preference with a working
+    /// default, and a caller that does not care should not have to name it.
+    pub(crate) fn set_diff_style(&mut self, style: DiffStyle) {
+        self.diff_style = style;
+    }
+
     pub(crate) fn set_title(&mut self, title: String) {
         if self.title.as_deref() != Some(title.as_str()) {
             self.title = Some(title);
@@ -1209,10 +1225,27 @@ impl Renderer {
         }
     }
 
-    /// Renders one boxed edit. The two panels are sized independently so the
-    /// right border stays aligned on odd terminal widths.
-    #[allow(clippy::too_many_lines)]
+    /// Renders one boxed edit in whichever shape `ui.diff_style` asks for.
     fn print_edit_box(&self, path: &str, edit: &EditBox, width: usize) {
+        match self.diff_style {
+            DiffStyle::Unified => self.print_edit_box_unified(path, edit, width),
+            DiffStyle::Split => self.print_edit_box_split(path, edit, width),
+        }
+    }
+
+    /// Renders one boxed edit as a patch: one column, `-` for what left and
+    /// `+` for what arrived.
+    fn print_edit_box_unified(&self, path: &str, edit: &EditBox, width: usize) {
+        for line in Self::unified_lines(self.style, path, edit, width) {
+            eprintln!("{line}");
+        }
+    }
+    /// Renders one boxed edit side by side.
+    ///
+    /// The two panels are sized independently so the right border stays aligned
+    /// on odd terminal widths.
+    #[allow(clippy::too_many_lines)]
+    fn print_edit_box_split(&self, path: &str, edit: &EditBox, width: usize) {
         let panel_left = width.saturating_sub(7) / 2;
         let panel_right = width.saturating_sub(7).saturating_sub(panel_left);
         if panel_left < 10 || panel_right < 10 {
@@ -1328,6 +1361,87 @@ impl Renderer {
             self.style.blue("─".repeat(width.saturating_sub(2))),
             self.style.blue("╯")
         );
+    }
+
+    /// Builds the unified box, one string per terminal row.
+    ///
+    /// It is built here rather than printed from the method so the rows can be
+    /// checked: a patch that puts the new line above the old one, or numbers an
+    /// addition from the file it is not in, reads plausibly and is wrong.
+    pub(crate) fn unified_lines(
+        style: Style,
+        path: &str,
+        edit: &EditBox,
+        width: usize,
+    ) -> Vec<String> {
+        let inner = width.saturating_sub(4).max(1);
+        let digits = edit
+            .rows
+            .iter()
+            .flat_map(|row| [row.left.as_ref(), row.right.as_ref()])
+            .filter_map(|cell| cell.and_then(|cell| cell.number))
+            .map(|number| number.to_string().len())
+            .max()
+            .unwrap_or(3)
+            .clamp(3, 6);
+        let approximate = if edit.approximate {
+            " · approximate"
+        } else {
+            ""
+        };
+        let mut title = format!(
+            " edit {}/{} · {}{approximate} · {}",
+            edit.index,
+            edit.total,
+            edit_range(edit),
+            preview_path(path)
+        );
+        title.push(' ');
+        let title = clip_plain(&title, width.saturating_sub(3));
+        let fill = width.saturating_sub(title.chars().count() + 3);
+        let mut lines = vec![format!(
+            "  {}{}{}{}",
+            style.blue("╭─"),
+            style.bold(title),
+            style.blue("─".repeat(fill)),
+            style.blue("╮")
+        )];
+        for row in unify(&edit.rows) {
+            let number = row
+                .number
+                .map_or_else(|| " ".repeat(digits), |number| format!("{number:>digits$}"));
+            let mark = row.kind.mark();
+            let room = inner.saturating_sub(digits + 3);
+            let text = format!("{:<room$}", clip_plain(&row.text, room));
+            let (mark, text) = match row.kind {
+                UnifiedKind::Context => (style.faint(mark.to_string()), style.faint(text)),
+                UnifiedKind::Removed => (style.red(mark.to_string()), style.red(text)),
+                UnifiedKind::Added => (style.green(mark.to_string()), style.green(text)),
+            };
+            lines.push(format!(
+                "  {} {} {mark} {text} {}",
+                style.blue("│"),
+                style.faint(number),
+                style.blue("│")
+            ));
+        }
+        if edit.omitted > 0 {
+            let note = format!("… {} more line(s) …", edit.omitted);
+            let note = format!("{:<inner$}", clip_plain(&note, inner));
+            lines.push(format!(
+                "  {} {} {}",
+                style.blue("│"),
+                style.yellow(note),
+                style.blue("│")
+            ));
+        }
+        lines.push(format!(
+            "  {}{}{}",
+            style.blue("╰"),
+            style.blue("─".repeat(width.saturating_sub(2))),
+            style.blue("╯")
+        ));
+        lines
     }
 
     /// Returns the command a shell tool call ran, clipped to one line.

@@ -1272,3 +1272,93 @@ fn the_footer_names_the_directory_the_work_is_in() {
         "the rest of the line stays: {without}"
     );
 }
+
+#[test]
+fn the_unified_diff_reads_as_a_patch() {
+    // The rows are what the terminal shows, so this is the only place the shape
+    // can be checked: a `+` above its `-`, or the wrong line number, still
+    // looks like a diff and is wrong.
+    let arguments = serde_json::json!({
+        "path": "src/lib.rs",
+        "edits": [{"search": "two\n", "replace": "TWO\n"}]
+    });
+    let preview = edit_preview(Some(&arguments), Some("one\ntwo\nthree\n")).expect("preview");
+    let edit = &preview.boxes[0];
+    let lines = Renderer::unified_lines(Style::plain(), &preview.path, edit, 60);
+    // `Style::plain` carries no escape codes, so the rows are already the text
+    // a terminal would show.
+    let plain: Vec<String> = lines.clone();
+    let joined = plain.join("\n");
+
+    // What left comes before what arrived, which is how a patch reads.
+    let removed = plain
+        .iter()
+        .position(|line| line.contains("- two"))
+        .expect("the removed line");
+    let added = plain
+        .iter()
+        .position(|line| line.contains("+ TWO"))
+        .expect("the added line");
+    assert!(removed < added, "the old line leads:\n{joined}");
+    // The context is one row per line, not one per side.
+    assert_eq!(
+        plain.iter().filter(|line| line.contains("one")).count(),
+        1,
+        "context is not drawn twice:\n{joined}"
+    );
+    // Every row is boxed, and the box closes exactly once.
+    assert!(joined.contains('╭'), "{joined}");
+    assert!(joined.contains('╰'), "{joined}");
+    assert_eq!(
+        plain.iter().filter(|line| line.contains('╰')).count(),
+        1,
+        "{joined}"
+    );
+}
+
+#[test]
+fn the_unified_diff_clips_to_the_width_it_was_given() {
+    // A row wider than the terminal wraps and breaks the box, which is the one
+    // thing a box is for. `width` is the box's own width: `edit_box_width`
+    // takes the two columns of indentation off before it hands one over, so a
+    // row of `width` plus those two is what fits the screen.
+    let arguments = serde_json::json!({
+        "path": "src/lib.rs",
+        "edits": [{
+            "search": "short\n",
+            "replace": format!("{}\n", "x".repeat(200))
+        }]
+    });
+    let preview = edit_preview(Some(&arguments), Some("short\n")).expect("preview");
+    let edit = &preview.boxes[0];
+    let width = 60;
+    for line in Renderer::unified_lines(Style::plain(), &preview.path, edit, width) {
+        let visible = line.chars().count();
+        assert!(
+            visible <= width + 2,
+            "a row of {visible} columns does not fit {width} plus its indent: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn the_split_view_still_draws_two_panels() {
+    // The style is a choice, and the one that was there before is still there:
+    // a config that names `split` gets what it always got.
+    let arguments = serde_json::json!({
+        "path": "src/lib.rs",
+        "edits": [{"search": "two\n", "replace": "TWO\n"}]
+    });
+    let preview = edit_preview(Some(&arguments), Some("one\ntwo\nthree\n")).expect("preview");
+    let edit = &preview.boxes[0];
+    let unified = Renderer::unified_lines(Style::plain(), &preview.path, edit, 60);
+    let joined = unified.join("\n");
+    assert!(
+        !joined.contains("original"),
+        "the unified view has no panels: {joined}"
+    );
+    assert!(
+        joined.contains("edit 1/1"),
+        "both views name the same edit: {joined}"
+    );
+}

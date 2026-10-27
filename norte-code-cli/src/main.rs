@@ -69,7 +69,7 @@ use norte_code_agent::{
     effective_reasoning, model_list,
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
-use norte_code_config::{ApprovalMode, AuthKind, Config, WireKind, user_config_path};
+use norte_code_config::{ApprovalMode, AuthKind, Config, DiffStyle, WireKind, user_config_path};
 use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
@@ -111,8 +111,12 @@ struct Cli {
     /// How much of the conversation to show: `low` (the answer alone),
     /// `medium` (also that tools run and that the model is thinking) or `high`
     /// (the reasoning, what each tool was asked and what it returned).
-    #[arg(long, global = true, value_name = "LEVEL", default_value = "medium")]
-    verbose: String,
+    ///
+    /// Left out, `ui.verbosity` from the configuration decides, and `medium`
+    /// when the configuration says nothing either: the flag is an override for
+    /// one run, not the only way to set it.
+    #[arg(long, global = true, value_name = "LEVEL")]
+    verbose: Option<String>,
     /// What to do. Omitted, the startup flow asks: new session, last session,
     /// or one from the list.
     #[command(subcommand)]
@@ -645,6 +649,9 @@ pub(crate) async fn new_session(
     let session_store: Arc<dyn norte::harness::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
+    // Read before the config moves into the service: the renderer draws the diff
+    // and the configuration is what says in which shape.
+    let diff_style = config.ui.diff_style;
     let service = Arc::new(
         Service::with_directory(
             config,
@@ -670,6 +677,7 @@ pub(crate) async fn new_session(
         Arc::clone(&pinned),
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
+    renderer.set_diff_style(diff_style);
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
@@ -803,6 +811,9 @@ async fn resume_session(
     let session_store: Arc<dyn norte::harness::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
+    // Read before the config moves into the service: the renderer draws the diff
+    // and the configuration is what says in which shape.
+    let diff_style = config.ui.diff_style;
     let service = Arc::new(
         Service::with_directory(
             config,
@@ -831,6 +842,7 @@ async fn resume_session(
         Arc::clone(&pinned),
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
+    renderer.set_diff_style(diff_style);
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;

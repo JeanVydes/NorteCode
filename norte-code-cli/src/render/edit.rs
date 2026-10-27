@@ -442,6 +442,122 @@ pub(crate) fn render_panel(
     format!("{number} {sign} {code}")
 }
 
+/// One row of the unified view: the line, and what happened to it.
+///
+/// The side-by-side view keeps two cells per row because it shows two files.
+/// This one shows one line at a time, so what it needs beside the text is the
+/// mark a patch puts there — and the number of the line in the file the row
+/// belongs to, which is the old file for a removal and the new one otherwise.
+#[derive(Debug)]
+pub(crate) struct UnifiedRow {
+    /// Where the line stands: unchanged, gone, or new.
+    pub(crate) kind: UnifiedKind,
+    /// The number in the file it belongs to, when it has one.
+    pub(crate) number: Option<usize>,
+    /// The text, with tabs already expanded for the terminal.
+    pub(crate) text: String,
+}
+
+/// What happened to a line in the unified view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnifiedKind {
+    /// It is in both files.
+    Context,
+    /// It was in the old file only.
+    Removed,
+    /// It is in the new file only.
+    Added,
+}
+
+impl UnifiedKind {
+    /// The character a patch puts in the first column.
+    pub(crate) fn mark(self) -> char {
+        match self {
+            Self::Context => ' ',
+            Self::Removed => '-',
+            Self::Added => '+',
+        }
+    }
+}
+
+/// Folds a side-by-side box into the unified view.
+///
+/// Both come from the same rows, so a removal and its replacement keep the
+/// order they had: what the left panel held, then what the right one holds. The
+/// side a panel left empty is the row the other panel added or removed, which
+/// is exactly what a patch's `-` and `+` lines are.
+///
+/// It is a fold rather than a diff of its own on purpose: the boxes already
+/// decided which lines changed and which are context, and a second diff would
+/// be a second answer to the same question.
+pub(crate) fn unify(rows: &[DiffRow]) -> Vec<UnifiedRow> {
+    let mut unified = Vec::with_capacity(rows.len());
+    for row in rows {
+        match (&row.left, &row.right) {
+            (Some(left), Some(right)) => {
+                // Both sides hold a line. An unchanged row is the same line in
+                // both files and is shown once; a changed one is shown twice —
+                // the old above the new — so the reader sees what was there and
+                // what is there now.
+                if left.changed || right.changed {
+                    unified.push(UnifiedRow {
+                        kind: UnifiedKind::Removed,
+                        number: left.number,
+                        text: left.text.clone(),
+                    });
+                    unified.push(UnifiedRow {
+                        kind: UnifiedKind::Added,
+                        number: right.number,
+                        text: right.text.clone(),
+                    });
+                } else {
+                    unified.push(UnifiedRow {
+                        kind: UnifiedKind::Context,
+                        number: right.number.or(left.number),
+                        text: right.text.clone(),
+                    });
+                }
+            }
+            (Some(left), None) => unified.push(UnifiedRow {
+                kind: UnifiedKind::Removed,
+                number: left.number,
+                text: left.text.clone(),
+            }),
+            (None, Some(right)) => unified.push(UnifiedRow {
+                kind: UnifiedKind::Added,
+                number: right.number,
+                text: right.text.clone(),
+            }),
+            (None, None) => {}
+        }
+    }
+    unified
+}
+
+/// The line range a box covers, in the words both views use.
+///
+/// The two shapes answer the same question in their header, and that header was
+/// written twice while this sat inline in one of them: a reader who switches
+/// styles should not have to learn a second set of words for the same fact.
+pub(crate) fn edit_range(edit: &EditBox) -> String {
+    match (edit.old_range, edit.new_range) {
+        (Some((start, end)), Some((new_start, new_end)))
+            if (start, end) == (new_start, new_end) =>
+        {
+            line_range(start, end)
+        }
+        (Some((start, end)), Some((new_start, new_end))) => {
+            format!(
+                "{} → {}",
+                line_range(start, end),
+                line_range(new_start, new_end)
+            )
+        }
+        (Some((start, end)), None) => format!("{} → deleted", line_range(start, end)),
+        (None, _) => "location unavailable".to_owned(),
+    }
+}
+
 pub(crate) fn clip_plain(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -504,5 +620,108 @@ pub(crate) fn clip_command(text: &str, max: usize) -> String {
         "(empty)".to_owned()
     } else {
         shortened
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cell with a number and text, changed or not.
+    fn cell_at(number: usize, text: &str, changed: bool) -> Cell {
+        Cell {
+            number: Some(number),
+            text: text.to_owned(),
+            changed,
+        }
+    }
+
+    #[test]
+    fn a_replacement_reads_as_a_removal_then_an_addition() {
+        // The order is what a patch does: what was there, then what is. A
+        // unified view that put the addition first would read backwards.
+        let rows = vec![DiffRow {
+            left: Some(cell_at(4, "old line", true)),
+            right: Some(cell_at(4, "new line", true)),
+        }];
+        let unified = unify(&rows);
+        assert_eq!(unified.len(), 2, "a changed line is two rows: {unified:?}");
+        assert_eq!(unified[0].kind, UnifiedKind::Removed);
+        assert_eq!(unified[0].text, "old line");
+        assert_eq!(unified[0].number, Some(4), "numbered by the old file");
+        assert_eq!(unified[1].kind, UnifiedKind::Added);
+        assert_eq!(unified[1].text, "new line");
+    }
+
+    #[test]
+    fn an_unchanged_line_is_shown_once_and_only_one_row() {
+        // Context is one line, not two: drawing it on both sides is what the
+        // side-by-side view does and what this one exists not to do.
+        let rows = vec![DiffRow {
+            left: Some(cell_at(3, "same", false)),
+            right: Some(cell_at(3, "same", false)),
+        }];
+        let unified = unify(&rows);
+        assert_eq!(unified.len(), 1, "{unified:?}");
+        assert_eq!(unified[0].kind, UnifiedKind::Context);
+        assert_eq!(unified[0].text, "same");
+    }
+
+    #[test]
+    fn a_side_that_is_missing_is_an_insertion_or_a_deletion() {
+        // A pure deletion has no right cell and a pure insertion has no left
+        // one; neither is a change of a line, and both must still be shown.
+        let rows = vec![
+            DiffRow {
+                left: Some(cell_at(7, "gone", true)),
+                right: None,
+            },
+            DiffRow {
+                left: None,
+                right: Some(cell_at(7, "arrived", true)),
+            },
+        ];
+        let unified = unify(&rows);
+        assert_eq!(unified.len(), 2, "{unified:?}");
+        assert_eq!(unified[0].kind, UnifiedKind::Removed);
+        assert_eq!(unified[0].text, "gone");
+        assert_eq!(unified[1].kind, UnifiedKind::Added);
+        assert_eq!(unified[1].text, "arrived");
+    }
+
+    #[test]
+    fn the_marks_are_the_ones_a_patch_uses() {
+        // A diff a person has read before should need no explanation, so the
+        // marks are the two every tool already uses.
+        assert_eq!(UnifiedKind::Context.mark(), ' ');
+        assert_eq!(UnifiedKind::Removed.mark(), '-');
+        assert_eq!(UnifiedKind::Added.mark(), '+');
+    }
+
+    #[test]
+    fn an_empty_box_unifies_to_nothing() {
+        // A box with no rows is not one row of blank: the call is what draws the
+        // borders, and this must not invent a line for it.
+        assert_eq!(unify(&[]).len(), 0);
+    }
+
+    #[test]
+    fn the_range_says_what_both_views_say() {
+        let boxed = |old: Option<(usize, usize)>, new: Option<(usize, usize)>| EditBox {
+            index: 1,
+            total: 1,
+            old_range: old,
+            new_range: new,
+            approximate: false,
+            rows: Vec::new(),
+            omitted: 0,
+        };
+        // A line replaced by another line: the old range and the new one.
+        assert!(edit_range(&boxed(Some((3, 3)), Some((3, 3)))).contains('3'));
+        // A deletion: there is no new range.
+        let deleted = edit_range(&boxed(Some((3, 5)), None));
+        assert!(deleted.contains("deleted"), "{deleted}");
+        // An insertion has no old range, which is what "unavailable" covers.
+        assert_eq!(edit_range(&boxed(None, None)), "location unavailable");
     }
 }

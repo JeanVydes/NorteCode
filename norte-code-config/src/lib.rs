@@ -64,6 +64,8 @@ pub struct Config {
     /// `openai.chat:provider` with `{"order": ["deepinfra"]}`. Norte ignores a
     /// key whose family does not match the active wire.
     pub extensions: BTreeMap<String, Value>,
+    /// How the client shows what it does.
+    pub ui: UiConfig,
     /// Display settings for cost.
     pub cost: CostConfig,
     /// Optional spending limits.
@@ -195,6 +197,7 @@ impl Default for Config {
             approvals: ApprovalsConfig::default(),
             max_iterations: None,
             extensions: BTreeMap::new(),
+            ui: UiConfig::default(),
             cost: CostConfig::default(),
             budgets: BudgetsConfig::default(),
             tools: ToolsConfig::default(),
@@ -426,6 +429,59 @@ pub struct ApprovalsConfig {
 pub struct CostConfig {
     /// Whether to show cost in the UI and the CLI.
     pub show: bool,
+}
+
+/// How the client shows what it does.
+///
+/// A subset of the configuration that only the interface reads: the engine
+/// never consults it, and a host with no interface — a script driving the
+/// service — is free to ignore the whole block.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// How much of the conversation to show: `low` (the answer alone), `medium`
+    /// (also that tools run and that the model is thinking) or `high` (the
+    /// reasoning, what each tool was asked and what it returned).
+    ///
+    /// `--verbose` overrides it for one run. It is a string rather than an enum
+    /// so a value the client does not know is reported beside the ones it does,
+    /// instead of failing the whole file.
+    pub verbosity: String,
+    /// How an `edit` call's diff is drawn.
+    pub diff_style: DiffStyle,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            verbosity: "medium".to_owned(),
+            diff_style: DiffStyle::default(),
+        }
+    }
+}
+
+/// How the diff of an `edit` call is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffStyle {
+    /// Removed and added lines interleaved, the way a patch reads: one column,
+    /// which is what fits a narrow terminal.
+    #[default]
+    Unified,
+    /// The file before and after, side by side. Wider, and the only shape that
+    /// shows a change inside a line rather than the two whole lines.
+    Split,
+}
+
+impl DiffStyle {
+    /// The name the configuration uses.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::Split => "split",
+        }
+    }
 }
 
 impl Default for CostConfig {
@@ -1834,5 +1890,64 @@ mod tests {
             .resolve_api_key("nobody", &["NORTE_CODE_TEST_NOBODY_API_KEY".to_owned()])
             .expect_err("key");
         assert!(error.to_string().contains("NORTE_CODE_TEST_NOBODY_API_KEY"));
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+
+    #[test]
+    fn the_ui_block_is_a_subset_and_says_nothing_by_default() {
+        // A config file that does not mention `ui` must behave exactly as it did
+        // before the block existed, so every field has a default that is what
+        // the client already did.
+        let loaded = Config::from_json("{}").expect("empty config");
+        let config = loaded.config;
+        assert_eq!(config.ui.verbosity, "medium");
+        assert_eq!(config.ui.diff_style, DiffStyle::Unified);
+    }
+
+    #[test]
+    fn the_diff_style_is_named_the_way_a_person_writes_it() {
+        // The two names are what the configuration accepts, so they are part of
+        // the interface and not a detail of the enum.
+        let loaded = Config::from_json(r#"{"ui":{"diff_style":"split"}}"#).expect("split");
+        let config = loaded.config;
+        assert_eq!(config.ui.diff_style, DiffStyle::Split);
+        let loaded = Config::from_json(r#"{"ui":{"diff_style":"unified"}}"#).expect("unified");
+        let config = loaded.config;
+        assert_eq!(config.ui.diff_style, DiffStyle::Unified);
+        // A name that is not one of the two is refused rather than silently
+        // falling back, because a person who wrote `side-by-side` should be told.
+        let error = Config::from_json(r#"{"ui":{"diff_style":"diagonal"}}"#)
+            .expect_err("an unknown style is refused");
+        assert!(
+            error.to_string().contains("diagonal"),
+            "the error names the value: {error}"
+        );
+    }
+
+    #[test]
+    fn verbosity_is_read_as_a_string_so_the_client_can_explain_a_bad_one() {
+        // The enum lives in the client, not here: the engine never reads this
+        // and a config crate that refused the value would make every host
+        // reimplement the message.
+        let loaded = Config::from_json(r#"{"ui":{"verbosity":"high"}}"#).expect("high");
+        let config = loaded.config;
+        assert_eq!(config.ui.verbosity, "high");
+        let loaded = Config::from_json(r#"{"ui":{"verbosity":"loud"}}"#).expect("any string");
+        let config = loaded.config;
+        assert_eq!(
+            config.ui.verbosity, "loud",
+            "the client is what refuses it, with the levels it knows"
+        );
+    }
+
+    #[test]
+    fn the_style_names_round_trip() {
+        assert_eq!(DiffStyle::Unified.name(), "unified");
+        assert_eq!(DiffStyle::Split.name(), "split");
+        assert_eq!(DiffStyle::default(), DiffStyle::Unified);
     }
 }

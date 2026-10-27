@@ -36,8 +36,8 @@ pub(crate) use renderer::{BudgetPrompt, Format, Renderer, Verbosity};
 
 use super::{
     ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
-    Delta, ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning, ReasoningEffort,
-    ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey, Source,
-    StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, Write, clip_text,
-    compact_json, duration_label,
+    Delta, DiffStyle, ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning,
+    ReasoningEffort, ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey,
+    Source, StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, Write,
+    clip_text, compact_json, duration_label,
 };

@@ -8,7 +8,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-### Added
+- `ui`, a section of the configuration for what the client shows, holding
+  `ui.verbosity` and `ui.diff_style`. `verbosity` is the `--verbose` level the
+  client works at when the flag is absent; the flag still wins for one run, and
+  leaving both out keeps `medium`, which is what the client always did.
+
+  `diff_style` says how an `edit` call's diff is drawn: `unified`, the new
+  default, writes it the way a patch reads — one column, `-` for what left and
+  `+` for what arrived, which fits a terminal that is not wide; `split` is the
+  side-by-side view that was the only one before. Both name the same edit and
+  carry the same line ranges.
 
 - Two tabs join the footer's row: `tools`, which counts what the model can reach
   and how a call to each is decided, and `mcp`, which counts the servers behind

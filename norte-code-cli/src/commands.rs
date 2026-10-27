@@ -14,7 +14,6 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let user_config = config_path.clone().or_else(user_config_path);
     let offline = cli.offline;
     let refresh = cli.refresh;
-    let verbose = cli.verbose;
     // Where the work happens. The whole process moves, not just the tools:
     // everything downstream — the skills roots, the project instructions, the
     // tools, the sandbox — is built from the process's own directory, and one
@@ -28,6 +27,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
         enter_workdir(dir)?;
     }
     let config = load_config(config_path)?;
+    let verbose = resolve_verbosity(cli.verbose.as_deref(), &config);
     // A bare `norte-code` is the startup flow with nothing else on the line:
     // `None` is not a missing subcommand but the whole point of the command.
     let command = cli
@@ -808,6 +808,18 @@ fn enter_workdir(dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("could not enter `{}`: {error}", dir.display()))
 }
 
+/// Which verbosity a run uses: the flag, else the config, else the default.
+///
+/// The order is what makes `--verbose` mean "for this run": a person who set
+/// `ui.verbosity` and then typed `--verbose high` asked for high now, and one
+/// who typed nothing gets what the file says. Reading it through the flag's own
+/// default would make the file unreachable, which is what it was before this
+/// became a function.
+#[must_use]
+pub(crate) fn resolve_verbosity(flag: Option<&str>, config: &Config) -> String {
+    flag.map_or_else(|| config.ui.verbosity.clone(), str::to_owned)
+}
+
 pub(crate) fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
     let user = path.or_else(user_config_path);
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -863,4 +875,37 @@ pub(crate) async fn load_catalogue(
         eprintln!("warning: {}", crate::text::terminal(warning));
     }
     Ok((loaded.catalog, loaded.source))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_flag_beats_the_configuration_and_the_configuration_beats_nothing() {
+        // The order is the whole point: `--verbose` is for one run, so it wins;
+        // a run that says nothing gets the file. Reading the flag's own default
+        // instead would make `ui.verbosity` unreachable, which is the bug this
+        // function exists to prevent.
+        let mut config = Config::default();
+        config.ui.verbosity = "high".to_owned();
+        assert_eq!(
+            resolve_verbosity(Some("low"), &config),
+            "low",
+            "the flag is the run's own setting"
+        );
+        assert_eq!(
+            resolve_verbosity(None, &config),
+            "high",
+            "no flag means the file decides"
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_says_nothing_leaves_the_client_default() {
+        // `medium` is what the client has always shown, and an empty file has to
+        // keep behaving exactly as it did before `ui` existed.
+        let config = Config::default();
+        assert_eq!(resolve_verbosity(None, &config), "medium");
+    }
 }
