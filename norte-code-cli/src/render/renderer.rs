@@ -11,7 +11,7 @@ use super::edit::{
     EditBox, EditPreview, Side, clip_command, clip_plain, edit_box_width, edit_preview, line_range,
     preview_path, render_panel,
 };
-use super::helpers::{cache_percent_label, human_tokens};
+use super::helpers::{cache_percent_label, human_tokens, short_path};
 use super::labels::{
     budget_action_name, budget_label, code_name, format_measure, scope_name, short, unit_name,
 };
@@ -117,6 +117,12 @@ pub(crate) struct Renderer {
     pub(crate) verbosity: Verbosity,
     /// The session key, for the footer. The server sends it on every event.
     pub(crate) session: Option<String>,
+    /// Whether the footer names the directory the work is in.
+    ///
+    /// It is the whole line's first field, so it is shown where a person looks
+    /// for it rather than only in the startup block; a footer with no room for
+    /// it — a narrow terminal, a pipe — turns it off.
+    pub(crate) show_workdir: bool,
     /// The session's title, when it has one.
     ///
     /// It is what the footer leads with: a key says nothing about what a
@@ -259,6 +265,7 @@ impl Renderer {
             format,
             verbosity,
             session: None,
+            show_workdir: true,
             title: None,
             host_facts: None,
             show_cost,
@@ -1968,10 +1975,22 @@ impl Renderer {
         if let Some(effort) = &self.reasoning {
             parts.push(reasoning_bar(self.style, effort));
         }
+        // The line leads with where the work is happening and what the turn is
+        // doing. The directory is the one thing on it that never changes
+        // between sessions, and the one a person checks when a tool reads the
+        // wrong tree: it is named here rather than only in `--debug`, which is
+        // a report nobody reads while working.
         let prefix = self.activity.as_ref().map_or_else(
             || self.style.faint("session"),
             |activity| self.style.yellow(activity.clone()),
         );
+        let mut head = String::new();
+        if self.show_workdir {
+            if let Ok(dir) = std::env::current_dir() {
+                head.push_str(&self.style.faint(short_path(&dir)));
+                head.push_str(&self.style.faint(" · "));
+            }
+        }
         // What names the session, in front of the totals. The title comes first
         // because it is what a person recognises the session by; the key follows
         // in brackets, because the key is what `resume` is given and a title is
@@ -1989,7 +2008,7 @@ impl Renderer {
                 }
             }
         }
-        format!("{} {}", prefix, parts.join(&self.style.faint(" · ")))
+        format!("{head}{} {}", prefix, parts.join(&self.style.faint(" · ")))
     }
 
     /// Writes the run's cost and tool summary, if the run made any requests.

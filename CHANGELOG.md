@@ -25,6 +25,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `default_model`, so the question is asked once; a file that cannot be written
   is reported and the session opens on the chosen model anyway.
 
+- `norte-code ./some-dir` works in that directory. It is a positional and not a
+  flag, because it is the one thing a person names when they name anything, and
+  the whole point is that `norte-code ~/src/thing` means what every other
+  command line means by a leading path. The process itself moves, before the
+  configuration is read, so the project config that applies is the named
+  directory's own. A directory that does not exist is reported rather than
+  silently ignored, because a typo that leaves the tools reading a tree nobody
+  named is the failure that is hardest to notice. The footer names the directory
+  in front of the session line, with the home directory abbreviated to `~`.
+
 - `/rename [title]` names the session. With a title it writes what was typed and
   calls nothing: a person who has already decided what the session is called
   should not wait for a model to agree. Bare, it asks the model from the first

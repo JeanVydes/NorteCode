@@ -1,8 +1,7 @@
 //! Config paths, provider environment names and the small number labels
 //! the renderer and the reports share.
 
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The per-project overlay config path, searched from `start` upwards.
 pub(crate) fn find_project_config(start: &Path) -> Option<PathBuf> {
@@ -40,6 +39,59 @@ pub(crate) fn fallback_env(provider: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// A path as it is shown in the footer: under the home directory it loses it.
+///
+/// It takes the home as an argument rather than reading `HOME` when it is
+/// called: `set_var` is unsafe in this edition because a test that changes the
+/// environment races every other thread that reads it, and this crate forbids
+/// unsafe. The caller that wants the real home reads it once, at the top.
+pub(crate) fn short_path_in(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// The same, reading the home directory from the environment.
+///
+/// The full path is what a person pastes into another shell, and the abbreviated
+/// one is what they read: `/home/jean/Projects/NorteCode` is nineteen columns of
+/// a footer that has a dozen things to say, and every one of them is more
+/// informative than the first thirteen characters of a path. Nothing is lost —
+/// `~` is the same path to every shell.
+pub(crate) fn short_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    short_path_in(path, home.as_deref())
+}
+
+#[cfg(test)]
+mod short_path_tests {
+    use super::short_path_in;
+
+    use std::path::Path;
+
+    #[test]
+    fn a_path_under_the_home_directory_is_shown_with_a_tilde() {
+        // The footer has a dozen things to say, and nineteen columns of a path
+        // is not one of them. `~` is the same path to every shell, so nothing
+        // is lost by showing it.
+        let home = Path::new("/home/someone");
+        assert_eq!(short_path_in(home, Some(home)), "~");
+        assert_eq!(
+            short_path_in(&home.join("src").join("thing"), Some(home)),
+            "~/src/thing"
+        );
+        // A path outside it is shown whole: there is no tilde for `/etc`.
+        assert_eq!(
+            short_path_in(Path::new("/etc/hosts"), Some(home)),
+            "/etc/hosts"
+        );
+        // Without a home to compare against, nothing can be abbreviated.
+        assert_eq!(short_path_in(&home.join("src"), None), "/home/someone/src");
+    }
 }
 
 pub(crate) fn human_tokens(tokens: u64) -> String {

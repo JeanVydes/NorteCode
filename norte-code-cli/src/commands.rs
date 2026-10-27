@@ -2,11 +2,11 @@
 
 use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
-    LoadOptions, PathBuf, RequestRecord, ResumeArgs, SessionDirectory, SessionsArgs, SkillRegistry,
-    SkillsArgs, SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session,
-    by_turn, cache_dir, cache_percent_label, discovery_roots, find_project_config, human_tokens,
-    list_models, load_catalog, new_session, open_session, resume_named, short, summarize,
-    token_ratio, user_config_path,
+    LoadOptions, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory, SessionsArgs,
+    SkillRegistry, SkillsArgs, SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc,
+    by_day, by_session, by_turn, cache_dir, cache_percent_label, discovery_roots,
+    find_project_config, human_tokens, list_models, load_catalog, new_session, open_session,
+    resume_named, short, summarize, token_ratio, user_config_path,
 };
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
@@ -15,6 +15,18 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let offline = cli.offline;
     let refresh = cli.refresh;
     let verbose = cli.verbose;
+    // Where the work happens. The whole process moves, not just the tools:
+    // everything downstream — the skills roots, the project instructions, the
+    // tools, the sandbox — is built from the process's own directory, and one
+    // move is what makes `norte-code ~/src/thing` mean what it says instead of
+    // a root that disagrees with the shell it was typed in.
+    //
+    // It moves before the config is loaded, so a project config in the named
+    // directory is the one that applies: `norte-code ./other` picking up this
+    // directory's `.norte-code/config.json` would be the wrong project.
+    if let Some(dir) = cli.dir.as_deref() {
+        enter_workdir(dir)?;
+    }
     let config = load_config(config_path)?;
     // A bare `norte-code` is the startup flow with nothing else on the line:
     // `None` is not a missing subcommand but the whole point of the command.
@@ -773,6 +785,27 @@ pub(crate) fn telemetry_table(
 fn pad_right(label: &str, width: usize) -> String {
     let length = label.chars().count();
     format!("{label}{}", " ".repeat(width.saturating_sub(length)))
+}
+
+/// Moves the process into the directory named on the command line.
+///
+/// The directory has to exist: a typo that silently left the process where it
+/// was would have the tools reading a tree nobody named, which is the failure
+/// that is hardest to notice. So it is checked and reported, and the process
+/// does not move.
+fn enter_workdir(dir: &Path) -> Result<(), String> {
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("could not read the working directory: {error}"))?
+            .join(dir)
+    };
+    if !dir.is_dir() {
+        return Err(format!("`{}` is not a directory", dir.display()));
+    }
+    std::env::set_current_dir(&dir)
+        .map_err(|error| format!("could not enter `{}`: {error}", dir.display()))
 }
 
 pub(crate) fn load_config(path: Option<PathBuf>) -> Result<Config, String> {

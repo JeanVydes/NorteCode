@@ -89,6 +89,15 @@ use crate::style::Style;
 )]
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
+    /// The directory to work in. It is where the tools read and write, and it
+    /// is the whole command line a person needs to work somewhere else: a bare
+    /// `norte-code` works where the shell already is.
+    ///
+    /// It is a positional and not a flag, because it is the one thing a person
+    /// names when they name anything: `norte-code ~/src/thing` says what every
+    /// other command line means by a leading path.
+    #[arg(value_name = "DIR")]
+    dir: Option<PathBuf>,
     /// The user configuration file.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
