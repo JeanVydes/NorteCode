@@ -1974,7 +1974,10 @@ mod tests {
         assert_eq!(costs.len(), 1);
         assert_eq!(costs[0].output_tokens, Some(25));
         assert!(costs[0].cost_usd.is_none());
-        assert!(store.costs(Some("other")).await.expect("costs").is_empty());
+        assert!(
+            store.costs(Some("other")).await.expect("costs").is_empty(),
+            "another session reports no cost"
+        );
     }
 
     #[tokio::test]
@@ -2067,7 +2070,8 @@ mod tests {
                 .unfinished_effects()
                 .await
                 .expect("pending")
-                .is_empty()
+                .is_empty(),
+            "a finished effect is no longer pending"
         );
     }
 
@@ -2245,6 +2249,9 @@ mod tests {
         assert_eq!(loaded.answer.as_deref(), Some("src/lib.rs"));
 
         store.delete_session("abc").await.expect("delete");
-        assert!(store.sessions().await.expect("list").is_empty());
+        assert!(
+            store.sessions().await.expect("list").is_empty(),
+            "nothing is left after the delete"
+        );
     }
 }

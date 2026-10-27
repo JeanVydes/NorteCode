@@ -3482,7 +3482,10 @@ async fn a_reconstructed_request_carries_its_tools_and_timing() {
         .collect();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].0, vec!["todo".to_owned()]);
-    assert!(requests[1].0.is_empty());
+    assert!(
+        requests[1].0.is_empty(),
+        "the second request offers no tools"
+    );
 }
 
 #[tokio::test]
@@ -4373,7 +4376,10 @@ async fn a_global_rule_is_persisted_and_applied() {
     assert!(service.approval_rules.allows(session, "write"));
     let loaded = Config::load(Some(&path), None).expect("config");
     assert_eq!(loaded.config.approvals.allow, ["write"]);
-    assert!(loaded.config.approvals.deny.is_empty());
+    assert!(
+        loaded.config.approvals.deny.is_empty(),
+        "an allow rule is not a deny"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -4407,7 +4413,7 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
         let records = service.lock_sessions();
         let record = records.get(&key).expect("session");
         assert_eq!(record.denied_tools, ["command"]);
-        assert!(record.allowed_tools.is_empty());
+        assert!(record.allowed_tools.is_empty(), "only the deny is recorded");
     }
 
     service
@@ -4419,7 +4425,7 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
     {
         let records = service.lock_sessions();
         let record = records.get(&key).expect("session");
-        assert!(record.denied_tools.is_empty());
+        assert!(record.denied_tools.is_empty(), "only the allow is recorded");
         assert_eq!(record.allowed_tools, ["command"]);
     }
 

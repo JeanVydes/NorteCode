@@ -524,9 +524,9 @@ mod tests {
             [BudgetNotice::Warning(_)]
         ));
         book.record(&record(2, 10, 10, None));
-        assert!(book.warnings().is_empty());
+        assert!(book.warnings().is_empty(), "only the first layer warns");
         assert!(book.stop().is_some());
-        assert!(book.notices().is_empty());
+        assert!(book.notices().is_empty(), "a warning is not a notice");
     }
 
     #[test]
@@ -548,7 +548,10 @@ mod tests {
             book.notices().as_slice(),
             [BudgetNotice::Exceeded(_)]
         ));
-        assert!(book.notices().is_empty());
+        assert!(
+            book.notices().is_empty(),
+            "the layer reports the exhaustion, the final check does not repeat it"
+        );
     }
 
     #[test]

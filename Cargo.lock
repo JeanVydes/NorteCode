@@ -1275,7 +1275,6 @@ dependencies = [
  "norte-code-protocol",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]

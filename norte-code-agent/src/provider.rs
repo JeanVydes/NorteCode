@@ -830,7 +830,10 @@ mod tests {
         .config;
         let spec = ModelSpec::resolve(&config, "local/qwen3", None, &[]).expect("spec");
         assert_eq!(spec.auth, Some(AuthKind::Disabled));
-        assert!(spec.api_key.expose().is_empty());
+        assert!(
+            spec.api_key.expose().is_empty(),
+            "disabled auth carries no key"
+        );
         let profile = profile(
             spec.wire,
             ProviderId::new("local").expect("provider"),
@@ -840,7 +843,10 @@ mod tests {
             spec.auth,
         )
         .expect("profile");
-        assert!(profile.auth.headers().expect("headers").is_empty());
+        assert!(
+            profile.auth.headers().expect("headers").is_empty(),
+            "disabled auth adds no header"
+        );
     }
 
     #[test]

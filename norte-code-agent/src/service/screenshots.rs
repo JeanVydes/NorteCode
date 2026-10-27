@@ -364,7 +364,10 @@ mod tests {
             is_error: false,
         };
         publisher(&screenshots).publish(session, &mut output).await;
-        assert!(screenshots.take(session).is_empty());
+        assert!(
+            screenshots.take(session).is_empty(),
+            "a plain answer queues no capture"
+        );
     }
 
     #[tokio::test]
@@ -376,7 +379,10 @@ mod tests {
         let session = SessionId::new();
         let mut output = output_with_capture("not base64 at all!!");
         publisher(&screenshots).publish(session, &mut output).await;
-        assert!(screenshots.take(session).is_empty());
+        assert!(
+            screenshots.take(session).is_empty(),
+            "an unreadable capture queues nothing"
+        );
         assert!(
             output
                 .structured
