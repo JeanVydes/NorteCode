@@ -95,6 +95,7 @@ exact revision and is committed.
 
 ```sh
 norte-code                     # pick a session, then talk to it
+norte-code ~/src/thing         # the same, working in that directory
 norte-code new                 # a new session, on default_model
 norte-code new --model openai/gpt-5
 norte-code resume <key>
@@ -105,6 +106,17 @@ norte-code telemetry --bucket day
 norte-code skills list
 ```
 
+A bare `norte-code` opens a menu of *New session*, *Last session* and the saved
+sessions, walked with the arrow keys and `Enter`. Typing narrows the list, and a
+name that matches no row is passed through as the entry it names — a session key
+off an older footer, a provider the catalogue does not list — so a bounded list
+never puts an entry out of reach. A leading directory is where the work happens:
+it is a positional and not a flag, because it is the one thing a person names
+when they name anything, and the process moves there before the configuration is
+read. The footer leads with that directory and the session's title, with the key
+in brackets behind it, because the title is what a person recognises a session
+by and the key is what `resume` is given.
+
 `--debug` prints the session id, model, wire, approval mode, iteration limit,
 compaction threshold and trigger, sandbox state and network access, workspace,
 config and database paths, and the configured extension keys. It also prints the selected model's modalities, context and
@@ -113,13 +125,17 @@ structured output and catalogue metadata, the effective reasoning setting for
 the session, and where the system prompt came from (flag, config or built-in),
 plus how many characters the system prompt and tool declarations contain.
 Tokens are not estimated: only the provider counts them, and the per-request
-usage line reports the provider's number. Unless `--quiet` is set, each request
-also shows answer tokens per second from the first token to the end of the
-request, total time, time to the first token,
-the cache-read share, the input:output ratio and the tools called by that
-request. `--verbose` prints each tool call's
-effective arguments and its result as fenced blocks; large values are shortened,
-and long tool output is capped before it crosses the wire. The final summary
+usage line reports the provider's number. There is one such line per model
+request — an answer that asks for two tool calls at once is one request, and
+their results come back in the next one — and what it says depends on the
+verbosity. At the default `medium` it shows the model, the answer's tokens per
+second, the cache-read share and the cost; `--verbose high` adds the token
+counts, the wall time, the time to the first token, the input:output ratio and
+the tools that request called. The footer follows the same rule: `medium` keeps
+the context dial, the cache share and the cost, and `high` adds the request
+count, the token totals and the input:output ratio. `--verbose` prints each tool
+call's effective arguments and its result as fenced blocks; large values are
+shortened, and long tool output is capped before it crosses the wire. The final summary
 lists the tools that ran and their counts. Iterations are unlimited by default;
 `--max-iterations N` caps one run or resume. The compaction threshold lives in
 `compaction.threshold` (default `0.90`) and can be overridden for one run or
@@ -219,10 +235,14 @@ reasoning is redacted to one `thinking…` marker per turn instead of disappeari
 entirely, and tool activity and usage stay hidden.
 
 `ask_user` accepts an optional `options` list and `multiple` flag. When the model
-offers choices, the terminal shows them as a numbered list plus an automatic
-“Something else (type it)” entry; choosing that entry asks for free-form text
-through the same answer channel. A multi-select answer joins the selected option
-strings with `, `.
+offers choices, the terminal draws them where the input line is and the arrow
+keys walk them; the last row is “something else”, and choosing it is what opens
+the input box for a free-form answer. Until it is chosen there is no box, because
+the choices are the answer — a second prompt asking for text after the first one
+already asked for text was one question asked twice. `Space` marks a choice when
+the model allows several, and `Escape` leaves the question unanswered rather than
+inventing a selection nobody made. A multi-select answer joins the selected
+option strings with `, `.
 
 While a turn is running, `Ctrl-C` cancels it: the running tool is asked to stop
 (Norte's `command` tool kills the whole child process group, so a hung command

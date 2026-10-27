@@ -7,8 +7,24 @@ Run with no arguments it opens a session: a menu of the saved sessions, and then
 the editor.
 
 ```text
-norte-code [OPTIONS]
+norte-code [OPTIONS] [DIR] [COMMAND]
 ```
+
+## The directory
+
+A leading directory is where the work happens:
+
+```sh
+norte-code ~/src/thing
+```
+
+It is a positional and not a flag, because it is the one thing a person names
+when they name anything: `norte-code ~/src/thing` means what every other command
+line means by a leading path. The process itself moves there, before the
+configuration is read, so the project config that applies is the named
+directory's own. A directory that does not exist is refused with its path rather
+than silently ignored. The footer names it in front of the session line, with
+the home abbreviated to `~`.
 
 ## Global options
 
@@ -17,7 +33,7 @@ norte-code [OPTIONS]
 | `--config PATH` | Use this user config file instead of the platform path. A `default_model` chosen at startup is written here. |
 | `--offline` | Never touch the network for the catalogue. |
 | `--refresh` | Revalidate the catalogue even when the cache is fresh. |
-| `--verbose` | Show tool failures and more detail. |
+| `--verbose LEVEL` | How much to show: `low` (the answer alone), `medium` (the default) or `high` (reasoning, tool arguments and results, every counter). |
 | `--debug` | Print startup details, model metadata, paths and extensions. |
 
 ## `new`
@@ -55,6 +71,22 @@ speaks the protocol.
 Without `--model` or `--provider` the session opens on `default_model`, and when
 that is not configured the startup flow asks which provider and model to use and
 writes the answer to the config file as `default_model`.
+
+## The startup menu
+
+A bare `norte-code`, and `resume` with no key, open the same menu: *New
+session*, *Last session*, then the saved sessions newest first. The arrow keys
+walk it, `Enter` opens the row under the cursor and `Escape` leaves. Typing
+narrows the list, and a name that matches no row is passed through as the entry
+it names — a session key off an older footer, a provider the catalogue does not
+list — so a bounded list never puts an entry out of reach. The list scrolls
+around the cursor and says how many entries it left out.
+
+When no `default_model` is configured, the same menu asks which provider and
+which model. The providers named in the configuration come first, and the
+catalogue's follow; the choice is written to the config file the process was
+started with (`--config FILE`, else the platform user path) as `default_model`,
+so the question is asked once.
 
 ## `resume`
 

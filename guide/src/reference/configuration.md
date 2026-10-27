@@ -22,6 +22,7 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `providers` | object | `{}` | Key source and endpoint per provider. |
 | `catalog` | object | see below | models.dev source and cache. |
 | `compaction` | object | see below | Automatic compaction. |
+| `titling` | object | see below | Automatic session titles. |
 | `retry` | object | see below | Transient retry policy. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
 | `system_prompt` | string or null | null | Base prompt replacement. |
@@ -93,6 +94,33 @@ marketplace category, `cli-agent` for a terminal coding assistant).
 | `keep_recent` | `6` | Recent messages kept verbatim. |
 | `model` | null | Summary model; null uses the session model. |
 | `reasoning` | `lowest` | Summary reasoning effort. |
+
+## `titling`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Name a new session from its first message. |
+| `model` | null | Model that writes the title; null uses the session model. |
+| `max_output` | `24` | Tokens the title request may produce. |
+
+A session with no title is listed by its key, and a key is not a name. When
+titling is on, the first message a person sends is also sent to the model as a
+request of its own — a scratch session holding one instruction, no tools, no
+reasoning, the output capped by `max_output` — and the answer becomes the
+session's title. Nothing of that request reaches the session being named, which
+is the point: the naming is not something the model can see, answer to, or bill
+as conversation.
+
+The answer is a label that reaches a footer and a startup row, so it is
+sanitised rather than trusted: control characters and bidi overrides are dropped,
+only the first line survives, whitespace folds, and a reply that is not a name is
+refused so the session keeps its key rather than taking a name nobody can use.
+
+`titling.model` names a cheaper model to ask, resolved the way a model switch
+resolves one, so a provider the catalogue does not list works. `enabled = false`
+turns the feature off: it is one extra request per session, and a host that does
+not want it must be able to say so. A session opened before titling existed, or
+one whose request failed, gets its name from `/rename` instead.
 
 ## `retry`
 

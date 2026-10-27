@@ -16,11 +16,23 @@ It supplies capabilities and endpoints; it does not supply prices to the ledger.
 **Compaction** — Summarising a long transcript into a fresh Norte session while
 keeping the logical session key. The old session stays for audit.
 
+**Directory** — The root the file tools resolve against and the sandbox confines
+to. It starts as the process's current directory and a leading argument to
+`norte-code` moves the process before the configuration is read. The footer names
+it; there is no `/workdir`, because the root is inside the tool registry and the
+sandbox declaration, both built per turn.
+
 **Effect journal** — Intent/finish records for effectful tools. A call still at
 intent on startup is refused rather than replayed.
 
 **Engine** — Norte's durable turn machine: one model, one session, policies,
 tools and a commit point.
+
+**Title** — A session's name, written once from the first message the person
+sent. It is asked for in a scratch session of its own — one instruction, no
+tools, a capped output — so the naming never enters the conversation it is
+naming. A session with no title is listed by its key, and `/rename` names one on
+demand.
 
 **Event** — A `ServerEvent` on the client wire. It answers a `request_id` and may
 carry a logical session key.

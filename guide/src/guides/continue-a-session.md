@@ -50,13 +50,38 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | Command | Effect |
 | --- | --- |
 | `/help` | Show the command list. |
+| `/rename [title]` | Name the session. Bare, the model picks a name from the first message the session holds. |
 | `/compact` | Summarise and continue on a fresh Norte session. |
+| `/model <model>` | Switch model, keeping the provider. |
+| `/provider <provider>` | Switch provider, keeping the model. |
+| `/reasoning <setting> [session\|message]` | Set the reasoning effort. |
 | `/allow <tool> [session\|global]` | Allow a tool without asking. |
 | `/deny <tool> [session\|global]` | Refuse a tool without asking. |
-| `/refresh` | Re-scan skill roots and their tools. |
+| `/revoke [grant-or-tool]` | List or revoke an approval grant. |
+| `/tab [name\|number]` | Switch tab (chat, todo). Bare lists them; during a turn it cycles. |
+| `/mcp [list\|enable\|disable] [server]` | List the MCP servers, or switch one. |
+| `/jobs [list\|check\|stop] [id]` | List the background jobs, read one, or stop one. |
+| `/debug` | Report what the process knows: model, tools, paths. |
+| `/refresh`, `/reload` | Re-read the config, the skills and the MCP servers. |
+| `/restart` | Start a fresh session; this one stays saved. |
 | `/exit`, `/quit` | Leave. |
 
-Ctrl-D or Ctrl-C at the prompt also leaves.
+Ctrl-D or Ctrl-C at the prompt also leaves. Commands with no argument at all —
+`/tab`, `/model`, `/provider`, `/mcp`, `/revoke`, `/jobs` — list what they can
+act on instead of erroring, so asking is never a mistake.
+
+A question from the model is answered the same way the startup menu is: the
+choices are drawn where the draft is drawn and the arrow keys walk them. The
+last row is "something else", and choosing it is what opens the input box; until
+it is chosen there is no box, because the choices are the answer. `Space` marks
+a choice when the model allows several, and `Escape` leaves the question
+unanswered rather than inventing a selection nobody made.
+
+`/rename` writes a name without calling anything when given one. Bare, it asks
+the model from the first message the session holds, which is how a session
+opened before titling existed gets a name — those sessions keep their key until
+someone names them, since the automatic title is made from the first message and
+they already sent theirs.
 
 ## Interruption
 

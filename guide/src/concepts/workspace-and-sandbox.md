@@ -6,6 +6,31 @@ The service takes the process's current directory, canonicalizes it when
 possible and treats it as the workspace root. File tools resolve their paths
 against that root.
 
+A leading directory names a different one:
+
+```sh
+norte-code ~/src/thing
+```
+
+It is a positional and not a flag, because it is the one thing a person names
+when they name anything, and the whole point is that `norte-code ~/src/thing`
+means what every other command line means by a leading path. The process itself
+moves, before the configuration is read, so the project config that applies is
+the named directory's own — reading this directory's `.norte-code/config.json`
+for a session about another project would be the wrong project. A directory that
+does not exist is refused with its path, because a typo that silently left the
+tools reading a tree nobody named is the failure that is hardest to notice.
+
+The footer names that directory in front of the session line, with the home
+abbreviated to `~`, because the root is what a person checks when a tool reads
+the wrong tree and the footer is where they are looking. `/debug` prints it in
+full.
+
+There is no `/workdir` in the middle of a session. The root is inside the tool
+registry and the sandbox declaration, both built per turn, so changing it means
+rebuilding them at a turn boundary — and deciding what a resumed session's
+directory is before it is worth calling a command.
+
 The policy is stricter than a string prefix check:
 
 - The existing prefix of a path is canonicalized, so a symlink cannot silently
