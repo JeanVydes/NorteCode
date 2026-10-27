@@ -1074,6 +1074,65 @@ pub fn project_config_path(root: &Path) -> PathBuf {
     root.join(".norte-code").join("config.json")
 }
 
+/// The file a change to the user's configuration is written to.
+///
+/// The path the process was started with wins, so `--config FILE` is the file
+/// that is edited rather than a second one the user never looks at again; the
+/// platform user path is the fallback. `None` means there is nowhere to write,
+/// which the caller reports instead of guessing.
+#[must_use]
+pub fn resolve_user_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
+    explicit.map(Path::to_path_buf).or_else(user_config_path)
+}
+
+/// Sets `default_model` in a config file, preserving the rest of it.
+///
+/// The value is a `provider/model` reference, which is the same shape
+/// `pickers` and `run` resolve, so the check here is the one `validate` makes:
+/// a reference with no provider is refused rather than written and reported at
+/// the next startup.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the reference is not `provider/model`, or when
+/// the file cannot be read or written.
+pub fn update_user_default_model(path: &Path, reference: &str) -> Result<(), ConfigError> {
+    let reference = reference.trim();
+    if reference.split_once('/').is_none() {
+        return Err(invalid(
+            "default_model",
+            format!("`{reference}` is not a `provider/model` reference"),
+        ));
+    }
+    let mut root = if path.exists() {
+        read_value(path)?
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+    let root = root
+        .as_object_mut()
+        .ok_or_else(|| invalid("default_model", "the config root must be a JSON object"))?;
+    root.insert(
+        "default_model".to_owned(),
+        Value::String(reference.to_owned()),
+    );
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut body = serde_json::to_string_pretty(&root).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    body.push('\n');
+    atomic_write(path, body.as_bytes())
+}
+
 /// Writes a config file atomically, preserving an existing symlink and mode.
 ///
 /// A fixed temporary name would race with another Norte Code process, and a
@@ -1265,7 +1324,10 @@ mod tests {
         let loaded = Config::from_json("{}").expect("config");
         assert_eq!(loaded.config.version, CONFIG_VERSION);
         assert_eq!(loaded.config.max_iterations, None);
-        assert!(loaded.warnings.is_empty());
+        assert!(
+            loaded.warnings.is_empty(),
+            "a clean file warns about nothing"
+        );
     }
 
     #[test]
@@ -1487,7 +1549,10 @@ mod tests {
         );
         assert!(!loaded.config.tools.confinement.sandbox.enabled);
         assert!(!loaded.config.tools.confinement.sandbox.network);
-        assert!(loaded.config.tools.confinement.sandbox.writable.is_empty());
+        assert!(
+            loaded.config.tools.confinement.sandbox.writable.is_empty(),
+            "no writable path is granted by default"
+        );
 
         let enabled = Config::from_json(
             r#"{"tools":{"confinement":{"sandbox":{"enabled":true,"network":true,"writable":["/tmp/cache"]}}}}"#,
@@ -1619,7 +1684,10 @@ mod tests {
             deny: vec!["echo".to_owned()],
             ..McpServerConfig::default()
         };
-        assert!(both.select(published.iter()).is_empty());
+        assert!(
+            both.select(published.iter()).is_empty(),
+            "neither selector matches a tool outside its list"
+        );
     }
 
     #[test]
@@ -1663,7 +1731,10 @@ mod tests {
 
         update_user_approval(&path, "command", false).expect("deny");
         let loaded = Config::load(Some(&path), None).expect("config");
-        assert!(loaded.config.approvals.allow.is_empty());
+        assert!(
+            loaded.config.approvals.allow.is_empty(),
+            "a deny rule is not an allow"
+        );
         assert_eq!(loaded.config.approvals.deny, ["command"]);
         let leftovers = fs::read_dir(path.parent().expect("parent"))
             .expect("directory")

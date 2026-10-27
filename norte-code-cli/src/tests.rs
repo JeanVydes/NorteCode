@@ -532,47 +532,62 @@ fn budget_labels_say_what_is_measured_and_what_happens() {
 fn wire_and_auth_flags_are_parsed_and_validated() {
     let cli = Cli::try_parse_from([
         "norte-code",
-        "run",
+        "new",
         "--wire",
         "messages",
         "--auth",
         "bearer",
-        "hi",
     ])
     .expect("parse");
-    let Command::Run(args) = cli.command else {
-        panic!("expected run");
+    let Some(Command::New(args)) = cli.command else {
+        panic!("expected new");
     };
     assert_eq!(args.wire, Some(WireKind::Messages));
     assert_eq!(args.auth, Some(AuthKind::Bearer));
 
-    let cli = Cli::try_parse_from(["norte-code", "run", "--auth", "disabled", "hi"])
+    let cli = Cli::try_parse_from(["norte-code", "new", "--auth", "disabled"])
         .expect("parse disabled auth");
-    let Command::Run(args) = cli.command else {
-        panic!("expected run");
+    let Some(Command::New(args)) = cli.command else {
+        panic!("expected new");
     };
     assert_eq!(args.auth, Some(AuthKind::Disabled));
 
-    assert!(Cli::try_parse_from(["norte-code", "run", "--wire", "telepathy", "hi"]).is_err());
-    assert!(Cli::try_parse_from(["norte-code", "run", "--auth", "none", "hi"]).is_err());
+    assert!(Cli::try_parse_from(["norte-code", "new", "--wire", "telepathy"]).is_err());
+    assert!(Cli::try_parse_from(["norte-code", "new", "--auth", "none"]).is_err());
 }
 
 #[test]
-fn an_interactive_run_can_start_without_a_prompt() {
-    let cli = Cli::try_parse_from(["norte-code", "run", "--interactive"])
-        .expect("interactive run should parse");
-    match cli.command {
-        Command::Run(args) => {
-            assert!(args.interactive);
-            assert!(args.prompt.is_none());
-        }
-        _ => panic!("expected run"),
-    }
+fn a_new_session_takes_no_prompt() {
+    // The first line typed is the first message, so there is nothing to pass on
+    // the command line: a stray word is a usage error rather than a prompt that
+    // would be sent before the session is read.
+    assert!(Cli::try_parse_from(["norte-code", "new", "hi there"]).is_err());
+    // The session is what the command starts, so it is not named either.
+    assert!(Cli::try_parse_from(["norte-code", "new", "--session", "abc"]).is_err());
+    let cli = Cli::try_parse_from(["norte-code", "new"]).expect("a bare new parses");
+    let Some(Command::New(args)) = cli.command else {
+        panic!("expected new");
+    };
+    // The model is optional: without it, `default_model` decides.
+    assert!(args.model.is_none() && args.provider.is_none());
 }
 
 #[test]
-fn a_headless_run_still_requires_a_prompt() {
-    assert!(Cli::try_parse_from(["norte-code", "run"]).is_err());
+fn a_new_session_can_override_the_model_and_the_provider() {
+    let cli = Cli::try_parse_from(["norte-code", "new", "--model", "openai/gpt-5"])
+        .expect("model override");
+    let Some(Command::New(args)) = cli.command else {
+        panic!("expected new");
+    };
+    assert_eq!(args.model.as_deref(), Some("openai/gpt-5"));
+
+    let cli = Cli::try_parse_from(["norte-code", "new", "--provider", "river", "-m", "deepseek"])
+        .expect("provider and model");
+    let Some(Command::New(args)) = cli.command else {
+        panic!("expected new");
+    };
+    assert_eq!(args.provider.as_deref(), Some("river"));
+    assert_eq!(args.model.as_deref(), Some("deepseek"));
 }
 
 #[test]
@@ -685,11 +700,15 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
         )
         .expect("catalog"),
     );
+    // A unique name, written atomically: a shared file could be read while
+    // another test truncated it, and the reader would see an empty key.
     let key_file = std::env::temp_dir().join(format!(
         "norte-code-cli-approval-{}-key",
         std::process::id()
     ));
-    std::fs::write(&key_file, "sk-test\n").expect("key file");
+    let key_tmp = key_file.with_extension("tmp");
+    std::fs::write(&key_tmp, "sk-test\n").expect("key file");
+    std::fs::rename(&key_tmp, &key_file).expect("key file");
     let config = Config::from_json(&format!(
         r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
         key_file.display()

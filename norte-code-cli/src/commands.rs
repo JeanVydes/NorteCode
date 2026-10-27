@@ -2,11 +2,11 @@
 
 use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
-    LoadOptions, PathBuf, RequestRecord, SessionDirectory, SessionsArgs, SkillRegistry, SkillsArgs,
-    SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session, by_turn,
-    cache_dir, cache_percent_label, discovery_roots, find_project_config, human_tokens,
-    list_models, load_catalog, resume_session, run_prompt, short, summarize, token_ratio,
-    user_config_path,
+    LoadOptions, PathBuf, RequestRecord, ResumeArgs, SessionDirectory, SessionsArgs, SkillRegistry,
+    SkillsArgs, SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session,
+    by_turn, cache_dir, cache_percent_label, discovery_roots, find_project_config, human_tokens,
+    list_models, load_catalog, new_session, open_session, resume_named, short, summarize,
+    token_ratio, user_config_path,
 };
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
@@ -16,7 +16,12 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let refresh = cli.refresh;
     let verbose = cli.verbose;
     let config = load_config(config_path)?;
-    match cli.command {
+    // A bare `norte-code` is the startup flow with nothing else on the line:
+    // `None` is not a missing subcommand but the whole point of the command.
+    let command = cli
+        .command
+        .unwrap_or_else(|| Command::Resume(ResumeArgs::bare()));
+    match command {
         Command::Skills(args) => skills_command(&config, &args),
         Command::Sessions(args) => sessions_command(&args).await,
         Command::Cost(args) => cost_command(&config, &args).await,
@@ -24,12 +29,26 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
-                Command::Run(args) => {
-                    run_prompt(config, catalog, source, args, &verbose, user_config).await
+                // `new` names its model with a flag when it wants one and
+                // falls back to `default_model` when it does not, so the flow
+                // is not consulted: a session asked for on the command line is
+                // not a session the menu should ask about.
+                Command::New(args) => {
+                    new_session(config, catalog, source, None, args, &verbose, user_config).await
                 }
-                Command::Resume(args) => {
-                    resume_session(config, catalog, source, args, &verbose, user_config).await
-                }
+                Command::Resume(args) => match args.session.clone() {
+                    // A named session is resumed even with no terminal, which is
+                    // what a scripted client uses.
+                    Some(key) => {
+                        resume_named(config, catalog, source, key, args, &verbose, user_config)
+                            .await
+                    }
+                    // No key: nothing to continue until someone says what, so
+                    // the startup flow asks.
+                    None => {
+                        open_session(config, catalog, source, args, &verbose, user_config).await
+                    }
+                },
                 Command::Models(args) => list_models(&config, &catalog, source, &args),
                 Command::Skills(_)
                 | Command::Sessions(_)

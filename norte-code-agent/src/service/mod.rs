@@ -268,6 +268,31 @@ impl Service {
         Ok(service)
     }
 
+    /// Starts a session without a message.
+    ///
+    /// A client that offers a startup choice — begin a new session, continue the
+    /// last one, pick one from a list — needs the session to exist *before* the
+    /// first message decides it. Until now the only ways in were a message, which
+    /// creates one as a side effect, and a resume, which needs a session that
+    /// already exists; so a client that asked for the list first, then for the new
+    /// session, ended up with two: the empty one the list returned and the one the
+    /// first message created. The key comes back here, and the message that
+    /// follows names it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError`] when the engine cannot create the session or the
+    /// directory cannot record it.
+    pub async fn start_session(&self, title: Option<String>) -> Result<SessionKey, ServiceError> {
+        self.create_session(title).await
+    }
+
+    /// The sessions the client can see, newest first.
+    #[must_use]
+    pub fn sessions(&self) -> Vec<norte_code_protocol::SessionInfo> {
+        self.list_sessions()
+    }
+
     /// Registers an interceptor the engine consults during every turn.
     ///
     /// The engine asks the interceptors at the safe points of a turn: before

@@ -765,9 +765,7 @@ impl Renderer {
                 frame,
                 "  {} {}",
                 self.style.faint("│"),
-                self.style.yellow(format!(
-                    "… {hidden} more line(s), the box shows the first {MAX_OUTPUT_ROWS}"
-                ))
+                self.style.yellow(format!("… {hidden} more line(s)"))
             );
         }
         let _ = writeln!(frame, "  {}", self.style.faint("╰"));
@@ -923,7 +921,6 @@ impl Renderer {
                 is_error,
                 error,
                 output,
-                truncated,
                 detached,
                 duration_ms,
                 ..
@@ -972,7 +969,7 @@ impl Renderer {
                     // model got, naming the job the process became — and it is
                     // shown below like any other result.
                     if let Some(error) = error {
-                        self.print_tool_result(error, *truncated);
+                        self.print_tool_result(error);
                     }
                 } else if *detached && !self.streamed_calls.remove(call_id) {
                     // The call answered with what it had and the name of the job
@@ -983,7 +980,7 @@ impl Renderer {
                         path.as_deref(),
                         output.as_deref(),
                     ) {
-                        self.print_tool_result(&result, *truncated);
+                        self.print_tool_result(&result);
                     }
                 } else if !self.streamed_calls.remove(call_id) {
                     // The output was printed as it arrived, so showing the
@@ -995,7 +992,7 @@ impl Renderer {
                         path.as_deref(),
                         output.as_deref(),
                     ) {
-                        self.print_tool_result(&result, *truncated);
+                        self.print_tool_result(&result);
                     }
                 }
                 // The turn is not over: the model has the result and is being
@@ -1134,7 +1131,7 @@ impl Renderer {
     /// wants to read, so each section shows its first lines and a count replaces
     /// the rest. `stdout` and `stderr` are budgeted apart, because a long stdout
     /// would otherwise hide the line of stderr that explains a failure.
-    fn print_tool_result(&self, text: &str, truncated: bool) {
+    fn print_tool_result(&self, text: &str) {
         let escaped = crate::text::terminal(text);
         let sections = tool_sections(&escaped);
         let labelled = sections
@@ -1160,12 +1157,6 @@ impl Renderer {
                     self.style.yellow(format!("… {hidden} more line(s)"))
                 );
             }
-        }
-        if truncated {
-            eprintln!(
-                "  {}",
-                self.style.yellow("(the text above is what the model saw)")
-            );
         }
     }
 

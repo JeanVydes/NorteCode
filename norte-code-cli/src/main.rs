@@ -18,6 +18,7 @@ mod markdown;
 mod models;
 mod prompt;
 mod render;
+mod startup;
 mod style;
 mod tabs;
 mod text;
@@ -25,7 +26,7 @@ mod text;
 use approval::{clip_text, compact_json};
 use commands::{apply_extensions, database_path, duration_label, run};
 use input::{InteractiveInput, Pinned};
-use interaction::{drive_turns, echo_user_message, interactive_loop};
+use interaction::{drive_turns, interactive_loop};
 use models::{list_models, resolve_spec};
 use render::{
     Format, HostFacts, Renderer, Verbosity, approval_label, cache_percent_label, fallback_env,
@@ -33,6 +34,7 @@ use render::{
     parse_reasoning_setting, reasoning_label, reasoning_setting_label, select_system_prompt, short,
     source_label, token_ratio,
 };
+use startup::Open;
 
 #[cfg(test)]
 use approval::{
@@ -100,15 +102,16 @@ struct Cli {
     /// (the reasoning, what each tool was asked and what it returned).
     #[arg(long, global = true, value_name = "LEVEL", default_value = "medium")]
     verbose: String,
-    /// What to do.
+    /// What to do. Omitted, the startup flow asks: new session, last session,
+    /// or one from the list.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Send one prompt and stream the answer.
-    Run(RunArgs),
+    /// Start a new session and stay in it.
+    New(NewArgs),
     /// Continue a parked, stopped or interrupted session.
     Resume(ResumeArgs),
     /// List the models the catalogue knows.
@@ -123,15 +126,17 @@ enum Command {
     Telemetry(TelemetryArgs),
 }
 
+/// The flags that shape a new session.
+///
+/// A new session is created and then read from the terminal, so there is no
+/// prompt to pass: the first line typed is the first message. Everything here
+/// overrides what the configuration would have used, and `--model`/`--provider`
+/// are what make a session open on something other than `default_model`.
 #[derive(Args)]
 // A command line has flags: clap needs each one as a bool field, and they are
 // not a state machine to model. `SkillsConfig` carries the same allow.
 #[allow(clippy::struct_excessive_bools)]
-struct RunArgs {
-    /// The prompt. With --interactive it may be omitted, so the session starts
-    /// at the prompt.
-    #[arg(required_unless_present = "interactive")]
-    prompt: Option<String>,
+struct NewArgs {
     /// A `provider/model` reference (defaults to `default_model` in config).
     #[arg(long, short = 'm', value_name = "PROVIDER/MODEL")]
     model: Option<String>,
@@ -185,21 +190,14 @@ struct RunArgs {
     /// `openai.chat:provider={"order":["deepinfra"]}` chooses the upstream.
     #[arg(long, value_name = "KEY=JSON")]
     extension: Vec<String>,
-    /// Write one JSON event per line on stdout.
-    #[arg(long)]
-    jsonl: bool,
-    /// Continue an existing session by key instead of creating one.
-    #[arg(long, value_name = "KEY")]
-    session: Option<String>,
-    /// Keep the session open and read the next message after each turn.
-    #[arg(long, short = 'i')]
-    interactive: bool,
 }
 
 #[derive(Args)]
 struct ResumeArgs {
-    /// The session key to continue.
-    session: String,
+    /// The session key to continue. Omitted, the startup flow asks which
+    /// session to open.
+    #[arg(value_name = "SESSION")]
+    session: Option<String>,
     /// Replace the built-in system prompt for this resume.
     #[arg(long, value_name = "TEXT")]
     system_prompt: Option<String>,
@@ -235,6 +233,68 @@ struct ResumeArgs {
     /// Keep the session open and read the next message after each turn.
     #[arg(long, short = 'i')]
     interactive: bool,
+}
+
+impl NewArgs {
+    /// The flags a new session gets when nothing was passed.
+    ///
+    /// The startup flow reaches `new_session` with no flags of its own: the
+    /// model was decided by the menu, and everything else comes from the
+    /// configuration.
+    pub(crate) fn bare() -> Self {
+        Self {
+            model: None,
+            provider: None,
+            system_prompt: None,
+            endpoint: None,
+            wire: None,
+            auth: None,
+            api_key_env: None,
+            disable_prompt_cache_key: false,
+            budget: None,
+            budget_unit: "usd".to_owned(),
+            budget_action: "stop".to_owned(),
+            compaction_threshold: None,
+            sandbox: SandboxOptions {
+                sandbox: false,
+                no_sandbox: false,
+                sandbox_network: None,
+            },
+            reasoning: None,
+            approval_mode: None,
+            max_iterations: None,
+            extension: Vec::new(),
+        }
+    }
+}
+
+impl ResumeArgs {
+    /// The flags a bare `norte-code` runs with.
+    ///
+    /// A bare invocation names nothing, so every switch is at its default and
+    /// the startup flow supplies the one decision that is missing. The global
+    /// flags — `--config`, `--offline`, `--verbose` — still apply: they are
+    /// parsed before the subcommand is chosen.
+    pub(crate) fn bare() -> Self {
+        Self {
+            session: None,
+            system_prompt: None,
+            model: None,
+            budget: None,
+            budget_unit: "usd".to_owned(),
+            budget_action: "stop".to_owned(),
+            compaction_threshold: None,
+            sandbox: SandboxOptions {
+                sandbox: false,
+                no_sandbox: false,
+                sandbox_network: None,
+            },
+            max_iterations: None,
+            extension: Vec::new(),
+            jsonl: false,
+            interactive: true,
+        }
+    }
 }
 
 /// Flags that override the command sandbox for one run or resume.
@@ -404,7 +464,10 @@ struct ModelsArgs {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli).await {
+    // The startup flow makes this future large — a menu, a picker and the
+    // service build all sit inside it — so it is boxed: it is awaited once, on
+    // the outermost frame, where the size buys nothing.
+    match Box::pin(run(cli)).await {
         Ok(code) => ExitCode::from(code),
         Err(message) => {
             eprintln!("norte-code: {}", text::terminal(&message));
@@ -461,12 +524,20 @@ fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Optio
     })
 }
 
+/// Starts a new session and reads it from the terminal.
+///
+/// `model` is the reference the startup flow chose, when it had to choose one;
+/// `args` carries what the command line said. The flags win, which is what makes
+/// `norte-code new --model openai/gpt-5` open on that model while a bare
+/// `norte-code` opens on `default_model`: the flag is an override, not a
+/// requirement.
 #[allow(clippy::too_many_lines)]
-async fn run_prompt(
+pub(crate) async fn new_session(
     config: Config,
     catalog: Catalog,
     source: Source,
-    args: RunArgs,
+    model: Option<String>,
+    args: NewArgs,
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
@@ -474,7 +545,7 @@ async fn run_prompt(
         &config,
         &catalog,
         args.provider.clone(),
-        args.model.clone(),
+        args.model.clone().or(model),
         args.endpoint.clone(),
         args.wire,
         args.auth,
@@ -497,8 +568,8 @@ async fn run_prompt(
         compaction_threshold: args.compaction_threshold,
         sandbox: &args.sandbox,
         extensions: &args.extension,
-        interactive: args.interactive,
-        jsonl: args.jsonl,
+        interactive: true,
+        jsonl: false,
     }
     .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
@@ -527,13 +598,9 @@ async fn run_prompt(
         }),
         None => None,
     };
-    let style = if args.jsonl {
-        Style::plain()
-    } else {
-        Style::stderr()
-    };
+    let style = Style::stderr();
     let verbosity = Verbosity::parse(verbosity)?;
-    if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
+    if verbosity.at_least(Verbosity::Medium) {
         eprintln!(
             "{} {} {} {} {}",
             style.magenta("◆"),
@@ -550,7 +617,7 @@ async fn run_prompt(
         .as_ref()
         .is_some_and(|budget| budget.unit == BudgetUnit::Usd);
     if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
-        if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
+        if verbosity.at_least(Verbosity::Medium) {
             eprintln!("{}", style.red(warning));
         }
     }
@@ -585,11 +652,7 @@ async fn run_prompt(
     let pinned = Pinned::new();
 
     let mut renderer = Renderer::new(
-        if args.jsonl {
-            Format::Jsonl
-        } else {
-            Format::Text
-        },
+        Format::Text,
         verbosity,
         show_cost,
         style,
@@ -611,59 +674,54 @@ async fn run_prompt(
     // and the totals are: nothing else on screen says it, and after a resume it
     // is not the flag that was passed but what the config and the model resolve.
     renderer.set_reasoning(reasoning_setting_label(&effective));
-    let interactive = args.interactive;
-    let mut input = if interactive {
-        Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
-    } else {
-        None
-    };
-    let mut session = args
-        .session
-        .as_ref()
-        .map(|key| SessionKey::new(key.clone()));
-    let mut parked = false;
-    if let Some(prompt) = args.prompt {
-        if interactive {
-            echo_user_message(style, &prompt);
-        }
-        // `--session` names a session that already existed, so the client is
-        // starting blank against a history and asks for it.
-        let attaching = args.session.is_some();
-        let request = ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::SendMessage {
-                session: session.clone(),
-                text: prompt,
-                attachments: Vec::new(),
-                budget: message_budget.clone(),
-                reasoning: reasoning.clone(),
-                replay: attaching,
-            },
-        };
-        renderer.mark_working();
-        let stream = service.submit(request).await.map_err(|e| e.to_string())?;
-        let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
-        session = outcome.session.or(session);
-        parked = outcome.parked;
-        renderer.ensure_newline();
+    let mut input = Some(InteractiveInput::start(style, Arc::clone(&pinned))?);
+    // The session exists before the first line is read, so the line's message
+    // names it: a session created as a side effect of a message cannot be shown
+    // in the footer before the message is sent.
+    let session = service
+        .start_session(None)
+        .await
+        .map_err(|error| error.to_string())?;
+    if verbosity.at_least(Verbosity::Medium) {
+        eprintln!(
+            "{} {}",
+            style.dim("session"),
+            style.faint(short(session.as_str()).to_owned())
+        );
     }
-    if interactive && !parked && !renderer.budget_stopped {
-        if let Some(receiver) = input.as_mut() {
-            interactive_loop(
-                &service,
-                session,
-                &mut renderer,
-                style,
-                receiver,
-                message_budget,
-                reasoning,
-            )
-            .await?;
-        }
+    if let Some(receiver) = input.as_mut() {
+        interactive_loop(
+            &service,
+            Some(session),
+            &mut renderer,
+            style,
+            receiver,
+            message_budget,
+            reasoning,
+        )
+        .await?;
     }
     renderer.ensure_newline();
     renderer.summary();
     Ok(u8::from(renderer.failed))
+}
+
+/// Continues a session named on the command line.
+///
+/// The name is required: without one there is nothing to continue, and the
+/// caller that has no name is `open_session`, which asks the startup flow
+/// instead.
+async fn resume_named(
+    config: Config,
+    catalog: Catalog,
+    source: Source,
+    key: String,
+    mut args: ResumeArgs,
+    verbosity: &str,
+    config_path: Option<PathBuf>,
+) -> Result<u8, String> {
+    args.session = Some(key);
+    resume_session(config, catalog, source, args, verbosity, config_path).await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -675,6 +733,10 @@ async fn resume_session(
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
+    let session_key = args
+        .session
+        .clone()
+        .ok_or("resume needs a session key; run `norte-code` to pick one")?;
     let mut config = config;
     CommonOptions {
         max_iterations: args.max_iterations,
@@ -706,7 +768,7 @@ async fn resume_session(
         eprintln!(
             "{} {} {} {}",
             style.magenta("◆"),
-            style.bold(format!("resume {}", short(&args.session))),
+            style.bold(format!("resume {}", short(&session_key))),
             style.dim("·"),
             style.dim(format!("catalogue from {}", source_label(source)))
         );
@@ -767,7 +829,7 @@ async fn resume_session(
         prompt_source: system_prompt_source,
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));
-    let session = SessionKey::new(args.session);
+    let session = SessionKey::new(session_key);
     let interactive = args.interactive;
     let mut input = if interactive {
         Some(InteractiveInput::start(style, Arc::clone(&pinned))?)
@@ -840,6 +902,64 @@ async fn resume_session(
     renderer.ensure_newline();
     renderer.summary();
     Ok(u8::from(renderer.failed))
+}
+
+/// Runs the startup flow and opens what it chose.
+///
+/// This is where a bare `norte-code`, and `resume` with no key, arrive. The flow
+/// runs first because the model has to be settled before the service is built —
+/// the service is built around a spec, and there is no spec without a model —
+/// while the session itself may come after: `new_session` creates one, and a key
+/// goes to the resume path.
+async fn open_session(
+    config: Config,
+    catalog: Catalog,
+    source: Source,
+    mut args: ResumeArgs,
+    verbosity: &str,
+    config_path: Option<PathBuf>,
+) -> Result<u8, String> {
+    let style = Style::stderr();
+    if !startup::has_terminal() {
+        return Err(
+            "the startup flow asks which session to open, so it needs a terminal; \
+             pass a session key (`norte-code resume <KEY>`) or name a model \
+             (`norte-code new --model PROVIDER/MODEL`) instead"
+                .to_owned(),
+        );
+    }
+    let mut opening = config.clone();
+    let chosen = startup::startup(
+        &mut opening,
+        &catalog,
+        &database_path(),
+        config_path.as_deref(),
+        style,
+    )
+    .await?;
+    match chosen.open {
+        // A key is resumed on the path a named session always takes, which
+        // replays the history and makes no request while the turn is over.
+        Open::Existing { key, .. } => {
+            args.session = Some(key.as_str().to_owned());
+            resume_session(config, catalog, source, args, verbosity, config_path).await
+        }
+        // A new session is created and read, never resumed: it holds no answer
+        // yet, and a resume of that is an empty turn the engine answers by
+        // asking the model.
+        Open::New => {
+            new_session(
+                config,
+                catalog,
+                source,
+                chosen.model,
+                NewArgs::bare(),
+                verbosity,
+                config_path,
+            )
+            .await
+        }
+    }
 }
 
 #[cfg(test)]
