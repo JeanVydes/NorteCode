@@ -30,7 +30,7 @@ mod text;
 mod transcript;
 
 use approval::{clip_text, compact_json};
-use commands::{apply_extensions, database_path, duration_label, run};
+use commands::{apply_extensions, database_path, duration_label, enter_workdir, run};
 use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, interactive_loop, refresh_effort};
 use models::{list_models, resolve_spec};
@@ -741,6 +741,27 @@ pub(crate) async fn new_session(
     Ok(u8::from(renderer.failed))
 }
 
+/// The directory a stored session was working in, when it recorded one.
+///
+/// It reads the row before the service is built, because the directory has to
+/// change before the tools are rooted: a service built in the wrong tree has
+/// already decided what its tools point at.
+///
+/// A database that cannot be read is not a reason to refuse the resume: the
+/// session is usable here, and the directory is where it would have gone.
+async fn stored_workdir(database: &Path, key: &str) -> Option<String> {
+    if !database.exists() {
+        return None;
+    }
+    let store = SqliteStore::open(database).ok()?;
+    let sessions = store.sessions().await.ok()?;
+    sessions
+        .into_iter()
+        .find(|session| session.key == key)
+        .and_then(|session| session.workdir)
+        .filter(|dir| !dir.trim().is_empty())
+}
+
 /// Continues a session named on the command line.
 ///
 /// The name is required: without one there is nothing to continue, and the
@@ -772,6 +793,37 @@ async fn resume_session(
         .session
         .clone()
         .ok_or("resume needs a session key; run `norte-code` to pick one")?;
+    // A session is about a tree, and the tools re-root at the process's own
+    // directory. Resuming one from somewhere else pointed every read, write and
+    // command at a tree the work was not about, which is a session that looks
+    // resumed and answers about the wrong files. The directory it was stored
+    // with is where it goes back to.
+    //
+    // A session stored before the field existed has none, and the directory the
+    // command was typed in stands — which is what `resume` always did.
+    if let Some(dir) = stored_workdir(&database_path(), &session_key).await {
+        let here = std::env::current_dir().ok();
+        let there = std::fs::canonicalize(&dir).ok();
+        let elsewhere = match (&here, &there) {
+            (Some(here), Some(there)) => here != there,
+            _ => false,
+        };
+        if elsewhere {
+            if there.is_some() {
+                enter_workdir(Path::new(&dir))?;
+                eprintln!("{}", crate::style::Style::stderr().dim(format!("in {dir}")));
+            } else {
+                eprintln!(
+                    "warning: this session worked in {dir}, which is gone; \
+                     staying in {}",
+                    here.as_ref().map_or_else(
+                        || "the current directory".to_owned(),
+                        |here| here.display().to_string()
+                    )
+                );
+            }
+        }
+    }
     let mut config = config;
     CommonOptions {
         max_iterations: args.max_iterations,

@@ -463,6 +463,7 @@ async fn a_session_saved_on_a_configured_provider_reopens_on_it() {
         denied_tools: Vec::new(),
         allowed_tools: Vec::new(),
         compacted_from: None,
+        workdir: None,
     };
     store.save_session(&stored).await.expect("store");
 

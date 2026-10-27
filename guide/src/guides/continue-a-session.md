@@ -38,6 +38,14 @@ pending question so an answer given after a restart reaches the parked tool.
 `resume --budget` replaces the session budget before continuing. That is how a
 session stopped by `action = "stop"` is allowed to proceed.
 
+A session remembers the directory it was working in, and `resume` goes back
+there before it builds anything: the tools are rooted at the process's own
+directory, so resuming a session about one tree from inside another pointed
+every read, write and command at the wrong one. A session stored before the
+directory was recorded has none, and `resume` stays where the command was typed,
+which is what it always did. A directory that no longer exists is reported and
+the resume continues where it is.
+
 ## Keep the conversation open
 
 ```sh

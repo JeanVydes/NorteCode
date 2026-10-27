@@ -793,7 +793,7 @@ fn pad_right(label: &str, width: usize) -> String {
 /// was would have the tools reading a tree nobody named, which is the failure
 /// that is hardest to notice. So it is checked and reported, and the process
 /// does not move.
-fn enter_workdir(dir: &Path) -> Result<(), String> {
+pub(crate) fn enter_workdir(dir: &Path) -> Result<(), String> {
     let dir = if dir.is_absolute() {
         dir.to_path_buf()
     } else {

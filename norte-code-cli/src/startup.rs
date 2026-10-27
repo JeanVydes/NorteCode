@@ -507,6 +507,7 @@ mod tests {
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
             compacted_from: None,
+            workdir: None,
         }
     }
 

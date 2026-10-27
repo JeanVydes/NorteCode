@@ -307,6 +307,10 @@ impl Service {
             denied_tools: record.denied_tools.clone(),
             allowed_tools: record.allowed_tools.clone(),
             compacted_from: record.compacted_from,
+            // Where the process is working, which is where the tools read and
+            // write: a session is about a tree, and resuming it from another
+            // directory would point every tool at the wrong one.
+            workdir: Some(self.workspace_root.display().to_string()),
         });
         if let Some(stored) = stored {
             self.directory.save_session(&stored).await?;

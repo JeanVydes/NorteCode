@@ -8,6 +8,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A session remembers the directory it was working in, and `resume` goes back
+  there. The tools are rooted at the process's own directory, so resuming a
+  session about one tree from inside another pointed every read, write and
+  command at the wrong one: the session looked resumed and answered about files
+  it had never seen. The directory is stored with the session and read before
+  the service is built, because a service built in the wrong tree has already
+  decided what its tools point at. A session stored before the field existed has
+  none and opens where the command was typed; a directory that is gone is
+  reported and the resume stays where it is.
+
+### Added
+
 - Commands are declared once, in a registry, and the parser, the completion
   and `/help` all read that declaration. They used to be five lists kept in step
   by hand, and they had drifted: `/tools` was parsed and never completed, and

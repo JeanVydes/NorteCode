@@ -69,6 +69,19 @@ pub struct StoredSession {
     /// The Norte session this one was compacted from, when it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compacted_from: Option<SessionId>,
+    /// The directory the session was working in, when the host recorded one.
+    ///
+    /// A session is about a tree: a path it read, a file it wrote, the project
+    /// instructions it was given. Resuming one from another directory was
+    /// resuming it somewhere the work does not apply — the tools re-root at the
+    /// process's own directory, so a resumed session silently read the wrong
+    /// files. The host stores where it was and goes back there.
+    ///
+    /// It is optional and it is in the blob rather than in a column: a session
+    /// stored before this field existed has no directory, and a schema a reader
+    /// has to migrate is a schema every reader has to keep a copy of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
 }
 
 /// One provider request, with everything a local telemetry report needs.
@@ -1293,6 +1306,7 @@ impl SessionDirectory for SqliteStore {
                         denied_tools: extra.denied_tools,
                         allowed_tools: extra.allowed_tools,
                         compacted_from: extra.compacted_from,
+                        workdir: extra.workdir,
                     })
                 },
             )
@@ -2039,6 +2053,7 @@ mod tests {
                 denied_tools: Vec::new(),
                 allowed_tools: Vec::new(),
                 compacted_from: None,
+                workdir: None,
             })
             .await
             .expect("save");
@@ -2215,6 +2230,7 @@ mod tests {
             denied_tools: vec!["command".to_owned()],
             allowed_tools: vec!["write".to_owned()],
             compacted_from: None,
+            workdir: Some("/home/someone/src/thing".to_owned()),
         };
         store.save_session(&session).await.expect("save");
         assert_eq!(store.sessions().await.expect("list"), vec![session.clone()]);
@@ -2253,5 +2269,32 @@ mod tests {
             store.sessions().await.expect("list").is_empty(),
             "nothing is left after the delete"
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_stored_before_the_directory_field_still_loads() {
+        // The field is in the blob and not in a column, which is what makes it
+        // optional: a row written before it existed decodes to `None` and the
+        // session opens wherever the command was typed, which is what `resume`
+        // did before there was anything to remember.
+        let store = SqliteStore::in_memory().expect("open");
+        let older = StoredSession {
+            key: "older".to_owned(),
+            north: SessionId::new(),
+            title: None,
+            model: "openai/gpt".to_owned(),
+            created_at: Utc::now(),
+            phase: "idle".to_owned(),
+            stats: serde_json::json!({}),
+            denied_tools: Vec::new(),
+            allowed_tools: Vec::new(),
+            compacted_from: None,
+            workdir: None,
+        };
+        store.save_session(&older).await.expect("save");
+        let loaded = store.sessions().await.expect("list");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].workdir, None, "no directory was ever recorded");
+        assert_eq!(loaded[0].key, "older");
     }
 }
