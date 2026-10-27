@@ -4,7 +4,7 @@ use super::{
     compose_selection, cost_summary, parse_approval_choice, parse_reasoning_setting,
     select_system_prompt,
 };
-use crate::commands::{RequestSummary, bucket_label, telemetry_table};
+use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use norte_code_config::{AuthKind, BudgetConfig, Config, WireKind};
@@ -824,4 +824,63 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
     );
     let _ = std::fs::remove_file(&target);
     let _ = std::fs::remove_file(&key_file);
+}
+
+#[test]
+fn the_percentiles_of_one_request_are_that_request() {
+    // A percentile of one thing is that thing at every level: the index rounds
+    // down and clamps, so a single request is its own p50, p75 and p95. Without
+    // the clamp, a request count of one indexes past the end.
+    let mut values = vec![120u64];
+    assert_eq!(percentile(&mut values, 50), 120);
+    assert_eq!(percentile(&mut values, 75), 120);
+    assert_eq!(percentile(&mut values, 95), 120);
+    // An empty set has no percentile, and zero is what "nothing was measured"
+    // prints as.
+    assert_eq!(percentile(&mut [], 95), 0);
+}
+
+#[test]
+fn a_percentile_reads_the_sorted_set_and_not_the_first_one() {
+    // The three say different things about the same set, which is the whole
+    // reason for having three: the middle request, the slow three in four, and
+    // the worst in twenty. A mean over these is dragged by the last two.
+    // The index is `len * p / 100`, so over `1..=100` the p50 is the value at
+    // index 50 — which is 51, because the index counts from zero.
+    let mut values: Vec<u64> = (1..=100).collect();
+    assert_eq!(percentile(&mut values, 50), 51, "the middle one");
+    assert_eq!(percentile(&mut values, 75), 76);
+    assert_eq!(percentile(&mut values, 95), 96, "the worst in twenty");
+    // And it reads the values, not the positions: an unsorted set gives the
+    // same answer because the function sorts it.
+    let mut shuffled = vec![95u64, 1, 50, 75, 20];
+    assert_eq!(percentile(&mut shuffled, 50), 50);
+    assert_eq!(percentile(&mut shuffled, 75), 75);
+    assert_eq!(percentile(&mut shuffled, 95), 95);
+}
+
+#[test]
+fn the_telemetry_row_carries_the_percentiles_the_average_hides() {
+    // The columns exist because a mean says nothing about the request a person
+    // is waiting on: one slow call in twenty moves the average and the p95 by
+    // different amounts, and the table has to show both.
+    let mut summary = RequestSummary::default();
+    for _ in 0..19 {
+        summary.add(&telemetry_record("openai", "gpt-5", Some(300), None));
+    }
+    // One slow call in twenty: the mean moves a little, the p95 moves to it.
+    let mut slow = telemetry_record("openai", "gpt-5", Some(300), None);
+    slow.duration_ms = 60_000;
+    summary.add(&slow);
+
+    let mut timing = summary.clone();
+    let p50 = timing.p50_ms();
+    let p95 = timing.p95_ms();
+    assert_eq!(p50, 1_000, "every ordinary request took the same time");
+    assert_eq!(p95, 60_000, "and the p95 is the slow one");
+    assert!(
+        summary.average_ms() < p95 / 2,
+        "one slow call in twenty moves the mean far less than the p95: {} vs {p95}",
+        summary.average_ms()
+    );
 }

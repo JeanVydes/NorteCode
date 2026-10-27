@@ -8,6 +8,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/telemetry` reports p50 and p95 beside the average latency. An average is
+  dragged by a handful of slow calls and says nothing about the request a person
+  is waiting on now: this machine's own ledger reads 6.0s average, 4.0s p50 and
+  16.9s p95 over the same window, and only the last two say what a slow request
+  costs. The JSON gains `p50_ms`, `p75_ms`, `p50_ttft_ms` and `p75_ttft_ms`
+  beside the `p95_*` it already had. One `percentile` serves every level of both
+  metrics, where two hand-written copies of the same five lines used to.
+
+### Added
+
 - A session remembers the directory it was working in, and `resume` goes back
   there. The tools are rooted at the process's own directory, so resuming a
   session about one tree from inside another pointed every read, write and

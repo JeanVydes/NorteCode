@@ -281,6 +281,27 @@ pub(crate) fn cost_summary(summary: &CostSummary) -> String {
     parts.join(" · ")
 }
 
+/// One percentile of a set of durations, sorted in place.
+///
+/// One definition for every percentile and both metrics: they were two
+/// hand-written copies of the same five lines, and the copies are what would
+/// drift when a second percentile arrived. The index rounds down and clamps, so
+/// a single request is its own p50, p75 and p95 — which is what a percentile of
+/// one thing means.
+///
+/// It sorts in place, which is why it takes the vector and not a slice: a
+/// caller that wants two percentiles of the same set would otherwise sort it
+/// twice.
+#[must_use]
+pub(crate) fn percentile(values: &mut [u64], which: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let index = (values.len() * which / 100).min(values.len() - 1);
+    values[index]
+}
+
 /// Counts and sums one slice of the request telemetry.
 #[derive(Default, Clone)]
 pub(crate) struct RequestSummary {
@@ -331,20 +352,25 @@ impl RequestSummary {
         self.providers.insert(record.provider.clone());
     }
 
-    fn average_ms(&self) -> u64 {
+    pub(crate) fn average_ms(&self) -> u64 {
         if self.requests == 0 {
             return 0;
         }
         self.durations.iter().sum::<u64>() / self.requests
     }
 
-    fn p95_ms(&mut self) -> u64 {
-        if self.durations.is_empty() {
-            return 0;
-        }
-        self.durations.sort_unstable();
-        let index = (self.durations.len() * 95 / 100).min(self.durations.len() - 1);
-        self.durations[index]
+    pub(crate) fn p95_ms(&mut self) -> u64 {
+        percentile(&mut self.durations, 95)
+    }
+
+    /// The middle request, which is what one request typically costs.
+    pub(crate) fn p50_ms(&mut self) -> u64 {
+        percentile(&mut self.durations, 50)
+    }
+
+    /// Three requests in four are at or under this.
+    fn p75_ms(&mut self) -> u64 {
+        percentile(&mut self.durations, 75)
     }
 
     /// The average time the requests took to reach their first token.
@@ -358,12 +384,17 @@ impl RequestSummary {
 
     /// The slowest first token of the slice, at the ninety-fifth percentile.
     fn p95_ttft_ms(&mut self) -> u64 {
-        if self.ttfts.is_empty() {
-            return 0;
-        }
-        self.ttfts.sort_unstable();
-        let index = (self.ttfts.len() * 95 / 100).min(self.ttfts.len() - 1);
-        self.ttfts[index]
+        percentile(&mut self.ttfts, 95)
+    }
+
+    /// The middle wait for a first token.
+    fn p50_ttft_ms(&mut self) -> u64 {
+        percentile(&mut self.ttfts, 50)
+    }
+
+    /// Three waits in four are at or under this.
+    fn p75_ttft_ms(&mut self) -> u64 {
+        percentile(&mut self.ttfts, 75)
     }
 
     fn cost_label(&self) -> String {
@@ -421,8 +452,12 @@ impl RequestSummary {
             "errors": self.errors,
             "cancelled": self.cancelled,
             "average_ms": self.average_ms(),
+            "p50_ms": self.p50_ms(),
+            "p75_ms": self.p75_ms(),
             "p95_ms": self.p95_ms(),
             "average_ttft_ms": self.average_ttft_ms(),
+            "p50_ttft_ms": self.p50_ttft_ms(),
+            "p75_ttft_ms": self.p75_ttft_ms(),
             "p95_ttft_ms": self.p95_ttft_ms(),
             "providers": self.providers.iter().cloned().collect::<Vec<_>>(),
         })
@@ -712,6 +747,11 @@ pub(crate) fn telemetry_table(
     header.push(style.faint(format!("{:>7}", "cache")));
     header.push(style.faint(format!("{:>9}", "ttft")));
     header.push(style.faint(format!("{:>7}", "latency")));
+    // The average is what one request typically costs and the percentiles are
+    // what the slow ones cost: a mean is dragged by a handful of outliers and
+    // says nothing about the request a person is waiting on now.
+    header.push(style.faint(format!("{:>7}", "p50")));
+    header.push(style.faint(format!("{:>7}", "p95")));
     header.push(style.faint("cost"));
     out.push_str(&header.join("  "));
     out.push('\n');
@@ -773,6 +813,13 @@ pub(crate) fn telemetry_table(
             format!("ttft {}", duration_label(summary.average_ttft_ms()))
         )));
         line.push(style.dim(format!("{:>7}", duration_label(summary.average_ms()))));
+        // The percentiles sort in place, so they are read from a clone: sorting
+        // the borrow would reorder the record the caller still holds.
+        let mut timing = (*summary).clone();
+        let p50 = duration_label(timing.p50_ms());
+        let p95 = duration_label(timing.p95_ms());
+        line.push(style.dim(format!("{p50:>7}")));
+        line.push(style.dim(format!("{p95:>7}")));
         line.push(cost);
         out.push_str(&line.join("  "));
         out.push('\n');
