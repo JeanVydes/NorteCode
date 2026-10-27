@@ -71,6 +71,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A resumed session showed `auto` in the footer while running on the reasoning
+  setting it was left on. The setting was stored and the next turn uses it — the
+  override a `/reasoning` leaves survives a restart — but the footer was set
+  from the configuration's default before the session was named, and nothing
+  refreshed it. It reads the session now, which is what the footer has always
+  shown after a `/model`, and what `/debug` reports.
+
 - The approval mode went looking for a tool called `command`, and no tool has
   answered to that name since the shell became one tool: the default mode asked
   about a tool that never ran and let the one that did run without asking. The
