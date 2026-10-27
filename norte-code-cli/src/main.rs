@@ -883,6 +883,17 @@ async fn resume_session(
     // this is the session's, which is what the footer has to show.
     refresh_effort(&service, &session, &mut renderer);
     let interactive = args.interactive;
+    // The terminal belongs to the renderer, exactly as it does for a new
+    // session: it is what knows when something changed, so it is what draws,
+    // and the editor reads its keys from the raw mode this sets. Without it a
+    // resume never entered the alternate screen or raw mode, so `draw` returned
+    // early and the reader blocked on a keystroke in canonical mode: the
+    // interface stayed on the terminal, the input was never cleared and the
+    // session could not be continued. A resume with no terminal (`--jsonl`, a
+    // pipe) keeps the plain path and draws nothing.
+    if interactive && crate::terminal::is_interactive() {
+        renderer.screen = Some(crate::terminal::Guard::enter()?);
+    }
     let mut input = if interactive {
         Some(InteractiveInput::start(Arc::clone(&pinned))?)
     } else {

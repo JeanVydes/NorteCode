@@ -83,6 +83,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `resume` left the interface on the terminal and blocked. It never took the
+  terminal over the way a new session does, so there was no alternate screen,
+  no raw mode and no frame: `draw` returned early, the input box was never
+  cleared when a message was sent, and the reader waited on a keystroke the
+  terminal was still holding for a line. A resume now enters the guard, exactly
+  as `new` does; a resume with no terminal (`--jsonl`, a pipe) keeps the plain
+  path and draws nothing.
+
 - A resumed session showed `auto` in the footer while running on the reasoning
   setting it was left on. The setting was stored and the next turn uses it — the
   override a `/reasoning` leaves survives a restart — but the footer was set
