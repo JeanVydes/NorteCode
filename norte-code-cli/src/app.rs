@@ -68,6 +68,12 @@ pub(crate) struct State {
     /// the bar used to repaint a line of its own from one, and that is a second
     /// writer on a terminal that has one.
     pub(crate) waiting: Option<crate::render::Wait>,
+    /// When the wait began, as milliseconds since the epoch.
+    ///
+    /// It travels from the renderer, which is what sees the event that started
+    /// the turn. The frame is what turns it into a number: a duration the frame
+    /// computes itself is one it can draw without asking anything.
+    pub(crate) waiting_since: Option<u128>,
     /// How many lines the view is scrolled back from the end.
     pub(crate) scroll: usize,
 }
@@ -197,12 +203,15 @@ pub(crate) const COMPLETION_ROWS: usize = 4;
 /// draft scrolls inside its own rows.
 pub(crate) const INPUT_ROWS: u16 = 10;
 
-/// Draws what the client is waiting for, as a turning glyph.
+/// Draws what the client is waiting for: a turning glyph and how long.
 ///
-/// It is a wheel of frames advanced by the clock, which is the one animation
-/// that earns a clock: it says the process is alive while nothing else on
-/// screen changes. The row appears only while a turn is in flight, so a client
-/// at a prompt draws exactly as many rows as it has content for.
+/// The glyph turns in both phases, because both are a wait: a wheel that stopped
+/// when tokens started arriving would say the process had stalled at the exact
+/// moment it was working. What changes with the phase is the words.
+///
+/// The number beside it is the time since the wait began, which is the one thing
+/// a person watching a silent provider wants and cannot get from anything else
+/// on screen.
 fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     use std::time::{SystemTime, UNIX_EPOCH};
     if area.height == 0 {
@@ -214,10 +223,18 @@ fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
         Some(crate::render::Wait::Streaming) => "streaming",
         _ => "waiting for the first token",
     };
-    let step = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis() / u128::from(SPINNER_MS));
+        .map_or(0, |since| since.as_millis());
+    let step = now / u128::from(SPINNER_MS);
     let glyph = SPINNER[(step % SPINNER.len() as u128) as usize];
+    // The count is of the wait, and the wait began when the client was told a
+    // turn started. The frame is the only thing that knows that instant, so it
+    // is kept here rather than travelling from the loop.
+    let since = state
+        .waiting_since
+        .map_or(0, |started| now.saturating_sub(started));
+    let since_secs = u64::try_from(since / 1_000).unwrap_or(u64::MAX);
     let line = Line::from(vec![
         Span::raw("  "),
         Span::styled(
@@ -226,6 +243,10 @@ fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
         ),
         Span::raw(" "),
         Span::styled(label.to_owned(), style.dim_span()),
+        Span::styled(
+            format!(" · {}", elapsed(std::time::Duration::from_secs(since_secs))),
+            style.faint_span(),
+        ),
     ]);
     Paragraph::new(line).render(area, frame.buffer_mut());
 }
@@ -262,12 +283,35 @@ fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style:
     Paragraph::new(line).render(area, frame.buffer_mut());
 }
 
+/// The bar in front of a row, which is what says who is talking.
+///
+/// It is a character and not a colour because a terminal with no colour has
+/// none: the bar is the part that survives, and the ink on top of it says the
+/// same thing twice for a terminal that can show it.
+#[must_use]
+pub(crate) fn margin(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Said => "▌ ",
+        Kind::Reasoning => "│ ",
+        _ => "  ",
+    }
+}
+
+/// The columns the transcript's margin takes, with its leading space.
+///
+/// One space and the bar: the narrowest thing that still reads as a column of
+/// its own beside the text.
+pub(crate) const MARGIN_COLS: u16 = 3;
+
 /// Draws the conversation: the part that fits, newest at the bottom.
 fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     if area.height == 0 {
         return;
     }
-    let width = area.width.saturating_sub(2).max(1);
+    // What the text has is what is left after the margin every row carries:
+    // wrapping at the full width would put the last word of a row past the edge
+    // of the terminal, where it is cut.
+    let width = area.width.saturating_sub(MARGIN_COLS).max(1);
     let lines = transcript_lines(&state.transcript, width);
     // From the bottom up: the newest line is the one being read, and a view
     // that grew from the top would put it off the screen.
@@ -283,16 +327,22 @@ fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style
         .iter()
         .map(|(kind, text)| {
             let ink = ink(*kind, style);
-            if *kind == Kind::Reasoning {
-                // The box's own column, so the eye can tell where the thought
-                // starts and ends without reading a word of it.
-                return Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("│ ", style.faint_span()),
-                    Span::styled(text.clone(), ink),
-                ]);
-            }
-            Line::from(vec![Span::raw("  "), Span::styled(text.clone(), ink)])
+            // The margin is what says who is talking. One column, before every
+            // line: the person at `▌` and the model at a space, which is the
+            // convention a chat and a diff already share. A colour alone cannot
+            // carry it — a terminal with no colour shows none — and the margin
+            // costs a column and reads at a glance.
+            let bar_ink = match kind {
+                Kind::Said => style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+                Kind::Reasoning => style.faint_span(),
+                _ => style.dim_span(),
+            };
+            let bar = margin(*kind);
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(bar.to_owned(), bar_ink),
+                Span::styled(text.clone(), ink),
+            ])
         })
         .collect();
     // The conversation sits against the input and not against the top: what a
@@ -593,6 +643,23 @@ mod tests {
         // conversation.
         state.input = "x\n".repeat(1_000);
         assert_eq!(state.input_height(80), INPUT_ROWS);
+    }
+
+    #[test]
+    fn the_margin_is_what_says_who_is_talking() {
+        // Colour alone cannot carry it: on a terminal with no colour every ink
+        // is the same ink, and the two sides of a conversation would read as
+        // one voice. The bar is what survives that, which is why it is drawn
+        // from the kind and not from the ink.
+        let plain = Style::plain();
+        assert_eq!(
+            ink(Kind::Said, plain),
+            ink(Kind::Answer, plain),
+            "with no colour there is nothing to tell them apart"
+        );
+        assert_eq!(margin(Kind::Said).trim(), "▌");
+        assert_eq!(margin(Kind::Reasoning).trim(), "│");
+        assert_eq!(margin(Kind::Answer).trim(), "", "the model has no bar");
     }
 
     #[test]

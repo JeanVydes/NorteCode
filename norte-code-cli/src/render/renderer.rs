@@ -183,6 +183,12 @@ pub(crate) struct Renderer {
     /// own from a thread of its own, which is a second writer on a terminal
     /// that has one. The state says what is happening and the frame draws it.
     pub(crate) waiting: Option<super::loading::Wait>,
+    /// When the current wait began, as milliseconds since the epoch.
+    ///
+    /// It is set when the client is told a turn started and cleared when the
+    /// wait ends, which is what the row beside the spinner counts: a number
+    /// that outlived the wait would keep counting after the answer arrived.
+    pub(crate) waiting_since: Option<u128>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -313,6 +319,7 @@ impl Renderer {
             model_name: None,
             reasoning: None,
             waiting: None,
+            waiting_since: None,
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -644,6 +651,7 @@ impl Renderer {
             tab_body: crate::select::strip_style(&self.tab_summary()),
             suggestion,
             waiting: self.waiting,
+            waiting_since: self.waiting_since,
             scroll: 0,
         }
     }
@@ -749,6 +757,7 @@ impl Renderer {
         self.failed = false;
         self.cancelled = false;
         self.waiting = Some(super::loading::Wait::Waiting);
+        self.waiting_since = Some(now_millis());
         self.set_activity(Some("waiting for the first token".to_owned()));
     }
 
@@ -765,6 +774,7 @@ impl Renderer {
     /// Marks the wait as over.
     fn stop_bar(&mut self) {
         self.waiting = None;
+        self.waiting_since = None;
     }
 
     /// Records the reasoning effort the footer shows, and repaints it.
@@ -2557,4 +2567,14 @@ fn tool_lines(entry: &mut crate::transcript::Entry, lines: &[String]) -> usize {
         entry.push_line(text);
     }
     hidden
+}
+
+/// The clock, as milliseconds since the epoch.
+///
+/// One place asks for the time, so every count in the interface counts from the
+/// same clock: two numbers taken a moment apart read as two different waits.
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis())
 }
