@@ -6702,3 +6702,47 @@ async fn a_title_can_be_asked_of_another_model() {
         .expect("a title");
     assert_eq!(title, "a cheap title");
 }
+
+#[tokio::test]
+async fn the_mode_asks_before_the_tool_that_runs_a_command() {
+    // The mode used to decide by a tool called `command`, and no tool has
+    // answered to that since the shell became one: `ask` — which is what a
+    // config with no `approval_mode` in it gets — let a command run without
+    // asking. A wrong name in that list is silent, because a name that matches
+    // nothing is not an error, so this is the test that has to notice.
+    //
+    // The names are read back out of the registry rather than trusted: that is
+    // the whole failure, a list of names nobody has.
+    let registered: Vec<String> = service()
+        .tools()
+        .expect("tools")
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    for tool in &registered {
+        let wanted =
+            super::approvals::mode_needs_approval(norte_code_config::ApprovalMode::Ask, tool);
+        let is_dangerous = matches!(tool.as_str(), "write" | "edit" | "shell" | "skill_script");
+        assert_eq!(
+            wanted, is_dangerous,
+            "`ask` mode and the tool list disagree about `{tool}`: {registered:?}"
+        );
+    }
+    // And the names the mode keeps are names the registry has, except for the
+    // one tool that is only registered when the config turns it on: a name the
+    // mode keeps for a tool that is not there is exactly the bug, and
+    // `skill_script` is the one case where absence is expected.
+    for name in super::approvals::WRITES
+        .iter()
+        .chain(super::approvals::RUNS.iter())
+    {
+        if *name == "skill_script" {
+            continue;
+        }
+        assert!(
+            registered.iter().any(|tool| tool == name),
+            "the mode names `{name}`, which is not a registered tool: {registered:?}"
+        );
+    }
+}

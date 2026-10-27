@@ -10,7 +10,11 @@ use norte_code_store_sqlite::SessionDirectory;
 use crate::ServiceError;
 
 /// The tools whose effects are not safely repeatable after a crash.
-const JOURNALED_TOOLS: [&str; 4] = ["write", "edit", "command", "skill_script"];
+///
+/// Named as the registry names them. This list spelled the shell as `command`
+/// for as long as the approval one did, so a command a crash may have run was
+/// never journalled and a replay would have run it twice.
+const JOURNALED_TOOLS: [&str; 4] = ["write", "edit", "shell", "skill_script"];
 
 fn is_journaled(tool: &str) -> bool {
     JOURNALED_TOOLS.contains(&tool)

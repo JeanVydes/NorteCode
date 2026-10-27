@@ -141,6 +141,31 @@ impl ApprovalRules {
     }
 }
 
+/// The tools a person must approve under each mode, named as the registry
+/// names them.
+///
+/// This used to spell the shell as `command`, and no tool has answered to that
+/// since the shell became one tool. A name that matches nothing is silent: the
+/// default mode asked about a tool that never ran and let the one that did run
+/// without asking. The test below checks these names against the registry, for
+/// exactly that reason.
+pub(super) const WRITES: [&str; 2] = ["write", "edit"];
+
+/// The tools that run something, named as the registry names them.
+pub(super) const RUNS: [&str; 2] = ["shell", "skill_script"];
+
+/// Whether the approval mode sends this tool to a human.
+///
+/// It is the rule [`ApprovalModePolicy`] applies, written once so the list a
+/// client draws and the decision the engine makes cannot disagree.
+pub(super) fn mode_needs_approval(mode: ApprovalMode, tool: &str) -> bool {
+    match mode {
+        ApprovalMode::Yolo => false,
+        ApprovalMode::AutoEdit => RUNS.contains(&tool),
+        ApprovalMode::Ask => WRITES.contains(&tool) || RUNS.contains(&tool),
+    }
+}
+
 /// Parks the tools a human must approve, according to the session's mode.
 pub(super) struct ApprovalModePolicy {
     pub(super) mode: ApprovalMode,
@@ -171,13 +196,7 @@ impl Policy for ApprovalModePolicy {
         {
             return Decision::Allow;
         }
-        let needs_approval = match self.mode {
-            ApprovalMode::Yolo => false,
-            ApprovalMode::AutoEdit => matches!(tool, "command" | "skill_script"),
-            ApprovalMode::Ask => {
-                matches!(tool, "write" | "edit" | "command" | "skill_script")
-            }
-        };
+        let needs_approval = mode_needs_approval(self.mode, tool);
         if needs_approval {
             Decision::RequireApproval(format!("allow `{tool}` to run with these arguments?"))
         } else {

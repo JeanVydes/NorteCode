@@ -44,6 +44,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The approval mode went looking for a tool called `command`, and no tool has
+  answered to that name since the shell became one tool: the default mode asked
+  about a tool that never ran and let the one that did run without asking. The
+  shell now asks before it runs a command, which is what `ask`, `auto-edit` and
+  `yolo` have claimed all along. `skill_script` was the other name in the same
+  list and is a real tool, so it still asks.
+
+  The effect journal carried the same wrong name, so a command a crash may have
+  run was never journalled and a replay would have run it a second time.
+
 - The question the model asks is drawn as soon as it arrives, and the box it
   opens answers with what was typed. Both were broken in the list the arrows
   walk: the choices were drawn only after a keypress, because the block that
