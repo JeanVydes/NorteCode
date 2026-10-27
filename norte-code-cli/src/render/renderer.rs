@@ -39,12 +39,16 @@ pub(crate) enum Format {
 /// newline that never comes would show nothing at all while the tool runs.
 const MAX_PARTIAL_LINE_CHARS: usize = 512;
 
-/// How many rows one streamed output box keeps.
+/// The most rows one streamed output box keeps, whatever the screen.
 ///
 /// A command that prints thousands of lines would push the transcript off the
 /// screen; the box keeps its last rows and counts what it dropped. It is a bound
 /// on one call and not on the conversation: the transcript is scrolled, so what
 /// a longer command produced is not a reason to lose the work around it.
+///
+/// The real bound is the screen (see [`OutputLimit`]), and this is the ceiling
+/// for a process with no terminal of its own to measure: a box never taller
+/// than the screen it is drawn on, and never more than this.
 const MAX_OUTPUT_ROWS: usize = 400;
 
 /// How much of the conversation the renderer shows.
@@ -631,6 +635,27 @@ impl Renderer {
         // The panel is four fifths of the height and two rows are its border.
         let (_, height) = screen.size();
         usize::from(height).saturating_mul(4) / 5
+    }
+
+    /// How many rows an output box may keep, bounded by the screen.
+    ///
+    /// A box taller than the screen shows its last rows and scrolls the rest of
+    /// the conversation off the top, which is the complaint the transcript
+    /// scroll already answers for the conversation: an output box should not be
+    /// a second, taller thing to scroll. The last screenful is kept, so what is
+    /// on screen is the end of the output, and the count of what was dropped is
+    /// what says there was more. A process with no terminal falls back to the
+    /// ceiling.
+    fn output_limit(&self) -> usize {
+        // No terminal means no screen to bound to, and the plain-text path
+        // prints the whole result elsewhere: the ceiling is the only bound.
+        if self.screen.is_none() {
+            return MAX_OUTPUT_ROWS;
+        }
+        let screen = self.screen_rows().max(1);
+        // Two rows are the box's own edges and the last one is the prompt, so a
+        // box that filled the screen would hide the line a person types on.
+        screen.saturating_sub(3).clamp(10, MAX_OUTPUT_ROWS)
     }
 
     /// What the panel decided about a key, and what to do about it.
@@ -1265,7 +1290,7 @@ impl Renderer {
     /// is a `│` a person selects along with the output they meant to copy.
     fn keep_output_row(&mut self, line: &str) {
         self.output_rows_seen += 1;
-        if self.output_rows_seen > MAX_OUTPUT_ROWS {
+        if self.output_rows_seen > self.output_limit() {
             // Past the bound the row is not kept, and the count says how many
             // were left out. The newest are the ones worth keeping, so this is
             // the oldest being dropped.
@@ -1306,7 +1331,7 @@ impl Renderer {
             return;
         };
         self.flush_output_pending();
-        let hidden = self.output_rows_seen.saturating_sub(MAX_OUTPUT_ROWS);
+        let hidden = self.output_rows_seen.saturating_sub(self.output_limit());
         let mut entry = crate::transcript::Entry::bordered(
             crate::transcript::Kind::ToolOutput,
             format!("shell #{}", short(&call_id)),
@@ -1642,6 +1667,18 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) fn output_rows_seen(&self) -> usize {
         self.output_rows_seen
+    }
+
+    /// How many rows the open box is holding, for a test.
+    #[cfg(test)]
+    pub(crate) fn output_rows_len(&self) -> usize {
+        self.output_rows.len()
+    }
+
+    /// The bound the box is keeping to, for a test.
+    #[cfg(test)]
+    pub(crate) fn output_limit_for_test(&self) -> usize {
+        self.output_limit()
     }
 
     /// What is waiting for a newline, for a test.

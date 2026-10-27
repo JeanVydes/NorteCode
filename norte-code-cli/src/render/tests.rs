@@ -1173,6 +1173,36 @@ fn the_box_stops_printing_rows_past_its_height() {
 }
 
 #[test]
+fn the_output_box_is_bounded_by_the_ceiling_without_a_screen() {
+    // A renderer with no terminal has no screen to measure, so the ceiling is
+    // the bound: the box holds that many rows and counts the rest.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    let limit = renderer.output_limit_for_test();
+    assert_eq!(limit, 400, "no screen means the ceiling");
+    for index in 0..450 {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: "stdout".to_owned(),
+            text: format!("line {index}\n"),
+            last: false,
+        });
+    }
+    assert_eq!(
+        renderer.output_rows_len(),
+        limit,
+        "the box holds the bound and no more"
+    );
+    assert_eq!(
+        renderer.output_rows_seen(),
+        450,
+        "and counts everything that arrived"
+    );
+}
+
+#[test]
 fn every_reasoning_level_draws_its_own_bar() {
     // A control that cannot be told apart from the one below it is not showing
     // anything, so the levels are checked to be distinct rather than merely

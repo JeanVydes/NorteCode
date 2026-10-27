@@ -1278,6 +1278,13 @@ log file gets the plain rows instead of the box drawing.
 
 ### Fixed
 
+- A streamed tool output box is no longer up to 400 rows tall. It was a fixed
+  count, about ten screens on a normal terminal: a long `shell` call filled the
+  transcript with one box and there was nothing to scroll but the whole
+  conversation. The box now keeps at most one screenful minus the border and the
+  prompt, and counts what it dropped, so the last screenful is what a person
+  reads and the rest is one line saying how many were left out.
+
 - `grep` and `web_fetch` now escape Unicode bidi overrides and line separators
   the way `read` does, so a crafted line cannot visually reorder or hide the
   rest of a result. `grep` also clips its 500-character line width by
