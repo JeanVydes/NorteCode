@@ -15,16 +15,19 @@
 //!
 //! It reads its own input instead of sharing the editor, because it runs before
 //! the editor exists: the editor takes the terminal over — raw mode, a scroll
-//! region, a pinned footer — while a menu is better off on a plain cooked line,
-//! which is also what a terminal that is not a terminal can answer.
+//! region, a pinned footer — and a menu that borrowed it would have to hand it
+//! back before the session it is choosing for had started. It puts the terminal
+//! in raw mode for the length of the question and restores it after, which is
+//! what makes an arrow key arrive as an arrow key instead of as three bytes.
 
-use std::io::{IsTerminal as _, Write as _};
+use std::io::IsTerminal as _;
 use std::path::Path;
 
 use norte_code_config::{Config, update_user_default_model};
 use norte_code_protocol::{Phase, SessionKey};
 use norte_code_store_sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
 
+use crate::select::{self, Item, Outcome};
 use crate::style::Style;
 
 /// How many sessions the startup list names.
@@ -35,9 +38,6 @@ use crate::style::Style;
 /// it, because a bounded list that hides its own bound is worse than a short one
 /// that admits it.
 const LISTED_SESSIONS: usize = 10;
-
-/// How many models of the chosen provider are named.
-const LISTED_MODELS: usize = 40;
 
 /// How many providers the picker names.
 ///
@@ -203,92 +203,40 @@ pub(crate) fn choose_session(rows: &[SessionRow], style: Style) -> Result<Open, 
     if rows.is_empty() {
         return Ok(Open::New);
     }
-    let mut options = vec![
-        Choice {
-            label: "New session".to_owned(),
-            open: Open::New,
-            state: None,
-            fixed: true,
-        },
-        Choice {
-            label: "Last session".to_owned(),
-            open: open_of(&rows[0]),
-            state: rows[0].state(),
-            fixed: true,
-        },
-    ];
-    for row in rows.iter().take(LISTED_SESSIONS) {
-        options.push(Choice {
-            label: row.label(),
-            open: open_of(row),
-            state: row.state(),
-            fixed: false,
-        });
-    }
+    let items = session_items(rows);
     let hidden = rows.len().saturating_sub(LISTED_SESSIONS);
-    eprintln!(
-        "{}",
-        style.dim(if hidden == 0 {
-            format!("{} session(s) saved", rows.len())
-        } else {
-            format!(
+    if hidden > 0 {
+        eprintln!(
+            "{}",
+            style.dim(format!(
                 "{} session(s) saved, showing the {LISTED_SESSIONS} most recent; \
                  {hidden} not shown (type a key to open one)",
                 rows.len()
-            )
-        })
-    );
-    for (index, choice) in options.iter().enumerate() {
-        let mut line = format!(
-            "  {}. {}",
-            index + 1,
-            if choice.fixed {
-                style.bold(choice.label.clone())
-            } else {
-                style.cyan(choice.label.clone())
-            }
-        );
-        if let Some(state) = choice.state {
-            line.push_str(&style.dim(format!(" · {state}")));
-        }
-        eprintln!("{line}");
-    }
-    loop {
-        // End of input is not a choice, but refusing to start on it would leave
-        // the process wedged on a terminal that cannot answer: a new session is
-        // the one thing that needs nothing typed.
-        let Some(answer) = prompt(&format!("open [1-{}] (default 1)> ", options.len()), style)?
-        else {
-            return Ok(Open::New);
-        };
-        // A bare Enter takes the first entry, which is the new session: it is
-        // the choice that opens nothing and discards nothing.
-        let index = if answer.trim().is_empty() {
-            Some(0)
-        } else {
-            pick(&answer, options.len(), rows)
-        };
-        if let Some(index) = index {
-            return Ok(options[index].open.clone());
-        }
-        // A key the list did not show is still a key a person may have typed
-        // from an earlier footer. It is passed through rather than checked here,
-        // which would need a second reader of the same table; the service
-        // resolves it at the first message and says so if it is unknown.
-        let typed = answer.trim();
-        if typed.len() >= 8 && typed.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-            return Ok(Open::Existing {
-                key: SessionKey::new(typed.to_owned()),
-                unfinished: false,
-            });
-        }
-        eprintln!(
-            "{}",
-            style.yellow(format!(
-                "`{answer}` is not one of the {} choices",
-                options.len()
             ))
         );
+    }
+    match select::run(items, "which session?", style)? {
+        // A bare Enter took the new session, and Escape means the same thing: it
+        // is the one choice that needs nothing typed, so it is what an
+        // unanswered menu means.
+        Outcome::Chosen(0) | Outcome::Left => Ok(Open::New),
+        // The second entry is the newest session, whatever its key is.
+        Outcome::Chosen(1) => Ok(open_of(&rows[0])),
+        Outcome::Chosen(index) => Ok(open_of(&rows[index - 2])),
+        // A name that matched no entry is a session key the list did not show,
+        // typed from an older footer. It is passed through rather than checked
+        // here, which would need a second reader of the same table; the service
+        // resolves it at the first message and says so if it is unknown.
+        Outcome::Typed(typed) => {
+            let typed = typed.trim();
+            if typed.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+                return Ok(Open::Existing {
+                    key: SessionKey::new(typed.to_owned()),
+                    unfinished: false,
+                });
+            }
+            Err(format!("`{typed}` names no session"))
+        }
     }
 }
 
@@ -299,48 +247,29 @@ fn open_of(row: &SessionRow) -> Open {
     }
 }
 
-/// An entry of the startup menu.
-struct Choice {
-    /// What the entry is called on screen.
-    label: String,
-    /// What choosing it opens.
-    open: Open,
-    /// What its session state is, when there is one worth saying.
-    state: Option<&'static str>,
-    /// Whether it is one of the two fixed entries, which are named in bold.
-    fixed: bool,
-}
-
-/// Turns an answer into a zero-based index into the menu.
+/// The rows the session menu draws: the two fixed entries, then the sessions.
 ///
-/// A number counts from one, `new` and `last` name the two fixed entries, and a
-/// session key selects its own row wherever it sits — the list is bounded, so
-/// the rows that fell off the end are still reachable by the key that names
-/// them.
-pub(crate) fn pick(answer: &str, len: usize, rows: &[SessionRow]) -> Option<usize> {
-    let answer = answer.trim();
-    // A number is a number and nothing else. Reading "0" as a key prefix opened
-    // the session whose key started with it, which is a session nobody chose.
-    if let Ok(number) = answer.parse::<usize>() {
-        return (1..=len).contains(&number).then(|| number - 1);
+/// The order is the contract the caller reads back: entry zero is a new session
+/// and entry one is the newest saved one, and the sessions follow in order, so
+/// `outcome - 2` is an index into `rows`.
+fn session_items(rows: &[SessionRow]) -> Vec<Item> {
+    let mut items = vec![
+        Item::new("New session", true),
+        Item::new("Last session", true),
+    ];
+    if let Some(state) = rows[0].state() {
+        // The state belongs to the row it describes, and that row is found by
+        // its place: the second entry is the newest session.
+        items[1] = items[1].clone().noted(state);
     }
-    if answer.is_empty() {
-        return None;
-    }
-    match answer.to_ascii_lowercase().as_str() {
-        "new" | "n" => Some(0),
-        "last" | "l" => (len > 1).then_some(1),
-        _ => {
-            if answer.is_empty() {
-                return None;
-            }
-            rows.iter()
-                .position(|row| row.key.starts_with(answer))
-                // The row's place in the menu: the two fixed entries come first.
-                .map(|position| position + 2)
-                .filter(|index| *index < len)
+    for row in rows.iter().take(LISTED_SESSIONS) {
+        let mut item = Item::new(row.label(), false).searched_by(row.key.clone());
+        if let Some(state) = row.state() {
+            item = item.noted(state);
         }
+        items.push(item);
     }
+    items
 }
 
 /// Asks which provider and which model a new session should use.
@@ -349,8 +278,9 @@ pub(crate) fn pick(answer: &str, len: usize, rows: &[SessionRow]) -> Option<usiz
 /// they carry a key, an endpoint and a wire, so they are listed first and the
 /// catalogue follows. The catalogue is the whole of models.dev — hundreds of
 /// providers — so printing it all would bury the two or three that matter under
-/// a screenful nobody reads. What is not listed is still reachable by name, and
-/// the count that was left out says so.
+/// a screenful nobody reads. The list is what the cursor walks; a name the cursor
+/// does not reach is typed into the filter, which is what narrows the list and,
+/// when it matches nothing, is the name itself.
 #[allow(clippy::too_many_lines)] // one arm per question, which is the dialogue.
 pub(crate) fn choose_model(
     config: &mut Config,
@@ -375,6 +305,9 @@ pub(crate) fn choose_model(
                 .to_owned(),
         );
     }
+    // The configured providers are never cut. They are the ones with a key and
+    // an endpoint, which are the two things the catalogue cannot supply, and a
+    // bound that hid one would hide the only choice that works.
     let mut providers = configured.clone();
     providers.extend(
         from_catalogue
@@ -382,54 +315,45 @@ pub(crate) fn choose_model(
             .take(LISTED_PROVIDERS.saturating_sub(configured.len()))
             .cloned(),
     );
-    for (index, provider) in providers.iter().enumerate() {
-        let source = if configured.contains(provider) {
-            "config"
-        } else {
-            "catalogue"
-        };
-        eprintln!(
-            "  {}. {} {}",
-            index + 1,
-            style.cyan(provider.clone()),
-            style.dim(source)
-        );
-    }
+    let items: Vec<Item> = providers
+        .iter()
+        .map(|provider| {
+            let source = if configured.contains(provider) {
+                "config"
+            } else {
+                "catalogue"
+            };
+            Item::new(provider.clone(), false).noted(source)
+        })
+        .collect();
     let hidden = from_catalogue
         .len()
         .saturating_sub(providers.len().saturating_sub(configured.len()));
     if hidden > 0 {
         eprintln!(
-            "  {}",
+            "{}",
             style.dim(format!(
-                "… {hidden} more provider(s) in the catalogue; type a name to choose one"
+                "{hidden} more provider(s) in the catalogue; type a name to choose one"
             ))
         );
     }
-    let provider = loop {
-        let Some(answer) = prompt(&format!("provider [1-{}]> ", providers.len()), style)? else {
-            return Err("no provider chosen".to_owned());
-        };
-        let answer = answer.trim();
-        // An empty line takes the first: with a configured provider that is the
-        // one the configuration was written around.
-        if answer.is_empty() {
-            break providers[0].clone();
-        }
-        if let Some(index) = pick_named(answer, &providers) {
-            break providers[index].clone();
-        }
+    let provider = match select::run(items, "which provider?", style)? {
+        Outcome::Chosen(index) => providers[index].clone(),
         // A name the list did not show is still a name: the catalogue is the
-        // authority on what exists, and a provider behind the bound is reachable
+        // authority on what exists, and a provider behind the bound is reached
         // by what it is called.
-        let named = configured
-            .iter()
-            .chain(from_catalogue.iter())
-            .find(|provider| provider.eq_ignore_ascii_case(answer));
-        match named {
-            Some(provider) => break provider.clone(),
-            None => eprintln!("{}", style.yellow(format!("`{answer}` names no provider"))),
+        Outcome::Typed(typed) => {
+            let typed = typed.trim();
+            configured
+                .iter()
+                .chain(from_catalogue.iter())
+                .find(|provider| provider.eq_ignore_ascii_case(typed))
+                .cloned()
+                .ok_or_else(|| format!("`{typed}` names no provider"))?
         }
+        // With no provider there is no model to ask about, and refusing is what
+        // the numbered prompt did with an unfinished answer.
+        Outcome::Left => return Err("no provider chosen".to_owned()),
     };
 
     let mut models: Vec<String> = catalog
@@ -447,9 +371,7 @@ pub(crate) fn choose_model(
                 "{provider} is not in the catalogue; type the model it serves"
             ))
         );
-        let Some(model) = prompt("model> ", style)? else {
-            return Err("no model chosen".to_owned());
-        };
+        let model = prompt_line("model> ", style)?.ok_or_else(|| "no model chosen".to_owned())?;
         let model = model.trim();
         if model.is_empty() {
             return Err(format!("no model named for provider `{provider}`"));
@@ -457,60 +379,33 @@ pub(crate) fn choose_model(
         return Ok(remember(config, config_path, &provider, model, style));
     }
 
-    let listed = models.len().min(LISTED_MODELS);
-    for (index, model) in models.iter().take(listed).enumerate() {
-        let name = catalog
-            .provider(&provider)
-            .and_then(|entry| entry.models.get(model))
-            .map(|entry| entry.name.clone())
-            .unwrap_or_default();
-        eprintln!(
-            "  {}. {} {}",
-            index + 1,
-            style.cyan(model.clone()),
-            style.dim(name)
-        );
-    }
-    if models.len() > listed {
-        eprintln!(
-            "  {}",
-            style.dim(format!(
-                "… {} more model(s) not listed; type a name to choose one",
-                models.len() - listed
-            ))
-        );
-    }
-    let model = loop {
-        let Some(answer) = prompt(&format!("model [1-{listed}]> "), style)? else {
-            return Err("no model chosen".to_owned());
-        };
-        if answer.trim().is_empty() {
-            break models[0].clone();
-        }
-        if let Some(index) = pick_named(&answer, &models[..listed]) {
-            break models[index].clone();
-        }
-        // A name past the bound is still a name the catalogue knows.
-        match models.iter().find(|model| model.as_str() == answer.trim()) {
-            Some(model) => break model.clone(),
-            None => eprintln!(
-                "{}",
-                style.yellow(format!("`{answer}` is not one of the listed models"))
-            ),
-        }
-    };
-    Ok(remember(config, config_path, &provider, &model, style))
-}
-
-/// A number or an exact name into an index of `options`.
-pub(crate) fn pick_named(answer: &str, options: &[String]) -> Option<usize> {
-    let answer = answer.trim();
-    if let Some(number) = answer.parse::<usize>().ok().filter(|number| *number >= 1) {
-        return (number <= options.len()).then(|| number - 1);
-    }
-    options
+    let items: Vec<Item> = models
         .iter()
-        .position(|option| option.eq_ignore_ascii_case(answer))
+        .map(|model| {
+            let name = catalog
+                .provider(&provider)
+                .and_then(|entry| entry.models.get(model))
+                .map(|entry| entry.name.clone())
+                .unwrap_or_default();
+            let item = Item::new(model.clone(), false);
+            if name.is_empty() {
+                item
+            } else {
+                item.noted(name)
+            }
+        })
+        .collect();
+    let model = match select::run(items, &format!("which model of {provider}?"), style)? {
+        Outcome::Chosen(index) => models[index].clone(),
+        // A name past the bound is still a name the catalogue knows, and one it
+        // does not know is still what the endpoint answers to.
+        Outcome::Typed(typed) => typed.trim().to_owned(),
+        Outcome::Left => return Err("no model chosen".to_owned()),
+    };
+    if model.is_empty() {
+        return Err(format!("no model named for provider `{provider}`"));
+    }
+    Ok(remember(config, config_path, &provider, &model, style))
 }
 
 /// Writes the choice into the config file and returns the reference.
@@ -565,7 +460,13 @@ pub(crate) fn has_terminal() -> bool {
 /// `None` means the input ended, which is not the same as an empty line: the
 /// first is a terminal that cannot answer and the second is a person accepting
 /// what the prompt suggested.
-fn prompt(question: &str, style: Style) -> Result<Option<String>, String> {
+///
+/// It is the one question the flow still asks by line, and it has to: a provider
+/// the catalogue does not list has no entries to walk, so the model it serves is
+/// a name nobody could put on a list.
+fn prompt_line(question: &str, style: Style) -> Result<Option<String>, String> {
+    use std::io::Write as _;
+
     print!("{}", style.bold(question.to_owned()));
     std::io::stdout()
         .flush()
@@ -610,39 +511,51 @@ mod tests {
     }
 
     #[test]
-    fn a_menu_is_answered_by_a_number_a_name_or_a_key() {
+    fn the_menu_offers_the_new_session_the_last_one_and_the_saved_ones() {
         let rows = vec![
+            row("7c19ab22-0000", None, Phase::Streaming, true),
             row("03fe0fad-a2ee", Some("browser work"), Phase::Idle, false),
-            row("7c19ab22-0000", None, Phase::Idle, false),
         ];
-        // Four entries: new, last, and the two sessions.
-        assert_eq!(pick("1", 4, &rows), Some(0));
-        assert_eq!(pick("2", 4, &rows), Some(1));
-        assert_eq!(pick("3", 4, &rows), Some(2));
-        assert_eq!(pick("new", 4, &rows), Some(0));
-        assert_eq!(pick("last", 4, &rows), Some(1));
-        // A key reaches its own row, which is what a bounded list promises.
-        assert_eq!(pick("7c19ab22", 4, &rows), Some(3));
-        assert_eq!(pick("03fe0fad-a2ee", 4, &rows), Some(2));
-        // Out of range, empty and nonsense choose nothing, so it asks again.
-        assert_eq!(pick("5", 4, &rows), None);
-        assert_eq!(pick("0", 4, &rows), None);
-        assert_eq!(pick("", 4, &rows), None);
-        assert_eq!(pick("maybe", 4, &rows), None);
-        // With nothing saved there is no last session to name.
-        assert_eq!(pick("last", 1, &[]), None);
+        let items = session_items(&rows);
+        // Two fixed entries and one row per session, in the order the rows
+        // arrived in, which is newest first.
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].label, "New session");
+        assert!(items[0].fixed, "the fixed entries are drawn bold");
+        assert_eq!(items[1].label, "Last session");
+        // The state of the newest session is on the row it describes, rather
+        // than only being reachable by opening it.
+        assert_eq!(items[1].note.as_deref(), Some("unfinished"));
+        // The newest session is the running one; the one after it is idle, and
+        // an idle session says nothing: "ready" on every row is a column of
+        // noise.
+        assert_eq!(items[2].label, "7c19ab22");
+        assert_eq!(items[2].note.as_deref(), Some("unfinished"));
+        // A titled session leads with the title and keeps its key beside it, so
+        // both what a person calls it and what they would type are on the row.
+        assert_eq!(items[3].label, "browser work (03fe0fad)");
+        assert_eq!(items[3].note, None);
+        assert!(
+            items[3].search.contains("03fe0fad-a2ee"),
+            "the whole key is searchable, not just the eight shown: {}",
+            items[3].search
+        );
     }
 
     #[test]
-    fn a_provider_or_model_is_answered_by_a_number_or_its_name() {
-        let options = vec!["river".to_owned(), "exa".to_owned()];
-        assert_eq!(pick_named("1", &options), Some(0));
-        assert_eq!(pick_named("2", &options), Some(1));
-        assert_eq!(pick_named(" exa ", &options), Some(1));
-        assert_eq!(pick_named("EXA", &options), Some(1));
-        assert_eq!(pick_named("3", &options), None);
-        assert_eq!(pick_named("0", &options), None);
-        assert_eq!(pick_named("other", &options), None);
+    fn the_session_list_is_bounded_and_says_how_many_it_left_out() {
+        // A database with hundreds of sessions must not print every one of them
+        // before the first question, and the rows that fell off must still be
+        // named somewhere: the count is that somewhere.
+        let rows: Vec<SessionRow> = (0..LISTED_SESSIONS + 3)
+            .map(|index| row(&format!("{index:08x}-0000"), None, Phase::Idle, false))
+            .collect();
+        let items = session_items(&rows);
+        assert_eq!(
+            items.len(),
+            LISTED_SESSIONS + 2,
+            "the fixed two and the bound"
+        );
     }
 
     #[test]

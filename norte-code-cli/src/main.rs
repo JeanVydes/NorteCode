@@ -18,6 +18,7 @@ mod markdown;
 mod models;
 mod prompt;
 mod render;
+mod select;
 mod startup;
 mod style;
 mod tabs;

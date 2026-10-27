@@ -27,6 +27,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The startup menu and the model picker are walked with the arrow keys and
+  Enter instead of answered with a number. Typing narrows the list, which is
+  what the numbered prompt's typed name became; when the filter matches nothing,
+  Enter hands the typed text back, so a provider the catalogue does not list or
+  a session key that fell off the list is still reachable. The list scrolls
+  around the cursor and says how many entries it left out.
+
 - `run` is `new`. It starts a session and stays in it, which is what the command
   does now: the prompt argument and `--session` are gone, because a session is
   read from the terminal rather than handed a message on the command line.
