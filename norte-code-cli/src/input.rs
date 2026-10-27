@@ -98,6 +98,25 @@ impl Asked {
     }
 }
 
+/// Everything the footer draws, read under one lock.
+///
+/// One lock for the lot: taking each field on its own lets a writer land
+/// between two of them, and the row would then show a summary belonging to a
+/// different paint than the tab name beside it.
+#[derive(Clone, Debug)]
+struct Snapshot {
+    /// The session status line, which is what the stats tab shows.
+    session: String,
+    /// The task list.
+    todos: Vec<TodoItem>,
+    /// Which tab is showing.
+    tab: SessionTab,
+    /// The one-row tools summary.
+    tool_summary: String,
+    /// The one-row MCP summary.
+    mcp_summary: String,
+}
+
 /// What the person did with a question.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
@@ -127,8 +146,10 @@ impl Default for PinnedInner {
             session: String::new(),
             todos: Vec::new(),
             asked: None,
-            tab: SessionTab::Chat,
+            tab: SessionTab::Stats,
             pending_steers: Vec::new(),
+            tool_summary: String::new(),
+            mcp_summary: String::new(),
         }
     }
 }
@@ -138,9 +159,17 @@ struct PinnedInner {
     todos: Vec<TodoItem>,
     /// The question being answered, when the model asked one.
     asked: Option<Asked>,
-    /// Which tab is showing. The conversation is the default because that is
-    /// what a client opens on.
+    /// Which tab is showing. What the session has spent is what a client opens
+    /// on: it is the line the footer carried before the other tabs existed.
     tab: SessionTab,
+    /// The one-row summary the tools tab shows.
+    ///
+    /// It is built where the rules live and handed over as text: a client that
+    /// counted the rules itself would be a second place that knows what `deny`
+    /// winning over `allow` means, and the two would drift.
+    tool_summary: String,
+    /// The one-row summary the MCP tab shows.
+    mcp_summary: String,
     /// The messages that reached the running request but are not in the
     /// transcript yet, oldest first.
     ///
@@ -314,6 +343,27 @@ impl Pinned {
             self.dirty.store(true, Ordering::Relaxed);
         }
     }
+    /// Replaces the tools summary the footer shows for the tools tab.
+    ///
+    /// The text is the whole line, already styled: the tab is one row and what
+    /// goes in it is decided where the rules are, so the editor draws what it
+    /// is given and never counts a rule itself.
+    pub(crate) fn set_tool_summary(&self, text: String) {
+        let mut inner = self.lock();
+        if inner.tool_summary != text {
+            inner.tool_summary = text;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Replaces the MCP summary the footer shows for the MCP tab.
+    pub(crate) fn set_mcp_summary(&self, text: String) {
+        let mut inner = self.lock();
+        if inner.mcp_summary != text {
+            inner.mcp_summary = text;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
 
     /// A snapshot of the todo list, in the model's order.
     #[cfg(test)]
@@ -341,11 +391,16 @@ impl Pinned {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn snapshot(&self) -> (String, Vec<TodoItem>, SessionTab) {
+    fn snapshot(&self) -> Snapshot {
         let inner = self.lock();
-        (inner.session.clone(), inner.todos.clone(), inner.tab)
+        Snapshot {
+            session: inner.session.clone(),
+            todos: inner.todos.clone(),
+            tab: inner.tab,
+            tool_summary: inner.tool_summary.clone(),
+            mcp_summary: inner.mcp_summary.clone(),
+        }
     }
-
     /// The question and its cursor, for the editor that draws and drives it.
     fn question(&self) -> Option<Asked> {
         self.lock().asked.clone()
@@ -1881,18 +1936,22 @@ mod unix {
         suggestion: Option<&CommandSuggestion>,
         focus: Option<SessionTab>,
     ) {
-        let (session, todos, tab) = pinned.snapshot();
+        let snapshot = pinned.snapshot();
+        let (session, todos, tab) = (&snapshot.session, &snapshot.todos, snapshot.tab);
         let width = usize::from(cols).saturating_sub(2);
         let suggestion_text = suggestion.map_or_else(String::new, |suggestion| {
             style.faint(suggestion.hint.clone())
         });
-        // What the active tab shows. `chat` has no widget of its own: the
-        // conversation is the scroll region above, so that row keeps carrying
-        // the session status it always did. `todo` replaces it with its list,
-        // which is what makes it a view rather than an extra.
+        // What the active tab shows. Every tab has a widget of its own here:
+        // the conversation is the scroll region above, so the row under it is
+        // free, and each tab puts its summary there. The stats tab carries the
+        // session status it always did, and the other three count what they
+        // hold, because a row is all the room the footer has.
         let body = match tab {
-            SessionTab::Chat => session.clone(),
-            SessionTab::Todo => todo_line(style, &todos, width),
+            SessionTab::Stats => session.clone(),
+            SessionTab::Todo => todo_line(style, todos, width),
+            SessionTab::Tools => snapshot.tool_summary.clone(),
+            SessionTab::Mcp => snapshot.mcp_summary.clone(),
         };
         let tabs_text = tabs_line(style, focus.unwrap_or(tab), focus.is_some(), width);
         let frame = format!(
@@ -2368,13 +2427,13 @@ mod unix {
             // be walkable and it has to be escapable.
             let key = |code, modifiers| KeyEvent::new(code, modifiers);
             assert_eq!(
-                tab_row_key(key(KeyCode::Right, KeyModifiers::NONE), SessionTab::Chat),
+                tab_row_key(key(KeyCode::Right, KeyModifiers::NONE), SessionTab::Stats),
                 TabRowKey::Select(SessionTab::Todo)
             );
             assert_eq!(
-                tab_row_key(key(KeyCode::Left, KeyModifiers::NONE), SessionTab::Chat),
-                TabRowKey::Select(SessionTab::Todo),
-                "left wraps"
+                tab_row_key(key(KeyCode::Left, KeyModifiers::NONE), SessionTab::Stats),
+                TabRowKey::Select(SessionTab::Mcp),
+                "left from the first wraps to the last"
             );
             assert_eq!(
                 tab_row_key(key(KeyCode::Enter, KeyModifiers::NONE), SessionTab::Todo),
@@ -2404,12 +2463,12 @@ mod unix {
             // Tab walks the row, because a keyboard without arrows still has
             // to be able to move; backwards is `Shift-Tab`.
             assert_eq!(
-                tab_row_key(key(KeyCode::Tab, KeyModifiers::NONE), SessionTab::Chat),
+                tab_row_key(key(KeyCode::Tab, KeyModifiers::NONE), SessionTab::Stats),
                 TabRowKey::Select(SessionTab::Todo)
             );
             assert_eq!(
-                tab_row_key(key(KeyCode::BackTab, KeyModifiers::NONE), SessionTab::Chat),
-                TabRowKey::Select(SessionTab::Todo)
+                tab_row_key(key(KeyCode::BackTab, KeyModifiers::NONE), SessionTab::Stats),
+                TabRowKey::Select(SessionTab::Mcp)
             );
         }
 
@@ -3523,11 +3582,25 @@ mod pinned_tests {
             content: "task".to_owned(),
             status: TodoStatus::Pending,
         }]);
-        let (session, todos, tab) = pinned.snapshot();
-        assert_eq!(session, "session");
-        assert_eq!(todos.len(), 1);
-        assert_eq!(todos[0].content, "task");
-        assert_eq!(tab, SessionTab::Chat, "a session opens on the conversation");
+        let snapshot = pinned.snapshot();
+        assert_eq!(snapshot.session, "session");
+        assert_eq!(snapshot.todos.len(), 1);
+        assert_eq!(snapshot.todos[0].content, "task");
+        assert_eq!(
+            snapshot.tab,
+            SessionTab::Stats,
+            "a session opens on the stats"
+        );
+        // The rows the tabs that count things show, which start empty because
+        // nothing has been counted yet.
+        assert_eq!(
+            snapshot.tool_summary, "",
+            "nothing has been counted for the tools row yet"
+        );
+        assert_eq!(
+            snapshot.mcp_summary, "",
+            "nothing has been counted for the MCP row yet"
+        );
     }
 
     #[test]
@@ -3535,10 +3608,10 @@ mod pinned_tests {
         // The editor changes it and the footer draws it, and they are two
         // threads: the shared handle is what keeps them agreeing.
         let pinned = Pinned::new();
-        assert_eq!(pinned.tab(), SessionTab::Chat);
+        assert_eq!(pinned.tab(), SessionTab::Stats);
         pinned.set_tab(SessionTab::Todo);
         assert_eq!(pinned.tab(), SessionTab::Todo);
-        assert_eq!(pinned.snapshot().2, SessionTab::Todo);
+        assert_eq!(pinned.snapshot().tab, SessionTab::Todo);
     }
 
     #[test]

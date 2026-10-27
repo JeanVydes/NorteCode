@@ -8,6 +8,24 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+### Added
+
+- Two tabs join the footer's row: `tools`, which counts what the model can reach
+  and how a call to each is decided, and `mcp`, which counts the servers behind
+  some of them and says when one failed to start. The tab that was `chat` is now
+  `stats`, because it shows what the session has spent rather than the
+  conversation — the conversation is the scroll region above, at every tab.
+  `chat` still reaches it by name. `Ctrl-1` to `Ctrl-4` go straight to a tab,
+  and `/tab <name>` goes to one without a modified key.
+
+  A tab has one row, so each one counts, and `/tools` is where the names are: a
+  summary saying three tools are denied is useless without saying which three,
+  and the list of them does not fit in the footer. Every tool is printed with
+  what happens to a call to it — allow, deny or ask — and how far its rule
+  reaches, which is what tells a rule of this session from a rule of every
+  session. The counts are read from the engine, the only place that knows
+  `deny` beats `allow`, so the row and the engine cannot disagree.
+
 - `norte-code` with no arguments opens the startup flow: a menu of *New
   session*, *Last session* and the saved sessions, and then the editor. The
   session is created before the first message, so the key shown in the footer is

@@ -20,6 +20,45 @@ use norte_code_skills::SkillRegistry;
 use super::mapping::single;
 use super::{EventStream, Service, ServiceError};
 
+/// How a tool is decided, and how far the rule that decides it reaches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolStatus {
+    /// The name the model calls it by.
+    pub name: String,
+    /// What happens to a call to it.
+    pub rule: ToolRule,
+    /// Where the rule comes from, which is what tells a rule somebody set
+    /// from one the approval mode implies.
+    pub scope: RuleScope,
+}
+
+/// How far a rule reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleScope {
+    /// This session only, set with `/allow <tool>` or in a session approval.
+    Session,
+    /// Every session, kept in the user config.
+    Global,
+    /// No rule names it: the approval mode decides, and no command would
+    /// change it without writing one.
+    Mode,
+}
+
+/// How a tool is decided, and by which rule.
+///
+/// The client asks for this rather than reading the rules itself: `deny` wins
+/// over `allow`, and which of the two applies is the whole question a person
+/// opening the tool list is asking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolRule {
+    /// Refused before the approval mode is consulted.
+    Deny,
+    /// Runs without asking.
+    Allow,
+    /// A human decides, when the approval mode says this tool needs one.
+    Ask,
+}
+
 /// Global and per-session approval rules.
 ///
 /// Global rules live in the config file; session rules are mirrored into the
@@ -129,6 +168,43 @@ impl ApprovalRules {
             .insert(tool.to_owned());
     }
 
+    /// The global rules, as the tools they name.
+    ///
+    /// Two lists rather than one with a flag each: they are what the config
+    /// file holds, and reading them back in the shape they were written is what
+    /// makes the tool list agree with the file.
+    pub(super) fn global(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        (
+            self.global_allow
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+            self.global_deny
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        )
+    }
+
+    /// The rules that belong to one session, as the tools they name.
+    pub(super) fn session(&self, session: SessionId) -> (BTreeSet<String>, BTreeSet<String>) {
+        let allows = self
+            .session_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .cloned()
+            .unwrap_or_default();
+        let denies = self
+            .session_deny
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .cloned()
+            .unwrap_or_default();
+        (allows, denies)
+    }
+
     pub(super) fn load_session(&self, session: SessionId, denied: &[String], allowed: &[String]) {
         self.session_deny
             .lock()
@@ -141,23 +217,23 @@ impl ApprovalRules {
     }
 }
 
-/// The tools a person must approve under each mode, named as the registry
-/// names them.
+/// The tools whose effects a person must approve under each mode.
 ///
-/// This used to spell the shell as `command`, and no tool has answered to that
-/// since the shell became one tool. A name that matches nothing is silent: the
-/// default mode asked about a tool that never ran and let the one that did run
-/// without asking. The test below checks these names against the registry, for
-/// exactly that reason.
+/// Named as the registry names them. This list said `command`, and no tool has
+/// been called that since the shell became one tool: the mode compared against
+/// a name nothing answers to, so `ask` — the default — never asked before a
+/// command ran. A wrong name here is silent, which is why the test below reads
+/// the names back out of the registry.
 pub(super) const WRITES: [&str; 2] = ["write", "edit"];
 
-/// The tools that run something, named as the registry names them.
+/// The tools that run something, as the registry names them.
 pub(super) const RUNS: [&str; 2] = ["shell", "skill_script"];
 
 /// Whether the approval mode sends this tool to a human.
 ///
-/// It is the rule [`ApprovalModePolicy`] applies, written once so the list a
-/// client draws and the decision the engine makes cannot disagree.
+/// It is the rule [`ApprovalModePolicy`] applies, written once so the list the
+/// client draws and the decision the engine makes cannot disagree: a tool shown
+/// as allowed while the mode parks it is worse than no list at all.
 pub(super) fn mode_needs_approval(mode: ApprovalMode, tool: &str) -> bool {
     match mode {
         ApprovalMode::Yolo => false,
@@ -206,6 +282,58 @@ impl Policy for ApprovalModePolicy {
 }
 
 impl Service {
+    /// Every tool the model can reach, with how a call to it is decided.
+    ///
+    /// The registry is the list, so a tool that failed to register is absent
+    /// and one from an MCP server is present, which is what makes this the
+    /// answer to "what can the model do right now". Each entry carries the rule
+    /// that decides the call and how far that rule reaches: `deny` before
+    /// `allow`, before the approval mode — the order
+    /// [`ApprovalModePolicy::decide`] applies, which is the point of asking the
+    /// service rather than reading the rules in the client.
+    ///
+    /// A tool named only by a session rule is in the list when the session is
+    /// the one it was set for, and a rule naming a tool the registry does not
+    /// have is left out: a list of tools is not a list of names somebody typed.
+    pub fn tool_rules(&self, session: Option<&SessionKey>) -> Vec<ToolStatus> {
+        // A session that is not open has no session rules, and asking for them
+        // is not an error: the list is what the *next* call meets, and a session
+        // that was never opened has none.
+        let session_id =
+            session.and_then(|key| self.lock_sessions().get(key).map(|record| record.id));
+        let (global_allow, global_deny) = self.approval_rules.global();
+        let (session_allow, session_deny) = session_id
+            .map(|id| self.approval_rules.session(id))
+            .unwrap_or_default();
+        let mode = self.config().approval_mode;
+        let Ok(tools) = self.tools() else {
+            return Vec::new();
+        };
+        let mut statuses: Vec<ToolStatus> = tools
+            .specs()
+            .into_iter()
+            .map(|spec| {
+                let name = spec.name.to_string();
+                let (rule, scope) = if global_deny.contains(&name) {
+                    (ToolRule::Deny, RuleScope::Global)
+                } else if session_deny.contains(&name) {
+                    (ToolRule::Deny, RuleScope::Session)
+                } else if global_allow.contains(&name) {
+                    (ToolRule::Allow, RuleScope::Global)
+                } else if session_allow.contains(&name) {
+                    (ToolRule::Allow, RuleScope::Session)
+                } else if mode_needs_approval(mode, &name) {
+                    (ToolRule::Ask, RuleScope::Mode)
+                } else {
+                    (ToolRule::Allow, RuleScope::Mode)
+                };
+                ToolStatus { name, rule, scope }
+            })
+            .collect();
+        statuses.sort_by(|left, right| left.name.cmp(&right.name));
+        statuses
+    }
+
     /// Sets one approval rule for a session or the user config.
     ///
     /// A session rule is stored with the logical session, so it survives a

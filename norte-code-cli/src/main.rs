@@ -65,7 +65,8 @@ use norte::{
     ToolKind,
 };
 use norte_code_agent::{
-    EventStream, ModelSpec, Service, ServiceError, VendorModels, effective_reasoning, model_list,
+    EventStream, ModelSpec, RuleScope, Service, ServiceError, ToolRule, VendorModels,
+    effective_reasoning, model_list,
 };
 use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
 use norte_code_config::{ApprovalMode, AuthKind, Config, WireKind, user_config_path};

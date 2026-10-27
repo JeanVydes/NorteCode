@@ -19,7 +19,8 @@ mod tests;
 pub(crate) use argument::approval_label;
 pub(crate) use debug::reasoning_setting_label;
 pub(crate) use debug::{
-    HostFacts, report_mcp, report_prompt, report_reasoning, report_start, report_tools,
+    HostFacts, mcp_summary, report_mcp, report_prompt, report_reasoning, report_start,
+    report_tool_rules, report_tools, tools_summary,
 };
 pub(crate) use dial::{reasoning_label, source_label, token_ratio};
 pub(crate) use helpers::{cache_percent_label, fallback_env, find_project_config, human_tokens};
@@ -36,6 +37,7 @@ pub(crate) use renderer::{BudgetPrompt, Format, Renderer, Verbosity};
 use super::{
     ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
     Delta, ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning, ReasoningEffort,
-    ReasoningInfo, ServerEvent, ServerEventKind, Service, Source, StreamingGranularity,
-    StructuredOutputMode, Style, ToolKind, Write, clip_text, compact_json, duration_label,
+    ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey, Source,
+    StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, Write, clip_text,
+    compact_json, duration_label,
 };

@@ -20,6 +20,7 @@ use super::names::{
     cache_name, feature_set, modality_set, reasoning_capabilities, streaming_name, structured_set,
     tool_kind_set, yes_no,
 };
+use super::{ApprovalMode, RuleScope, SessionKey, ToolRule};
 use super::{Config, ModelSpec, Path, Reasoning, Service, Source, Style};
 use super::{approval_label, source_label};
 
@@ -303,6 +304,127 @@ pub(crate) fn report_tools(style: Style, service: &Service) -> Vec<String> {
             }
         }
         Err(error) => lines.push(fact("error", error)),
+    }
+    lines
+}
+
+/// The one-row tools summary the footer shows.
+///
+/// Counts, not names: the footer has a row and there are a dozen tools, so the
+/// count is what fits and `/tools` is where the names are. The counts are of
+/// what a call meets — deny before allow before the approval mode — which is
+/// why they come from the service and not from the config file.
+pub(crate) fn tools_summary(
+    style: Style,
+    service: &Service,
+    session: Option<&SessionKey>,
+) -> String {
+    let statuses = service.tool_rules(session);
+    if statuses.is_empty() {
+        return String::new();
+    }
+    let count = |rule: ToolRule| statuses.iter().filter(|it| it.rule == rule).count();
+    let (allow, deny, ask) = (
+        count(ToolRule::Allow),
+        count(ToolRule::Deny),
+        count(ToolRule::Ask),
+    );
+    let mut parts: Vec<String> = Vec::new();
+    // Colour carries the meaning here: these three are what a person scans the
+    // row for, and the count beside each says how much of the registry is
+    // behind it. A state nobody is in is left out, so a short row means the
+    // tools are mostly one thing.
+    if allow > 0 {
+        parts.push(style.green(format!("{allow} allow")));
+    }
+    if deny > 0 {
+        parts.push(style.red(format!("{deny} deny")));
+    }
+    if ask > 0 {
+        parts.push(style.yellow(format!("{ask} ask")));
+    }
+    format!(
+        "{} {} {}",
+        style.faint("tools"),
+        style.bold(statuses.len()),
+        parts.join(&style.faint(" · "))
+    )
+}
+
+/// The one-row MCP summary the footer shows.
+///
+/// Servers and tools, and a failure count when there is one: a server that did
+/// not start is the one fact that must not be left off the row, because nothing
+/// else on screen would say it.
+pub(crate) fn mcp_summary(style: Style, service: &Service) -> String {
+    let connected = service.mcp_status();
+    let failures = service.mcp_failures();
+    if connected.is_empty() && failures.is_empty() {
+        return style.faint("mcp · none configured");
+    }
+    let tools: usize = connected.iter().map(|server| server.tools.len()).sum();
+    let active = connected.iter().filter(|server| server.active).count();
+    let mut line = format!(
+        "{} {} {}",
+        style.faint("mcp"),
+        style.bold(connected.len()),
+        style.faint(format!("({active} on) · {tools} tool(s)"))
+    );
+    if !failures.is_empty() {
+        line.push_str(&style.faint(" · "));
+        line.push_str(&style.red(format!("{} failed", failures.len())));
+    }
+    line
+}
+
+/// Every tool with how a call to it is decided, for `/tools`.
+///
+/// The footer has counts and this is where the names are: a summary saying
+/// three tools are denied is useless without saying which three. The scope is
+/// printed beside each one because a rule of this session and a rule of every
+/// session read the same otherwise, and which it is decides who else it binds.
+pub(crate) fn report_tool_rules(
+    style: Style,
+    service: &Service,
+    session: Option<&SessionKey>,
+) -> Vec<String> {
+    let statuses = service.tool_rules(session);
+    if statuses.is_empty() {
+        return vec![style.yellow("no tools are registered")];
+    }
+    let mut lines = vec![heading(style, "tools")];
+    lines.push(fact(
+        "approval mode",
+        match service.config().approval_mode {
+            ApprovalMode::Ask => "ask (writes and commands are approved)",
+            ApprovalMode::AutoEdit => "auto-edit (commands are approved)",
+            ApprovalMode::Yolo => "yolo (nothing is approved)",
+        },
+    ));
+    // The widest name decides the column, so the rule beside each one lines up
+    // and the list reads down rather than across.
+    let widest = statuses
+        .iter()
+        .map(|status| status.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for status in &statuses {
+        let (mark, word) = match status.rule {
+            ToolRule::Allow => (style.green("✓"), "allow"),
+            ToolRule::Deny => (style.red("✗"), "deny"),
+            ToolRule::Ask => (style.yellow("?"), "ask"),
+        };
+        let scope = match status.scope {
+            RuleScope::Session => "this session",
+            RuleScope::Global => "every session",
+            RuleScope::Mode => "by the mode",
+        };
+        lines.push(format!(
+            "  {mark} {name:<widest$}  {word}  {scope}",
+            name = style.bold(status.name.clone()),
+            word = style.dim(word),
+            scope = style.faint(scope),
+        ));
     }
     lines
 }

@@ -87,6 +87,7 @@ use skills::{collect_secrets, discover_skills};
 use tooling::{ToolActivity, edit_source, recording_tool};
 use workspace::WorkspacePolicy;
 
+pub use approvals::{RuleScope, ToolRule, ToolStatus};
 pub use models::{effective_reasoning, model_list};
 pub use prompt::PromptSize;
 

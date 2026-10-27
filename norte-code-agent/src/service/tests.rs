@@ -6703,6 +6703,173 @@ async fn a_title_can_be_asked_of_another_model() {
     assert_eq!(title, "a cheap title");
 }
 
+/// A service whose config is the one the test needs, with a scripted model that
+/// is never asked to answer: these tests read the registry and the rules.
+fn service_with(config: norte_code_config::Config) -> Arc<Service> {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_deltas(["Hel", "lo"]));
+    Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    )
+}
+
+#[tokio::test]
+async fn a_tool_list_counts_the_rules_that_decide_each_tool() {
+    // The list is what the footer counts and what `/tools` prints, and both
+    // read it from here: deny beats allow beats the mode, which is the order
+    // the policy itself applies. A list that got the order wrong would show a
+    // tool as allowed while the engine refuses it.
+    let mut config = config();
+    config.approvals.allow = vec!["read".to_owned()];
+    config.approvals.deny = vec!["write".to_owned()];
+    let service = service_with(config);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+    service
+        .set_approval_rule(Some(&key), "shell", true, false)
+        .await
+        .expect("session rule");
+
+    let statuses = service.tool_rules(Some(&key));
+    let find = |name: &str| {
+        statuses
+            .iter()
+            .find(|status| status.name == name)
+            .unwrap_or_else(|| panic!("`{name}` is registered: {statuses:?}"))
+    };
+    assert_eq!(find("read").rule, ToolRule::Allow);
+    assert_eq!(find("read").scope, RuleScope::Global, "from the config");
+    assert_eq!(find("write").rule, ToolRule::Deny);
+    assert_eq!(find("write").scope, RuleScope::Global);
+    assert_eq!(find("shell").rule, ToolRule::Allow);
+    assert_eq!(
+        find("shell").scope,
+        RuleScope::Session,
+        "a rule of this session only"
+    );
+    // `edit` needs approval under the mode and has no rule of its own, which is
+    // what leaves it in the `ask` count with no rule behind it.
+    assert_eq!(find("edit").rule, ToolRule::Ask);
+    assert_eq!(find("edit").scope, RuleScope::Mode);
+}
+
+#[tokio::test]
+async fn a_session_rule_reaches_only_the_session_it_was_set_for() {
+    // A rule somebody set for the session they are in must not show up as a
+    // rule of every session: which one it is decides who else it binds.
+    let service = service();
+    let first = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let first = first[0].session.clone().expect("session");
+    let second = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let second = second[0].session.clone().expect("session");
+    service
+        .set_approval_rule(Some(&first), "shell", true, false)
+        .await
+        .expect("session rule");
+
+    let in_first = service.tool_rules(Some(&first));
+    let command = in_first
+        .iter()
+        .find(|status| status.name == "shell")
+        .expect("command is registered");
+    assert_eq!(command.rule, ToolRule::Allow);
+    assert_eq!(command.scope, RuleScope::Session);
+
+    let in_second = service.tool_rules(Some(&second));
+    let command = in_second
+        .iter()
+        .find(|status| status.name == "shell")
+        .expect("command is registered");
+    assert_eq!(
+        command.rule,
+        ToolRule::Ask,
+        "the other session never had that rule"
+    );
+    assert_eq!(command.scope, RuleScope::Mode);
+}
+
+#[tokio::test]
+async fn the_tool_list_is_sorted_so_a_count_and_a_reading_agree() {
+    let statuses = service().tool_rules(None);
+    assert!(!statuses.is_empty(), "the registry has tools");
+    let mut sorted: Vec<String> = statuses.iter().map(|status| status.name.clone()).collect();
+    sorted.sort();
+    let listed: Vec<String> = statuses.iter().map(|status| status.name.clone()).collect();
+    assert_eq!(listed, sorted, "the list reads down the names");
+}
+
+#[tokio::test]
+async fn a_tool_named_in_both_lists_is_denied() {
+    // Deny wins, and the tool list has to say so: naming a tool in both lists
+    // is how a copied `allow` list keeps one tool out.
+    let mut config = config();
+    config.approvals.allow = vec!["write".to_owned()];
+    config.approvals.deny = vec!["write".to_owned()];
+    let service = service_with(config);
+    let statuses = service.tool_rules(None);
+    let write = statuses
+        .iter()
+        .find(|status| status.name == "write")
+        .expect("write is registered");
+    assert_eq!(write.rule, ToolRule::Deny);
+    assert_eq!(write.scope, RuleScope::Global);
+}
+
+#[tokio::test]
+async fn the_shell_is_the_tool_the_approval_mode_gates() {
+    // The tool is registered as `shell`, and the mode has to name it the way
+    // the registry does: a mode that lists a tool nobody has is a mode that
+    // approves nothing. `Ask` is the default, so this is what the first call a
+    // person ever makes meets.
+    let statuses = service().tool_rules(None);
+    let shell = statuses
+        .iter()
+        .find(|status| status.name == "shell")
+        .expect("the shell is registered");
+    assert_eq!(
+        shell.rule,
+        ToolRule::Ask,
+        "`ask` mode asks before a command runs"
+    );
+}
+#[tokio::test]
+async fn every_tool_the_mode_gates_is_a_tool_that_exists() {
+    // The mode used to name `command`, and no tool has answered to that since
+    // the shell became one tool: `ask` — the default — let a command run
+    // without asking, and nothing said so, because a name that matches nothing
+    // is not an error. The names are read back out of the registry here for the
+    // same reason: this is the only place that can notice.
+    //
+    // `skill_script` is registered only when the config lets skill scripts run,
+    // so the config here is the one that turns them on: the names are the point,
+    // not the defaults.
+    let mut config = config();
+    config.skills.allow_scripts = true;
+    let statuses = service_with(config).tool_rules(None);
+    let registered: Vec<&str> = statuses.iter().map(|status| status.name.as_str()).collect();
+    for name in super::approvals::WRITES
+        .iter()
+        .chain(super::approvals::RUNS.iter())
+    {
+        assert!(
+            registered.contains(name),
+            "the mode names `{name}`, which is not a registered tool: {registered:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_mode_asks_before_the_tool_that_runs_a_command() {
     // The mode used to decide by a tool called `command`, and no tool has

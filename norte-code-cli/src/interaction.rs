@@ -11,9 +11,9 @@ use crate::input::{Attachment, EditorAction, EditorEvent, InteractiveInput};
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
-    BudgetPrompt, Verbosity, format_measure, parse_reasoning_setting, reasoning_setting_label,
-    report_mcp as render_mcp, report_prompt, report_reasoning, report_start, report_tools,
-    scope_name, unit_name,
+    BudgetPrompt, Verbosity, format_measure, mcp_summary, parse_reasoning_setting,
+    reasoning_setting_label, report_mcp as render_mcp, report_prompt, report_reasoning,
+    report_start, report_tool_rules, report_tools, scope_name, tools_summary, unit_name,
 };
 use crate::tabs::SessionTab;
 /// The wire's own attachment, named apart from the editor's: they carry the
@@ -110,6 +110,8 @@ pub(crate) enum ChatCommand {
         tool: String,
         global: bool,
     },
+    /// List every tool and how a call to it is decided.
+    Tools,
     /// Set a reasoning override.
     Reasoning {
         scope: ReasoningScope,
@@ -176,6 +178,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             id: None,
         }),
         "/debug" => Some(ChatCommand::Debug),
+        "/tools" => Some(ChatCommand::Tools),
         _ => None,
     };
     if let Some(rest) = command_rest(text, "/jobs") {
@@ -697,6 +700,10 @@ pub(crate) async fn interactive_loop(
         );
     }
     let mut request_id = 2_u64;
+    // The tabs open on something: without this the tools and MCP rows stay
+    // blank until the first turn ends, and an empty row reads as nothing to
+    // report rather than as not looked at yet.
+    refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
     loop {
         let Some((text, attachments)) =
             read_repl_line(service, session.as_ref(), input, style).await?
@@ -719,6 +726,7 @@ pub(crate) async fn interactive_loop(
                 // and the servers are all things that change while the process
                 // runs, so the useful moment to ask is after they have.
                 ChatCommand::Debug => report_debug(service, session.as_ref(), renderer, style),
+                ChatCommand::Tools => report_tools_now(service, session.as_ref(), style),
                 ChatCommand::Compact => {
                     let Some(current) = session.clone() else {
                         eprintln!(
@@ -757,6 +765,7 @@ pub(crate) async fn interactive_loop(
                 },
                 ChatCommand::Mcp { action, server } => {
                     report_mcp(service, action, server.as_deref(), style);
+                    refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
                 }
                 ChatCommand::Approval {
                     allow,
@@ -774,6 +783,9 @@ pub(crate) async fn interactive_loop(
                             "for this session"
                         };
                         eprintln!("{}", style.green(format!("{verb} `{tool}` {scope}")));
+                        // The rule just changed, so the row that counts the
+                        // rules is stale until it is rebuilt.
+                        refresh_tab_summaries(service, session.as_ref(), &renderer.pinned, style);
                     }
                     Err(error) => {
                         eprintln!("{}", style.red(format!("could not set the rule: {error}")));
@@ -1175,6 +1187,7 @@ async fn handle_live_command(
         // The report needs no turn boundary: it reads state that is already
         // settled, so it is the one command that works mid-turn.
         ChatCommand::Debug => report_debug(service, current, renderer, style),
+        ChatCommand::Tools => report_tools_now(service, current, style),
         ChatCommand::Compact => eprintln!(
             "{}",
             style.yellow("wait until the current turn finishes, then /compact")
@@ -1182,6 +1195,7 @@ async fn handle_live_command(
         ChatCommand::Refresh => report_refresh(service, style).await,
         ChatCommand::Mcp { action, server } => {
             report_mcp(service, action, server.as_deref(), style);
+            refresh_tab_summaries(service, current, &renderer.pinned, style);
         }
         ChatCommand::Approval {
             allow,
@@ -1342,6 +1356,32 @@ async fn rename_session(
 /// wrong moment — the tools the model could reach before an MCP server dropped,
 /// the model before a `/model`. Everything is read here and printed to stderr,
 /// where the rest of the diagnostics live, so it does not land in the answer.
+/// The tools and how a call to each is decided, for `/tools`.
+///
+/// It goes to stderr with the other diagnostics, not into the answer: it is
+/// what the person asked the client, not what the model said.
+fn report_tools_now(service: &Arc<Service>, session: Option<&SessionKey>, style: Style) {
+    for line in report_tool_rules(style, service, session) {
+        eprintln!("{line}");
+    }
+}
+
+/// Rebuilds the one-row summaries the tools and MCP tabs show.
+///
+/// Called at every moment either can change: when the session opens, when a
+/// turn ends (a tool an MCP server published may have come or gone), and after
+/// a command that writes a rule. The summaries arrive as text, so the footer
+/// draws them without knowing what a rule is.
+fn refresh_tab_summaries(
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    pinned: &crate::input::Pinned,
+    style: Style,
+) {
+    pinned.set_tool_summary(tools_summary(style, service, session));
+    pinned.set_mcp_summary(mcp_summary(style, service));
+}
+
 fn report_debug(
     service: &Arc<Service>,
     session: Option<&SessionKey>,
@@ -2463,6 +2503,10 @@ pub(crate) async fn drive_turns_titled(
     if !steered.is_empty() {
         renderer.pinned.set_pending_steers(Vec::new());
     }
+    // A turn can move both lists: an approval can write a session rule, and a
+    // server that dropped took its tools with it. The rows are rebuilt once
+    // here rather than after every event that might have moved either.
+    refresh_tab_summaries(service, current.as_ref(), &renderer.pinned, style);
     Ok(DriveOutcome {
         session: current,
         parked,
