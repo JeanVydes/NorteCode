@@ -1486,6 +1486,78 @@ async fn sessions_are_created_listed_and_renamed() {
 }
 
 #[tokio::test]
+async fn a_rename_survives_the_process_that_made_it() {
+    // `/rename` is worth nothing if the name is only in memory: the point of a
+    // title is that the next run lists the session by it. The store is the only
+    // thing that outlives the process, so the name is read back from the store
+    // and not from the service that wrote it.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("hello"));
+    let (service, store) = persistent_service(model).await;
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("before".to_owned()),
+        },
+    )
+    .await;
+    let key = created[0].session.clone().expect("session");
+
+    drain(
+        &service,
+        ClientRequestKind::RenameSession {
+            session: key.clone(),
+            title: "fix the footer overflow".to_owned(),
+        },
+    )
+    .await;
+
+    // Read it back from the database, which is what the next process does.
+    let rows = store.sessions().await.expect("sessions");
+    let row = rows
+        .iter()
+        .find(|row| row.key == key.as_str())
+        .expect("the session is in the store");
+    assert_eq!(row.title.as_deref(), Some("fix the footer overflow"));
+}
+
+#[tokio::test]
+async fn a_title_from_the_model_is_what_the_store_holds() {
+    // The automatic path and the manual one have to agree: `/rename` uses the
+    // rename request, and `title_session` writes through the same `rename`, so
+    // both end up as the session's `title` rather than two names that disagree
+    // depending on which path set it.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("fix the footer overflow"));
+    let (service, store) = persistent_service(model).await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+
+    let title = service
+        .title_session(&key, "the footer overflows when the terminal is narrow")
+        .await
+        .expect("a title");
+    assert_eq!(title, "fix the footer overflow");
+
+    let rows = store.sessions().await.expect("sessions");
+    let row = rows
+        .iter()
+        .find(|row| row.key == key.as_str())
+        .expect("the session is in the store");
+    assert_eq!(
+        row.title.as_deref(),
+        Some(title.as_str()),
+        "what the model wrote is what the store holds"
+    );
+}
+
+#[tokio::test]
 async fn a_fork_copies_the_history_under_a_new_engine_session() {
     let service = service();
     let created = drain(
