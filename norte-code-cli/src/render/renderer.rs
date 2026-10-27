@@ -383,6 +383,9 @@ impl Renderer {
                     Entry::ToolStarted,
                     format!("→ {tool} #{}", short(call_id)),
                 );
+                // The clock starts with the announcement: a call is out until
+                // it says otherwise, and its row counts while it is.
+                entry.started = Some(std::time::Instant::now());
                 if let Some(command) = Self::command_summary(arguments.as_ref()) {
                     entry.push_line(format!("$ {command}"));
                 }
@@ -392,6 +395,10 @@ impl Renderer {
                 self.transcript.append(Entry::ToolOutput, text);
             }
             ServerEventKind::ToolFinished { tool, is_error, .. } => {
+                // The call is over, so its clock stops: what the row shows from
+                // here is the duration the service reported, and a count that
+                // kept running beside a finished call would be a lie.
+                self.transcript.stop_timer();
                 self.transcript.close();
                 if *is_error {
                     self.transcript

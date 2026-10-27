@@ -17,6 +17,13 @@ use crate::render::{
 };
 use crate::tabs::SessionTab;
 use norte_code_commands::Invocation;
+/// How often a running turn redraws, in ms.
+///
+/// It is the clock behind a call's counter and the spinner. Fast enough that a
+/// second never looks stuck, slow enough that a provider taking a minute costs
+/// a handful of frames.
+const TURN_TICK_MS: u64 = 120;
+
 /// How often the interface redraws while nothing else is happening, in ms.
 ///
 /// It is what keeps a typed character and a spinner on screen. Sixty
@@ -1748,6 +1755,12 @@ impl Drop for SignalGuard {
 
 /// What woke the turn loop: a signal, a completed input line, or an event.
 enum Wake {
+    /// The clock, and nothing else: a frame is due.
+    ///
+    /// It is what a running call's counter and the spinner are drawn from. A
+    /// turn that only redrew on an event would show a call stuck at `0s` while
+    /// the provider took a minute to answer.
+    Tick,
     /// Ctrl-C or another interrupt.
     Interrupt,
     /// Escape, Ctrl-C or Ctrl-G reached the editor and asked for
@@ -1817,9 +1830,14 @@ pub(crate) async fn drive_turns_titled(
     // Whether the last turn closed normally. A cancelled or budget-stopped
     // turn leaves the session in a state a resume cannot pick up.
     let mut committed = false;
+    let mut turn_tick = tokio::time::interval(std::time::Duration::from_millis(TURN_TICK_MS));
     loop {
         while let Some(mut stream) = streams.pop_front() {
             loop {
+                // The clock, so a call's row counts and the spinner turns
+                // while the turn is waiting for the provider: an event is not
+                // what time passing looks like.
+                let _ = &mut turn_tick;
                 let wake = if let Some(receiver) = input.as_deref_mut() {
                     tokio::select! {
                         biased;
@@ -1837,6 +1855,7 @@ pub(crate) async fn drive_turns_titled(
                             Some(EditorEvent::End) | None => Wake::Eof,
                         },
                         next = stream.next() => Wake::Event(Box::new(next)),
+                        _ = turn_tick.tick() => Wake::Tick,
                         title = titling.next() => match title {
                             Some(title) => Wake::Title(title),
                             // The channel closed with nothing in it, which is a
@@ -1850,6 +1869,7 @@ pub(crate) async fn drive_turns_titled(
                         biased;
                         Some(()) = interrupt_rx.recv() => Wake::Interrupt,
                         event = stream.next() => Wake::Event(Box::new(event)),
+                        _ = turn_tick.tick() => Wake::Tick,
                         title = titling.next() => match title {
                             Some(title) => Wake::Title(title),
                             None => continue,
@@ -1857,6 +1877,13 @@ pub(crate) async fn drive_turns_titled(
                     }
                 };
                 let event = match wake {
+                    // The clock: a frame, and nothing was decided. It is what
+                    // keeps a running call's counter moving and the spinner
+                    // turning while the provider is silent.
+                    Wake::Tick => {
+                        renderer.draw()?;
+                        continue;
+                    }
                     // A keystroke the editor could not act on itself: it knows
                     // which key was pressed, not what a turn is. All three
                     // decisions are made here, where that is known.

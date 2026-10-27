@@ -85,6 +85,13 @@ pub struct Entry {
     pub lines: Vec<String>,
     /// How many lines the bound dropped, so the view can say so.
     pub dropped: usize,
+    /// When it started, for an entry that is still running.
+    ///
+    /// A tool call is announced before it finishes, and its row counts while it
+    /// runs, so the instant it began travels with it. `None` for an entry that
+    /// counts nothing: a message has no duration, and a timer that never stops
+    /// leaves a number that means nothing.
+    pub started: Option<std::time::Instant>,
 }
 
 impl Entry {
@@ -95,6 +102,7 @@ impl Entry {
             kind,
             lines: Vec::new(),
             dropped: 0,
+            started: None,
         }
     }
 
@@ -263,6 +271,29 @@ impl Transcript {
     pub fn close(&mut self) {
         self.open = false;
     }
+
+    /// How long the last entry has been running, when it is running.
+    ///
+    /// `None` means it counts nothing: an entry with no start, or one that
+    /// finished and had its timer taken. The view asks this to draw the number
+    /// beside a call that is still out.
+    #[cfg(test)]
+    #[must_use]
+    pub fn running_for(&self) -> Option<std::time::Duration> {
+        self.entries.last()?.started.map(|at| at.elapsed())
+    }
+
+    /// Stops the last entry's timer, and says how long it ran.
+    ///
+    /// What the row shows once a call ends is the duration the service
+    /// reported; the clock here is only for the wait before that arrives.
+    pub fn stop_timer(&mut self) -> Option<std::time::Duration> {
+        self.entries
+            .last_mut()?
+            .started
+            .take()
+            .map(|at| at.elapsed())
+    }
 }
 
 #[cfg(test)]
@@ -347,6 +378,36 @@ mod tests {
         let mut entry = Entry::new(Kind::Answer);
         entry.push_line("a\tb");
         assert_eq!(entry.lines[0], "a    b");
+    }
+
+    #[test]
+    fn a_running_entry_counts_and_a_finished_one_stops() {
+        // The header of a tool call shows the call running, so its clock has to
+        // be there and has to stop: a count that kept going beside a finished
+        // call is a number that lies.
+        let mut transcript = Transcript::new();
+        let mut entry = Entry::line(Kind::ToolStarted, "→ shell #abc");
+        entry.started = Some(std::time::Instant::now());
+        transcript.push(entry);
+        assert!(
+            transcript.running_for().is_some(),
+            "a call that is out is counting"
+        );
+        let measured = transcript.stop_timer();
+        assert!(measured.is_some(), "and it reports what it measured");
+        assert!(
+            transcript.running_for().is_none(),
+            "and it stops counting when it ends"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_counts_nothing_says_so() {
+        // A message has no duration: a timer on every entry would put a number
+        // beside things that never run.
+        let mut transcript = Transcript::new();
+        transcript.push(Entry::line(Kind::Said, "hello"));
+        assert!(transcript.running_for().is_none());
     }
 
     #[test]

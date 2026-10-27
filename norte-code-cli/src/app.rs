@@ -314,8 +314,19 @@ fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style
 pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<(Kind, String)> {
     let mut out = Vec::new();
     for entry in transcript.entries() {
-        for line in &entry.lines {
-            for wrapped in wrap(line, width) {
+        // A call that is out says so on its own header: the row counts while
+        // the work runs, which is the one number that turns a silent wait into
+        // something a person can read. It replaces the header rather than
+        // adding a line, so nothing under it moves while it counts.
+        let counting = entry.kind == Kind::ToolStarted && entry.started.is_some();
+        for (index, line) in entry.lines.iter().enumerate() {
+            let line = if counting && index == 0 {
+                let at = entry.started.unwrap_or_else(std::time::Instant::now);
+                format!("{line}  {}", elapsed(at.elapsed()))
+            } else {
+                line.clone()
+            };
+            for wrapped in wrap(&line, width) {
                 out.push((entry.kind, wrapped));
             }
         }
@@ -329,6 +340,23 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<(Kind
         }
     }
     out
+}
+
+/// How long a call that is still out has been running, as the row says it.
+///
+/// Seconds under a minute and minutes after that: a call that ran past the hour
+/// is a call somebody should look at, and the two numbers they need are how long
+/// and how many. The ellipsis is what says it is still going.
+#[must_use]
+pub(crate) fn elapsed(since: std::time::Duration) -> String {
+    let seconds = since.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s…")
+    } else if seconds < 3_600 {
+        format!("{}m{}s…", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{}m…", seconds / 3_600, (seconds % 3_600) / 60)
+    }
 }
 
 /// Breaks one line to a width, keeping words whole where it can.
