@@ -73,26 +73,22 @@ pub(crate) async fn answer_if_asked(
             Some(()) = interrupts.recv() => break None,
             event = input.recv() => event,
         };
-        // An empty line is Enter on a choice: the editor draws the list and the
-        // shared handle is what knows which row the cursor was on.
-        if let Some(answer) = pinned.take_answer() {
-            break Some(answer);
-        }
+        // The editor reports what the person did as a question event: it is the
+        // only thing that reads a key, so it is the only thing that knows which
+        // one was meant. Nothing here reads the question's state instead — doing
+        // that answered with the first choice the moment any event arrived, on a
+        // question nobody had answered.
         match next {
-            Some(crate::input::EditorEvent::Line(text, _)) => {
-                // The box was open, so the line is the text itself.
-                pinned.take_answer();
-                break Some(crate::input::Answer::Typed(text));
-            }
             Some(crate::input::EditorEvent::Question(answer)) => break Some(answer),
+            // A line is not an answer to a question: the box sends its text as a
+            // `Question` like every other way of answering.
+            Some(crate::input::EditorEvent::Line(..) | crate::input::EditorEvent::Action(_)) => {}
             Some(crate::input::EditorEvent::End) | None => break None,
-            // Escape, Ctrl-C and the rest reach the editor as actions while a
-            // question is on screen, and the question's own keys turn into a
-            // `Question` event or a line. An action here is a key that had
-            // nothing to do with the question.
-            Some(crate::input::EditorEvent::Action(_)) => {}
         }
     };
+    // The block goes whatever happened: an answer was sent, or there is nobody
+    // left to answer and a question on screen would be one that cannot be.
+    pinned.retire();
     let answer = match answer {
         Some(crate::input::Answer::Taken(taken)) => compose_selection(options, &taken, None),
         Some(crate::input::Answer::Typed(text)) => text,

@@ -42,6 +42,26 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   takes — the history is read out of the engine, because the transcript belongs
   to it and not to the client.
 
+### Fixed
+
+- The question the model asks is drawn as soon as it arrives, and the box it
+  opens answers with what was typed. Both were broken in the list the arrows
+  walk: the choices were drawn only after a keypress, because the block that
+  holds them was repainted on a keystroke and not on the question arriving, so
+  the first thing a person saw was an empty block; and Enter with the box open
+  did nothing at all, because it checked the row the cursor was on — still the
+  "something else" row — and reopened the box it was already in.
+
+  The list is also what the answer was taken from: any event arriving during the
+  wait closed the question and answered with whatever row the cursor happened to
+  be on. Nothing but the key that answers now takes the question away, and every
+  way out of the wait clears the block.
+
+  The block gives each part its rows instead of drawing until it fills: a long
+  question or a long list pushed the box and the hint off the screen, which is
+  how the answer came to have nowhere to be typed. A question cut short says so,
+  and so does a list with choices past the bottom.
+
 ### Changed
 
 - The footer and the per-request line say less at `medium`, which is the level a
