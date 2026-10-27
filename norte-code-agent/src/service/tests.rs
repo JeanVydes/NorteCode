@@ -152,10 +152,31 @@ fn spec(model: &str) -> ModelSpec {
     }
 }
 
+/// A key file no other test shares.
+///
+/// Every call gets its own name. They used to be one file per process, and
+/// `std::fs::write` truncates before it writes, so a test that read the file
+/// while another rewrote it saw an empty one: the key then fell through to the
+/// catalogue's `env`, and `a_model_switch_while_parked_is_applied_at_the_next_turn_boundary`
+/// failed with "no value in any of: TEST_API_KEY" in a full run while passing on
+/// its own. A unique name per call is what makes the tests independent; the
+/// atomic write means even a shared name could not be seen half-written.
+fn key_file(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "norte-code-service-{}-{tag}-{}-key",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, "sk-test\n").expect("key file");
+    std::fs::rename(&tmp, &path).expect("key file");
+    path
+}
+
 fn config() -> Config {
-    let key_file =
-        std::env::temp_dir().join(format!("norte-code-service-{}-key", std::process::id()));
-    std::fs::write(&key_file, "sk-test\n").expect("key file");
+    let key_file = key_file("default");
     Config::from_json(&format!(
         r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
         key_file.display()
@@ -322,9 +343,7 @@ async fn a_compaction_summariser_can_be_a_configured_provider() {
         norte_code_config::ProviderConfig {
             endpoint: Some("https://example.invalid/v1".to_owned()),
             wire: Some(norte_code_config::WireKind::Chat),
-            api_key_file: Some(
-                std::env::temp_dir().join(format!("norte-code-service-{}-key", std::process::id())),
-            ),
+            api_key_file: Some(key_file("private")),
             ..norte_code_config::ProviderConfig::default()
         },
     );
@@ -368,9 +387,7 @@ async fn a_model_switch_accepts_a_configured_provider() {
         norte_code_config::ProviderConfig {
             endpoint: Some("https://example.invalid/v1".to_owned()),
             wire: Some(norte_code_config::WireKind::Chat),
-            api_key_file: Some(
-                std::env::temp_dir().join(format!("norte-code-service-{}-key", std::process::id())),
-            ),
+            api_key_file: Some(key_file("private")),
             ..norte_code_config::ProviderConfig::default()
         },
     );
