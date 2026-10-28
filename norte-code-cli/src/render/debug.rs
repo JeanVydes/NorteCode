@@ -379,7 +379,7 @@ pub(crate) fn report_tools(style: Style, service: &Service) -> Vec<String> {
 /// A server that failed to start is a row too, and not an actable one: there is
 /// nothing running to switch, and a key that did nothing would say the press was
 /// wrong rather than the server.
-pub(crate) fn mcp_panel(style: Style, service: &Service) -> Vec<Row> {
+pub(crate) fn mcp_panel(service: &Service) -> Vec<Row> {
     let connected = service.mcp_status();
     let failures = service.mcp_failures();
     if connected.is_empty() && failures.is_empty() {
@@ -404,14 +404,13 @@ pub(crate) fn mcp_panel(style: Style, service: &Service) -> Vec<Row> {
             rows.push(Row::text(format!("    {tool}")));
         }
         for warning in &server.filtered {
-            rows.push(Row::text(format!("    {}", style.yellow(warning.clone()))));
+            // Plain text: the panel draws the ink, and a row that carried an SGR
+            // code would show it as the characters it is.
+            rows.push(Row::text(format!("    {warning}")));
         }
     }
     for (name, reason) in &failures {
-        rows.push(Row::text(format!(
-            "{} failed: {reason}",
-            style.red(name.clone())
-        )));
+        rows.push(Row::text(format!("{name} failed: {reason}")));
     }
     rows
 }

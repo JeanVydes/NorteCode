@@ -32,7 +32,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 
-use crate::input::McpRow;
+use crate::input::{McpRow, McpState};
 use crate::style::Style;
 use crate::terminal::{self, Draw};
 use crate::transcript::{Ink, Kind, Transcript};
@@ -187,8 +187,19 @@ impl State {
         terminal: &mut terminal::Guard,
         style: Style,
         pinned: &crate::input::Pinned,
+        modal: Option<&crate::modal::Modal>,
     ) -> Result<(), String> {
-        terminal.draw(|frame| self.paint(frame, style, pinned))
+        terminal.draw(|frame| {
+            self.paint(frame, style, pinned);
+            // The panel is painted into the same frame as the interface. Two
+            // `draw` calls are two flushes of the same terminal, and the screen
+            // between them is the interface without its panel: that gap is the
+            // flicker, and it is worst while the panel animates because every
+            // frame is two writes instead of one.
+            if let Some(modal) = modal {
+                modal.draw(frame, frame.area(), style);
+            }
+        })
     }
 
     /// Paints the whole interface into one frame.
@@ -1101,6 +1112,47 @@ const SIDEBAR_PERCENT: u16 = 25;
 /// task events in the conversation itself.
 const SIDEBAR_MIN_WIDTH: u16 = 72;
 
+/// The MCP servers as one sidebar panel, or `None` when none is configured.
+///
+/// It is its own function because the column is one panel per subject and this
+/// is the second: keeping them all in the drawing function made it do two jobs
+/// and read as a wall.
+fn mcp_panel_rows(state: &State, style: Style, width: u16) -> Option<(String, Vec<Line<'static>>)> {
+    if state.mcp.is_empty() {
+        return None;
+    }
+    let on = state
+        .mcp
+        .iter()
+        .filter(|row| matches!(row.state, McpState::On))
+        .count();
+    let rows = state
+        .mcp
+        .iter()
+        .map(|row| {
+            // The state is a word and not only a colour: a terminal with no
+            // colour shows none, and whether a server is on is what this row is
+            // for.
+            let (mark, ink) = match &row.state {
+                McpState::On => ("on ", style.dim_span()),
+                McpState::Off => ("off", style.faint_span()),
+                McpState::Disabled => ("-- ", style.faint_span()),
+                McpState::Failed(_) => ("!! ", style.red_span()),
+            };
+            let text = format!(
+                "{mark} {} ({})",
+                clip_visible(
+                    &crate::text::terminal(&row.name),
+                    usize::from(width).saturating_sub(14)
+                ),
+                row.tools
+            );
+            Line::from(Span::styled(text, ink))
+        })
+        .collect();
+    Some((format!("mcp {on}/{}", state.mcp.len()), rows))
+}
+
 /// Draws the one column between the conversation and the sidebar.
 ///
 /// A panel is a panel because its edge is visible: a gap alone reads as a
@@ -1175,32 +1227,8 @@ fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
             .collect();
         panels.push((format!("tasks {done}/{}", state.todos.len()), rows));
     }
-    if !state.mcp.is_empty() {
-        let on = state.mcp.iter().filter(|row| row.active).count();
-        let rows = state
-            .mcp
-            .iter()
-            .map(|row| {
-                // The state is a word and not only a colour: a terminal with no
-                // colour shows none, and whether a server is on is what this row
-                // is for.
-                let (mark, ink) = if row.active {
-                    ("on ", style.dim_span())
-                } else {
-                    ("off", style.faint_span())
-                };
-                let text = format!(
-                    "{mark} {} ({})",
-                    clip_visible(
-                        &crate::text::terminal(&row.name),
-                        usize::from(width).saturating_sub(14)
-                    ),
-                    row.tools
-                );
-                Line::from(Span::styled(text, ink))
-            })
-            .collect();
-        panels.push((format!("mcp {on}/{}", state.mcp.len()), rows));
+    if let Some(panel) = mcp_panel_rows(state, style, width) {
+        panels.push(panel);
     }
     for (plugin, list) in &state.sidebar {
         // The name leads, because a column of rows with no attribution is one
@@ -1492,6 +1520,36 @@ mod tests {
         assert_eq!(lines[said].kind, Kind::Said);
         assert_eq!(lines[answer].kind, Kind::Answer);
         assert!(said < answer, "the order is the order it happened in");
+    }
+
+    #[test]
+    fn the_sidebar_shows_a_disabled_mcp_server_too() {
+        // A server configured off, or one that failed, is what a person wants
+        // the column to say: a list of only the running ones would hide exactly
+        // the entry they are looking for.
+        let mut state = State::new();
+        state.mcp = vec![
+            McpRow {
+                name: "on-one".to_owned(),
+                tools: 2,
+                state: McpState::On,
+            },
+            McpRow {
+                name: "off-one".to_owned(),
+                tools: 0,
+                state: McpState::Disabled,
+            },
+            McpRow {
+                name: "broken".to_owned(),
+                tools: 0,
+                state: McpState::Failed("no such command".to_owned()),
+            },
+        ];
+        let screen = screen_of(&state, 90, 24).join("\n");
+        assert!(screen.contains("on-one"), "{screen}");
+        assert!(screen.contains("off-one"), "{screen}");
+        assert!(screen.contains("broken"), "{screen}");
+        assert!(screen.contains("mcp 1/3"), "one of three is on: {screen}");
     }
 
     #[test]
@@ -1839,12 +1897,12 @@ mod tests {
             McpRow {
                 name: "context7".to_owned(),
                 tools: 2,
-                active: true,
+                state: McpState::On,
             },
             McpRow {
                 name: "everything".to_owned(),
                 tools: 5,
-                active: false,
+                state: McpState::Off,
             },
         ];
         let screen = screen_of(&state, 90, 24).join("\n");

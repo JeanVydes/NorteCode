@@ -6,6 +6,28 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The modal no longer flickers. Every frame was drawn twice — once for the
+  interface and once for the panel — and each draw is its own flush of the
+  terminal, so the screen between them was the interface without its panel.
+  The two are painted into one frame now, which is what removes the gap; it
+  was worst while a panel animated, because every animated frame was two
+  writes.
+
+- A modal row shows its text and not the escape codes baked into it.
+  `open_editable` did not strip them the way `open_modal` did, so an MCP row
+  built with `style.red(...)` showed the SGR code on screen as its
+  characters. The strip lives in one place now, where every row is drawn, so
+  no caller can leak a code into a panel; the MCP and sidebar rows are built
+  plain in the first place.
+
+- The sidebar shows every configured MCP server, not only the connected
+  ones. A server turned off, or one that failed to start, was skipped before
+  it could become a row, so a person with all their servers disabled — the
+  exact case the column is for — saw no MCP panel at all. Each row says
+  `on`, `off`, `--` for configured-off or `!!` for a failure.
+
 ### Added
 
 - The telemetry panel assembles itself when it opens: its bars grow to their

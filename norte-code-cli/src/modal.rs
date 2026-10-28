@@ -577,14 +577,22 @@ const PAGE: isize = 10;
 
 /// One row, as the panel draws it.
 fn row_line(row: &Row, under_cursor: bool, _style: Style) -> Line<'static> {
-    let mut text = row.text.clone();
+    // The escapes go before anything else, whatever path built the row: a report
+    // that carried an SGR code would show it as the characters it is, and the one
+    // place every row is drawn is the one place that can make that impossible
+    // rather than unlikely. The strength and the notes are built from it too, so
+    // the column they line up on is the text's and not the codes'.
+    let mut text = crate::select::strip_style(&row.text);
     if let Some(note) = &row.note {
-        // The note is padded to a fixed column, so a column of notes lines up
-        // and a reader can scan it.
+        // The note is a word on the right, stripped of any escape the caller
+        // baked in for the same reason the row's own text is.
+        let note = crate::select::strip_style(note);
+        // It is padded to a fixed column, so a column of notes lines up and a
+        // reader can scan it.
         let room = NOTE_COLUMN.saturating_sub(text.chars().count());
         if room > note.chars().count() {
             text.push_str(&" ".repeat(room - note.chars().count()));
-            text.push_str(note);
+            text.push_str(&note);
         } else {
             use std::fmt::Write as _;
             let _ = write!(text, "  {note}");

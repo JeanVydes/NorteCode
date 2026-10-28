@@ -25,14 +25,31 @@ pub(crate) struct Attachment {
 }
 
 /// One MCP server, as the sidebar renders it.
+///
+/// It is a configured entry and not a connection: a server that is off, or that
+/// failed to start, is exactly what a person wants to see in the column, so the
+/// row exists whether or not anything is running behind it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct McpRow {
     /// The name the configuration gave it.
     pub(crate) name: String,
-    /// How many tools it publishes.
+    /// How many tools it publishes, or zero when none connected.
     pub(crate) tools: usize,
-    /// Whether it is on.
-    pub(crate) active: bool,
+    /// What the row says about it.
+    pub(crate) state: McpState,
+}
+
+/// What a configured MCP server is doing, as the sidebar shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum McpState {
+    /// Connected, and its tools reach the model.
+    On,
+    /// Connected, but switched off for the turn.
+    Off,
+    /// Configured off, so it was never started.
+    Disabled,
+    /// It did not start; the string is why.
+    Failed(String),
 }
 
 /// One item in the session's todo list, as the footer renders it.

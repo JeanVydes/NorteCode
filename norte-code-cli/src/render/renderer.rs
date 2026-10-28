@@ -804,17 +804,11 @@ impl Renderer {
                 modal.scroll_by(delta, rows);
             }
         }
-        let modal = self.modal.clone();
+        // The state and the panel go into one frame: `State::draw` paints the
+        // panel over the interface in the same flush, so there is no screen
+        // between them and nothing to flicker.
         if let Some(screen) = self.screen.as_mut() {
-            state.draw(screen, self.style, &pinned)?;
-            // The panel is drawn over the frame, in the same frame: two draws
-            // would be a flicker between them.
-            if let Some(modal) = modal {
-                screen.draw(|frame| {
-                    let area = frame.area();
-                    modal.draw(frame, area, self.style);
-                })?;
-            }
+            state.draw(screen, self.style, &pinned, self.modal.as_ref())?;
         }
         Ok(())
     }

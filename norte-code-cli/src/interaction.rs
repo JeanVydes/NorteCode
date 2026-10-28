@@ -486,7 +486,7 @@ pub(crate) async fn interactive_loop(
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
                 ChatCommand::Mcp { action } => {
-                    report_mcp(service, action, renderer, style).await;
+                    report_mcp(service, action, renderer).await;
                 }
                 ChatCommand::Approval {
                     allow,
@@ -884,7 +884,7 @@ async fn handle_live_command(
         }
         ChatCommand::Refresh => report_refresh(service, renderer).await,
         ChatCommand::Mcp { action } => {
-            report_mcp(service, action, renderer, style).await;
+            report_mcp(service, action, renderer).await;
         }
         ChatCommand::Approval {
             allow,
@@ -1046,6 +1046,48 @@ fn report_tools_now(
     renderer.open_editable("tools", rows);
 }
 
+/// Every configured MCP server, as the sidebar's rows.
+///
+/// It is built from the configuration and the status together, and not from the
+/// status alone: a server that is configured off, or that failed to start, is
+/// exactly what a person wants the column to say, and a list of only the running
+/// ones would hide both. The state comes from the status when there is one and
+/// from the configuration otherwise, so the sidebar and `/mcp` cannot disagree
+/// about which server is on.
+pub(crate) fn mcp_rows(service: &norte_code_agent::Service) -> Vec<crate::input::McpRow> {
+    use crate::input::{McpRow, McpState};
+    let status = service.mcp_status();
+    let failures = service.mcp_failures();
+    service
+        .config()
+        .mcp_servers
+        .iter()
+        .map(|(name, config)| {
+            let running = status.iter().find(|server| &server.name == name);
+            let state = if !config.enabled {
+                McpState::Disabled
+            } else if let Some(server) = running {
+                if server.active {
+                    McpState::On
+                } else {
+                    McpState::Off
+                }
+            } else if let Some((_, reason)) = failures.iter().find(|(failed, _)| failed == name) {
+                McpState::Failed(reason.clone())
+            } else {
+                // Configured on and neither running nor failed: it is trying, or
+                // it was never reached. Off is the honest word for that.
+                McpState::Off
+            };
+            McpRow {
+                name: name.clone(),
+                tools: running.map_or(0, |server| server.tools.len()),
+                state,
+            }
+        })
+        .collect()
+}
+
 /// Opens the telemetry panel: this session's ledger and every provider's.
 ///
 /// The rows come from the same store `norte-code telemetry` reads, opened here
@@ -1110,7 +1152,6 @@ async fn apply_tool_action(
             apply_mcp_action(
                 service,
                 renderer,
-                style,
                 &crate::modal::Action::Toggle(name.clone()),
             );
             return;
@@ -1671,17 +1712,7 @@ async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
         renderer.notice(format!("{} mcp server(s) unreachable", failed.len()));
     }
     // The sidebar follows: it is a column of state, and the state just changed.
-    renderer.set_mcp(
-        service
-            .mcp_status()
-            .into_iter()
-            .map(|server| crate::input::McpRow {
-                name: server.name,
-                tools: server.tools.len(),
-                active: server.active,
-            })
-            .collect(),
-    );
+    renderer.set_mcp(mcp_rows(service));
 }
 
 /// Rebuilds the MCP connections and reports how many are up.
@@ -1697,17 +1728,7 @@ async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
         renderer.notice(format!("`{name}` did not start: {reason}"));
     }
     // The sidebar follows: it is a column of state, and the state just changed.
-    renderer.set_mcp(
-        service
-            .mcp_status()
-            .into_iter()
-            .map(|server| crate::input::McpRow {
-                name: server.name,
-                tools: server.tools.len(),
-                active: server.active,
-            })
-            .collect(),
-    );
+    renderer.set_mcp(mcp_rows(service));
 }
 
 /// Lists, adds, removes or switches an MCP server.
@@ -1717,12 +1738,7 @@ async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
 /// is off in the next run too. `add` and `remove` write the entry and reload, so
 /// what a person typed is what connects. `list` opens the panel, where the same
 /// switch is one key.
-async fn report_mcp(
-    service: &Arc<Service>,
-    action: McpAction,
-    renderer: &mut Renderer,
-    style: Style,
-) {
+async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Renderer) {
     let path = service
         .config_path()
         .or_else(norte_code_config::user_config_path);
@@ -1785,7 +1801,7 @@ async fn report_mcp(
     // on: reading the list that names a server is the moment they know which
     // one to switch off, and typing `/mcp disable <name>` from memory while
     // looking at it is a command line doing a panel's job.
-    let rows = mcp_panel(style, service);
+    let rows = mcp_panel(service);
     if rows.is_empty() {
         renderer.notice("no MCP server connected");
         return;
@@ -1802,7 +1818,6 @@ async fn report_mcp(
 fn apply_mcp_action(
     service: &Arc<Service>,
     renderer: &mut Renderer,
-    style: Style,
     action: &crate::modal::Action,
 ) {
     let crate::modal::Action::Toggle(name) = action else {
@@ -1832,18 +1847,8 @@ fn apply_mcp_action(
             if !state {
                 renderer.notice("its tools leave the next turn; the process stays up");
             }
-            renderer.set_mcp(
-                service
-                    .mcp_status()
-                    .into_iter()
-                    .map(|server| crate::input::McpRow {
-                        name: server.name,
-                        tools: server.tools.len(),
-                        active: server.active,
-                    })
-                    .collect(),
-            );
-            let rows = mcp_panel(style, service);
+            renderer.set_mcp(mcp_rows(service));
+            let rows = mcp_panel(service);
             if rows.is_empty() {
                 renderer.close_modal();
             } else {

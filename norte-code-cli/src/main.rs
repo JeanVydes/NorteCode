@@ -564,22 +564,6 @@ fn parse_auth(value: &str) -> Result<AuthKind, String> {
     }
 }
 
-/// The connected MCP servers, as the sidebar's rows.
-///
-/// It is the one place the service's status is turned into the rows the frame
-/// draws, so the sidebar and `/mcp` cannot disagree about which server is on.
-fn mcp_rows(service: &norte_code_agent::Service) -> Vec<crate::input::McpRow> {
-    service
-        .mcp_status()
-        .into_iter()
-        .map(|server| crate::input::McpRow {
-            name: server.name,
-            tools: server.tools.len(),
-            active: server.active,
-        })
-        .collect()
-}
-
 /// A warning when a USD budget cannot be measured because the provider never
 /// reports cost.
 fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Option<String> {
@@ -983,7 +967,7 @@ async fn resume_session(
     renderer.compaction_threshold = compaction_threshold;
     // The connected MCP servers, for the sidebar. Read once here, and again
     // after every `/refresh`: those are the moments the set can change.
-    renderer.set_mcp(mcp_rows(&service));
+    renderer.set_mcp(crate::interaction::mcp_rows(&service));
     renderer.host_facts = Some(HostFacts {
         catalogue_source: source,
         database: database.clone(),
