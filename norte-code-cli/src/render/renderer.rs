@@ -2452,8 +2452,10 @@ impl Renderer {
                 if text.is_empty() {
                     return;
                 }
-                // The provider answered: the bar stops saying it is waiting.
-                self.set_wait(super::loading::Wait::Streaming);
+                // The provider answered with a thought: the bar stops saying it
+                // is waiting and says it is thinking, which is what is
+                // happening. Only answer text moves it to `streaming`.
+                self.set_wait(super::loading::Wait::Thinking);
                 if self.verbosity.is_quiet() {
                     // `low` is the answer alone: not even the fact that the
                     // model is thinking is shown.

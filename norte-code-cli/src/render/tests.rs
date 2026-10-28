@@ -641,9 +641,10 @@ fn thinking_is_announced_when_nothing_else_says_so() {
         text: "thinking".to_owned(),
     });
     // The spinner takes over: a thought arriving means the provider answered,
-    // and the frame says `streaming` from then on. The `thinking…` line is what
+    // and the frame says `thinking` — not `streaming`, which would claim the
+    // answer had started when only the thought has. The `thinking…` line is what
     // a turn with no spinner running shows instead.
-    assert_eq!(renderer.waiting, Some(crate::render::Wait::Streaming));
+    assert_eq!(renderer.waiting, Some(crate::render::Wait::Thinking));
     // The thought reaches the conversation through the event, which is the one
     // place an event becomes an entry: `delta` moves the state, and the event
     // that carried it makes the entry. Two writers would put it in twice.

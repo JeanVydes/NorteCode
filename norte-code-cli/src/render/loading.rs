@@ -15,6 +15,12 @@
 pub(crate) enum Wait {
     /// The request is on its way to the provider.
     Waiting,
-    /// The provider is answering.
+    /// The provider is thinking: reasoning is arriving, and no answer text yet.
+    ///
+    /// It is its own phase because the two are different waits for the person
+    /// watching: a model that is thinking has not started to answer, and calling
+    /// that "streaming" says the answer is on its way when the thought is.
+    Thinking,
+    /// The provider is answering: answer text is arriving.
     Streaming,
 }

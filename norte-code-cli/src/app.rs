@@ -363,6 +363,7 @@ fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     // different things and one of them is not about time passing.
     let label = match state.waiting {
         Some(crate::render::Wait::Streaming) => "streaming",
+        Some(crate::render::Wait::Thinking) => "thinking",
         _ => "waiting for the first token",
     };
     let now = SystemTime::now()
