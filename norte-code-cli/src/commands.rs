@@ -191,22 +191,38 @@ pub(crate) fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, S
 }
 
 /// Where Norte Code keeps its database.
-pub(crate) fn database_path() -> PathBuf {
+///
+/// Both roots are absolute. A process that starts without `HOME` — a service,
+/// a detached job, a sandboxed agent — used to fall back to a relative
+/// `.norte-code/sessions.db`, which resolved against the working directory and
+/// pointed at a database that was never written: every session already stored
+/// looked missing, and the picker offered nothing to open. There is no correct
+/// relative answer here, so the absence is reported instead of guessed at.
+///
+/// # Errors
+///
+/// Returns an error naming the missing variable when neither `XDG_DATA_HOME`
+/// nor `HOME` is set.
+pub(crate) fn database_path() -> Result<PathBuf, String> {
     if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(data).join("norte-code").join("sessions.db");
+        return Ok(PathBuf::from(data).join("norte-code").join("sessions.db"));
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
+        return Ok(PathBuf::from(home)
             .join(".local")
             .join("share")
             .join("norte-code")
-            .join("sessions.db");
+            .join("sessions.db"));
     }
-    PathBuf::from(".norte-code").join("sessions.db")
+    Err(
+        "neither XDG_DATA_HOME nor HOME is set, so the session database has no \
+         location; set HOME, or XDG_DATA_HOME to name it directly"
+            .to_owned(),
+    )
 }
 
 pub(crate) async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> {
-    let path = database_path();
+    let path = database_path()?;
     if !path.exists() {
         if !args.json {
             println!("no sessions yet (the database is {})", path.display());
@@ -250,7 +266,7 @@ pub(crate) async fn cost_command(config: &Config, args: &CostArgs) -> Result<u8,
         eprintln!("cost display is off (cost.show = false)");
         return Ok(0);
     }
-    let path = database_path();
+    let path = database_path()?;
     if !path.exists() {
         println!("no cost records yet (the database is {})", path.display());
         return Ok(0);
@@ -567,7 +583,7 @@ fn top(groups: &BTreeMap<String, RequestSummary>) -> Vec<(&String, &RequestSumma
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String> {
-    let path = database_path();
+    let path = database_path()?;
     if !path.exists() {
         println!(
             "no request telemetry yet (the database is {})",

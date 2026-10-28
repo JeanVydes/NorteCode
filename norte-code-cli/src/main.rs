@@ -688,7 +688,7 @@ pub(crate) async fn new_session(
     // before the config and spec are moved into the service.
     let max_context = spec.capabilities.max_context;
     let compaction_threshold = config.compaction.threshold;
-    let database = database_path();
+    let database = database_path()?;
     let store = Arc::new(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
@@ -845,7 +845,7 @@ async fn resume_session(
     //
     // A session stored before the field existed has none, and the directory the
     // command was typed in stands — which is what `resume` always did.
-    if let Some(dir) = stored_workdir(&database_path(), &session_key).await {
+    if let Some(dir) = stored_workdir(&database_path()?, &session_key).await {
         let here = std::env::current_dir().ok();
         let there = std::fs::canonicalize(&dir).ok();
         let elsewhere = match (&here, &there) {
@@ -915,7 +915,7 @@ async fn resume_session(
     // before the config and spec are moved into the service.
     let max_context = spec.capabilities.max_context;
     let compaction_threshold = config.compaction.threshold;
-    let database = database_path();
+    let database = database_path()?;
     let store = Arc::new(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
@@ -1093,7 +1093,7 @@ async fn open_session(
     let chosen = startup::startup(
         &mut opening,
         &catalog,
-        &database_path(),
+        &database_path()?,
         config_path.as_deref(),
         style,
     )

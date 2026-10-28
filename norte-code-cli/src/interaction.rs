@@ -1165,7 +1165,7 @@ async fn report_telemetry(session: Option<&SessionKey>, renderer: &mut Renderer)
 /// Every recorded request row, from the store the client already uses.
 async fn read_telemetry() -> Result<Vec<norte_code_store_sqlite::RequestRecord>, String> {
     use norte_code_store_sqlite::SessionDirectory as _;
-    let path = crate::commands::database_path();
+    let path = crate::commands::database_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }

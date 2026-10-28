@@ -8,6 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- North Code refuses to start, with the name of the missing variable, when
+  neither `XDG_DATA_HOME` nor `HOME` is set. It used to fall back to a relative
+  `.norte-code/sessions.db` that resolved against the working directory: a
+  process started without `HOME` — a service, a detached job, a sandboxed agent
+  — read an empty database and reported that no session existed.
+
 - Deleting a session removes the Norte session it named, its node tree and its
   cost, telemetry, effect, question and approval rows, in one transaction. The
   delete cleared the key and left everything else behind, so a session gone
