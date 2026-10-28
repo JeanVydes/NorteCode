@@ -8,6 +8,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Deleting a session removes the Norte session it named, its node tree and its
+  cost, telemetry, effect, question and approval rows, in one transaction. The
+  delete cleared the key and left everything else behind, so a session gone
+  from the list kept its rows in five tables — a database that grew with every
+  session forgotten, and the seed of the dangling pointers that made a
+  surviving session fail to open with `session not found` or `node not found`.
+
 - A pasted paragraph shows its `[Copied: …]` label again, and the cursor lands
   where it is drawn. The frame was handed the *expanded* paste — what is sent —
   instead of what is on screen, so the label never appeared and the cursor was

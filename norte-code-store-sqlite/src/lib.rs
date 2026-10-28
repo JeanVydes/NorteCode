@@ -235,7 +235,13 @@ pub trait SessionDirectory: Send + Sync {
     ///
     /// Propagates a database failure.
     async fn save_session(&self, session: &StoredSession) -> Result<()>;
-    /// Removes one session by key. Missing keys are not an error.
+    /// Removes one session and everything the database holds for it.
+    ///
+    /// The key, the Norte session it names, its node tree, and the cost,
+    /// telemetry, effect, question and approval rows written under either the
+    /// key or the session id. Missing keys are not an error. It is one
+    /// transaction, because a delete that removes the key and leaves the rows
+    /// behind is a database that grows a little with every session forgotten.
     ///
     /// # Errors
     ///
@@ -1344,10 +1350,76 @@ impl SessionDirectory for SqliteStore {
 
     async fn delete_session(&self, key: &str) -> Result<()> {
         let key = key.to_owned();
-        self.run(move |connection| {
-            connection
+        self.transact(move |transaction| {
+            // The row that names the Norte session: the key alone does not say
+            // which one it is, and everything else here is keyed by that id.
+            let north: Option<String> = transaction
+                .query_row(
+                    "SELECT north FROM logical_sessions WHERE key = ?1",
+                    params![key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(Fault::from)?;
+            transaction
                 .execute("DELETE FROM logical_sessions WHERE key = ?1", params![key])
                 .map_err(Fault::from)?;
+            if let Some(north) = north {
+                // The conversation is the ancestor chain of the session's head,
+                // which is the only way the node tree is reachable: nodes carry
+                // no session of their own, a parent is the message before them.
+                // A session that was compacted has all of its nodes under the
+                // current head, so walking back from it takes the whole tree.
+                let head: Option<String> = transaction
+                    .query_row(
+                        "SELECT data FROM sessions WHERE id = ?1",
+                        params![north],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(Fault::from)?
+                    .and_then(|data| {
+                        decode::<serde_json::Value>(&data, "session")
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("session")
+                                    .and_then(|session| session.get("head"))
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                    });
+                if let Some(head) = head {
+                    transaction
+                        .execute(
+                            "WITH RECURSIVE chain(id, parent) AS (
+                                 SELECT id, parent FROM nodes WHERE id = ?1
+                                 UNION
+                                 SELECT n.id, n.parent FROM nodes n JOIN chain c ON n.id = c.parent
+                             )
+                             DELETE FROM nodes WHERE id IN (SELECT id FROM chain)",
+                            params![head],
+                        )
+                        .map_err(Fault::from)?;
+                }
+                // Every table that outlives a session keeps its own row, and a
+                // session deleted from one alone is a key that names nothing: a
+                // cost ledger, a telemetry row or an effect still pointing at a
+                // session the list no longer has is what made a delete look
+                // partial. `session` holds the id in some tables and the key in
+                // others, so both spellings are cleared for the same session.
+                for table in ["costs", "requests", "effects", "questions", "approvals"] {
+                    transaction
+                        .execute(
+                            &format!("DELETE FROM {table} WHERE session IN (?1, ?2)"),
+                            params![key, north],
+                        )
+                        .map_err(Fault::from)?;
+                }
+                transaction
+                    .execute("DELETE FROM sessions WHERE id = ?1", params![north])
+                    .map_err(Fault::from)?;
+            }
             Ok(())
         })
         .await
@@ -2268,6 +2340,251 @@ mod tests {
         assert!(
             store.sessions().await.expect("list").is_empty(),
             "nothing is left after the delete"
+        );
+    }
+
+    /// Counts the rows the database holds for one session: everything a delete
+    /// has to reach. `heads` are the node ids the session's tree is made of,
+    /// which is how nodes are found: they carry no session of their own.
+    fn rows_for(
+        store: &SqliteStore,
+        key: &str,
+        north: SessionId,
+        heads: &[NodeId],
+    ) -> Vec<(&'static str, i64)> {
+        let connection = store.lock();
+        let count = |sql: &str, value: &str| -> i64 {
+            connection
+                .query_row(sql, params![value], |row| row.get::<_, i64>(0))
+                .expect("count")
+        };
+        let north = north.to_string();
+        let mut nodes = 0;
+        for head in heads {
+            nodes += count(
+                "SELECT count(*) FROM nodes WHERE id = ?1",
+                &head.to_string(),
+            );
+        }
+        vec![
+            (
+                "sessions",
+                count("SELECT count(*) FROM sessions WHERE id = ?1", &north),
+            ),
+            ("nodes", nodes),
+            (
+                "costs",
+                count("SELECT count(*) FROM costs WHERE session = ?1", key),
+            ),
+            (
+                "requests",
+                count("SELECT count(*) FROM requests WHERE session = ?1", key),
+            ),
+            (
+                "effects",
+                count("SELECT count(*) FROM effects WHERE session = ?1", &north),
+            ),
+            (
+                "questions",
+                count("SELECT count(*) FROM questions WHERE session = ?1", &north),
+            ),
+            (
+                "approvals",
+                count("SELECT count(*) FROM approvals WHERE session = ?1", &north),
+            ),
+        ]
+    }
+
+    /// Seeds a session's logical row and a two-node conversation under it,
+    /// returning the node ids: the chain a delete walks back from the head.
+    async fn seed_conversation(store: &SqliteStore, key: &str, north: SessionId) -> Vec<NodeId> {
+        store
+            .save_session(&StoredSession {
+                key: key.to_owned(),
+                north,
+                title: Some(key.to_owned()),
+                model: "openai/gpt".to_owned(),
+                created_at: Utc::now(),
+                phase: "idle".to_owned(),
+                stats: serde_json::json!({}),
+                denied_tools: Vec::new(),
+                allowed_tools: Vec::new(),
+                compacted_from: None,
+                workdir: None,
+            })
+            .await
+            .expect("save");
+
+        store
+            .commit(Commit {
+                session_id: north,
+                expected_version: None,
+                nodes: Vec::new(),
+                head: None,
+                phase: Phase::Idle,
+                turn: 0,
+                grants: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("create");
+        let first = Node::message(Message::user("hello"), None);
+        store
+            .commit(Commit {
+                session_id: north,
+                expected_version: Some(1),
+                nodes: vec![first.clone()],
+                head: Some(first.id),
+                phase: Phase::Idle,
+                turn: 1,
+                grants: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("append");
+        let second = Node::message(Message::assistant("hi"), Some(first.id));
+        store
+            .commit(Commit {
+                session_id: north,
+                expected_version: Some(2),
+                nodes: vec![second.clone()],
+                head: Some(second.id),
+                phase: Phase::Idle,
+                turn: 2,
+                grants: Vec::new(),
+                metadata: None,
+            })
+            .await
+            .expect("append");
+        vec![first.id, second.id]
+    }
+
+    /// Seeds one row in each table that outlives a session: the ledger, the
+    /// telemetry row, the effect, the question and the approval. Some keyed by
+    /// the logical key and some by the session id, which is the point.
+    async fn seed_rows(store: &SqliteStore, key: &str, north: SessionId) {
+        use norte_code_cost::CostRecord;
+
+        store
+            .record_cost(&CostRecord {
+                session: key.to_owned(),
+                turn: 1,
+                index: 0,
+                model: "openai/gpt".to_owned(),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                reasoning_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                cost_usd: Some(0.01),
+                recorded_at: Utc::now(),
+            })
+            .await
+            .expect("cost");
+        store
+            .record_request(&RequestRecord {
+                id: format!("request-{key}"),
+                session: key.to_owned(),
+                north_session: north.to_string(),
+                turn: 1,
+                provider: "provider".to_owned(),
+                model: "model".to_owned(),
+                endpoint: None,
+                started_at: Utc::now(),
+                duration_ms: 10,
+                first_token_ms: Some(1),
+                last_token_ms: Some(9),
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                reasoning_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                estimated_input_tokens: None,
+                cache_hit: false,
+                tool_calls: Vec::new(),
+                reasoning: None,
+                sandbox: false,
+                sandbox_network: false,
+                params: serde_json::Value::Null,
+                extensions: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+                cost_usd: None,
+                finish_reason: None,
+                status: "ok".to_owned(),
+                error: None,
+                error_kind: None,
+                retry_after_ms: None,
+            })
+            .await
+            .expect("request");
+        store
+            .effect_started(north, CallId::new(), "write", "epoch")
+            .expect("effect");
+        store
+            .save_question(&StoredQuestion {
+                id: format!("q-{key}"),
+                session: north,
+                call_id: format!("call-{key}"),
+                question: "which file?".to_owned(),
+                options: Vec::new(),
+                multiple: false,
+                answer: None,
+            })
+            .await
+            .expect("question");
+        store
+            .save_approval(ApprovalRecord::new(
+                north,
+                CallId::new(),
+                ToolName::new("write").expect("name"),
+                &serde_json::json!({}),
+                chrono::Duration::minutes(5),
+            ))
+            .await
+            .expect("approval");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_takes_every_row_it_left_behind() {
+        // A delete that cleared only `logical_sessions` left the Norte session,
+        // its node tree and its cost, telemetry, effect, question and approval
+        // rows behind: a session that vanished from the list but kept growing
+        // the database. The key names the logical row, the id names the rest,
+        // and both spellings live in the `session` column of different tables,
+        // so this seeds a row for each and checks that all of them are gone.
+        let store = SqliteStore::in_memory().expect("open");
+        let north = SessionId::new();
+        let nodes = seed_conversation(&store, "doomed", north).await;
+        seed_rows(&store, "doomed", north).await;
+        let before = rows_for(&store, "doomed", north, &nodes);
+        assert!(
+            before.iter().all(|(_, count)| *count > 0),
+            "every table was seeded: {before:?}"
+        );
+
+        // A second session, so the delete can be shown to be scoped: a delete
+        // that emptied the tables outright would pass the checks above too.
+        let keeper = SessionId::new();
+        let keeper_nodes = seed_conversation(&store, "keeper", keeper).await;
+        seed_rows(&store, "keeper", keeper).await;
+        let before_keeper = rows_for(&store, "keeper", keeper, &keeper_nodes);
+
+        store.delete_session("doomed").await.expect("delete");
+
+        let gone = store.sessions().await.expect("list");
+        assert!(
+            gone.iter().all(|session| session.key != "doomed"),
+            "the deleted session is not in the list"
+        );
+        let after = rows_for(&store, "doomed", north, &nodes);
+        assert!(
+            after.iter().all(|(_, count)| *count == 0),
+            "no table kept a row for it: {after:?}"
+        );
+        assert_eq!(
+            rows_for(&store, "keeper", keeper, &keeper_nodes),
+            before_keeper,
+            "the other session is untouched"
         );
     }
 
