@@ -189,7 +189,7 @@ pub(crate) fn argument_preview(tool: &str, arguments: &serde_json::Value) -> Vec
         "read" => read_preview(object),
         "write" => write_preview(object),
         "edit" => edit_preview(object),
-        "glob" | "grep" | "list_dir" => path_tool_preview(tool, object),
+        "grep" => path_tool_preview(object),
         "ask_user" => ask_preview(object),
         _ => generic_preview(object),
     };
@@ -330,7 +330,6 @@ pub(crate) fn edit_preview(
 }
 
 pub(crate) fn path_tool_preview(
-    tool: &str,
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<PreviewLine> {
     let mut lines = Vec::new();
@@ -349,9 +348,6 @@ pub(crate) fn path_tool_preview(
         .is_some_and(|set| set)
     {
         lines.push(PreviewLine::Note("ignore case".to_owned()));
-    }
-    if tool == "list_dir" && lines.is_empty() {
-        lines.push(PreviewLine::Note("the workspace root".to_owned()));
     }
     lines
 }

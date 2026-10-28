@@ -2042,7 +2042,7 @@ impl Renderer {
                 .map(str::to_owned)
         };
         match tool {
-            "read" | "write" | "edit" | "list_dir" | "glob" => text("path")
+            "read" | "write" | "edit" => text("path")
                 .or_else(|| text("pattern"))
                 .map_or_else(|| tool.to_owned(), |path| format!("{tool} {path}")),
             "grep" => {

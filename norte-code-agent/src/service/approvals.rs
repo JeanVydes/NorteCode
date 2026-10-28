@@ -338,7 +338,9 @@ impl Service {
             .map(|id| self.approval_rules.session(id))
             .unwrap_or_default();
         let mode = self.config().approval_mode;
-        let Ok(tools) = self.tools() else {
+        // The list a client is shown is the one the session it is on was made
+        // with, so `/tools` and the engine agree about what the model can reach.
+        let Ok(tools) = self.tools(session) else {
             return Vec::new();
         };
         let mut statuses: Vec<ToolStatus> = tools
@@ -485,7 +487,7 @@ impl Service {
             ));
         }
         let (nid, spec, _) = self.require_record(&session)?;
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(&session))?;
         let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
         let record = engine
             .pending_approvals(nid)
@@ -538,7 +540,7 @@ impl Service {
         scope: Option<norte_code_protocol::DenyScope>,
     ) -> Result<EventStream, ServiceError> {
         let (nid, spec, _) = self.require_record(&session)?;
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(&session))?;
         let id: ApprovalId = approval.parse().map_err(ServiceError::Norte)?;
         let record = engine
             .pending_approvals(nid)
@@ -594,7 +596,7 @@ impl Service {
         grant: String,
     ) -> Result<EventStream, ServiceError> {
         let (nid, spec, _) = self.require_record(&session)?;
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(&session))?;
         let grant: GrantId = grant.parse().map_err(ServiceError::Norte)?;
         engine.revoke(nid, grant, "user").await?;
         Ok(single(

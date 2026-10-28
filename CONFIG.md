@@ -245,8 +245,9 @@ from the catalogue.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `web_fetch` | boolean | `false` | Register the `web_fetch` tool. |
+| `disabled` | array of strings | `[]` | Tools a new session does not get, by the name the model calls them. A tool named here is not registered at all: no schema, no request, no entry in the registry. The list is read when a session is created and kept for its life — the declarations are part of the prompt's prefix, and changing them under a live conversation would discard the provider's cached prefix. Editing the file changes what the next session gets. |
 | `command_max_model_bytes` | integer | `131072` | Bytes of each `command` stream and summary that reach the model. The tool still captures up to its own larger ceiling; this only bounds the text the model sees, eliding the middle with a marker. Valid range: `1024`–`1048576`. |
-| `confinement.workspace_only` | boolean | `true` | Confine tool paths to the workspace. Off, `read`, `write`, `edit`, `glob`, `list_dir`, `grep` and `command`'s `cwd` may name any path, for a host working across repositories. A special file such as a FIFO is refused either way. |
+| `confinement.workspace_only` | boolean | `true` | Confine tool paths to the workspace. Off, `read`, `write`, `edit`, `grep` and `command`'s `cwd` may name any path, for a host working across repositories. A special file such as a FIFO is refused either way. |
 | `confinement.sandbox.enabled` | boolean | `false` | Run `command` inside bubblewrap (Linux) or `sandbox-exec` (macOS). |
 | `confinement.sandbox.network` | boolean | `false` | Allow network access inside the sandbox. |
 | `confinement.sandbox.writable` | array of paths | `[]` | Extra writable directories besides the workspace. Relative paths resolve against the workspace; missing paths are ignored. |

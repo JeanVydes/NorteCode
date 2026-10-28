@@ -132,7 +132,8 @@ impl Service {
             book
         };
         let gate = self.compaction_gate(&spec);
-        let engine = self.engine_with_budget(&spec, Some(Arc::clone(&book)), gate.clone())?;
+        let engine =
+            self.engine_with_budget(&spec, Some(&key), Some(Arc::clone(&book)), gate.clone())?;
         let state = engine.session(nid).await?;
         let turn = state.turn + 1;
         // The steering messages belong to the turn boundary that is starting
@@ -530,7 +531,7 @@ impl Service {
                     stats.cache_read_tokens = record.cache_read_tokens;
                     stats.cache_write_tokens = record.cache_write_tokens;
                 }
-                engine = self.engine_with_budget(&new_spec, budget.clone(), None)?;
+                engine = self.engine_with_budget(&new_spec, Some(key), budget.clone(), None)?;
                 current_nid = new_nid;
                 input = None;
                 gate = None;

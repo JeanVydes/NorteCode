@@ -435,7 +435,7 @@ impl Service {
                 "switch the model at a turn boundary",
             ));
         }
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(key))?;
         if engine.session(nid).await?.phase != norte::harness::Phase::Idle {
             return Err(ServiceError::Unsupported(
                 "switch the model at a turn boundary",

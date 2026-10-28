@@ -8,6 +8,25 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `tools.disabled` withholds tools from a new session. A tool named there is not
+  registered at all: it is not in the schema the model is shown, not in the
+  request, and not in the registry a call is looked up in, so the model cannot
+  name it and the prompt pays nothing for its declaration. The list is read when
+  a session is *created* and kept for that session's whole life, because the
+  declarations are part of the prompt's prefix: a set that changed under a live
+  conversation would throw away the provider's cached prefix and re-bill every
+  message in it. Editing the file changes what the next session gets, and a
+  resumed session keeps the tools it was made with.
+
+### Removed
+
+- The `glob` and `list_dir` tools. `grep` searches content and takes a glob to
+  narrow the files it looks in, which covers what a person reached for either
+  of them for, and a tool the model can see is one it pays for on every request
+  and will try before reading a file.
+
+### Added
+
 - A session can be deleted, with everything it left behind. `/delete` in a chat
   removes the session it is on and leaves; `norte-code sessions delete <key>`
   does it from the command line, asking first and taking `--yes` for a script.

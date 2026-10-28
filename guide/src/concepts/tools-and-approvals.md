@@ -10,9 +10,7 @@ Every engine gets the same configured registry:
 | `write` | Write a file. | Yes in `ask` and `auto-edit` |
 | `edit` | Replace exact text in a file. | Yes in `ask` and `auto-edit` |
 | `shell` | Run a shell script, with a cleared environment. | Yes in every mode except `yolo` |
-| `glob` | Find paths matching a glob, honoring `.gitignore`. | No |
-| `list_dir` | List one directory, directories first. | No |
-| `grep` | Search file contents. | No |
+| `grep` | Search file contents, with a glob to narrow the files. | No |
 | `todo` | Maintain the session's todo list. | No |
 | `ask_user` | Park the turn and ask the human. | No |
 | `web_fetch` | Fetch a URL; opt-in. | No |
@@ -21,6 +19,29 @@ Every engine gets the same configured registry:
 
 Tool output is bounded before it crosses the wire. Failed tools return an error
 text the model can read; they do not abort the engine.
+
+### Withholding a tool
+
+`tools.disabled` names tools a new session does not get:
+
+```json
+{
+  "tools": {
+    "disabled": ["shell", "browser_use"]
+  }
+}
+```
+
+A tool named here is never registered. It is not in the schema the model is
+shown, not in the request, and not in the registry a call is looked up in, so
+the model has no way to ask for it and pays nothing for its declaration.
+
+The list is read when a session is **created** and kept for that session's whole
+life. The declarations are part of the prompt's prefix, so a set that changed
+under a live conversation would throw away the provider's cached prefix and
+re-bill every message in it. Editing the list changes what the next session
+gets; it does not reach back into one that already exists, and a resumed session
+keeps the tools it was made with even if the file has moved on.
 
 ## Approval modes
 

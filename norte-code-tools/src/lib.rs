@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use globset::{Glob, GlobMatcher};
+use globset::Glob;
 use ignore::{Walk, WalkBuilder};
 use norte::{FnExecutor, Result, SessionId, ToolContext, ToolDeclaration, ToolOutput};
 use regex::RegexBuilder;
@@ -94,179 +94,6 @@ fn walk(root: &Path) -> Walk {
     let mut builder = WalkBuilder::new(root);
     builder.hidden(true).require_git(false);
     builder.build()
-}
-
-/// Arguments for `glob`.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GlobArgs {
-    /// A glob such as `**/*.rs` or `src/**/mod.rs`.
-    pub pattern: String,
-    /// The directory to search; defaults to the workspace root.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// The largest number of paths to return.
-    #[serde(default)]
-    pub max_results: Option<usize>,
-}
-
-/// Find paths with a glob, honoring `.gitignore`.
-#[derive(Clone, Debug, Default)]
-pub struct GlobTool {
-    root: PathBuf,
-}
-
-impl GlobTool {
-    /// A glob tool rooted at `root`.
-    #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    /// Turns the tool into a declaration the core registry accepts.
-    #[must_use]
-    pub fn into_declaration(self) -> ToolDeclaration<GlobArgs> {
-        ToolDeclaration::new(
-            "glob",
-            "Find files whose path matches a glob. Honors .gitignore, skips hidden directories and returns paths relative to the search root. Use it to discover files before reading them.",
-            Arc::new(self),
-        )
-    }
-}
-
-#[async_trait]
-impl FnExecutor<GlobArgs, ToolOutput> for GlobTool {
-    async fn call(&self, args: GlobArgs) -> Result<ToolOutput> {
-        let matcher: GlobMatcher = match Glob::new(&args.pattern) {
-            Ok(glob) => glob.compile_matcher(),
-            Err(error) => {
-                return Ok(ToolOutput::error(format!(
-                    "invalid glob `{}`: {error}",
-                    args.pattern
-                )));
-            }
-        };
-        let root = args.path.unwrap_or_else(|| self.root.clone());
-        if !root.exists() {
-            return Ok(ToolOutput::error(format!(
-                "`{}` does not exist",
-                root.display()
-            )));
-        }
-        let limit = cap(args.max_results, DEFAULT_MAX_RESULTS, MAX_RESULTS);
-        let mut found = Vec::new();
-        let mut truncated = false;
-        for entry in walk(&root).flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let shown = relative(&root, path);
-            if !matcher.is_match(&shown) {
-                continue;
-            }
-            found.push(shown);
-            if found.len() >= limit {
-                truncated = true;
-                break;
-            }
-        }
-        if found.is_empty() {
-            return Ok(ToolOutput::text(format!(
-                "no files match `{}` under {}",
-                args.pattern,
-                root.display()
-            )));
-        }
-        let mut text = found.join("\n");
-        if truncated {
-            let _ = write!(
-                text,
-                "\n\n[showing the first {limit} matches; narrow the pattern]"
-            );
-        }
-        Ok(ToolOutput::text(text))
-    }
-}
-
-/// Arguments for `list_dir`.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ListDirArgs {
-    /// The directory to list; defaults to the workspace root.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// The largest number of entries to return.
-    #[serde(default)]
-    pub max_entries: Option<usize>,
-}
-
-/// List one directory, directories first.
-#[derive(Clone, Debug, Default)]
-pub struct ListDirTool {
-    root: PathBuf,
-}
-
-impl ListDirTool {
-    /// A tool rooted at `root`.
-    #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    /// Turns the tool into a declaration the core registry accepts.
-    #[must_use]
-    pub fn into_declaration(self) -> ToolDeclaration<ListDirArgs> {
-        ToolDeclaration::new(
-            "list_dir",
-            "List the entries of one directory, directories first, with a trailing slash on directories. Use it to inspect a directory before deciding which file to read.",
-            Arc::new(self),
-        )
-    }
-}
-
-#[async_trait]
-impl FnExecutor<ListDirArgs, ToolOutput> for ListDirTool {
-    async fn call(&self, args: ListDirArgs) -> Result<ToolOutput> {
-        let path = args.path.unwrap_or_else(|| self.root.clone());
-        let limit = cap(args.max_entries, DEFAULT_MAX_RESULTS, MAX_RESULTS);
-        let entries = match std::fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(error) => {
-                return Ok(ToolOutput::error(format!(
-                    "could not list `{}`: {error}",
-                    path.display()
-                )));
-            }
-        };
-        let mut names = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let suffix = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                "/"
-            } else {
-                ""
-            };
-            names.push((!suffix.is_empty(), format!("{name}{suffix}")));
-        }
-        names.sort();
-        let truncated = names.len() > limit;
-        let mut text = names
-            .into_iter()
-            .take(limit)
-            .map(|(_, name)| name)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if text.is_empty() {
-            "(empty directory)".clone_into(&mut text);
-        } else if truncated {
-            let _ = write!(
-                text,
-                "\n\n[showing the first {limit} entries; list a subdirectory]"
-            );
-        }
-        Ok(ToolOutput::text(text))
-    }
 }
 
 /// Arguments for `grep`.
@@ -1175,28 +1002,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn glob_finds_files_and_honors_the_limit() {
-        let root = temp_root("glob");
-        let tool = GlobTool::new(&root);
-        let output = tool
-            .call(GlobArgs {
-                pattern: "**/*.rs".to_owned(),
-                path: None,
-                max_results: Some(1),
-            })
-            .await
-            .expect("glob");
-        assert!(!output.is_error);
-        assert!(
-            output
-                .parts
-                .iter()
-                .any(|part| format!("{part:?}").contains("src/lib.rs"))
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
     async fn grep_reports_path_and_line() {
         let root = temp_root("grep");
         let tool = GrepTool::new(&root);
@@ -1215,32 +1020,6 @@ mod tests {
         assert!(text.contains("src/lib.rs"));
         assert!(text.contains("fn two"));
         assert!(!text.contains("fn one"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn glob_skips_hidden_paths_and_honors_gitignore_without_git() {
-        let root = temp_root("glob-ignore");
-        std::fs::write(root.join(".gitignore"), "ignored.txt\n").expect("gitignore");
-        std::fs::write(root.join("ignored.txt"), "needle\n").expect("ignored");
-        std::fs::write(root.join("visible.txt"), "needle\n").expect("visible");
-        std::fs::create_dir_all(root.join(".hidden")).expect("hidden dir");
-        std::fs::write(root.join(".hidden/secret.txt"), "needle\n").expect("secret");
-        assert!(!root.join(".git").exists());
-
-        let tool = GlobTool::new(&root);
-        let output = tool
-            .call(GlobArgs {
-                pattern: "**/*.txt".to_owned(),
-                path: None,
-                max_results: None,
-            })
-            .await
-            .expect("glob");
-        let text = format!("{:?}", output.parts);
-        assert!(text.contains("visible.txt"), "{text}");
-        assert!(!text.contains("ignored.txt"), "{text}");
-        assert!(!text.contains("secret.txt"), "{text}");
         let _ = std::fs::remove_dir_all(root);
     }
 

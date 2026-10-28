@@ -41,7 +41,7 @@ impl Service {
         let Some(max_context) = spec.capabilities.max_context else {
             return Ok(false);
         };
-        let engine = self.engine(spec)?;
+        let engine = self.engine(spec, Some(key))?;
         let state = engine.session(nid).await?;
         if state.phase != norte::harness::Phase::Idle {
             return Ok(false);
@@ -149,7 +149,7 @@ impl Service {
     /// guessing at it.
     pub(super) async fn compact_core(&self, key: &SessionKey) -> Result<Compaction, ServiceError> {
         let (old, spec, _) = self.require_record(key)?;
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(key))?;
         let state = engine.session(old).await?;
         if state.phase != norte::harness::Phase::Idle {
             return Err(ServiceError::Compaction(
@@ -169,7 +169,7 @@ impl Service {
         }
         let summary_spec = self.summary_spec(&spec)?;
         let book = self.budget_book(key).await?;
-        let summary_engine = self.engine_with_budget(&summary_spec, Some(book), None)?;
+        let summary_engine = self.engine_with_budget(&summary_spec, Some(key), Some(book), None)?;
         let scratch = summary_engine.create().await?;
         let mut request_messages = history.clone();
         request_messages.push(Message::user(SUMMARY_PROMPT));

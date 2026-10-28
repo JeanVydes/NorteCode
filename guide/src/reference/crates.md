@@ -10,7 +10,7 @@ never depends on the CLI.
 | `norte-code-config` | Typed config, merge, validation, approval-rule updates and secret resolution. |
 | `norte-code-catalog` | models.dev client, ETag/TTL cache and mapping to Norte capabilities. |
 | `norte-code-cost` | Cost ledger and budget evaluation. Provider-reported amounts only. |
-| `norte-code-tools` | Host tools: `glob`, `list_dir`, `grep`, `todo`, `ask_user`, `web_fetch`. |
+| `norte-code-tools` | Host tools: `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | Norte `Store` + `BlobStore`, logical sessions, approvals, questions, effects, costs and request telemetry. |
 | `norte-code-cli` | The `norte-code` binary, its subcommands and the interactive prompt. |
 

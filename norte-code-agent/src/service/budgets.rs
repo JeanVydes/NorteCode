@@ -87,6 +87,16 @@ impl Service {
         configured_budget(self.config().budgets.session.as_ref())
     }
 
+    /// The tools the configuration withholds from a session made right now.
+    ///
+    /// It is read once, where a session is created, and kept: the tool
+    /// declarations are part of the prompt's prefix, so a list consulted on
+    /// every turn would change the prefix of a session that already has a
+    /// cache over it and re-bill the conversation.
+    pub(super) fn configured_disabled_tools(&self) -> Vec<String> {
+        self.config().tools.disabled.clone()
+    }
+
     /// The notices the book has for the cost it recorded.
     ///
     /// A warning crosses once and an exhaustion is only reported when the turn

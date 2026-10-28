@@ -558,6 +558,21 @@ pub struct ToolsConfig {
     pub confinement: ConfinementConfig,
     /// How a browser screenshot reaches the model.
     pub screenshots: ScreenshotConfig,
+    /// Tools a new session does not get, by the name the model would call them.
+    ///
+    /// A tool named here is never registered: it is not in the schema the model
+    /// is given, not in the request, and not in the registry a call is looked up
+    /// in. That is the point of doing it at registration rather than at call
+    /// time — a tool the model can see is a tool it will try, and a refusal
+    /// after the fact costs a round trip and teaches it nothing.
+    ///
+    /// It bites when a session is *created*, and only then. The declarations
+    /// are part of the prompt prefix, so a set that changed under a running
+    /// session would invalidate the provider's cached prefix and re-bill the
+    /// whole conversation. A session made while a tool was enabled keeps it for
+    /// its whole life, and editing this list does not reach back into one that
+    /// already exists.
+    pub disabled: Vec<String>,
 }
 
 impl Default for ToolsConfig {
@@ -567,6 +582,7 @@ impl Default for ToolsConfig {
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
             confinement: ConfinementConfig::default(),
             screenshots: ScreenshotConfig::default(),
+            disabled: Vec::new(),
         }
     }
 }
@@ -2305,5 +2321,35 @@ mod ui_tests {
         assert_eq!(DiffStyle::Unified.name(), "unified");
         assert_eq!(DiffStyle::Split.name(), "split");
         assert_eq!(DiffStyle::default(), DiffStyle::Unified);
+    }
+
+    #[test]
+    fn disabled_tools_are_read_from_the_file() {
+        // The field as a person writes it, and the two cases that matter: the
+        // list is read, and a file that does not mention it keeps every tool
+        // rather than failing to load.
+        let dir = std::env::temp_dir().join(format!("norte-disabled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"tools":{"disabled":["shell","todo"]}}"#,
+        )
+        .expect("write");
+        let loaded = Config::load(Some(&path), None).expect("load");
+        assert_eq!(
+            loaded.config.tools.disabled,
+            vec!["shell".to_owned(), "todo".to_owned()],
+            "the list is read from the file"
+        );
+        std::fs::write(&path, r#"{"version":1}"#).expect("write");
+        let loaded = Config::load(Some(&path), None).expect("load");
+        assert!(
+            loaded.config.tools.disabled.is_empty(),
+            "a file that does not mention it withholds nothing: {:?}",
+            loaded.config.tools.disabled
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

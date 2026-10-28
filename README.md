@@ -20,7 +20,7 @@ Norte Code never forks Norte.
 | `norte-code-config` | `config.json` loading, validation, merging and secrets. |
 | `norte-code-catalog` | The models.dev client, its disk cache and the mapping to Norte capabilities. |
 | `norte-code-cost` | The cost ledger and budget evaluation. Provider-reported cost only. |
-| `norte-code-tools` | The tools Norte does not ship: `glob`, `list_dir`, `grep`, `todo`, `ask_user`, `web_fetch`. |
+| `norte-code-tools` | The tools Norte does not ship: `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | A Norte `Store` + `BlobStore` over SQLite, plus Norte Code's own tables. |
 | `norte-code-cli` | The `norte-code` command and its interactive prompt. |
 

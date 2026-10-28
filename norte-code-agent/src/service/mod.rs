@@ -49,9 +49,7 @@ use norte_code_skills::{
     SkillRegistry, SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
 use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredSession};
-use norte_code_tools::{
-    AskUserTool, GlobTool, GrepTool, ListDirTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
-};
+use norte_code_tools::{AskUserTool, GrepTool, QuestionBroker, TodoState, TodoTool, WebFetchTool};
 use norte_tools::{
     BrowserTool, EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
 };
@@ -200,6 +198,14 @@ pub struct Service {
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
     telemetry: Arc<Telemetry>,
+}
+
+/// Whether a name is in a session's withheld list.
+///
+/// The comparison is exact: a name is what the model calls a tool, and a prefix
+/// that matched — `read` for `read_file` — would take away a tool nobody named.
+fn withheld(disabled: &[String], name: &str) -> bool {
+    disabled.iter().any(|entry| entry == name)
 }
 
 impl Service {
@@ -403,6 +409,7 @@ impl Service {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
+            None,
         )?;
         Ok(service)
     }
@@ -433,8 +440,13 @@ impl Service {
     /// Rebuilds the in-memory session map from the durable directory.
     #[allow(clippy::too_many_lines)]
     /// Builds an engine for one spec over the shared stores.
-    fn engine(&self, spec: &ModelSpec) -> Result<Harness, ServiceError> {
-        self.engine_with_budget(spec, None, None)
+    ///
+    /// The session is what decides which tools the engine is built with: the
+    /// withheld list is the session's own snapshot, not the configuration's
+    /// current value, because the declarations are part of the prompt's prefix
+    /// and moving them under a live conversation throws away its cache.
+    fn engine(&self, spec: &ModelSpec, key: Option<&SessionKey>) -> Result<Harness, ServiceError> {
+        self.engine_with_budget(spec, key, None, None)
     }
 
     /// Builds an engine whose requests pass through the budget and telemetry
@@ -442,6 +454,7 @@ impl Service {
     fn engine_with_budget(
         &self,
         spec: &ModelSpec,
+        key: Option<&SessionKey>,
         budget: Option<Arc<Mutex<BudgetBook>>>,
         compaction: Option<Arc<CompactionGate>>,
     ) -> Result<Harness, ServiceError> {
@@ -458,7 +471,7 @@ impl Service {
             .blobs(Arc::clone(&self.blobs))
             .media_adapter(media)
             .model(model)
-            .tools(self.tools()?)
+            .tools(self.tools(key)?)
             .policies(self.policies())
             .config(HarnessConfig {
                 max_iterations: self.config().max_iterations.unwrap_or(usize::MAX),
@@ -544,8 +557,10 @@ impl Service {
     /// Returns [`ServiceError`] when the configured tool registry cannot be
     /// built.
     pub fn prompt_size(&self) -> Result<PromptSize, ServiceError> {
+        // No session: this measures the static material of a prompt about to be
+        // built, which is the configuration's list before anything froze it.
         let tool_chars = self
-            .tools()?
+            .tools(None)?
             .specs()
             .iter()
             .map(|spec| serde_json::to_string(spec).map_or(0, |json| json.chars().count()))
@@ -559,16 +574,46 @@ impl Service {
     }
 
     /// Registers one rich tool with the activity recorder attached.
+    ///
+    /// A tool the configuration disables is not registered at all: it is not in
+    /// the schema the model is handed, not in the request, and not in the
+    /// registry a call is looked up in. Refusing the call after the model made
+    /// it would cost a round trip and teach it nothing, and the declarations are
+    /// what the prompt pays for on every request.
+    ///
+    /// The name is read from the declaration, which is the name the model calls,
+    /// so one list covers the host's own tools and the MCP servers' alike.
     fn register_tool<A>(
         &self,
         tools: &mut ToolRegistry,
+        disabled: &[String],
         declaration: ToolDeclaration<A>,
     ) -> Result<(), ServiceError>
     where
         A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
     {
+        if withheld(disabled, declaration.name) {
+            return Ok(());
+        }
         tools.register_tool_declaration(recording_tool(declaration, Arc::clone(&self.activity)))?;
         Ok(())
+    }
+
+    /// The tools withheld from a session.
+    ///
+    /// A session that exists answers with the list it was made with, which is
+    /// what keeps its prompt prefix stable. One that does not exist yet — the
+    /// engine a session is created through, before there is a record to freeze
+    /// — answers with the configuration, which is the list that is about to be
+    /// frozen into it.
+    fn disabled_for(&self, session: Option<&SessionKey>) -> Vec<String> {
+        session
+            .and_then(|key| {
+                self.lock_sessions()
+                    .get(key)
+                    .map(|record| record.disabled_tools.clone())
+            })
+            .unwrap_or_else(|| self.configured_disabled_tools())
     }
 
     /// The shell, and the manager for the jobs it can leave behind.
@@ -576,7 +621,11 @@ impl Service {
     /// One shell with one set of limits: the sandbox, the secrets, the output
     /// bounds and the time bound are the same whether a call is waited for or let
     /// go of, and `detach` on the request is what says which.
-    fn register_shell(&self, tools: &mut ToolRegistry) -> Result<(), ServiceError> {
+    fn register_shell(
+        &self,
+        tools: &mut ToolRegistry,
+        disabled: &[String],
+    ) -> Result<(), ServiceError> {
         let mut env = BTreeMap::new();
         if let Ok(path) = std::env::var("PATH") {
             env.insert("PATH".to_owned(), path);
@@ -628,9 +677,10 @@ impl Service {
             Arc::clone(&self.steering),
             Arc::clone(&self.detaches),
         );
-        self.register_tool(tools, command)?;
+        self.register_tool(tools, disabled, command)?;
         self.register_tool(
             tools,
+            disabled,
             ManageJobs::new(Arc::clone(&self.jobs)).into_declaration(),
         )?;
         Ok(())
@@ -646,11 +696,12 @@ impl Service {
     ///
     /// Returns [`ServiceError`] when a declaration is invalid or a name is
     /// already taken.
-    pub fn tools(&self) -> Result<ToolRegistry, ServiceError> {
+    pub fn tools(&self, session: Option<&SessionKey>) -> Result<ToolRegistry, ServiceError> {
+        let disabled = self.disabled_for(session);
         let mut tools = ToolRegistry::new();
-        self.register_tool(&mut tools, ReadTool::new().into_declaration())?;
-        self.register_tool(&mut tools, WriteTool::new().into_declaration())?;
-        self.register_tool(&mut tools, EditTool::new().into_declaration())?;
+        self.register_tool(&mut tools, &disabled, ReadTool::new().into_declaration())?;
+        self.register_tool(&mut tools, &disabled, WriteTool::new().into_declaration())?;
+        self.register_tool(&mut tools, &disabled, EditTool::new().into_declaration())?;
         // The browser's capture is promoted into a user message: the tool
         // answers with the PNG as base64 in its result, and a tool result
         // carries text only on the chat completions wire. The wrapper reads the
@@ -667,46 +718,48 @@ impl Service {
         } else {
             browser
         };
-        self.register_tool(&mut tools, browser)?;
+        self.register_tool(&mut tools, &disabled, browser)?;
 
-        self.register_shell(&mut tools)?;
+        self.register_shell(&mut tools, &disabled)?;
         self.register_tool(
             &mut tools,
-            GlobTool::new(&self.workspace_root).into_declaration(),
-        )?;
-        self.register_tool(
-            &mut tools,
-            ListDirTool::new(&self.workspace_root).into_declaration(),
-        )?;
-        self.register_tool(
-            &mut tools,
+            &disabled,
             GrepTool::new(&self.workspace_root).into_declaration(),
         )?;
         self.register_tool(
             &mut tools,
+            &disabled,
             TodoTool::new(Arc::clone(&self.todo)).into_declaration(),
         )?;
         self.register_tool(
             &mut tools,
+            &disabled,
             AskUserTool::new(Arc::clone(&self.questions)).into_declaration(),
         )?;
         if self.config().tools.web_fetch {
-            self.register_tool(&mut tools, WebFetchTool::new().into_declaration())?;
+            self.register_tool(
+                &mut tools,
+                &disabled,
+                WebFetchTool::new().into_declaration(),
+            )?;
         }
 
         if self.config().skills.enabled {
             let skills = self.skills();
             self.register_tool(
                 &mut tools,
+                &disabled,
                 SkillTool::new(Arc::clone(&skills)).into_declaration(),
             )?;
             self.register_tool(
                 &mut tools,
+                &disabled,
                 SkillResourceTool::new(Arc::clone(&skills)).into_declaration(),
             )?;
             if self.config().skills.allow_scripts {
                 self.register_tool(
                     &mut tools,
+                    &disabled,
                     SkillScriptTool::new(
                         Arc::clone(&skills),
                         SkillScriptConfig::in_workspace(&self.workspace_root),
@@ -724,6 +777,12 @@ impl Service {
             .map(|servers| servers.tools())
             .unwrap_or_default();
         for tool in mcp_tools {
+            // An MCP tool is named by its server — `server__tool` — and the
+            // configuration disables it by that same name, so one list covers
+            // the host's tools and the servers' alike.
+            if withheld(&disabled, tool.name()) {
+                continue;
+            }
             tools.register(tool)?;
         }
         Ok(tools)

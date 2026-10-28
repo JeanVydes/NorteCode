@@ -50,6 +50,16 @@ pub(super) struct SessionRecord {
     pub(super) cache_write_tokens: u64,
     /// The session budget, when one was set.
     pub(super) budget: Option<Budget>,
+    /// The tools the configuration withheld when this session was created.
+    ///
+    /// It is a snapshot and not a reading of the configuration, because the
+    /// tool declarations are part of the prompt's prefix: a set that changed
+    /// under a running session would invalidate the provider's cached prefix
+    /// and re-bill the whole conversation. The list is fixed when the session
+    /// is made, kept across a resume, and never consulted against the file
+    /// again — a tool enabled then and disabled now stays with the session that
+    /// already had it.
+    pub(super) disabled_tools: Vec<String>,
     /// Tools this session refuses without asking again.
     pub(super) denied_tools: Vec<String>,
     /// Tools this session allows without asking again.
@@ -98,6 +108,19 @@ fn record_from(
         cache_read_tokens: number("cache_read_tokens").unwrap_or(0),
         cache_write_tokens: number("cache_write_tokens").unwrap_or(0),
         budget: stat(stats, "budget"),
+        // A session stored before this existed has no list, and an absent list
+        // withholds nothing: it keeps every tool it was made with, which is the
+        // same rule the field follows everywhere else.
+        disabled_tools: stats
+            .get("disabled_tools")
+            .and_then(serde_json::Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
         denied_tools: entry.denied_tools.clone(),
         allowed_tools: entry.allowed_tools.clone(),
         compacted_from: entry.compacted_from,
@@ -303,6 +326,7 @@ impl Service {
                 "pending_reasoning": record.pending_reasoning,
                 "pending_steers": record.pending_steers,
                 "pending_model": record.pending_model,
+                "disabled_tools": record.disabled_tools,
             }),
             denied_tools: record.denied_tools.clone(),
             allowed_tools: record.allowed_tools.clone(),
@@ -328,7 +352,7 @@ impl Service {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, None)?;
         let session = engine.create().await?;
         engine
             .append_history(
@@ -353,6 +377,10 @@ impl Service {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             budget: self.configured_session_budget(),
+            // Frozen here, at the one moment the prefix is not yet cached: the
+            // tool declarations are part of it, so the set a session starts
+            // with is the set it keeps.
+            disabled_tools: self.configured_disabled_tools(),
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
             compacted_from: None,
@@ -374,7 +402,7 @@ impl Service {
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
         let (source, spec, _) = self.require_record(from)?;
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(from))?;
         let mut conversation = engine.export(source).await?;
         // Norte's import preserves the conversation's session id, which is the
         // right default for a backup/restore and exactly wrong for a fork: the
@@ -400,6 +428,14 @@ impl Service {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             budget: self.configured_session_budget(),
+            // A fork copies the conversation, so it copies the tool set the
+            // conversation was held in: a branch that quietly gained a tool the
+            // source did not have would answer the same history differently.
+            disabled_tools: self
+                .lock_sessions()
+                .get(from)
+                .map(|record| record.disabled_tools.clone())
+                .unwrap_or_default(),
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
             // A fork is a new branch, not a compaction of the source.

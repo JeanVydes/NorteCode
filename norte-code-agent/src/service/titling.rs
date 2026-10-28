@@ -174,7 +174,7 @@ impl Service {
         // not an error worth raising, it is a name with nowhere to go.
         let (_, session_spec, _) = self.require_record(key)?;
         let spec = self.titling_spec(&session_spec)?;
-        let engine = self.engine(&spec)?;
+        let engine = self.engine(&spec, Some(key))?;
         let scratch = engine.create().await?;
         // No tools and no reasoning: the question is "what is this called", and
         // a tool call or a chain of thought is neither a cheaper nor a better
@@ -223,7 +223,7 @@ impl Service {
         key: &norte_code_protocol::SessionKey,
     ) -> Result<String, ServiceError> {
         let (nid, spec, _) = self.require_record(key)?;
-        let history = self.engine(&spec)?.history(nid).await?;
+        let history = self.engine(&spec, Some(key))?.history(nid).await?;
         // The first thing the person said, not the system prompt and not the
         // summary a compaction seeded: those are the host's words, and a name
         // has to come from the conversation's own.

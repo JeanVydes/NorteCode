@@ -343,9 +343,15 @@ pub(crate) fn tools_panel(
 /// that was registered a moment ago is in the report and a tool that failed to
 /// register is not. The first line of a description is enough to say what the
 /// tool is; the whole text is the model's, and it is long.
-pub(crate) fn report_tools(style: Style, service: &Service) -> Vec<String> {
+pub(crate) fn report_tools(
+    style: Style,
+    service: &Service,
+    session: Option<&norte_code_protocol::SessionKey>,
+) -> Vec<String> {
     let mut lines = vec![heading(style, "tools")];
-    match service.tools() {
+    // The session's list and not the configuration's: a session keeps the tools
+    // it was made with, so this is what the model can actually reach in it.
+    match service.tools(session) {
         Ok(registry) => {
             let specs = registry.specs();
             lines.push(fact("registered", specs.len()));

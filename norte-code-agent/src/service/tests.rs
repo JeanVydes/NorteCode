@@ -240,7 +240,7 @@ async fn a_real_mcp_server_publishes_its_tools_into_the_service() {
     );
 
     // The tools are in the registry the engine reads, with the namespace.
-    let registry = service.tools().expect("registry");
+    let registry = service.tools(None).expect("registry");
     let specs = registry.specs();
     let names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
     assert!(
@@ -1063,7 +1063,7 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
 
     // Write a list the way the model does: a committed `todo` call.
     let call = CallId::new();
-    let engine = service.engine(&spec("scripted")).expect("engine");
+    let engine = service.engine(&spec("scripted"), None).expect("engine");
     let node = norte::harness::Node::message(
         Message::new(
             Role::Assistant,
@@ -1651,7 +1651,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
 
     let (source_id, source_spec, _) = service.require_record(&source_key).expect("source record");
     let exported = service
-        .engine(&source_spec)
+        .engine(&source_spec, None)
         .expect("engine")
         .export(source_id)
         .await
@@ -1684,7 +1684,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
         None
     );
     let copied = service
-        .engine(&fork_spec)
+        .engine(&fork_spec, None)
         .expect("engine")
         .export(fork_id)
         .await
@@ -1829,7 +1829,7 @@ async fn a_session_can_switch_models_at_a_boundary() {
 
     let (nid, spec, _) = service.require_record(&key).expect("record");
     let history = service
-        .engine(&spec)
+        .engine(&spec, None)
         .expect("engine")
         .history(nid)
         .await
@@ -4961,7 +4961,7 @@ async fn the_shell_tools_and_the_job_manager_are_registered() {
     let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
     let (service, _store) = persistent_service(model).await;
     let names: Vec<String> = service
-        .tools()
+        .tools(None)
         .expect("tools")
         .specs()
         .iter()
@@ -4983,7 +4983,7 @@ async fn the_shell_tools_and_the_job_manager_are_registered() {
     // That field has to be in the schema the model reads: a request carrying it
     // is rejected when the schema does not name it.
     let shell = service
-        .tools()
+        .tools(None)
         .expect("tools")
         .specs()
         .into_iter()
@@ -6728,7 +6728,7 @@ async fn a_title_is_asked_for_in_a_session_of_its_own() {
     // The request went to a session of its own: the one being named is as empty
     // as it was, and none of the naming is in it.
     let history = service
-        .engine(&spec("scripted"))
+        .engine(&spec("scripted"), None)
         .expect("engine")
         .history(service.require_record(&key).expect("record").0)
         .await
@@ -7036,7 +7036,7 @@ async fn the_mode_asks_before_the_tool_that_runs_a_command() {
     // The names are read back out of the registry rather than trusted: that is
     // the whole failure, a list of names nobody has.
     let registered: Vec<String> = service()
-        .tools()
+        .tools(None)
         .expect("tools")
         .specs()
         .into_iter()
@@ -7200,4 +7200,142 @@ async fn a_resumed_session_sends_the_effort_it_was_left_on() {
     drop(reopened);
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_session_keeps_the_tools_it_was_made_with() {
+    // The decision this pins: the tool declarations are part of the prompt
+    // prefix, so a set that changed under a live session would invalidate the
+    // provider's cached prefix and re-bill the whole conversation. A tool
+    // disabled after a session exists does not reach back into it, and a tool
+    // enabled after it does not reach forward into it either. The configuration
+    // decides what the *next* session gets and nothing else.
+    let mut config = config();
+    config.tools.disabled = vec!["grep".to_owned()];
+    let service = service_with(config);
+
+    // A session made while `grep` was withheld does not have it.
+    let first = service.start_session(None).await.expect("session");
+    let names = |key: Option<&SessionKey>| {
+        service
+            .tools(key)
+            .expect("registry")
+            .specs()
+            .iter()
+            .map(|spec| spec.name.to_string())
+            .collect::<Vec<_>>()
+    };
+    let made_without = names(Some(&first));
+    assert!(
+        !made_without.iter().any(|name| name == "grep"),
+        "the tool was withheld when the session was made: {made_without:?}"
+    );
+
+    // Re-enabling it does not reach the session that already exists.
+    let mut next = service.config();
+    next.tools.disabled.clear();
+    service.replace_config(next);
+    let still_without = names(Some(&first));
+    assert!(
+        !still_without.iter().any(|name| name == "grep"),
+        "the session keeps the set it was made with: {still_without:?}"
+    );
+
+    // A session made now does have it: the configuration decides what the next
+    // one gets.
+    let second = service.start_session(None).await.expect("session");
+    let made_with = names(Some(&second));
+    assert!(
+        made_with.iter().any(|name| name == "grep"),
+        "a session made after the change gets the tool: {made_with:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_withheld_tool_is_not_registered_at_all() {
+    // Not registered means not in the schema the model is shown and not in the
+    // registry a call is looked up in: the model cannot name it, and a call
+    // that arrived anyway would find nothing to run.
+    let mut config = config();
+    config.tools.disabled = vec!["todo".to_owned(), "read".to_owned()];
+    let service = service_with(config);
+    let registry = service.tools(None).expect("registry");
+    let names: Vec<String> = registry
+        .specs()
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .collect();
+    assert!(
+        !names.iter().any(|name| name == "todo" || name == "read"),
+        "a withheld tool is absent from the registry: {names:?}"
+    );
+    // And the ones nobody named are still there.
+    assert!(names.iter().any(|name| name == "write"), "{names:?}");
+}
+
+/// A scripted model that answers one text per turn, for a test that needs its
+/// own config rather than the shared one.
+#[tokio::test]
+async fn a_session_whose_tools_were_taken_away_still_runs_its_turns() {
+    // The rule the configuration promises: the list bites when a session is
+    // *made*, and a session that already exists keeps working. Its history can
+    // hold calls to a tool that no longer exists anywhere — the conversation is
+    // messages the engine replays, not a lookup in the registry — so a turn
+    // after the change runs exactly as it did before it.
+    let mut before = config();
+    before.tools.disabled = vec!["todo".to_owned()];
+    let service = service_with(before);
+    let key = service.start_session(None).await.expect("session");
+    assert!(
+        !service
+            .tools(Some(&key))
+            .expect("registry")
+            .specs()
+            .iter()
+            .any(|spec| spec.name.as_str() == "todo"),
+        "the session was made without it"
+    );
+
+    // The tool comes back in the configuration: the session keeps what it had.
+    let mut after = service.config();
+    after.tools.disabled.clear();
+    service.replace_config(after);
+
+    // And a turn in that session still runs to a committed answer.
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "still there?".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let mut text = String::new();
+    let mut committed = false;
+    for event in &events {
+        match &event.kind {
+            ServerEventKind::Delta {
+                delta: Delta::Text { text: chunk, .. },
+                ..
+            } => text.push_str(chunk),
+            ServerEventKind::TurnFinished {
+                committed: done, ..
+            } => committed = *done,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        text, "Hello",
+        "the turn ran in a session made without `todo`"
+    );
+    assert!(committed);
+    // The session is still the same one and still in the list.
+    assert!(
+        service.sessions().iter().any(|info| info.session == key),
+        "the session survived"
+    );
 }

@@ -59,7 +59,7 @@ The same rules can be written directly:
 ```json
 {
   "approvals": {
-    "allow": ["read", "glob"],
+    "allow": ["read", "grep"],
     "deny": ["shell"]
   }
 }

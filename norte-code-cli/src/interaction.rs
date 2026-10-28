@@ -1327,7 +1327,7 @@ fn report_debug(
         &catalog,
         host,
     );
-    lines.extend(report_tools(style, service));
+    lines.extend(report_tools(style, service, session));
     lines.extend(render_mcp(style, service));
     if let Some(host) = host {
         lines.extend(report_prompt(style, service, host.prompt_source));
