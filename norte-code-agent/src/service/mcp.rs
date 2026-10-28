@@ -208,6 +208,18 @@ impl McpServers {
             .collect()
     }
 
+    /// The on/off state of each connected server, by name.
+    ///
+    /// A reload rebuilds the connections and this is what carries the state a
+    /// person set across it: a server they turned off stays off, and one they
+    /// never touched comes back on.
+    pub(super) fn active_by_name(&self) -> BTreeMap<String, bool> {
+        self.servers
+            .iter()
+            .map(|server| (server.name.clone(), server.active))
+            .collect()
+    }
+
     /// Turns one server off or on.
     ///
     /// Returns the state it is in afterwards, or `None` when no such server

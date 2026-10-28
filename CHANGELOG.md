@@ -8,9 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The spinner says `thinking` while reasoning is arriving and `streaming` only
-  once answer text starts. Both used to say `streaming` from the first reasoning
-  token, which claimed the answer had started when only the thought had.
+- `/refresh` rebuilds the MCP connections from the configuration in force, so a
+  server added, removed or disabled in the file takes effect without a restart.
+  It used to retry only the servers that had already failed at startup, which
+  could never pick up a server the file did not name when the process began. A
+  server turned off in the panel stays off across a refresh.
+
 ### Added
 
 - A model's answer is drawn with more of its markdown: `~~struck~~` and

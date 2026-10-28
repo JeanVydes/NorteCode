@@ -1585,15 +1585,16 @@ async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
     report_reload(service, renderer);
     let count = service.refresh_skills();
     renderer.notice(format!("skills refreshed: {count}"));
-    let recovered = service.retry_mcp().await;
-    match recovered {
-        0 => {
-            let failed = service.mcp_failures();
-            if !failed.is_empty() {
-                renderer.notice(format!("{} mcp server(s) still unreachable", failed.len()));
-            }
-        }
-        count => renderer.notice(format!("mcp server(s) connected: {count}")),
+    // The connections are rebuilt, not merely retried: a server added, removed
+    // or disabled in the file takes effect here, and one that is still failing
+    // comes back in the failures list. A retry alone could only revive what was
+    // already configured when the process started, which is why a new server
+    // needed a restart.
+    let up = service.reload_mcp().await;
+    let failed = service.mcp_failures();
+    renderer.notice(format!("mcp servers connected: {up}"));
+    if !failed.is_empty() {
+        renderer.notice(format!("{} mcp server(s) unreachable", failed.len()));
     }
 }
 
