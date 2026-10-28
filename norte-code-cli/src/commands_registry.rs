@@ -31,7 +31,7 @@ pub(crate) const TOOL_SCOPES: &[&str] = &["session", "global"];
 pub(crate) const JOB_ACTIONS: &[&str] = &["list", "check", "stop"];
 
 /// The actions `/mcp` takes.
-pub(crate) const MCP_ACTIONS: &[&str] = &["list", "enable", "disable"];
+pub(crate) const MCP_ACTIONS: &[&str] = &["list", "add", "enable", "disable", "remove"];
 
 /// The tabs `/tab` can show, as the footer names them.
 /// The registry every part of the client reads.
@@ -121,9 +121,12 @@ pub(crate) fn built() -> Registry {
         .aliased(&["/reload"]),
     );
     registry.register(
-        CommandSpec::new("/mcp", "list the MCP servers, or switch one off or on")
+        CommandSpec::new("/mcp", "list, add, remove or switch an MCP server")
             .arg(ArgSpec::optional_choice("action", MCP_ACTIONS))
-            .arg(ArgSpec::optional("server")),
+            // The rest of the line, not one argument: `add` takes a name, a
+            // command and its arguments, and how many there are is the person's
+            // to decide.
+            .arg(ArgSpec::rest("args")),
     );
     registry.register(
         CommandSpec::new(

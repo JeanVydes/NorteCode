@@ -1421,6 +1421,141 @@ pub fn forget_user_approval(path: &Path, tool: &str) -> Result<(), ConfigError> 
     atomic_write(path, body.as_bytes())
 }
 
+/// The `mcpServers` map of a config file, as a mutable JSON object.
+///
+/// It is created when the file does not have it, and refused when it has one of
+/// the wrong shape: a `mcpServers` that is not an object is a file a person
+/// edited by hand and got wrong, and writing over it would lose what they meant.
+fn mcp_servers_mut(root: &mut Value) -> Result<&mut serde_json::Map<String, Value>, ConfigError> {
+    let root = root
+        .as_object_mut()
+        .ok_or_else(|| invalid("mcpServers", "the config root must be a JSON object"))?;
+    let entry = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    entry
+        .as_object_mut()
+        .ok_or_else(|| invalid("mcpServers", "must be a JSON object"))
+}
+
+/// Reads the file, applies `edit`, and writes it back, preserving the rest.
+fn edit_config(
+    path: &Path,
+    edit: impl FnOnce(&mut Value) -> Result<(), ConfigError>,
+) -> Result<(), ConfigError> {
+    let mut root = if path.exists() {
+        read_value(path)?
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+    edit(&mut root)?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut body = serde_json::to_string_pretty(&root).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    body.push('\n');
+    atomic_write(path, body.as_bytes())
+}
+
+/// Adds one MCP server to the config file at `mcpServers.<name>`.
+///
+/// The entry is written as a program to run — `npx`, a path, anything the
+/// platform can execute — with its arguments and an `enabled` flag. An existing
+/// entry of the same name is replaced, because adding a server that is already
+/// named is what a person does to change it.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the name or the command is empty, or when the
+/// file cannot be read or written.
+pub fn add_user_mcp_server(
+    path: &Path,
+    name: &str,
+    command: &str,
+    args: &[String],
+) -> Result<(), ConfigError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(invalid("mcpServers", "the server name is empty"));
+    }
+    if command.trim().is_empty() {
+        return Err(invalid("mcpServers", "the server command is empty"));
+    }
+    edit_config(path, |root| {
+        let servers = mcp_servers_mut(root)?;
+        servers.insert(
+            name.to_owned(),
+            serde_json::json!({
+                "command": command.trim(),
+                "args": args,
+                "enabled": true,
+            }),
+        );
+        Ok(())
+    })
+}
+
+/// Turns one MCP server on or off in the config file.
+///
+/// It sets `mcpServers.<name>.enabled`, which is the same flag the config
+/// carries and the one that keeps an entry without starting it.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the name is empty, no server has it, or the file
+/// cannot be read or written.
+pub fn set_user_mcp_enabled(path: &Path, name: &str, enabled: bool) -> Result<(), ConfigError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(invalid("mcpServers", "the server name is empty"));
+    }
+    edit_config(path, |root| {
+        let servers = mcp_servers_mut(root)?;
+        let Some(entry) = servers.get_mut(name) else {
+            return Err(invalid(
+                "mcpServers",
+                format!("no server named `{name}` in the config"),
+            ));
+        };
+        let entry = entry
+            .as_object_mut()
+            .ok_or_else(|| invalid("mcpServers", format!("`{name}` is not a JSON object")))?;
+        entry.insert("enabled".to_owned(), Value::Bool(enabled));
+        Ok(())
+    })
+}
+
+/// Removes one MCP server from the config file.
+///
+/// A name that is not there is not an error: removing one twice is what a person
+/// does when they are not sure it worked, and refusing the second press is the
+/// file arguing with them.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the name is empty, or when the file cannot be
+/// read or written.
+pub fn remove_user_mcp_server(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(invalid("mcpServers", "the server name is empty"));
+    }
+    edit_config(path, |root| {
+        let servers = mcp_servers_mut(root)?;
+        servers.remove(name);
+        Ok(())
+    })
+}
+
 /// Adds one global approval rule to the user config, preserving the rest of
 /// the file.
 ///
@@ -1931,6 +2066,71 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn an_mcp_server_is_added_turned_off_and_removed() {
+        // The three writes the `mcp` command makes, against one file, keeping
+        // what else was in it.
+        let path = temp_file(r#"{"mystery":true}"#);
+        add_user_mcp_server(
+            &path,
+            "context7",
+            "npx",
+            &["-y".to_owned(), "@upstash/context7-mcp".to_owned()],
+        )
+        .expect("add");
+        let root: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(root["mcpServers"]["context7"]["command"], "npx");
+        assert_eq!(
+            root["mcpServers"]["context7"]["args"],
+            serde_json::json!(["-y", "@upstash/context7-mcp"])
+        );
+        assert_eq!(root["mcpServers"]["context7"]["enabled"], true);
+        assert_eq!(root["mystery"], true, "the rest of the file survives");
+
+        set_user_mcp_enabled(&path, "context7", false).expect("disable");
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert!(
+            !loaded
+                .config
+                .mcp_servers
+                .get("context7")
+                .expect("entry")
+                .enabled
+        );
+
+        set_user_mcp_enabled(&path, "context7", true).expect("enable");
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert!(
+            loaded
+                .config
+                .mcp_servers
+                .get("context7")
+                .expect("entry")
+                .enabled
+        );
+
+        remove_user_mcp_server(&path, "context7").expect("remove");
+        let loaded = Config::load(Some(&path), None).expect("config");
+        assert!(loaded.config.mcp_servers.is_empty(), "the entry is gone");
+
+        // Removing one that is not there is not an error.
+        remove_user_mcp_server(&path, "context7").expect("remove again");
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn an_mcp_write_needs_a_name_and_a_command() {
+        let path = temp_file("{}");
+        assert!(add_user_mcp_server(&path, "  ", "npx", &[]).is_err());
+        assert!(add_user_mcp_server(&path, "x", "  ", &[]).is_err());
+        assert!(set_user_mcp_enabled(&path, "  ", false).is_err());
+        // A server the file does not name cannot be toggled: the mistake is the
+        // name, and saying so is what the person needs.
+        assert!(set_user_mcp_enabled(&path, "nope", false).is_err());
+        let _ = fs::remove_dir_all(path.parent().expect("parent"));
     }
 
     #[test]

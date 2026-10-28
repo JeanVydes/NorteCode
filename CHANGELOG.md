@@ -6,6 +6,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- MCP servers are managed where they are named. `norte-code mcp add <name>
+  <command> [args…]`, `mcp enable|disable <name>`, `mcp remove <name>` and `mcp
+  list` write the config file, and the same verbs work at the prompt as `/mcp
+  add|enable|disable|remove|list`. `enable`/`disable` set `mcpServers.<name>
+  .enabled` — the flag the config already carried — so the choice outlives the
+  process, and a write at the prompt reloads the connections so the effect is
+  visible at once. `add` replaces an entry of the same name, which is how one is
+  changed.
+
 ### Fixed
 
 - `/refresh` reaches the sessions that are already open. A provider's settings —

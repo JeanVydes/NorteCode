@@ -2,12 +2,13 @@
 
 use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
-    LoadOptions, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory, SessionsArgs,
-    SkillRegistry, SkillsArgs, SkillsCommand, Source, SqliteStore, Style, TelemetryArgs, Utc,
-    by_day, by_session, by_turn, cache_dir, cache_percent_label, discovery_roots,
-    find_project_config, human_tokens, list_models, load_catalog, new_session, open_session,
-    resume_named, short, summarize, token_ratio, user_config_path,
+    LoadOptions, McpArgs, McpCommand, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory,
+    SessionsArgs, SkillRegistry, SkillsArgs, SkillsCommand, Source, SqliteStore, Style,
+    TelemetryArgs, Utc, by_day, by_session, by_turn, cache_dir, cache_percent_label,
+    discovery_roots, find_project_config, human_tokens, list_models, load_catalog, new_session,
+    open_session, resume_named, short, summarize, token_ratio, user_config_path,
 };
+use norte_code_config::{add_user_mcp_server, remove_user_mcp_server, set_user_mcp_enabled};
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let config_path = cli.config.clone();
@@ -38,6 +39,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
         Command::Sessions(args) => sessions_command(&args).await,
         Command::Cost(args) => cost_command(&config, &args).await,
         Command::Telemetry(args) => telemetry_command(&args).await,
+        Command::Mcp(args) => mcp_command(&config, user_config, &args),
         command => {
             let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
             match command {
@@ -65,10 +67,74 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
                 Command::Skills(_)
                 | Command::Sessions(_)
                 | Command::Cost(_)
-                | Command::Telemetry(_) => {
+                | Command::Telemetry(_)
+                | Command::Mcp(_) => {
                     unreachable!("these commands do not need the catalogue")
                 }
             }
+        }
+    }
+}
+
+/// Adds, toggles or removes an MCP server in the config file.
+///
+/// It writes the file and stops: the process that carries the change is the one
+/// that reloads it — `/refresh` in a running client, or the next `norte-code`
+/// — and a command that also tried to connect would start a server the person
+/// has not asked to run in this process.
+fn mcp_command(
+    config: &Config,
+    config_path: Option<PathBuf>,
+    args: &McpArgs,
+) -> Result<u8, String> {
+    let path = config_path
+        .or_else(user_config_path)
+        .ok_or_else(|| "no user config path; pass --config".to_owned())?;
+    match &args.command {
+        McpCommand::List => {
+            if config.mcp_servers.is_empty() {
+                println!("no MCP server is configured");
+                return Ok(0);
+            }
+            for (name, server) in &config.mcp_servers {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    crate::text::terminal(name),
+                    if server.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    crate::text::terminal(&server.command),
+                    crate::text::terminal(&server.args.join(" ")),
+                );
+            }
+            Ok(0)
+        }
+        McpCommand::Add {
+            name,
+            command,
+            args,
+        } => {
+            add_user_mcp_server(&path, name, command, args).map_err(|error| error.to_string())?;
+            println!("added mcp server `{}`", crate::text::terminal(name));
+            println!("run `/refresh` in a client, or start one, to connect it");
+            Ok(0)
+        }
+        McpCommand::Enable { name } => {
+            set_user_mcp_enabled(&path, name, true).map_err(|error| error.to_string())?;
+            println!("enabled mcp server `{}`", crate::text::terminal(name));
+            Ok(0)
+        }
+        McpCommand::Disable { name } => {
+            set_user_mcp_enabled(&path, name, false).map_err(|error| error.to_string())?;
+            println!("disabled mcp server `{}`", crate::text::terminal(name));
+            Ok(0)
+        }
+        McpCommand::Remove { name } => {
+            remove_user_mcp_server(&path, name).map_err(|error| error.to_string())?;
+            println!("removed mcp server `{}`", crate::text::terminal(name));
+            Ok(0)
         }
     }
 }

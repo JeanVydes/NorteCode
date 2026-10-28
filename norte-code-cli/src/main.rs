@@ -143,6 +143,46 @@ enum Command {
     Cost(CostArgs),
     /// Report local request telemetry: counts, tokens, cache, tools and latency.
     Telemetry(TelemetryArgs),
+    /// Manage the MCP servers in the config file.
+    Mcp(McpArgs),
+}
+
+#[derive(Args)]
+struct McpArgs {
+    /// What to do with the configured MCP servers.
+    #[command(subcommand)]
+    command: McpCommand,
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// List the configured MCP servers.
+    List,
+    /// Add a server, or replace one of the same name.
+    Add {
+        /// The name the server is known by.
+        name: String,
+        /// The program to run.
+        command: String,
+        /// Its arguments, in order.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Turn a configured server on.
+    Enable {
+        /// The name of the server.
+        name: String,
+    },
+    /// Turn a configured server off, keeping its entry.
+    Disable {
+        /// The name of the server.
+        name: String,
+    },
+    /// Remove a configured server.
+    Remove {
+        /// The name of the server.
+        name: String,
+    },
 }
 
 /// The flags that shape a new session.

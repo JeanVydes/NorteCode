@@ -41,33 +41,34 @@ use norte_code_protocol::Attachment as ProtocolAttachment;
 /// Commands with arguments parse into closed variants. Anything that is not a
 /// known command stays a normal message, so a prompt may still start with `/`.
 /// What `/mcp` was asked to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum McpAction {
-    /// List the connected servers and their tools.
+    /// List the configured servers and their tools.
     List,
+    /// Add a server, or replace one of the same name.
+    Add {
+        /// The name the server is known by.
+        name: String,
+        /// The program to run.
+        command: String,
+        /// Its arguments, in order.
+        args: Vec<String>,
+    },
     /// Turn a server on.
-    Enable,
-    /// Turn a server off.
-    Disable,
-}
-
-impl McpAction {
-    /// Whether the action needs a server name.
-    fn needs_server(self) -> bool {
-        match self {
-            Self::List => false,
-            Self::Enable | Self::Disable => true,
-        }
-    }
-
-    /// The word the usage line shows.
-    fn usage(self) -> &'static str {
-        match self {
-            Self::List => "list",
-            Self::Enable => "enable",
-            Self::Disable => "disable",
-        }
-    }
+    Enable {
+        /// The name of the server.
+        name: String,
+    },
+    /// Turn a server off, keeping its entry.
+    Disable {
+        /// The name of the server.
+        name: String,
+    },
+    /// Remove a server.
+    Remove {
+        /// The name of the server.
+        name: String,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -78,11 +79,8 @@ pub(crate) enum ChatCommand {
     Compact,
     /// Re-read everything that can be re-read while the process runs.
     Refresh,
-    /// List the MCP servers, or switch one off or on.
-    Mcp {
-        action: McpAction,
-        server: Option<String>,
-    },
+    /// List, add, remove or switch an MCP server.
+    Mcp { action: McpAction },
     /// Leave the chat.
     Exit,
     /// Change an approval rule.
@@ -224,24 +222,57 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
 /// The registry knows the two arguments; what it cannot know is that `list`
 /// takes no server and the others need one, which is a rule about this command.
 fn parse_mcp(invocation: &Invocation) -> Result<ChatCommand, String> {
-    let action = match invocation.arg("action").unwrap_or("list") {
+    // The action is a closed choice, so a word that is not one falls through to
+    // the trailing arguments. An action nobody gave with text after the command
+    // is therefore an action nobody wrote: the first word is the mistake, and
+    // saying so is better than listing for a person who typed `frobnicate`.
+    let named = invocation.arg("action");
+    let rest = invocation.arg("args").unwrap_or("");
+    let action = match named {
+        None if !rest.trim().is_empty() => {
+            let first = rest.split_whitespace().next().unwrap_or("");
+            return Err(format!(
+                "unknown /mcp action `{first}`; use list, add, enable, disable or remove"
+            ));
+        }
+        None => "list",
+        Some(action) => action,
+    };
+    let args: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+    let action = match action {
         "list" => McpAction::List,
-        "enable" => McpAction::Enable,
-        "disable" => McpAction::Disable,
+        "add" => {
+            // `add <name> <command> [args…]`: the name and the command are the
+            // two things a server cannot be without, and the rest is whatever
+            // the program takes.
+            let mut parts = args.into_iter();
+            let (Some(name), Some(command)) = (parts.next(), parts.next()) else {
+                return Err("usage: /mcp add <name> <command> [args…]".to_owned());
+            };
+            McpAction::Add {
+                name,
+                command,
+                args: parts.collect(),
+            }
+        }
+        "enable" | "disable" | "remove" => {
+            let mut parts = args.into_iter();
+            let Some(name) = parts.next() else {
+                return Err(format!("usage: /mcp {action} <name>"));
+            };
+            match action {
+                "enable" => McpAction::Enable { name },
+                "disable" => McpAction::Disable { name },
+                _ => McpAction::Remove { name },
+            }
+        }
         other => {
             return Err(format!(
-                "unknown /mcp action `{other}`; use list, enable or disable"
+                "unknown /mcp action `{other}`; use list, add, enable, disable or remove"
             ));
         }
     };
-    let server = invocation.arg("server").map(str::to_owned);
-    if action.needs_server() && server.is_none() {
-        return Err(format!("usage: /mcp {} <server>", action.usage()));
-    }
-    if !action.needs_server() && server.is_some() {
-        return Err("usage: /mcp list  (it takes no server)".to_owned());
-    }
-    Ok(ChatCommand::Mcp { action, server })
+    Ok(ChatCommand::Mcp { action })
 }
 
 /// The `/jobs` command, with its action and id checked against each other.
@@ -448,8 +479,8 @@ pub(crate) async fn interactive_loop(
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
-                ChatCommand::Mcp { action, server } => {
-                    report_mcp(service, action, server.as_deref(), renderer, style);
+                ChatCommand::Mcp { action } => {
+                    report_mcp(service, action, renderer, style).await;
                 }
                 ChatCommand::Approval {
                     allow,
@@ -843,8 +874,8 @@ async fn handle_live_command(
             renderer.notice("wait until the current turn finishes, then /compact");
         }
         ChatCommand::Refresh => report_refresh(service, renderer).await,
-        ChatCommand::Mcp { action, server } => {
-            report_mcp(service, action, server.as_deref(), renderer, style);
+        ChatCommand::Mcp { action } => {
+            report_mcp(service, action, renderer, style).await;
         }
         ChatCommand::Approval {
             allow,
@@ -1598,34 +1629,89 @@ async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
     }
 }
 
-/// Reports the MCP servers, or switches one off or on.
+/// Rebuilds the MCP connections and reports how many are up.
 ///
-/// A server's tools ride in every prompt, so the count is worth seeing; a server
-/// that is off keeps its process, which is what makes turning it back on
-/// instant.
-fn report_mcp(
+/// It is what every write to the MCP configuration ends with: a switch or an
+/// entry that is written but not connected is a change the person cannot see
+/// working, and the reload is what makes the file and the process agree.
+async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
+    let up = service.reload_mcp().await;
+    let failed = service.mcp_failures();
+    renderer.notice(format!("mcp servers connected: {up}"));
+    for (name, reason) in failed {
+        renderer.notice(format!("`{name}` did not start: {reason}"));
+    }
+}
+
+/// Lists, adds, removes or switches an MCP server.
+///
+/// `enable`/`disable` write the flag into the config file and reload the
+/// connections, so the choice outlives the process: a server switched off here
+/// is off in the next run too. `add` and `remove` write the entry and reload, so
+/// what a person typed is what connects. `list` opens the panel, where the same
+/// switch is one key.
+async fn report_mcp(
     service: &Arc<Service>,
     action: McpAction,
-    server: Option<&str>,
     renderer: &mut Renderer,
     style: Style,
 ) {
-    if let Some(name) = server {
-        let active = action == McpAction::Enable;
-        match service.set_mcp_active(name, active) {
-            Some(state) => {
-                let word = if state { "enabled" } else { "disabled" };
-                // Turning a server on or off is something that happened, so it
-                // is a line of the conversation and not a panel: the person
-                // wants to see it was done and carry on.
-                renderer.notice(format!("mcp server `{name}` {word}"));
-                if !state {
-                    renderer.notice("its tools leave the next turn; the process stays up");
+    let path = service
+        .config_path()
+        .or_else(norte_code_config::user_config_path);
+    match &action {
+        McpAction::List => {}
+        McpAction::Add {
+            name,
+            command,
+            args,
+        } => {
+            let Some(path) = path else {
+                renderer.failure("no user config path; pass --config");
+                return;
+            };
+            match norte_code_config::add_user_mcp_server(&path, name, command, args) {
+                Ok(()) => {
+                    renderer.notice(format!("added mcp server `{name}`"));
+                    reload_mcp(service, renderer).await;
+                }
+                Err(error) => renderer.failure(format!("could not add `{name}`: {error}")),
+            }
+            return;
+        }
+        McpAction::Remove { name } => {
+            let Some(path) = path else {
+                renderer.failure("no user config path; pass --config");
+                return;
+            };
+            match norte_code_config::remove_user_mcp_server(&path, name) {
+                Ok(()) => {
+                    renderer.notice(format!("removed mcp server `{name}`"));
+                    reload_mcp(service, renderer).await;
+                }
+                Err(error) => renderer.failure(format!("could not remove `{name}`: {error}")),
+            }
+            return;
+        }
+        McpAction::Enable { name } | McpAction::Disable { name } => {
+            let enabled = matches!(action, McpAction::Enable { .. });
+            // The switch is written first: a file that cannot be written is what
+            // the person needs to know, and switching the process alone would
+            // say it worked when the next run would undo it.
+            if let Some(path) = path {
+                if let Err(error) = norte_code_config::set_user_mcp_enabled(&path, name, enabled) {
+                    renderer.failure(format!("could not change `{name}`: {error}"));
+                    return;
                 }
             }
-            None => renderer.failure(format!("no mcp server named `{name}` connected")),
+            let word = if enabled { "enabled" } else { "disabled" };
+            renderer.notice(format!("mcp server `{name}` {word}"));
+            if !enabled {
+                renderer.notice("its tools leave the next turn; the process stays up");
+            }
+            reload_mcp(service, renderer).await;
+            return;
         }
-        return;
     }
 
     // The listing is a panel and not a print, and it is one a person can act
@@ -2581,27 +2667,54 @@ mod tests {
         assert_eq!(
             parse_chat_command("/mcp"),
             Some(Ok(ChatCommand::Mcp {
-                action: McpAction::List,
-                server: None,
+                action: McpAction::List
             }))
         );
-        // The three actions, with the server they act on.
+        // Each action, with the server it acts on.
         for (text, action) in [
-            ("/mcp enable everything", McpAction::Enable),
-            ("/mcp disable everything", McpAction::Disable),
+            (
+                "/mcp enable everything",
+                McpAction::Enable {
+                    name: "everything".to_owned(),
+                },
+            ),
+            (
+                "/mcp disable everything",
+                McpAction::Disable {
+                    name: "everything".to_owned(),
+                },
+            ),
+            (
+                "/mcp remove everything",
+                McpAction::Remove {
+                    name: "everything".to_owned(),
+                },
+            ),
         ] {
             assert_eq!(
                 parse_chat_command(text),
-                Some(Ok(ChatCommand::Mcp {
-                    action,
-                    server: Some("everything".to_owned()),
-                })),
+                Some(Ok(ChatCommand::Mcp { action })),
                 "{text}"
             );
         }
-        // A switch without a server, and an unknown action, are refused rather
-        // than sent to the model as a message.
+        // `add` takes a name, a command and its arguments.
+        assert_eq!(
+            parse_chat_command("/mcp add context7 npx -y @upstash/context7-mcp"),
+            Some(Ok(ChatCommand::Mcp {
+                action: McpAction::Add {
+                    name: "context7".to_owned(),
+                    command: "npx".to_owned(),
+                    args: vec!["-y".to_owned(), "@upstash/context7-mcp".to_owned()],
+                },
+            }))
+        );
+        // A switch without a server, an `add` without a command, and an unknown
+        // action are refused rather than sent to the model as a message.
         assert!(matches!(parse_chat_command("/mcp enable"), Some(Err(_))));
+        assert!(matches!(
+            parse_chat_command("/mcp add onlyname"),
+            Some(Err(_))
+        ));
         assert!(matches!(
             parse_chat_command("/mcp frobnicate x"),
             Some(Err(_))

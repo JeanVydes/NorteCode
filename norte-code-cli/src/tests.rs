@@ -1,6 +1,6 @@
 use super::{
-    ApprovalChoice, Cli, Command, DenyScope, GrantScope, PreviewLine, SandboxOptions, Style,
-    apply_extensions, approval_request, argument_preview, budget_label, budget_warning,
+    ApprovalChoice, Cli, Command, DenyScope, GrantScope, McpCommand, PreviewLine, SandboxOptions,
+    Style, apply_extensions, approval_request, argument_preview, budget_label, budget_warning,
     compose_selection, cost_summary, parse_approval_choice, parse_reasoning_setting,
     select_system_prompt,
 };
@@ -562,6 +562,45 @@ fn wire_and_auth_flags_are_parsed_and_validated() {
 
     assert!(Cli::try_parse_from(["norte-code", "new", "--wire", "telepathy"]).is_err());
     assert!(Cli::try_parse_from(["norte-code", "new", "--auth", "none"]).is_err());
+}
+
+#[test]
+fn the_mcp_command_parses_add_and_the_switch() {
+    // `add` takes a name, a program and everything after it, hyphenated flags
+    // included: an MCP server's arguments are the program's, not ours.
+    let cli = Cli::try_parse_from([
+        "norte-code",
+        "mcp",
+        "add",
+        "context7",
+        "npx",
+        "-y",
+        "@upstash/context7-mcp",
+    ])
+    .expect("add parses");
+    let Some(Command::Mcp(args)) = cli.command else {
+        panic!("expected mcp");
+    };
+    let McpCommand::Add {
+        name,
+        command,
+        args,
+    } = args.command
+    else {
+        panic!("expected add");
+    };
+    assert_eq!(name, "context7");
+    assert_eq!(command, "npx");
+    assert_eq!(args, ["-y", "@upstash/context7-mcp"]);
+
+    let cli = Cli::try_parse_from(["norte-code", "mcp", "disable", "context7"]).expect("disable");
+    let Some(Command::Mcp(args)) = cli.command else {
+        panic!("expected mcp");
+    };
+    assert!(matches!(args.command, McpCommand::Disable { name } if name == "context7"));
+
+    // A subcommand is required: `norte-code mcp` alone has nothing to do.
+    assert!(Cli::try_parse_from(["norte-code", "mcp"]).is_err());
 }
 
 #[test]
