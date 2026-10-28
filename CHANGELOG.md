@@ -8,6 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The telemetry panel's `over time` tab draws one sparkline per model — the
+  shape of its use across the range's buckets, by the metric in force — with the
+  peak named on the line. A day is bucketed by hour and everything longer by day,
+  because a day read by day is one point and a year read by hour is thousands
+  that say nothing. Models named `provider/model` are never merged.
+
 - `/telemetry` opens a panel over the conversation instead of printing a report
   and losing it. It has tabs: `this session` is the roll-up filtered to the open
   session — its summary, its models ranked, its errors — and `providers` is every

@@ -348,7 +348,7 @@ pub(crate) struct Report {
 impl Report {
     /// Rolls every record into the report.
     #[must_use]
-    pub(crate) fn of(records: &[RequestRecord]) -> Self {
+    pub(crate) fn of(records: &[RequestRecord], range: Range) -> Self {
         let now = Utc::now();
         let mut report = Self::default();
         for record in records {
@@ -365,7 +365,7 @@ impl Report {
                 .add_within(record, now);
             report
                 .buckets
-                .entry(bucket_of(record.started_at))
+                .entry(bucket_of(record.started_at, range))
                 .or_default()
                 .add_within(record, now);
         }
@@ -420,13 +420,17 @@ fn sort_by(rows: &mut [(&str, &Slice)], metric: Metric) {
     });
 }
 
-/// The bucket a record falls in, by the day.
+/// The bucket a record falls in: the hour for a day's range, the day otherwise.
 ///
-/// The panel's series is per day: a provider's use over a year is read by day,
-/// and an hour bucket would be hundreds of points that say nothing.
+/// A day read by day is one point, which is no line; the same day read by hour is
+/// the shape of the working day. Everything longer is read by day, because an
+/// hour bucket over a year is thousands of points that say nothing.
 #[must_use]
-fn bucket_of(at: DateTime<Utc>) -> String {
-    at.format("%Y-%m-%d").to_string()
+fn bucket_of(at: DateTime<Utc>, range: Range) -> String {
+    match range {
+        Range::Today => at.format("%Y-%m-%d %H:00").to_string(),
+        _ => at.format("%Y-%m-%d").to_string(),
+    }
 }
 
 /// The bars a rank is drawn as: `filled` cells of a full **█** at most.
@@ -483,11 +487,13 @@ pub(crate) enum Tab {
     ThisSession,
     /// Every provider, with the models each served.
     Providers,
+    /// How each model's use moved over time.
+    Time,
 }
 
 impl Tab {
     /// Every tab, in the order the key walks them.
-    pub(crate) const ALL: [Self; 2] = [Self::ThisSession, Self::Providers];
+    pub(crate) const ALL: [Self; 3] = [Self::ThisSession, Self::Providers, Self::Time];
 
     /// The word the tab row shows.
     #[must_use]
@@ -495,6 +501,7 @@ impl Tab {
         match self {
             Self::ThisSession => "this session",
             Self::Providers => "providers",
+            Self::Time => "over time",
         }
     }
 
@@ -571,7 +578,7 @@ impl Panel {
     #[must_use]
     fn report(&self) -> Report {
         let rows: Vec<RequestRecord> = self.scoped().into_iter().cloned().collect();
-        Report::of(&rows)
+        Report::of(&rows, self.range)
     }
 
     /// Switches to the next tab.
@@ -654,6 +661,7 @@ impl Panel {
         match self.tab {
             Tab::ThisSession => self.session_lines(&mut out, &report),
             Tab::Providers => self.provider_lines(&mut out, &report),
+            Tab::Time => self.time_lines(&mut out),
         }
         out
     }
@@ -716,6 +724,117 @@ impl Panel {
             }
         }
         error_section(out, report);
+    }
+
+    /// One sparkline per model: its metric across the day buckets of the range.
+    ///
+    /// The line is a sparkline and not a chart with axes: a terminal has room
+    /// for the shape of the use and not for a plot, and the shape — a trough
+    /// after a key rotated, a spike after a long turn — is what a person reads.
+    /// Each model is its own line, never merged with another provider's model of
+    /// the same name.
+    fn time_lines(&self, out: &mut Vec<ViewLine>) {
+        let series = self.model_series(self.metric);
+        if series.is_empty() {
+            out.push(ViewLine::dim("nothing recorded, in this range"));
+            return;
+        }
+        let buckets: Vec<String> = report_buckets(&self.scoped(), self.range);
+        out.push(ViewLine::bold(format!(
+            "{} by day, {} to {}",
+            self.metric.label(),
+            buckets.first().map_or("–", String::as_str),
+            buckets.last().map_or("–", String::as_str)
+        )));
+        for (label, points) in &series {
+            let spark = sparkline(points);
+            let peak = points.iter().copied().max().unwrap_or(0);
+            out.push(ViewLine::plain(format!(
+                "{:<LABEL_COLUMN$} {spark}  peak {}",
+                clip(label, LABEL_COLUMN),
+                metric_scalar(peak, self.metric)
+            )));
+        }
+    }
+
+    /// One point per bucket, per model, for the metric in force.
+    fn model_series(&self, metric: Metric) -> Vec<(String, Vec<u64>)> {
+        let rows = self.scoped();
+        let buckets = report_buckets(&rows, self.range);
+        // A model's value in a bucket: its own slice of that bucket's rows.
+        let mut per_model: BTreeMap<String, BTreeMap<String, Slice>> = BTreeMap::new();
+        for record in rows {
+            per_model
+                .entry(format!("{}/{}", record.provider, record.model))
+                .or_default()
+                .entry(bucket_of(record.started_at, self.range))
+                .or_default()
+                .add_within(record, self.now);
+        }
+        let mut out: Vec<(String, Vec<u64>)> = per_model
+            .into_iter()
+            .map(|(model, by_bucket)| {
+                let points = buckets
+                    .iter()
+                    .map(|bucket| {
+                        by_bucket
+                            .get(bucket)
+                            .map_or(0, |slice| metric_total(slice, metric))
+                    })
+                    .collect();
+                (model, points)
+            })
+            .collect();
+        // The busiest model first, so the line that matters is at the top.
+        out.sort_by(|left, right| {
+            let peak = |points: &Vec<u64>| points.iter().copied().max().unwrap_or(0);
+            peak(&right.1)
+                .cmp(&peak(&left.1))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        out
+    }
+}
+
+/// Every day bucket the rows fall in, oldest first.
+fn report_buckets(rows: &[&RequestRecord], range: Range) -> Vec<String> {
+    let mut buckets: BTreeSet<String> = BTreeSet::new();
+    for record in rows {
+        buckets.insert(bucket_of(record.started_at, range));
+    }
+    buckets.into_iter().collect()
+}
+
+/// A model label with its provider stripped, clipped to a column.
+fn clip(label: &str, width: usize) -> String {
+    label.chars().take(width).collect()
+}
+
+/// The eight-step sparkline of a series, one character per point.
+fn sparkline(points: &[u64]) -> String {
+    const STEPS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let peak = points.iter().copied().max().unwrap_or(0);
+    if peak == 0 {
+        return "·".repeat(points.len());
+    }
+    points
+        .iter()
+        .map(|point| {
+            let step = usize::try_from(point.saturating_mul(7) / peak).unwrap_or(0);
+            STEPS[step.min(7)]
+        })
+        .collect()
+}
+
+/// A metric's peak as a short word, for the line that names it.
+fn metric_scalar(value: u64, metric: Metric) -> String {
+    match metric {
+        Metric::Tokens => format!("{} tokens", human(value)),
+        Metric::Output => format!("{} output", human(value)),
+        Metric::CacheRate => format!("{value}%"),
+        Metric::Latency | Metric::FirstToken => format!("{value}ms"),
+        Metric::Cost => format!("{value}µ$"),
+        Metric::Errors => format!("{value} errors"),
     }
 }
 
@@ -954,7 +1073,7 @@ mod tests {
             record("openai", "gpt-5", "ok"),
             record("openrouter", "gpt-5", "ok"),
         ];
-        let report = Report::of(&records);
+        let report = Report::of(&records, Range::All);
         assert_eq!(report.models.len(), 2, "{:?}", report.models.keys());
         assert!(report.models.contains_key("openai/gpt-5"));
         assert!(report.models.contains_key("openrouter/gpt-5"));
@@ -967,7 +1086,7 @@ mod tests {
             record("openai", "gpt-4", "ok"),
             record("openrouter", "gpt-5", "ok"),
         ];
-        let report = Report::of(&records);
+        let report = Report::of(&records, Range::All);
         let models = report.models_of("openai", Metric::Tokens);
         assert_eq!(models.len(), 2, "only openai's own: {models:?}");
         assert!(models.iter().all(|(label, _)| label.starts_with("openai/")));
@@ -982,7 +1101,7 @@ mod tests {
         let mut other = record("openai", "gpt-5", "error");
         other.error_kind = None;
         let records = vec![rate_limited, other];
-        let report = Report::of(&records);
+        let report = Report::of(&records, Range::All);
         let slice = report.providers.get("openai").expect("provider");
         assert_eq!(slice.errors, 2);
         let kinds = slice.error_tally.ranked();
@@ -1002,7 +1121,7 @@ mod tests {
         busy.output_tokens = Some(1_000);
         busy.cost_usd = Some(0.5);
         let records = vec![cheap, busy];
-        let report = Report::of(&records);
+        let report = Report::of(&records, Range::All);
         // By cost, the expensive one leads.
         let by_cost = report.providers_by(Metric::Cost);
         assert_eq!(by_cost[0].0, "busy");
@@ -1012,7 +1131,7 @@ mod tests {
         talker.input_tokens = Some(10);
         talker.output_tokens = Some(5_000);
         talker.cost_usd = Some(0.2);
-        let report = Report::of(&[record("reader", "m", "ok"), talker]);
+        let report = Report::of(&[record("reader", "m", "ok"), talker], Range::All);
         let by_output = report.providers_by(Metric::Output);
         assert_eq!(by_output[0].0, "talker", "the one that answered most");
         let by_tokens = report.providers_by(Metric::Tokens);
@@ -1106,6 +1225,42 @@ mod tests {
         assert!(text.contains("errors by provider, by kind"), "{text}");
         assert!(text.contains("rate_limited"), "{text}");
         assert!(text.contains("timeout"), "{text}");
+    }
+
+    #[test]
+    fn the_time_tab_draws_a_sparkline_per_model() {
+        // Two models over two days: each gets its own line, and the shape is the
+        // use, not a merged total.
+        let today = Utc::now();
+        let yesterday = today - Duration::days(1);
+        let mut a1 = record("openai", "gpt-5", "ok");
+        a1.started_at = yesterday;
+        a1.id = "a1".to_owned();
+        a1.input_tokens = Some(100);
+        let mut a2 = record("openai", "gpt-5", "ok");
+        a2.started_at = today;
+        a2.id = "a2".to_owned();
+        a2.input_tokens = Some(1_000);
+        let mut b = record("openrouter", "gpt-5", "ok");
+        b.started_at = today;
+        let mut panel = Panel::new(vec![a1, a2, b], None);
+        panel.tab = Tab::Time;
+        let text = text_of(&panel);
+        assert!(text.contains("over time"), "{text}");
+        assert!(text.contains("openai/gpt-5"), "{text}");
+        assert!(text.contains("openrouter/gpt-5"), "{text}");
+        // A full block for the peak day and a lower step for the smaller one.
+        assert!(text.contains('█') || text.contains('▇'), "{text}");
+    }
+
+    #[test]
+    fn a_sparkline_of_one_peak_reads_as_a_block() {
+        assert_eq!(sparkline(&[0, 0, 0]), "···");
+        let line = sparkline(&[1, 8, 4]);
+        let chars: Vec<char> = line.chars().collect();
+        assert_eq!(chars.len(), 3);
+        assert_eq!(chars[1], '█', "the peak is the full block");
+        assert!(chars[0] < chars[1], "the small one is shorter");
     }
 
     #[test]
