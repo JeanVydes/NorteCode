@@ -598,6 +598,17 @@ impl Renderer {
         self.set_modal(crate::modal::Modal::report(title, lines));
     }
 
+    /// Opens the telemetry panel.
+    ///
+    /// It is its own entry point and not `open_editable`: the panel draws charts
+    /// from its own state and walks its own tabs, so it is not a list of rows
+    /// with a cursor over them.
+    pub(crate) fn open_telemetry(&mut self, panel: crate::telemetry_panel::Panel) {
+        let mut modal = crate::modal::Modal::telemetry(panel);
+        modal.refresh_telemetry();
+        self.set_modal(modal);
+    }
+
     /// Opens a panel that can be acted on.
     ///
     /// A report and an editor are one widget: what makes the difference is
@@ -614,7 +625,10 @@ impl Renderer {
         // The keyboard reads this on its own thread: it is the one thing that
         // decides which keys belong to the panel and which to the report's
         // scroll, and the panel itself is not shared across the two threads.
-        self.pinned.set_modal_editable(modal.editable);
+        // A telemetry panel is not `editable` — it has no actable rows — but it
+        // still owns its own keys, so the reader has to route them to it.
+        self.pinned
+            .set_modal_editable(modal.editable || modal.telemetry.is_some());
         self.modal = Some(modal);
         // The scroll a person left on the last report is not one they want on
         // this one: a new panel opens at its top.

@@ -81,6 +81,8 @@ pub(crate) enum ChatCommand {
     Refresh,
     /// List, add, remove or switch an MCP server.
     Mcp { action: McpAction },
+    /// The telemetry panel: this session's ledger, and every provider's.
+    Telemetry,
     /// Leave the chat.
     Exit,
     /// Change an approval rule.
@@ -173,6 +175,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/refresh" => ChatCommand::Refresh,
         "/restart" => ChatCommand::Restart,
         "/debug" => ChatCommand::Debug,
+        "/telemetry" => ChatCommand::Telemetry,
         "/tools" => ChatCommand::Tools,
         "/exit" => ChatCommand::Exit,
         "/mcp" => match parse_mcp(&invocation) {
@@ -435,6 +438,9 @@ pub(crate) async fn interactive_loop(
                 // runs, so the useful moment to ask is after they have.
                 ChatCommand::Debug => report_debug(service, session.as_ref(), renderer, style),
                 ChatCommand::Tools => report_tools_now(service, session.as_ref(), renderer, style),
+                ChatCommand::Telemetry => {
+                    report_telemetry(session.as_ref(), renderer).await;
+                }
                 // A command from a plugin: the plugin answers with the lines
                 // of a panel, and the frame draws it like any other. The client
                 // does not know what the command is for and does not need to:
@@ -855,6 +861,9 @@ async fn handle_live_command(
         // settled, so it is the one command that works mid-turn.
         ChatCommand::Debug => report_debug(service, current, renderer, style),
         ChatCommand::Tools => report_tools_now(service, current, renderer, style),
+        ChatCommand::Telemetry => {
+            report_telemetry(current, renderer).await;
+        }
         // A command from a plugin: the plugin answers with the lines
         // of a panel, and the frame draws it like any other. The client
         // does not know what the command is for and does not need to:
@@ -1035,6 +1044,40 @@ fn report_tools_now(
     // names the tool.
     let rows = tools_panel(style, service, session);
     renderer.open_editable("tools", rows);
+}
+
+/// Opens the telemetry panel: this session's ledger and every provider's.
+///
+/// The rows come from the same store `norte-code telemetry` reads, opened here
+/// as a reader: a client that is mid-turn has a writer of its own on the same
+/// file, and WAL lets the two share it. A store that cannot be opened is not a
+/// failure of the client — a machine that has never run a request has no
+/// database — so it opens an empty panel and says so.
+async fn report_telemetry(session: Option<&SessionKey>, renderer: &mut Renderer) {
+    let records = match read_telemetry().await {
+        Ok(records) => records,
+        Err(error) => {
+            renderer.failure(format!("could not read the request ledger: {error}"));
+            return;
+        }
+    };
+    let session_key = session.map(ToString::to_string);
+    renderer.open_telemetry(crate::telemetry_panel::Panel::new(records, session_key));
+}
+
+/// Every recorded request row, from the store the client already uses.
+async fn read_telemetry() -> Result<Vec<norte_code_store_sqlite::RequestRecord>, String> {
+    use norte_code_store_sqlite::SessionDirectory as _;
+    let path = crate::commands::database_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let store = norte_code_store_sqlite::SqliteStore::open(&path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    store
+        .requests(None)
+        .await
+        .map_err(|error| format!("could not read {}: {error}", path.display()))
 }
 
 /// Carries out what the tools panel decided.

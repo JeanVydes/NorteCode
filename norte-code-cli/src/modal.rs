@@ -47,6 +47,12 @@ pub(crate) struct Row {
     pub action: Option<Action>,
     /// A word on the right that says what the row's state is.
     pub note: Option<String>,
+    /// Whether the row is a quiet note, drawn dim.
+    ///
+    /// A telemetry panel is mostly bars and numbers, and the lines around them —
+    /// a hint, a subtitle — are read past. The flag is on the row and not the
+    /// text so a dim row is still text a person can select and copy.
+    pub dim: bool,
 }
 
 impl Row {
@@ -58,6 +64,7 @@ impl Row {
             heading: false,
             action: None,
             note: None,
+            dim: false,
         }
     }
 
@@ -69,6 +76,7 @@ impl Row {
             heading: true,
             action: None,
             note: None,
+            dim: false,
         }
     }
 
@@ -80,6 +88,7 @@ impl Row {
             heading: false,
             action: Some(action),
             note: None,
+            dim: false,
         }
     }
 
@@ -170,12 +179,25 @@ pub(crate) enum Key {
     Enter,
     /// Flip the scope of the next action.
     ToggleScope,
+    /// Switch to the next tab.
+    Tab,
+    /// Walk the range selector on.
+    NextRange,
+    /// Walk the range selector back.
+    PrevRange,
+    /// Walk the metric the ranks are ordered by.
+    NextMetric,
+    /// Walk the metric back.
+    PrevMetric,
     /// Leave.
     Escape,
 }
 
 /// A panel of rows over the interface.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `PartialEq`: a telemetry panel carries sums of money, and comparing two
+/// of those is not something the client does or should.
+#[derive(Clone, Debug)]
 pub(crate) struct Modal {
     /// What the panel is about, on its top border.
     pub(crate) title: String,
@@ -195,6 +217,13 @@ pub(crate) struct Modal {
     /// A report and an editor are the same panel: a report has no actable rows
     /// and the cursor skips it, which is what keeps one widget for both.
     pub(crate) editable: bool,
+    /// The telemetry panel, when this panel is one.
+    ///
+    /// It carries its own state — the tab, the range, the metric, what is
+    /// expanded — because a chart panel is not a list of rows: the rows are
+    /// rebuilt from that state on every frame, and the keys move the state and
+    /// not a cursor over text.
+    pub(crate) telemetry: Option<crate::telemetry_panel::Panel>,
 }
 
 impl Modal {
@@ -208,6 +237,7 @@ impl Modal {
             top: 0,
             scope: Scope::Session,
             editable: false,
+            telemetry: None,
         }
     }
 
@@ -221,9 +251,50 @@ impl Modal {
             top: 0,
             scope: Scope::Session,
             editable: true,
+            telemetry: None,
         };
         modal.cursor = modal.first_actable();
         modal
+    }
+
+    /// A panel that draws the telemetry charts and walks its own tabs.
+    #[must_use]
+    pub(crate) fn telemetry(panel: crate::telemetry_panel::Panel) -> Self {
+        Self {
+            title: "telemetry".to_owned(),
+            rows: Vec::new(),
+            cursor: 0,
+            top: 0,
+            scope: Scope::Session,
+            editable: false,
+            telemetry: Some(panel),
+        }
+    }
+
+    /// Rebuilds the rows of a telemetry panel from its state.
+    ///
+    /// The panel draws itself: it is not a list the frame scrolls, it is a chart
+    /// the frame paints, so its lines are made here where the width is known and
+    /// the frame only draws them.
+    pub(crate) fn refresh_telemetry(&mut self) {
+        let Some(panel) = self.telemetry.as_ref() else {
+            return;
+        };
+        self.rows = panel
+            .lines()
+            .into_iter()
+            .map(|line| {
+                if line.bold {
+                    Row::heading(line.text)
+                } else if line.dim {
+                    let mut row = Row::text(line.text);
+                    row.dim = true;
+                    row
+                } else {
+                    Row::text(line.text)
+                }
+            })
+            .collect();
     }
 
     /// The first row that can be acted on, or zero when none can.
@@ -246,6 +317,12 @@ impl Modal {
     /// A heading is drawn and never landed on: acting on one is nothing, and a
     /// cursor that stopped on it would be a key that did nothing.
     pub(crate) fn move_by(&mut self, delta: isize) {
+        // A telemetry panel walks its own provider cursor: the rows are built
+        // from that state and not the other way round.
+        if let Some(panel) = self.telemetry.as_mut() {
+            panel.move_cursor(delta);
+            return;
+        }
         // A report has no cursor: its rows are text to read, and a cursor on
         // one would be a highlight a person cannot act on. Its arrows scroll,
         // which the reader does instead.
@@ -278,6 +355,15 @@ impl Modal {
     /// is what the tests drive: the reader cannot be tested without a terminal
     /// and this can.
     pub(crate) fn key(&mut self, key: Key) -> Choice {
+        let choice = self.key_without_rows(key);
+        // A telemetry panel is drawn from its state, so a key that moved the
+        // state moved what is on screen: the rows are rebuilt here, once, and
+        // the frame only draws them.
+        self.refresh_telemetry();
+        choice
+    }
+
+    fn key_without_rows(&mut self, key: Key) -> Choice {
         match key {
             Key::Escape => Choice::Closed,
             Key::Up => {
@@ -303,6 +389,10 @@ impl Modal {
                 Choice::None
             }
             Key::Enter => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.toggle_at_cursor();
+                    return Choice::None;
+                }
                 let Some(action) = self
                     .rows
                     .get(self.cursor)
@@ -314,6 +404,36 @@ impl Modal {
                     action,
                     scope: self.scope,
                 }
+            }
+            Key::Tab => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.next_tab();
+                }
+                Choice::None
+            }
+            Key::NextRange => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.next_range();
+                }
+                Choice::None
+            }
+            Key::PrevRange => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.prev_range();
+                }
+                Choice::None
+            }
+            Key::NextMetric => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.next_metric();
+                }
+                Choice::None
+            }
+            Key::PrevMetric => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.prev_metric();
+                }
+                Choice::None
             }
         }
     }
@@ -457,6 +577,8 @@ fn row_line(row: &Row, under_cursor: bool, _style: Style) -> Line<'static> {
         Style::bold_span()
     } else if under_cursor {
         Style::selected()
+    } else if row.dim {
+        ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::DIM)
     } else {
         ratatui::style::Style::new()
     };

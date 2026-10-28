@@ -6,6 +6,20 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `/telemetry` opens a panel over the conversation instead of printing a report
+  and losing it. It has tabs: `this session` is the roll-up filtered to the open
+  session — its summary, its models ranked, its errors — and `providers` is every
+  provider, each expandable into the models it served. A range selector
+  (`Today`, `This Week`, `This Month`, `This Year`, `All Time`) sits over both,
+  and the ranks are switchable by metric: total tokens, output, cache rate,
+  latency, time to first token, cost or errors. Errors are drawn as a bar per
+  provider cut into segments by their typed kind, because *which* three errors
+  decides what to do about them. `Tab` switches tab, `[`/`]` walk the range, `r`/
+  `R` the metric, arrows move the cursor and `Enter` expands a provider. A model
+  is keyed by `provider/model` and never merged.
+
 ### Changed
 
 - Entries in the conversation are separated by a blank row. A message used to sit

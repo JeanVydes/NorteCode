@@ -19,10 +19,9 @@
 //! so the panel's numbers — the ranks, the ranges, the error bars — are checked
 //! against the rows and not against a screen.
 
-#![allow(dead_code)] // the panel that draws this is built on top, frame by frame.
 #![allow(clippy::cast_precision_loss)] // a token count is far under 2^52 in any real ledger.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use norte_code_store_sqlite::RequestRecord;
@@ -66,6 +65,16 @@ impl Range {
             .position(|range| *range == self)
             .unwrap_or(0);
         Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+
+    /// The range before it, wrapping.
+    #[must_use]
+    pub(crate) fn prev(self) -> Self {
+        let at = Self::ALL
+            .iter()
+            .position(|range| *range == self)
+            .unwrap_or(0);
+        Self::ALL[(at + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
     /// How far back the range reaches from `now`, or `None` for everything.
@@ -148,6 +157,16 @@ impl Metric {
         Self::ALL[(at + 1) % Self::ALL.len()]
     }
 
+    /// The metric before it, wrapping.
+    #[must_use]
+    pub(crate) fn prev(self) -> Self {
+        let at = Self::ALL
+            .iter()
+            .position(|metric| *metric == self)
+            .unwrap_or(0);
+        Self::ALL[(at + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
     /// The value a summary is ranked by, larger first.
     #[must_use]
     fn value(self, summary: &Slice) -> f64 {
@@ -179,12 +198,6 @@ impl ErrorTally {
             .filter(|kind| !kind.is_empty())
             .unwrap_or_else(|| "other".to_owned());
         *self.by_kind.entry(kind).or_insert(0) += 1;
-    }
-
-    /// The total failures of every kind.
-    #[must_use]
-    pub(crate) fn total(&self) -> u64 {
-        self.by_kind.values().sum()
     }
 
     /// The kinds, most frequent first.
@@ -236,11 +249,6 @@ pub(crate) struct Slice {
 }
 
 impl Slice {
-    /// Rolls one record into the slice.
-    pub(crate) fn add(&mut self, record: &RequestRecord, now: DateTime<Utc>) {
-        self.add_within(record, now);
-    }
-
     fn add_within(&mut self, record: &RequestRecord, _now: DateTime<Utc>) {
         self.requests += 1;
         self.input_tokens += record.input_tokens.unwrap_or(0);
@@ -307,22 +315,6 @@ impl Slice {
     pub(crate) fn p50_ttft_ms(&self) -> u64 {
         percentile(&self.ttfts, 50)
     }
-
-    /// The wait for a first token three requests in four are at or under.
-    #[must_use]
-    pub(crate) fn p95_ttft_ms(&self) -> u64 {
-        percentile(&self.ttfts, 95)
-    }
-
-    /// The mean response time.
-    #[must_use]
-    pub(crate) fn average_ms(&self) -> u64 {
-        if self.durations.is_empty() {
-            return 0;
-        }
-        let count = u64::try_from(self.durations.len()).unwrap_or(u64::MAX);
-        self.durations.iter().sum::<u64>() / count.max(1)
-    }
 }
 
 /// The value at a percentile of a set, zero when it is empty.
@@ -338,27 +330,6 @@ fn percentile(values: &[u64], which: usize) -> u64 {
     sorted.sort_unstable();
     let index = (sorted.len() * which / 100).min(sorted.len() - 1);
     sorted[index]
-}
-
-/// One point of a series over time.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Point {
-    /// The bucket's name, as `bucket_label` writes it.
-    pub(crate) label: String,
-    /// Prompt and answer tokens in the bucket.
-    pub(crate) tokens: u64,
-    /// The money the provider reported in the bucket.
-    pub(crate) cost_usd: f64,
-}
-
-/// A model's line in the time chart: its own points, not merged with another
-/// provider's model of the same name.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Series {
-    /// The `provider/model` the line is for.
-    pub(crate) label: String,
-    /// The points, oldest bucket first.
-    pub(crate) points: Vec<u64>,
 }
 
 /// Everything the panel draws, rolled up once from the rows.
@@ -456,6 +427,481 @@ fn sort_by(rows: &mut [(&str, &Slice)], metric: Metric) {
 #[must_use]
 fn bucket_of(at: DateTime<Utc>) -> String {
     at.format("%Y-%m-%d").to_string()
+}
+
+/// The bars a rank is drawn as: `filled` cells of a full **█** at most.
+///
+/// It is text and not a widget, so a bar survives a pipe and reads the same in
+/// the panel as in `--jsonl`'s neighbour. The width is fixed, so a row of bars
+/// lines up down the panel and the eye can compare them.
+const BAR_CELLS: usize = 24;
+
+/// The label column, so the bars and the numbers line up down the panel.
+const LABEL_COLUMN: usize = 22;
+
+/// One drawn line: text plus the ink it is written in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ViewLine {
+    /// What the line says.
+    pub(crate) text: String,
+    /// Phrase the ink: `None` is ordinary, `Some` is a muted note.
+    pub(crate) dim: bool,
+    /// Whether the line is a heading, drawn bold.
+    pub(crate) bold: bool,
+}
+
+impl ViewLine {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            dim: false,
+            bold: false,
+        }
+    }
+
+    fn dim(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            dim: true,
+            bold: false,
+        }
+    }
+
+    fn bold(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            dim: false,
+            bold: true,
+        }
+    }
+}
+
+/// The tabs the panel switches between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tab {
+    /// The session the client is in.
+    ThisSession,
+    /// Every provider, with the models each served.
+    Providers,
+}
+
+impl Tab {
+    /// Every tab, in the order the key walks them.
+    pub(crate) const ALL: [Self; 2] = [Self::ThisSession, Self::Providers];
+
+    /// The word the tab row shows.
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ThisSession => "this session",
+            Self::Providers => "providers",
+        }
+    }
+
+    /// The next tab, wrapping.
+    #[must_use]
+    pub(crate) fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+}
+
+/// The whole panel state: the rows, and what is shown of them.
+///
+/// It holds the rows and not a rolled-up report: the tab and the range decide
+/// what is rolled up, and `this session` and `providers` are the same roll-up
+/// over two different filters. A report built once at construction would answer
+/// the wrong question the moment the range moved.
+#[derive(Clone, Debug)]
+pub(crate) struct Panel {
+    /// Every recorded row, as read from the store.
+    records: Vec<RequestRecord>,
+    /// The session key the `this session` tab filters by, when one is open.
+    session: Option<String>,
+    /// When "now" is, so the range does not move under a frame.
+    now: DateTime<Utc>,
+    /// Which tab is shown.
+    pub(crate) tab: Tab,
+    /// The window the numbers cover.
+    pub(crate) range: Range,
+    /// What the ranks are ordered by.
+    pub(crate) metric: Metric,
+    /// The providers whose models are shown, by provider id.
+    open: BTreeSet<String>,
+    /// Which provider row the cursor is on, in the `providers` tab.
+    pub(crate) cursor: usize,
+}
+
+impl Panel {
+    /// A panel over every recorded row, with a session to answer for.
+    #[must_use]
+    pub(crate) fn new(records: Vec<RequestRecord>, session: Option<String>) -> Self {
+        Self {
+            records,
+            session,
+            now: Utc::now(),
+            tab: Tab::ThisSession,
+            range: Range::Today,
+            metric: Metric::Tokens,
+            open: BTreeSet::new(),
+            cursor: 0,
+        }
+    }
+
+    /// The rows the current tab and range cover.
+    ///
+    /// `this session` is the same roll-up as `providers`, filtered to the open
+    /// session: the numbers a person sees there are the session's own slice of
+    /// exactly what the other tab rolls up.
+    fn scoped(&self) -> Vec<&RequestRecord> {
+        self.records
+            .iter()
+            .filter(|record| self.range.holds(record, self.now))
+            .filter(|record| {
+                self.tab != Tab::ThisSession
+                    || self
+                        .session
+                        .as_deref()
+                        .is_none_or(|session| record.session == session)
+            })
+            .collect()
+    }
+
+    /// The roll-up the current tab and range describe.
+    #[must_use]
+    fn report(&self) -> Report {
+        let rows: Vec<RequestRecord> = self.scoped().into_iter().cloned().collect();
+        Report::of(&rows)
+    }
+
+    /// Switches to the next tab.
+    pub(crate) fn next_tab(&mut self) {
+        self.tab = self.tab.next();
+        self.cursor = 0;
+    }
+
+    /// Walks the range selector on.
+    pub(crate) fn next_range(&mut self) {
+        self.range = self.range.next();
+    }
+
+    /// Walks the range selector back.
+    pub(crate) fn prev_range(&mut self) {
+        self.range = self.range.prev();
+    }
+
+    /// Walks the metric the ranks are ordered by.
+    pub(crate) fn next_metric(&mut self) {
+        self.metric = self.metric.next();
+    }
+
+    /// Walks the metric back.
+    pub(crate) fn prev_metric(&mut self) {
+        self.metric = self.metric.prev();
+    }
+
+    /// Moves the provider cursor, holding at both ends.
+    pub(crate) fn move_cursor(&mut self, delta: isize) {
+        let rows = self.report().providers_by(self.metric).len();
+        if rows == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let at = self.cursor.saturating_add_signed(delta);
+        self.cursor = at.min(rows - 1);
+    }
+
+    /// Opens or closes the provider under the cursor.
+    pub(crate) fn toggle_at_cursor(&mut self) {
+        let name = self
+            .report()
+            .providers_by(self.metric)
+            .get(self.cursor)
+            .map(|(provider, _)| (*provider).to_owned());
+        if let Some(provider) = name {
+            if !self.open.remove(&provider) {
+                self.open.insert(provider);
+            }
+        }
+    }
+
+    /// The tab row, so a person sees which of them they are on.
+    #[must_use]
+    pub(crate) fn tab_row(&self) -> ViewLine {
+        let tabs: Vec<String> = Tab::ALL
+            .iter()
+            .map(|tab| {
+                if *tab == self.tab {
+                    format!("[{}]", tab.label())
+                } else {
+                    format!(" {} ", tab.label())
+                }
+            })
+            .collect();
+        ViewLine::bold(format!(
+            "{}   ·   range: {}   ·   rank by: {}",
+            tabs.join(" "),
+            self.range.label(),
+            self.metric.label()
+        ))
+    }
+
+    /// The lines of the current tab.
+    #[must_use]
+    pub(crate) fn lines(&self) -> Vec<ViewLine> {
+        let report = self.report();
+        let mut out = vec![self.tab_row(), ViewLine::plain("")];
+        match self.tab {
+            Tab::ThisSession => self.session_lines(&mut out, &report),
+            Tab::Providers => self.provider_lines(&mut out, &report),
+        }
+        out
+    }
+
+    /// This session's own figures, its own models ranked, and its errors.
+    fn session_lines(&self, out: &mut Vec<ViewLine>, report: &Report) {
+        if report.total.requests == 0 {
+            out.push(ViewLine::dim(
+                "no request recorded for this session, in this range",
+            ));
+            return;
+        }
+        out.push(ViewLine::bold("summary"));
+        for (label, value) in summary_facts(&report.total) {
+            out.push(ViewLine::plain(format!("  {label:<14}{value}")));
+        }
+        out.push(ViewLine::plain(""));
+        out.push(ViewLine::bold(format!("models by {}", self.metric.label())));
+        let rows = report.models_by(self.metric);
+        let busiest = busiest_of(&rows, self.metric);
+        for (model, slice) in &rows {
+            out.push(ViewLine::plain(rank_row(
+                model,
+                slice,
+                self.metric,
+                busiest,
+            )));
+        }
+        error_section(out, report);
+    }
+
+    /// Every provider, each expandable into its models.
+    fn provider_lines(&self, out: &mut Vec<ViewLine>, report: &Report) {
+        let rows = report.providers_by(self.metric);
+        if rows.is_empty() {
+            out.push(ViewLine::dim("nothing recorded"));
+            return;
+        }
+        let busiest = busiest_of(&rows, self.metric);
+        out.push(ViewLine::bold(format!(
+            "providers by {}",
+            self.metric.label()
+        )));
+        for (index, (provider, slice)) in rows.iter().enumerate() {
+            let open = self.open.contains(*provider);
+            let marker = if open { "▾" } else { "▸" };
+            let lead = if index == self.cursor { "›" } else { " " };
+            out.push(ViewLine::plain(format!(
+                "{lead}{marker} {}",
+                rank_row(provider, slice, self.metric, busiest)
+            )));
+            if open {
+                for (model, model_slice) in report.models_of(provider, self.metric) {
+                    let name = model.split_once('/').map_or(model, |(_, name)| name);
+                    out.push(ViewLine::plain(format!(
+                        "     {}",
+                        rank_row(name, model_slice, self.metric, busiest)
+                    )));
+                }
+            }
+        }
+        error_section(out, report);
+    }
+}
+
+/// The error bars: one per provider, subdivided by the kind of error.
+///
+/// A bar that says "three errors" is not enough — rate limits, auth and timeouts
+/// are three different things to do something about — so each provider's bar is
+/// cut into its kinds, and the longest bar sets the scale.
+fn error_section(out: &mut Vec<ViewLine>, report: &Report) {
+    let with_errors: Vec<(&str, &Slice)> = report
+        .providers
+        .iter()
+        .filter(|(_, slice)| slice.errors > 0)
+        .map(|(name, slice)| (name.as_str(), slice))
+        .collect();
+    if with_errors.is_empty() {
+        return;
+    }
+    out.push(ViewLine::plain(""));
+    out.push(ViewLine::bold("errors by provider, by kind"));
+    let busiest = with_errors
+        .iter()
+        .map(|(_, slice)| slice.errors)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    for (provider, slice) in with_errors {
+        out.push(ViewLine::plain(format!(
+            "  {provider:<LABEL_COLUMN$} {}",
+            error_bar(slice, busiest)
+        )));
+        for (kind, count) in slice.error_tally.ranked() {
+            out.push(ViewLine::dim(format!("      {count:>4}  {kind}")));
+        }
+    }
+}
+
+/// One provider's errors as a bar cut into segments by kind.
+fn error_bar(slice: &Slice, busiest: u64) -> String {
+    let filled = usize::try_from(slice.errors)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(BAR_CELLS)
+        .checked_div(usize::try_from(busiest).unwrap_or(1))
+        .unwrap_or(0)
+        .clamp(1, BAR_CELLS);
+    // Each kind takes a slice of the bar, in turns, so a bar of one kind is one
+    // run and a bar of three shows three.
+    let segments = "▚▞▓▒░█";
+    let kinds = slice.error_tally.ranked();
+    let mut bar = String::new();
+    for cell in 0..filled {
+        let kind = kinds
+            .get(cell * kinds.len() / filled.max(1))
+            .map_or('·', |_| '█');
+        let shade = segments
+            .chars()
+            .nth(cell % segments.chars().count())
+            .unwrap_or(kind);
+        bar.push(shade);
+    }
+    format!("{bar:<BAR_CELLS$} {}", slice.errors)
+}
+
+/// The busiest row's metric, which is the scale a bar is drawn against.
+fn busiest_of(rows: &[(&str, &Slice)], metric: Metric) -> u64 {
+    rows.iter()
+        .map(|(_, slice)| metric_total(slice, metric))
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// The value a metric measures on a slice, used to size the bar.
+#[must_use]
+fn metric_total(slice: &Slice, metric: Metric) -> u64 {
+    match metric {
+        Metric::Tokens => slice.tokens(),
+        Metric::Output => slice.output_tokens,
+        Metric::CacheRate => slice.cache_rate().unwrap_or(0),
+        Metric::Latency => slice.p50_ms(),
+        Metric::FirstToken => slice.p50_ttft_ms(),
+        Metric::Cost => cost_cents(slice.cost_usd),
+        Metric::Errors => slice.errors,
+    }
+}
+
+/// One ranked row: a label, a bar, and the value the bar is drawn for.
+#[must_use]
+fn rank_row(label: &str, slice: &Slice, metric: Metric, busiest: u64) -> String {
+    let value = metric_total(slice, metric);
+    let filled = usize::try_from(value)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(BAR_CELLS)
+        .checked_div(usize::try_from(busiest).unwrap_or(1))
+        .unwrap_or(0)
+        .min(BAR_CELLS);
+    let bar: String = "█".repeat(filled) + &"·".repeat(BAR_CELLS - filled);
+    let clipped: String = label.chars().take(LABEL_COLUMN).collect();
+    format!(
+        "{clipped:<LABEL_COLUMN$} {bar}  {}",
+        metric_value(slice, metric)
+    )
+}
+
+/// A metric's value on a slice, as the row prints it.
+#[must_use]
+fn metric_value(slice: &Slice, metric: Metric) -> String {
+    match metric {
+        Metric::Tokens => format!("{} tokens", human(slice.tokens())),
+        Metric::Output => format!("{} output", human(slice.output_tokens)),
+        Metric::CacheRate => slice
+            .cache_rate()
+            .map_or_else(|| "no cache".to_owned(), |rate| format!("{rate}% cached")),
+        Metric::Latency => format!("{}ms p50", slice.p50_ms()),
+        Metric::FirstToken => format!("{}ms ttft", slice.p50_ttft_ms()),
+        Metric::Cost => {
+            if slice.unpriced == slice.requests && slice.requests > 0 {
+                "cost not reported".to_owned()
+            } else {
+                format!("${:.4}", slice.cost_usd)
+            }
+        }
+        Metric::Errors => format!("{} error(s)", slice.errors),
+    }
+}
+
+/// The cost in millionths of a dollar, clamped at zero, for sizing a bar.
+///
+/// The bar needs an integer and the cost is a float; a negative cost is not a
+/// thing a provider reports, and clamping means it cannot size a bar backwards.
+#[must_use]
+fn cost_cents(cost_usd: f64) -> u64 {
+    let scaled = (cost_usd * 1_000_000.0).round();
+    if scaled <= 0.0 {
+        return 0;
+    }
+    // The value is checked non-negative above and bounded here, so the cast
+    // cannot lose a sign or wrap.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bounded = scaled.min(u64::MAX as f64) as u64;
+    bounded
+}
+
+/// A count of tokens, short: `1.2M`, `34k`, `900`.
+#[must_use]
+fn human(tokens: u64) -> String {
+    crate::render::human_tokens(tokens)
+}
+
+/// The summary facts of a slice, in the order the panel prints them.
+#[must_use]
+fn summary_facts(slice: &Slice) -> Vec<(&'static str, String)> {
+    let mut facts = vec![
+        ("requests", slice.requests.to_string()),
+        (
+            "tokens",
+            format!(
+                "{} in · {} out",
+                human(slice.input_tokens),
+                human(slice.output_tokens)
+            ),
+        ),
+        (
+            "latency",
+            format!("{}ms p50 · {}ms p95", slice.p50_ms(), slice.p95_ms()),
+        ),
+        ("first token", format!("{}ms p50", slice.p50_ttft_ms())),
+    ];
+    if let Some(rate) = slice.cache_rate() {
+        facts.push(("cache", format!("{rate}% of the prompt")));
+    }
+    facts.push((
+        "cost",
+        if slice.unpriced == slice.requests && slice.requests > 0 {
+            "not reported".to_owned()
+        } else {
+            format!("${:.4}", slice.cost_usd)
+        },
+    ));
+    if slice.errors + slice.cancelled > 0 {
+        facts.push((
+            "errors",
+            format!("{} error(s), {} cancelled", slice.errors, slice.cancelled),
+        ));
+    }
+    facts
 }
 
 #[cfg(test)]
@@ -585,6 +1031,81 @@ mod tests {
         assert!(!Range::Month.holds(&old, now));
         // Everything holds everything.
         assert!(Range::All.holds(&old, now));
+    }
+
+    fn text_of(panel: &Panel) -> String {
+        panel
+            .lines()
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_panel_draws_the_tabs_the_range_and_the_rank() {
+        let records = vec![
+            record("openai", "gpt-5", "ok"),
+            record("openrouter", "gpt-5", "ok"),
+        ];
+        let panel = Panel::new(records, None);
+        let text = text_of(&panel);
+        assert!(text.contains("this session"), "{text}");
+        assert!(
+            text.contains("[providers]") || text.contains("providers"),
+            "{text}"
+        );
+        assert!(text.contains("range: Today"), "{text}");
+        assert!(text.contains("rank by: total tokens"), "{text}");
+    }
+
+    #[test]
+    fn this_session_is_the_same_roll_up_filtered_by_session() {
+        // The two tabs are one roll-up over two filters: this session is the
+        // session's own slice of exactly what the provider tab rolls up, so a
+        // row of another session is not in it.
+        let mut mine = record("openai", "gpt-5", "ok");
+        mine.session = "mine".to_owned();
+        let mut other = record("openai", "gpt-5", "ok");
+        other.session = "other".to_owned();
+        other.id = "other".to_owned();
+        let panel = Panel::new(vec![mine, other], Some("mine".to_owned()));
+        let text = text_of(&panel);
+        // One request, not two: the other session's is not this session's.
+        assert!(text.contains("requests      1"), "{text}");
+    }
+
+    #[test]
+    fn a_provider_expands_in_the_panel_to_show_its_models() {
+        let records = vec![
+            record("openai", "gpt-5", "ok"),
+            record("openai", "gpt-4", "ok"),
+        ];
+        let mut panel = Panel::new(records, None);
+        panel.next_tab();
+        let closed = text_of(&panel);
+        assert!(
+            !closed.contains("gpt-4"),
+            "closed shows no models: {closed}"
+        );
+        panel.toggle_at_cursor();
+        let open = text_of(&panel);
+        assert!(open.contains("gpt-4"), "open shows them: {open}");
+        assert!(open.contains("gpt-5"), "{open}");
+    }
+
+    #[test]
+    fn the_error_section_subdivides_a_bar_by_kind() {
+        let mut rate = record("openai", "gpt-5", "error");
+        rate.error_kind = Some("rate_limited".to_owned());
+        let mut timeout = record("openai", "gpt-5", "error");
+        timeout.id = "timeout".to_owned();
+        timeout.error_kind = Some("timeout".to_owned());
+        let panel = Panel::new(vec![rate, timeout], None);
+        let text = text_of(&panel);
+        assert!(text.contains("errors by provider, by kind"), "{text}");
+        assert!(text.contains("rate_limited"), "{text}");
+        assert!(text.contains("timeout"), "{text}");
     }
 
     #[test]

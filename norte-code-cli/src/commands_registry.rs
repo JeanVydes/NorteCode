@@ -148,6 +148,10 @@ pub(crate) fn built() -> Registry {
         "/debug",
         "what the process knows: model, tools, paths, servers",
     ));
+    registry.register(CommandSpec::new(
+        "/telemetry",
+        "the request ledger: this session, and every provider",
+    ));
     registry.register(CommandSpec::new("/exit", "leave the chat").aliased(&["/quit"]));
     // The plugins lead: a command of theirs that names one of the client's is
     // the one that wins, because the plugin was asked for by name and the

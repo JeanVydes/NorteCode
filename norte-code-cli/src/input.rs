@@ -1300,6 +1300,15 @@ mod unix {
                                     {
                                         Some(crate::modal::Key::ToggleScope)
                                     }
+                                    // The keys a telemetry panel owns: it is the
+                                    // thing that knows which tab, range and
+                                    // metric are shown, so what travels is the
+                                    // key and not the state.
+                                    KeyCode::Tab => Some(crate::modal::Key::Tab),
+                                    KeyCode::Char(']') => Some(crate::modal::Key::NextRange),
+                                    KeyCode::Char('[') => Some(crate::modal::Key::PrevRange),
+                                    KeyCode::Char('r') => Some(crate::modal::Key::NextMetric),
+                                    KeyCode::Char('R') => Some(crate::modal::Key::PrevMetric),
                                     _ => None,
                                 };
                                 if let Some(press) = key_for_panel {
