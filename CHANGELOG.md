@@ -8,6 +8,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A session can be deleted, with everything it left behind. `/delete` in a chat
+  removes the session it is on and leaves; `norte-code sessions delete <key>`
+  does it from the command line, asking first and taking `--yes` for a script.
+  Both go through the service's own delete, so the logical row, the Norte
+  session, the node chain and the ledgers keyed by either id go together: the
+  tables carry no foreign keys, and a delete that cleared one row alone is what
+  left requests pointing at a session the list no longer had.
+
 - A "back to the latest" bar sits on the last row of the conversation
   while the view is scrolled back, naming the key that returns to the tail.
   It is a button too: clicking it jumps to the newest line, so a person who
@@ -16,6 +24,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   back to.
 
 ### Fixed
+
+- An answer that interleaves with the model's thinking is no longer split. A
+  model that reasons emits `Reasoning` and `Text` in turn, and every change of
+  block writes the blank row that separates the two; the row was written after
+  the entry for the new text had been made, so it landed inside the answer
+  instead of between the blocks. The first word of an answer ended up alone on
+  its row with a gap under it, and the rest started again below.
 
 - A server switched off in a session takes effect at once. `/mcp disable`
   wrote the config file but the connections were rebuilt from the copy in

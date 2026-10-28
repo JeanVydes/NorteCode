@@ -1610,3 +1610,83 @@ fn a_call_that_is_still_out_is_grey_and_carries_no_outcome() {
     assert!(!text.contains('\u{2717}'), "no cross: {text:?}");
     assert!(entry.started.is_some(), "and it is counting");
 }
+
+/// A delta event, as the loop hands it to the renderer.
+fn delta_event(delta: Delta) -> ServerEvent {
+    ServerEvent {
+        request_id: 1,
+        session: None,
+        kind: ServerEventKind::Delta { turn: 1, delta },
+    }
+}
+
+#[test]
+fn an_answer_that_is_interleaved_with_thinking_is_not_split() {
+    // A model that reasons emits `Reasoning` and `Text` in turn, and every
+    // change of block writes the blank row that separates two blocks. The row
+    // was written after the entry for the new text had been made, so it landed
+    // inside the answer instead of between the two: the first word of an answer
+    // ended up alone on its row with a gap under it, and the rest started again
+    // below — the answer looked like it had been cut in half.
+    //
+    // The block change is what makes the row, so it has to happen before the
+    // entry exists. What is asserted here is the shape of the whole
+    // conversation: one entry per block, in the order they arrived.
+    let pinned = Pinned::new();
+    let mut renderer = reasoning_renderer(&pinned);
+    renderer.mark_working();
+    for (kind, text) in [
+        ("r", "Pienso un momento. "),
+        ("t", "Ant"),
+        ("t", "es de borrar"),
+        ("t", " tengo que resolver"),
+        ("r", " una duda"),
+        ("t", " una duda critica"),
+        ("t", ": hay 105 requests"),
+        ("r", " mas"),
+        ("t", " con nuestro north_session"),
+        ("t", " pero otra key."),
+    ] {
+        let delta = if kind == "r" {
+            Delta::Reasoning {
+                index: 0,
+                text: text.to_owned(),
+            }
+        } else {
+            Delta::Text {
+                index: 0,
+                text: text.to_owned(),
+            }
+        };
+        renderer.event(&delta_event(delta)).expect("event");
+    }
+    // The answers, in order and with the blank rows taken out: the text reads
+    // as one answer and the first word is not on a row of its own.
+    let answers: Vec<Vec<String>> = renderer
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == crate::transcript::Kind::Answer)
+        .map(texts)
+        .collect();
+    assert!(
+        !answers
+            .iter()
+            .any(|rows| rows.first().is_some_and(|row| row == "Ant")),
+        "the first word is not alone on its row: {answers:?}"
+    );
+    let whole: String = answers.into_iter().flatten().collect();
+    assert!(
+        whole.contains("Antes de borrar tengo que resolver"),
+        "the answer reads as one: {whole:?}"
+    );
+    // And a blank row is written where a block gave way to another, which is
+    // what separates a thought from the answer it leads to.
+    let blanks = renderer
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind == crate::transcript::Kind::Notice && texts(entry) == [""])
+        .count();
+    assert!(blanks > 0, "the blocks are still separated");
+}

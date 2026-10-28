@@ -3,8 +3,8 @@
 use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
     LoadOptions, McpArgs, McpCommand, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory,
-    SessionsArgs, SkillRegistry, SkillsArgs, SkillsCommand, Source, SqliteStore, Style,
-    TelemetryArgs, Utc, by_day, by_session, by_turn, cache_dir, cache_percent_label,
+    SessionsArgs, SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand, Source, SqliteStore,
+    Style, TelemetryArgs, Utc, by_day, by_session, by_turn, cache_dir, cache_percent_label,
     discovery_roots, find_project_config, human_tokens, list_models, load_catalog, new_session,
     open_session, resume_named, short, summarize, token_ratio, user_config_path,
 };
@@ -234,6 +234,12 @@ pub(crate) async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> 
     if let Err(error) = store.repair_interrupted().await {
         eprintln!("warning: could not repair interrupted sessions: {error}");
     }
+    // A delete is the one thing this command does that is not a read, and it is
+    // answered here rather than after the list: the caller asked to remove a
+    // session, not to be shown every one it has.
+    if let Some(SessionsCommand::Delete { key, yes }) = &args.command {
+        return delete_session(&store, key, *yes, args.json).await;
+    }
     let sessions = store
         .sessions()
         .await
@@ -257,6 +263,66 @@ pub(crate) async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> 
                 crate::text::terminal(&session.phase)
             );
         }
+    }
+    Ok(0)
+}
+
+/// Deletes one stored session, and every row that pointed at it.
+///
+/// The deletion goes through [`SessionDirectory::delete_session`], which is
+/// where the cascade lives: a session is a key, a Norte id, a chain of nodes
+/// and a row in every ledger that outlives it, and the tables carry no foreign
+/// keys, so a delete that cleared one alone left the rest behind. That is what
+/// put requests in the telemetry of a session the list no longer had, and what
+/// made a delete look partial.
+///
+/// The key is required and it is the whole key: a prefix that matched is a
+/// person deleting something they did not name, and this is not undoable from
+/// here.
+async fn delete_session(
+    store: &SqliteStore,
+    key: &str,
+    yes: bool,
+    json: bool,
+) -> Result<u8, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(
+            "delete needs a session key; run `norte-code sessions` to list them".to_owned(),
+        );
+    }
+    let sessions = store
+        .sessions()
+        .await
+        .map_err(|error| format!("could not read the sessions: {error}"))?;
+    let Some(session) = sessions.iter().find(|session| session.key == key) else {
+        return Err(format!("no stored session has the key `{key}`"));
+    };
+    // The confirmation is not a formality: the conversation, its cost ledger
+    // and its telemetry all go with it, and nothing here can bring them back.
+    // `--yes` is what a script passes; a person at a terminal is asked.
+    if !yes {
+        let title = session.title.as_deref().unwrap_or("(untitled)");
+        eprint!(
+            "delete session `{key}` ({title})? its conversation, cost and telemetry go with it [y/N] "
+        );
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            return Err("could not read the confirmation".to_owned());
+        }
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("nothing was deleted");
+            return Ok(0);
+        }
+    }
+    store
+        .delete_session(key)
+        .await
+        .map_err(|error| format!("could not delete `{key}`: {error}"))?;
+    if json {
+        println!("{}", serde_json::json!({"deleted": key}));
+    } else {
+        println!("deleted session `{key}`");
     }
     Ok(0)
 }

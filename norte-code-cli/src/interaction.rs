@@ -117,6 +117,8 @@ pub(crate) enum ChatCommand {
     /// Go back to choosing a provider and a model: the screen the process opens
     /// on, reachable from inside a session.
     Menu,
+    /// Delete this session and leave the chat.
+    Delete,
 
     /// Report what the process knows about itself: the model, its
     /// capabilities, the tools, the servers, the paths. Built when it is asked
@@ -178,6 +180,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/refresh" => ChatCommand::Refresh,
         "/restart" => ChatCommand::Restart,
         "/menu" => ChatCommand::Menu,
+        "/delete" => ChatCommand::Delete,
         "/debug" => ChatCommand::Debug,
         "/telemetry" => ChatCommand::Telemetry,
         "/tools" => ChatCommand::Tools,
@@ -743,6 +746,34 @@ pub(crate) async fn interactive_loop(
                         "starting a fresh session; the previous one is saved and can be resumed",
                     );
                 }
+                // The session goes and the chat goes with it. Nothing is left
+                // to continue and nothing above it in the history names it any
+                // more, so staying would leave a client on a session that no
+                // longer exists. It is done here, at the turn boundary, and not
+                // while a turn runs: the service is still writing to the
+                // session being dropped.
+                ChatCommand::Delete => {
+                    let Some(key) = session.clone() else {
+                        renderer.notice("there is no session to delete yet; send a message first");
+                        continue;
+                    };
+                    match delete_current(service, &key).await {
+                        Ok(()) => {
+                            // Cleared before the break, so the caller cannot
+                            // write the session back: a session deleted here
+                            // and saved on the way out would come back, and the
+                            // next start would offer a conversation the person
+                            // asked to be rid of.
+                            session = None;
+                            renderer.notice("session deleted; leaving");
+                            break;
+                        }
+                        Err(error) => {
+                            renderer.failure(format!("could not delete the session: {error}"));
+                            continue;
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -1014,6 +1045,11 @@ async fn handle_live_command(
         ChatCommand::Restart => {
             renderer.notice("wait until the current turn finishes, then /restart");
         }
+        // A delete ends the session, so it cannot wait for the turn either: the
+        // service is writing to the session being deleted.
+        ChatCommand::Delete => {
+            renderer.notice("wait until the current turn finishes, then /delete");
+        }
         // `/menu` reads the catalogue and the session's provider, and both are
         // settled between turns: mid-turn the list would be the one the running
         // turn is already answering from, which is the list that helps least.
@@ -1021,6 +1057,25 @@ async fn handle_live_command(
             renderer.notice("wait until the current turn finishes, then /menu");
         }
     }
+}
+
+/// Deletes a session through the service, so every row goes with it.
+///
+/// The request is the wire's own `DeleteSession`, which is the path a delete
+/// elsewhere takes: the service drops the session from the directory it holds
+/// and the store clears the logical row, the Norte session, the node chain and
+/// the ledgers keyed by either id. The tables carry no foreign keys, so a delete
+/// that cleared one row alone is what left requests pointing at a session the
+/// list no longer had.
+async fn delete_current(service: &Arc<Service>, session: &SessionKey) -> Result<(), String> {
+    let request = ClientRequestKind::DeleteSession {
+        session: session.clone(),
+    };
+    let events = drain_request(service, request).await?;
+    if let Some(error) = stream_error(&events) {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Names the session, from the text given or from the model.
@@ -2760,6 +2815,28 @@ mod tests {
         assert_eq!(usage_of("/rename"), Some("/rename [title]".to_owned()));
         // A word that merely starts with it is still a message.
         assert_eq!(parse_chat_command("/renamed"), None);
+    }
+
+    #[test]
+    fn delete_is_a_command_and_takes_no_argument() {
+        // `/delete` removes the session the chat is on and leaves. It is spelled
+        // out because it is not undoable from here: everything else a person
+        // types beginning with a slash is refused rather than sent as a message,
+        // and a delete that reached the model as text would be a message about
+        // deleting rather than the deletion.
+        assert_eq!(parse_chat_command("/delete"), Some(Ok(ChatCommand::Delete)));
+        // An argument is refused by the registry, which names the word it did
+        // not expect and prints the usage: a delete is not something to guess
+        // at, and a silent ignore would run it on the wrong reading of what
+        // was typed.
+        assert!(
+            matches!(
+                parse_chat_command("/delete now"),
+                Some(Err(message)) if message.contains("no `now`") && message.contains("usage: /delete")
+            ),
+            "an argument is refused: {:?}",
+            parse_chat_command("/delete now")
+        );
     }
 
     #[test]

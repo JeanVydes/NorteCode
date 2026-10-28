@@ -138,7 +138,7 @@ enum Command {
     Models(ModelsArgs),
     /// Inspect the installed Agent Skills.
     Skills(SkillsArgs),
-    /// List the sessions stored on disk.
+    /// List the sessions stored on disk, or delete one.
     Sessions(SessionsArgs),
     /// Report the provider-reported cost ledger.
     Cost(CostArgs),
@@ -451,9 +451,24 @@ impl CommonOptions<'_> {
 
 #[derive(Args)]
 struct SessionsArgs {
+    /// What to do with the stored sessions.
+    #[command(subcommand)]
+    command: Option<SessionsCommand>,
     /// Write one JSON object per line.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Subcommand)]
+enum SessionsCommand {
+    /// Delete a stored session and every row it left behind.
+    Delete {
+        /// The session key, as `sessions` prints it.
+        key: String,
+        /// Answer yes to the confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Args)]

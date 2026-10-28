@@ -155,6 +155,10 @@ pub(crate) fn built() -> Registry {
     registry.register(
         CommandSpec::new("/menu", "go back to choosing a provider and a model").aliased(&["/back"]),
     );
+    registry.register(CommandSpec::new(
+        "/delete",
+        "delete this session, with its cost and telemetry, and leave",
+    ));
     registry.register(CommandSpec::new("/exit", "leave the chat").aliased(&["/quit"]));
     // The plugins lead: a command of theirs that names one of the client's is
     // the one that wins, because the plugin was asked for by name and the
@@ -198,6 +202,7 @@ mod tests {
             "/rename",
             "/debug",
             "/menu",
+            "/delete",
             "/exit",
         ] {
             assert!(names.contains(&expected.to_owned()), "missing {expected}");

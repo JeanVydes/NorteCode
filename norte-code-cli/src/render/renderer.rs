@@ -532,6 +532,14 @@ impl Renderer {
             println!("{line}");
             return Ok(());
         }
+        // A delta changes the block before it is recorded. The block change is
+        // where the blank row between two blocks is written, and if the entry
+        // for the new text already exists that row lands inside the answer it
+        // was meant to open — which is what split an answer with a gap after
+        // its first word every time the model went back to thinking.
+        if let ServerEventKind::Delta { delta, .. } = &event.kind {
+            self.delta(delta);
+        }
         self.record(&event.kind);
         // The retry delay is over as soon as the next piece of work arrives.
         // Without this the footer would keep counting a wait that already ended.
@@ -549,7 +557,9 @@ impl Renderer {
             self.mark_working();
         }
         match &event.kind {
-            ServerEventKind::Delta { delta, .. } => self.delta(delta),
+            // Already reached the conversation, before the entry was made: see
+            // the comment above.
+            ServerEventKind::Delta { .. } => {}
             ServerEventKind::ToolStarted { .. }
             | ServerEventKind::ToolFinished { .. }
             | ServerEventKind::ToolOutput { .. } => {
