@@ -243,7 +243,11 @@ pub enum ClientRequestKind {
     },
     /// List the models the catalogue knows.
     ListModels,
-    /// Refresh the catalogue from the network.
+    /// Re-read the catalogue files.
+    ///
+    /// It reads the two files the host owns — the providers and the models —
+    /// and replaces what is in memory. Nothing is fetched: the files are a
+    /// person's, and a plugin that writes them is what changes them.
     RefreshCatalog,
     /// List the installed Agent Skills.
     ListSkills,
@@ -608,7 +612,7 @@ pub enum ServerEventKind {
         /// Why.
         reason: String,
     },
-    /// The catalogue changed on disk.
+    /// The catalogue was re-read: how many models it now carries.
     CatalogUpdated {
         /// How many models it carries.
         models: usize,
@@ -782,6 +786,28 @@ pub struct GrantInfo {
     pub revoked: bool,
 }
 
+/// One kind of content a model accepts or produces.
+///
+/// It is the wire's own name for the three the ecosystem shares. The catalogue
+/// has its own enum and this is the one the wire carries: the protocol crate is
+/// free of Norte types and of the catalogue's, so the mapping between them
+/// happens in one place rather than a string crossing the wire and being parsed
+/// again at the other end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    /// Plain text.
+    Text,
+    /// An image.
+    Image,
+    /// Recorded audio.
+    Audio,
+    /// Recorded video.
+    Video,
+    /// A document, which is what a PDF is.
+    File,
+}
+
 /// One model the catalogue knows, flattened for a picker.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -801,13 +827,53 @@ pub struct ModelInfo {
     /// Whether the model calls host functions.
     pub tools: bool,
     /// Accepted input modalities.
-    pub input: Vec<String>,
+    pub input: Vec<Modality>,
     /// Produced output modalities.
-    pub output: Vec<String>,
+    pub output: Vec<Modality>,
     /// The reasoning controls the host may offer.
     pub reasoning: ReasoningInfo,
     /// Whether the catalogue marks the model deprecated.
     pub deprecated: bool,
+}
+
+/// Where a background job stands.
+///
+/// It crosses the wire as an enum and not as a word: a client that matched on a
+/// string had a catch-all arm that swallowed every typo, so a state the service
+/// added would have been drawn as "finished" by every client that did not know
+/// it. An unknown variant in a payload is a parse error naming the variant,
+/// which is the failure a reader can act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    /// Running, or finished and not yet read.
+    Running,
+    /// Ended on its own.
+    Finished,
+    /// Ended because someone asked it to.
+    Cancelled,
+}
+
+impl JobState {
+    /// The word a person and the model read.
+    ///
+    /// It is the same word the wire carries, because these are the same three
+    /// states: a separate spelling for the prompt would be a second vocabulary
+    /// that drifts, and the prompt is where a drift is hardest to notice.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Finished => "finished",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Whether the job is over.
+    #[must_use]
+    pub fn is_done(self) -> bool {
+        !matches!(self, Self::Running)
+    }
 }
 
 /// One background job, as a client sees it.
@@ -823,8 +889,8 @@ pub struct JobInfo {
     pub id: String,
     /// The script, clipped to one line.
     pub script: String,
-    /// Where it stands: `running`, `finished` or `cancelled`.
-    pub state: String,
+    /// Where it stands.
+    pub state: JobState,
     /// The exit code, once it ended on its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,

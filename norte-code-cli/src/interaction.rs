@@ -35,6 +35,7 @@ const READER_TICK_MS: u64 = 60;
 /// same three fields today, and they are not the same type — one is what a
 /// keystroke produced and the other is what goes on the wire.
 use norte_code_protocol::Attachment as ProtocolAttachment;
+use norte_code_protocol::JobState;
 
 /// A validated interactive command.
 ///
@@ -544,19 +545,26 @@ pub(crate) async fn interactive_loop(
                         // and as lines of the conversation a catalogue of
                         // hundreds would bury the work.
                         let mut lines = vec![format!("Models for {provider}:")];
-                        if let Some(p) = catalog.provider(&provider) {
-                            let mut models: Vec<String> = p.models.keys().cloned().collect();
+                        if catalog.provider(&provider).is_some() {
+                            let mut models: Vec<String> = catalog
+                                .models_of(&provider)
+                                .map(|entry| entry.id.clone())
+                                .collect();
                             models.sort();
                             for m in &models {
                                 lines.push(format!("  {m}"));
                             }
                             if models.is_empty() {
-                                lines.push("  (none in catalogue)".to_owned());
+                                // A provider with no models is one somebody added
+                                // to `providers.json` and not yet to
+                                // `models.json`, which is the state a plugin
+                                // building one leaves the other in for a moment.
+                                lines.push("  (no models; add one to models.json)".to_owned());
                             }
                         } else {
-                            lines.push(
-                                "  (provider not in catalogue; any model name accepted)".to_owned(),
-                            );
+                            lines.push(format!(
+                                "  (no provider named `{provider}`; see providers.json)"
+                            ));
                         }
                         renderer.open_modal(format!("models of {provider}"), lines);
                     } else if let Some(current) = session.clone() {
@@ -583,69 +591,26 @@ pub(crate) async fn interactive_loop(
                 }
                 ChatCommand::Provider { provider } => {
                     if provider.is_empty() {
-                        // List available providers
+                        // Every provider the catalogue carries, with the wires
+                        // it serves and how many models it holds. There is no
+                        // configured provider to merge in any more: the
+                        // catalogue is the only place a provider comes from.
                         let catalog = service.catalog();
-                        let config = service.config();
                         let mut lines = vec!["Providers:".to_owned()];
                         let mut providers: Vec<String> =
-                            catalog.providers.keys().cloned().collect();
-                        for id in config.providers.keys() {
-                            if !providers.contains(id) {
-                                providers.push(id.clone());
-                            }
-                        }
+                            catalog.providers().keys().cloned().collect();
                         providers.sort();
-                        for p in &providers {
-                            let catalog_entry = catalog.provider(p);
-                            let configured = config.providers.get(p);
-                            // Where the provider comes from and, when it is both,
-                            // what the config changes about it: a configured
-                            // entry over the catalogue silently replaces the
-                            // endpoint, the wire or the key variable, and a
-                            // person debugging a request needs to see that it is
-                            // overriding and not merely present.
-                            let mut tags: Vec<&str> = Vec::new();
-                            if catalog_entry.is_some() {
-                                tags.push("catalog");
-                            }
-                            if configured.is_some() {
-                                tags.push("config");
-                            }
-                            if let (Some(_), Some(entry)) = (catalog_entry, configured) {
-                                let mut over: Vec<&str> = Vec::new();
-                                if entry.endpoint.is_some() {
-                                    over.push("endpoint");
-                                }
-                                if entry.wire.is_some() {
-                                    over.push("wire");
-                                }
-                                if entry.auth.is_some() {
-                                    over.push("auth");
-                                }
-                                if entry.api_key_env.is_some() || entry.api_key_file.is_some() {
-                                    over.push("key");
-                                }
-                                if entry.prompt_cache_key.is_some() {
-                                    over.push("prompt_cache_key");
-                                }
-                                if !entry.headers.is_empty() {
-                                    over.push("headers");
-                                }
-                                if !over.is_empty() {
-                                    lines.push(format!(
-                                        "  {p} (catalog+config, overrides {})",
-                                        over.join(", ")
-                                    ));
-                                    continue;
-                                }
-                            }
-                            let models = catalog_entry.map_or(0, |entry| entry.models.len());
-                            let count = if models > 0 {
-                                format!(", {models} model(s)")
-                            } else {
-                                String::new()
+                        for id in &providers {
+                            let Some(entry) = catalog.provider(id) else {
+                                continue;
                             };
-                            lines.push(format!("  {p} ({}{count})", tags.join("+")));
+                            let wires = entry.offered();
+                            let models = catalog.models_of(id).count();
+                            let plural = if models == 1 { "model" } else { "models" };
+                            lines.push(format!(
+                                "  {id} ({} · {models} {plural})",
+                                crate::text::terminal(&wires)
+                            ));
                         }
                         renderer.open_modal("providers", lines);
                     } else if let Some(current) = session.clone() {
@@ -661,10 +626,7 @@ pub(crate) async fn interactive_loop(
                         // provider's catalogue does not list it. Say so, because
                         // the next turn would be refused with a name the person
                         // no longer recognises, and the fix is one `/model` away.
-                        let known = service
-                            .catalog()
-                            .provider(&provider)
-                            .is_some_and(|entry| entry.models.contains_key(&model_name));
+                        let known = service.catalog().find(&provider, &model_name).is_some();
                         if !known {
                             renderer.notice(format!(
                                 "`{provider}` does not list `{model_name}`; switch it with /model"
@@ -699,17 +661,11 @@ pub(crate) async fn interactive_loop(
                 // `/restart` is the command that starts a fresh one.
                 ChatCommand::Menu => {
                     let catalog = service.catalog();
-                    let config = service.config();
                     let current = session
                         .as_ref()
                         .and_then(|current| provider_of(service, current));
                     let mut lines = vec!["Choose a provider and a model:".to_owned()];
-                    let mut providers: Vec<String> = catalog.providers.keys().cloned().collect();
-                    for id in config.providers.keys() {
-                        if !providers.contains(id) {
-                            providers.push(id.clone());
-                        }
-                    }
+                    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
                     providers.sort();
                     for provider in &providers {
                         let marked = if current.as_deref() == Some(provider.as_str()) {
@@ -718,9 +674,9 @@ pub(crate) async fn interactive_loop(
                             " "
                         };
                         let mut models: Vec<String> = catalog
-                            .provider(provider)
-                            .map(|entry| entry.models.keys().cloned().collect())
-                            .unwrap_or_default();
+                            .models_of(provider)
+                            .map(|entry| entry.id.clone())
+                            .collect();
                         models.sort();
                         if models.is_empty() {
                             lines.push(format!("{marked} {provider} (no models listed)"));
@@ -1636,7 +1592,7 @@ async fn report_jobs(
                     lines.push(format!(
                         "  {} {} {}",
                         crate::text::terminal(&job.id),
-                        job_state_label(&job.state, crate::style::Style::plain()),
+                        job_state_label(job.state, crate::style::Style::plain()),
                         job.script
                     ));
                 }
@@ -1652,7 +1608,7 @@ fn print_job(job: &JobInfo, renderer: &mut Renderer, style: Style) {
     let mut lines = vec![format!(
         "{} {}{} ({} ms)",
         crate::text::terminal(&job.id),
-        job_state_label(&job.state, crate::style::Style::plain()),
+        job_state_label(job.state, crate::style::Style::plain()),
         match job.exit_code {
             Some(code) => format!(", exit {code}"),
             None => String::new(),
@@ -1678,11 +1634,17 @@ fn print_job(job: &JobInfo, renderer: &mut Renderer, style: Style) {
 }
 
 /// The state of a job as it is printed.
-fn job_state_label(state: &str, style: Style) -> String {
+///
+/// The match is over the enum and has no catch-all arm: a state the protocol
+/// grows is a compile error here, which is what a color chosen for it needs to
+/// be. Matching on the string meant a new state fell into `_` and was drawn as
+/// a finished job.
+fn job_state_label(state: JobState, style: Style) -> String {
+    let word = state.label();
     match state {
-        "running" => style.cyan(state.to_owned()),
-        "cancelled" => style.yellow(state.to_owned()),
-        _ => style.green(state.to_owned()),
+        JobState::Running => style.cyan(word.to_owned()),
+        JobState::Finished => style.green(word.to_owned()),
+        JobState::Cancelled => style.yellow(word.to_owned()),
     }
 }
 
@@ -1994,10 +1956,14 @@ fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
             // that fills faster, and reading it from the startup spec would
             // leave the bar lying about how close the compaction is.
             renderer.max_context = service.default_spec().capabilities.max_context;
-            renderer.notice(format!(
-                "configuration reloaded ({} providers)",
-                reloaded.config.providers.len()
-            ));
+            // The catalogue is re-read here too: a person who added a model to
+            // `models.json` and typed `/refresh` expects the next `/model` to
+            // find it, and the files are the only place a model comes from.
+            let catalog_note = match crate::commands::load_catalogue() {
+                Ok(catalog) => format!(", {} models", catalog.model_count()),
+                Err(error) => format!("; the catalogue did not reload: {error}"),
+            };
+            renderer.notice(format!("configuration reloaded{catalog_note}"));
             for warning in &reloaded.warnings {
                 renderer.notice(format!(
                     "warning: unknown config key `{}`",

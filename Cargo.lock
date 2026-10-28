@@ -1240,7 +1240,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "norte",
- "norte-code-config",
  "reqwest",
  "serde",
  "serde_json",

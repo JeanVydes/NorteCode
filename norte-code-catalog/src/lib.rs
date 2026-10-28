@@ -1,21 +1,25 @@
-//! The models.dev catalogue.
+//! The catalogue: where models come from and what they can do.
 //!
-//! The catalogue is the source of provider facts: `npm` selects the wire,
-//! `api` is the endpoint, `env` names the key variables, and the model entries
-//! carry the limits, modalities and reasoning options Norte Code needs.
+//! The catalogue is two files a person owns, under the configuration directory:
+//! `providers.json` says who serves models and over which wires, and
+//! `models.json` is a flat list of the models themselves. Nothing here fetches
+//! anything: loading blocks on no network, and a file that is missing is an
+//! error that names it rather than a snapshot to fall back on.
 //!
-//! Loading never blocks startup on the network. The order is always: a fresh
-//! disk cache, a conditional request, the stale cache, and finally the bundled
-//! snapshot. A bad download never replaces a good cache.
+//! A plugin may build the same two shapes from wherever it likes — one reads
+//! models.dev, one reads an `OpenRouter` listing — and hand them to
+//! [`Catalog::new`], which is the same validation the files go through.
 
 #![forbid(unsafe_code)]
 
-pub mod cache;
 pub mod map;
 pub mod schema;
+pub mod source;
 
-pub use cache::{Cache, LoadOptions, Loaded, Source, cache_dir, load_catalog};
-pub use map::{Wire, capabilities, modality_of_kind, reasoning};
+pub use map::{WireKind, capabilities, modality_of, reasoning};
 pub use schema::{
-    Catalog, CatalogError, Limit, Modalities, Model, ModelEntry, Provider, ReasoningOption,
+    Catalog, CatalogError, Limit, Modalities, Modality, Model, ModelEntry, ModelStatus, Models,
+    Pricing, Provider, Providers, Reasoning, SupportedEffort, SupportedParams, Wire, WireSchema,
+    load_catalog_files,
 };
+pub use source::{catalog_dir, models_path, providers_path};

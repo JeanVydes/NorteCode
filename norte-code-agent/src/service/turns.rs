@@ -22,7 +22,7 @@ use norte_code_protocol::{
     SessionKey,
 };
 
-use norte_code_store_sqlite::SessionDirectory;
+use norte_code_store_sqlite::{RequestStatus, SessionDirectory};
 
 use crate::provider::ModelSpec;
 
@@ -944,7 +944,7 @@ impl Service {
             gate.update(used_context(&history));
         }
         for record in self.telemetry_for(key, nid) {
-            if record.status == "ok" {
+            if record.status == RequestStatus::Ok {
                 // The telemetry waits for the message it belongs to: the
                 // provider answered before the message was committed.
                 stats.pending.push_back(record);
@@ -1089,7 +1089,7 @@ impl Service {
             metadata: serde_json::json!({"source": "history"}),
             cost_usd: reported_cost(usage),
             finish_reason: None,
-            status: "ok".to_owned(),
+            status: RequestStatus::Ok,
             error: None,
             error_kind: None,
             retry_after_ms: None,

@@ -32,7 +32,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Duration;
 
 use futures_core::Stream;
 use norte::harness::TurnInterceptor;
@@ -76,8 +75,6 @@ use manage::ManageJobs;
 use mapping::{BudgetLayer, single};
 use mcp::McpServers;
 use models::resolve_reasoning;
-#[cfg(test)]
-use prompt::skills_block;
 use prompt::{compose_system_prompt, load_project_instructions};
 use questions::DirectoryQuestions;
 use sandbox::sandboxed_command;
@@ -88,17 +85,6 @@ use workspace::WorkspacePolicy;
 pub use approvals::{RuleScope, ToolRule, ToolStatus};
 pub use models::{effective_reasoning, model_list};
 pub use prompt::PromptSize;
-
-#[cfg(test)]
-use mapping::token_rate;
-#[cfg(test)]
-use models::parse_configured_reasoning;
-#[cfg(test)]
-use prompt::{MAX_PROJECT_INSTRUCTIONS_BYTES, PROJECT_INSTRUCTIONS_FILE};
-#[cfg(test)]
-use sandbox::{macos_profile, sandbox_request, sandboxed_arguments};
-#[cfg(test)]
-use workspace::{PathKind, check_path_kind, transform_path};
 
 /// A stream of events answering one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
@@ -124,15 +110,6 @@ struct Stats {
     /// here instead of dropping it, so the request that follows is measured
     /// with its own numbers.
     pending: std::collections::VecDeque<norte_code_store_sqlite::RequestRecord>,
-}
-
-/// Where the catalogue is refreshed from.
-#[derive(Clone, Debug)]
-struct CatalogSettings {
-    url: String,
-    ttl: Duration,
-    offline: bool,
-    cache_dir: PathBuf,
 }
 
 /// One MCP server, as the startup block reports it.
@@ -163,7 +140,6 @@ pub struct ReloadedConfig {
 pub struct Service {
     config: RwLock<Config>,
     catalog: RwLock<Arc<Catalog>>,
-    catalog_settings: CatalogSettings,
     default_spec: RwLock<ModelSpec>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
@@ -329,13 +305,6 @@ impl Service {
         directory: Arc<dyn SessionDirectory>,
         system_prompt: impl Into<String>,
     ) -> Result<Self, ServiceError> {
-        let settings = CatalogSettings {
-            url: config.catalog.url.clone(),
-            ttl: Duration::from_secs(config.catalog.ttl_hours.saturating_mul(3600)),
-            offline: config.catalog.offline,
-            cache_dir: norte_code_catalog::cache_dir()
-                .unwrap_or_else(|| PathBuf::from(".norte-code").join("cache")),
-        };
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
         let project = load_project_instructions(&workspace_root);
@@ -371,7 +340,6 @@ impl Service {
         let service = Self {
             config: RwLock::new(config),
             catalog: RwLock::new(catalog),
-            catalog_settings: settings,
             default_spec: RwLock::new(default_spec),
             store,
             blobs,
@@ -1215,34 +1183,11 @@ impl Service {
         catalog: &Catalog,
         reference: &str,
     ) -> Result<ModelSpec, ServiceError> {
-        match ModelSpec::from_catalog(config, catalog, reference, None) {
-            Err(ServiceError::UnknownProvider(provider)) => {
-                // A provider the catalogue does not list has to be one the host
-                // configured, or there is nothing to resolve a key or an
-                // endpoint from.
-                if !config.providers.contains_key(&provider) {
-                    return Err(ServiceError::UnknownProvider(provider));
-                }
-                // No fallback environment names: a configured provider names its
-                // key variable in `api_key_env`, and `api_key_for` reads that
-                // before it reaches this list. Passing guesses here would let a
-                // provider resolve a key from a variable it never declared.
-                ModelSpec::resolve(config, reference, None, &[])
-            }
-            // The provider is in the catalogue and the model is not: a fresh
-            // release, or a model named in the config and nowhere else. The
-            // provider still supplies the wire, the endpoint and the key, so the
-            // reference resolves with conservative capabilities instead of
-            // failing. This is what lets `/provider` name a provider whose
-            // catalogue does not carry the model the session was on: the model
-            // stays whatever it was, and the person is told to switch it.
-            Err(ServiceError::UnknownModel { provider, .. })
-                if catalog.provider(&provider).is_some() =>
-            {
-                ModelSpec::from_provider(config, catalog, reference, None)
-            }
-            other => other,
-        }
+        // The catalogue is the only place a model comes from, so a reference it
+        // does not carry is not resolved from somewhere else: there is nowhere
+        // else. A provider is in `providers.json` or it is unknown, and a model
+        // is in `models.json` or it is unknown.
+        ModelSpec::from_catalog(config, catalog, reference, None)
     }
 
     /// The default spec in force.
@@ -1571,7 +1516,7 @@ impl Service {
             Kind::ListModels => Ok(self.list_models_event(request_id)),
             Kind::ListSkills => Ok(self.skill_list_event(request_id)),
             Kind::RefreshSkills => Ok(self.refresh_skills_event(request_id)),
-            Kind::RefreshCatalog => self.refresh_catalog(request_id).await,
+            Kind::RefreshCatalog => self.reload_catalog(request_id),
             Kind::SetModel { session, model } => {
                 self.set_model_event(request_id, session, model).await
             }

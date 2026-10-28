@@ -30,13 +30,6 @@ use norte_code_store_sqlite::{SessionDirectory as _, SqliteStore, StoredSession}
 use crate::select::{self, Item, Outcome};
 use crate::style::Style;
 
-/// How many providers the picker names.
-///
-/// The configured ones come first and are never cut; the catalogue fills what is
-/// left. Anything past the bound is reachable by name, and the count says how
-/// many were left out.
-const LISTED_PROVIDERS: usize = 20;
-
 /// What the person asked the process to open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Open {
@@ -271,47 +264,33 @@ pub(crate) fn choose_model(
     config_path: Option<&Path>,
     style: Style,
 ) -> Result<String, String> {
-    let mut configured: Vec<String> = config.providers.keys().cloned().collect();
-    configured.sort();
-    let mut from_catalogue: Vec<String> = catalog
-        .providers
-        .keys()
-        .filter(|provider| !config.providers.contains_key(*provider))
-        .cloned()
-        .collect();
-    from_catalogue.sort();
+    // One list and not two: the catalogue is the only place a provider comes
+    // from, so there is nothing to merge and nothing to prefer.
+    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
+    providers.sort();
     eprintln!("{}", style.bold("no default model is configured"));
-    if configured.is_empty() && from_catalogue.is_empty() {
-        return Err(
-            "no model selected: the catalogue is empty and no provider is configured; \
-             name one with `--model` or set default_model in the config"
-                .to_owned(),
-        );
+    if providers.is_empty() {
+        return Err("no model selected: providers.json defines no provider; \
+             add one, or name a model with `--model`"
+            .to_owned());
     }
-    // The configured providers are never cut. They are the ones with a key and
-    // an endpoint, which are the two things the catalogue cannot supply, and a
-    // bound that hid one would hide the only choice that works.
-    let mut providers = configured.clone();
-    providers.extend(
-        from_catalogue
-            .iter()
-            .take(LISTED_PROVIDERS.saturating_sub(configured.len()))
-            .cloned(),
-    );
     let items: Vec<Item> = providers
         .iter()
         .map(|provider| {
-            let source = if configured.contains(provider) {
-                "config"
-            } else {
-                "catalogue"
-            };
-            Item::new(provider.clone(), false).noted(source)
+            // What the row says beside the name is the wire a session will open
+            // on when nobody picks another, which is the one fact a person
+            // choosing between providers wants before the choice.
+            let wire = catalog
+                .provider(provider)
+                .and_then(|entry| entry.preferred_wire())
+                .map_or_else(
+                    || "no wire".to_owned(),
+                    |wire| wire.schema.label().to_owned(),
+                );
+            Item::new(provider.clone(), false).noted(wire)
         })
         .collect();
-    let hidden = from_catalogue
-        .len()
-        .saturating_sub(providers.len().saturating_sub(configured.len()));
+    let hidden = catalog.providers().len().saturating_sub(providers.len());
     if hidden > 0 {
         eprintln!(
             "{}",
@@ -327,9 +306,8 @@ pub(crate) fn choose_model(
         // by what it is called.
         Outcome::Typed(typed) => {
             let typed = typed.trim();
-            configured
+            providers
                 .iter()
-                .chain(from_catalogue.iter())
                 .find(|provider| provider.eq_ignore_ascii_case(typed))
                 .cloned()
                 .ok_or_else(|| format!("`{typed}` names no provider"))?
@@ -340,18 +318,19 @@ pub(crate) fn choose_model(
     };
 
     let mut models: Vec<String> = catalog
-        .provider(&provider)
-        .map(|entry| entry.models.keys().cloned().collect())
-        .unwrap_or_default();
+        .models_of(&provider)
+        .map(|entry| entry.id.clone())
+        .collect();
     models.sort();
     if models.is_empty() {
-        // A provider the catalogue does not list has no models to offer: it is a
-        // configured endpoint — a private gateway, a local server — and the model
-        // is whatever that endpoint serves, so the name is typed.
+        // A provider with no models is one somebody added to `providers.json`
+        // and has not written a model for yet. The name is asked for rather than
+        // refused: the endpoint may serve a model the file has not caught up
+        // with, and the spec is built from the provider's wire either way.
         eprintln!(
             "  {}",
             style.dim(format!(
-                "{provider} is not in the catalogue; type the model it serves"
+                "{provider} lists no models in models.json; type the model it serves"
             ))
         );
         let model = prompt_line("model> ", style)?.ok_or_else(|| "no model chosen".to_owned())?;
@@ -366,8 +345,7 @@ pub(crate) fn choose_model(
         .iter()
         .map(|model| {
             let name = catalog
-                .provider(&provider)
-                .and_then(|entry| entry.models.get(model))
+                .find(&provider, model)
                 .map(|entry| entry.name.clone())
                 .unwrap_or_default();
             let item = Item::new(model.clone(), false);

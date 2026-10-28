@@ -19,21 +19,16 @@ pub(super) fn discover_skills(config: &Config, workspace: &Path) -> SkillRegistr
     SkillRegistry::discover(&roots, config.skills.max_skills)
 }
 
-/// Every API key the config can resolve, for redaction in command output.
+/// Every API key the catalogue's providers can resolve, for redaction.
 ///
-/// Missing keys are not an error here: only the selected provider needs one.
+/// Missing keys are not an error here: only the selected provider needs one, and
+/// a provider that names no variable needs none at all. Every provider is
+/// walked and not only the session's, because a command's output may quote any
+/// of them and a key that reached a log is a key that leaked.
 pub(super) fn collect_secrets(config: &Config, catalog: &Catalog) -> Vec<String> {
     let mut secrets = Vec::new();
-    for (id, provider) in &catalog.providers {
-        if let Ok(key) = config.resolve_api_key(id, &provider.env) {
-            secrets.push(key.expose().to_owned());
-        }
-    }
-    for id in config.providers.keys() {
-        let env = catalog
-            .provider(id)
-            .map_or_else(Vec::new, |provider| provider.env.clone());
-        if let Ok(key) = config.resolve_api_key(id, &env) {
+    for (id, provider) in catalog.providers() {
+        if let Ok(key) = config.resolve_api_key(id, &provider.environment_keys) {
             secrets.push(key.expose().to_owned());
         }
     }

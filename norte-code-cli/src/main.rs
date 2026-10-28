@@ -37,10 +37,9 @@ use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, interactive_loop, refresh_effort};
 use models::{list_models, resolve_spec};
 use render::{
-    Format, HostFacts, Renderer, Verbosity, approval_label, cache_percent_label, fallback_env,
+    Format, HostFacts, Renderer, Verbosity, approval_label, cache_percent_label,
     find_project_config, human_tokens, parse_budget_action, parse_budget_unit,
     parse_reasoning_setting, reasoning_label, reasoning_setting_label, select_system_prompt, short,
-    source_label, token_ratio,
 };
 use startup::Open;
 
@@ -60,7 +59,6 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -70,11 +68,11 @@ use norte::{
     ToolKind,
 };
 use norte_code_agent::{
-    EventStream, ModelSpec, RuleScope, Service, ServiceError, ToolRule, VendorModels,
-    effective_reasoning, model_list,
+    EventStream, ModelSpec, RuleScope, Service, ToolRule, VendorModels, effective_reasoning,
+    model_list,
 };
-use norte_code_catalog::{Catalog, LoadOptions, Source, cache_dir, load_catalog};
-use norte_code_config::{ApprovalMode, AuthKind, Config, DiffStyle, WireKind, user_config_path};
+use norte_code_catalog::{Catalog, WireSchema};
+use norte_code_config::{ApprovalMode, Config, DiffStyle, user_config_path};
 use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
@@ -107,12 +105,6 @@ struct Cli {
     /// The user configuration file.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
-    /// Never touch the network for the catalogue.
-    #[arg(long, global = true)]
-    offline: bool,
-    /// Revalidate the catalogue with the network even when the cache is fresh.
-    #[arg(long, global = true)]
-    refresh: bool,
     /// How much of the conversation to show: `low` (the answer alone),
     /// `medium` (also that tools run and that the model is thinking) or `high`
     /// (the reasoning, what each tool was asked and what it returned).
@@ -212,18 +204,13 @@ struct NewArgs {
     /// A base URL override for the provider.
     #[arg(long, value_name = "URL")]
     endpoint: Option<String>,
-    /// The wire to speak, overriding the catalogue and the config.
-    #[arg(long, value_name = "WIRE", value_parser = parse_wire)]
-    wire: Option<WireKind>,
-    /// The credential scheme, overriding the wire's default.
-    #[arg(long, value_name = "AUTH", value_parser = parse_auth)]
-    auth: Option<AuthKind>,
-    /// Read the key from this environment variable instead of the configured one.
-    #[arg(long, value_name = "VAR")]
-    api_key_env: Option<String>,
-    /// Omit `prompt_cache_key` for providers that reject it.
-    #[arg(long)]
-    disable_prompt_cache_key: bool,
+    /// The schema to speak, picking among the wires the provider serves.
+    ///
+    /// Left out, the provider's preferred one is used: its `OpenAI` surface when
+    /// it has one. A provider that serves several is where this matters, and
+    /// naming one it does not serve is an error that lists what it has.
+    #[arg(long, value_name = "SCHEMA", value_parser = parse_schema)]
+    wire: Option<WireSchema>,
     /// A limit for this message.
     #[arg(long, value_name = "LIMIT")]
     budget: Option<f64>,
@@ -310,9 +297,6 @@ impl NewArgs {
             system_prompt: None,
             endpoint: None,
             wire: None,
-            auth: None,
-            api_key_env: None,
-            disable_prompt_cache_key: false,
             budget: None,
             budget_unit: "usd".to_owned(),
             budget_action: "stop".to_owned(),
@@ -553,30 +537,23 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Parses `--wire`, the wire a run speaks.
-fn parse_wire(value: &str) -> Result<WireKind, String> {
-    match value {
-        "responses" => Ok(WireKind::Responses),
-        "chat" => Ok(WireKind::Chat),
-        "messages" => Ok(WireKind::Messages),
-        "generate-content" => Ok(WireKind::GenerateContent),
-        other => Err(format!(
-            "unknown wire `{other}`; expected responses, chat, messages or generate-content"
-        )),
+/// Parses `--wire`, the schema a run speaks.
+///
+/// The names are the ones `providers.json` writes, so a person who reads the
+/// file knows what to type here. `openai` is the chat completions surface and
+/// not the Responses API: this host speaks the shape the three schemas share.
+fn parse_schema(value: &str) -> Result<WireSchema, String> {
+    for schema in WireSchema::ALL {
+        if schema.label() == value {
+            return Ok(schema);
+        }
     }
-}
-
-/// Parses `--auth`, the credential scheme a run uses.
-fn parse_auth(value: &str) -> Result<AuthKind, String> {
-    match value {
-        "bearer" => Ok(AuthKind::Bearer),
-        "x-api-key" => Ok(AuthKind::XApiKey),
-        "x-goog-api-key" => Ok(AuthKind::XGoogApiKey),
-        "disabled" => Ok(AuthKind::Disabled),
-        other => Err(format!(
-            "unknown auth `{other}`; expected bearer, x-api-key, x-goog-api-key or disabled"
-        )),
-    }
+    let expected = WireSchema::ALL
+        .iter()
+        .map(|schema| schema.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!("unknown wire `{value}`; expected {expected}"))
 }
 
 /// A warning when a USD budget cannot be measured because the provider never
@@ -612,7 +589,6 @@ fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Optio
 pub(crate) async fn new_session(
     config: Config,
     catalog: Catalog,
-    source: Source,
     model: Option<String>,
     args: NewArgs,
     verbosity: &str,
@@ -625,9 +601,6 @@ pub(crate) async fn new_session(
         args.model.clone().or(model),
         args.endpoint.clone(),
         args.wire,
-        args.auth,
-        args.api_key_env.clone(),
-        args.disable_prompt_cache_key,
     )?;
     let model_label = spec.label();
     let provider = spec.provider.clone();
@@ -683,7 +656,7 @@ pub(crate) async fn new_session(
             style.magenta("◆"),
             style.bold(spec.label()),
             style.dim("·"),
-            style.dim(format!("catalogue from {}", source_label(source))),
+            style.dim(format!("catalogue: {} models", catalog.model_count())),
             style.dim(format!(
                 "· approval {}",
                 approval_label(config.approval_mode)
@@ -754,8 +727,9 @@ pub(crate) async fn new_session(
     // catalogue came from, the database it opened and where the system prompt
     // came from. Set once here, like the model name and the context window.
     renderer.host_facts = Some(HostFacts {
-        catalogue_source: source,
         database: database.clone(),
+        providers_path: norte_code_catalog::providers_path().unwrap_or_default(),
+        models_path: norte_code_catalog::models_path().unwrap_or_default(),
         prompt_source: system_prompt_source,
     });
     // The effort the next turn will ask for, on the footer where the session
@@ -829,21 +803,19 @@ async fn stored_workdir(database: &Path, key: &str) -> Option<String> {
 async fn resume_named(
     config: Config,
     catalog: Catalog,
-    source: Source,
     key: String,
     mut args: ResumeArgs,
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     args.session = Some(key);
-    resume_session(config, catalog, source, args, verbosity, config_path).await
+    resume_session(config, catalog, args, verbosity, config_path).await
 }
 
 #[allow(clippy::too_many_lines)]
 async fn resume_session(
     config: Config,
     catalog: Catalog,
-    source: Source,
     args: ResumeArgs,
     verbosity: &str,
     config_path: Option<PathBuf>,
@@ -895,7 +867,7 @@ async fn resume_session(
     .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
-    let spec = resolve_spec(&config, &catalog, None, None, None, None, None, None, false)?;
+    let spec = resolve_spec(&config, &catalog, None, None, None, None)?;
     let model_label = spec.label();
     let provider = spec.provider.clone();
     let effective = effective_reasoning(
@@ -916,7 +888,7 @@ async fn resume_session(
             style.magenta("◆"),
             style.bold(format!("resume {}", short(&session_key))),
             style.dim("·"),
-            style.dim(format!("catalogue from {}", source_label(source)))
+            style.dim(format!("catalogue: {} models", catalog.model_count()))
         );
     }
     let budget_is_usd = args.budget.is_some() && args.budget_unit.eq_ignore_ascii_case("usd");
@@ -984,8 +956,9 @@ async fn resume_session(
     // after every `/refresh`: those are the moments the set can change.
     renderer.set_mcp(crate::interaction::mcp_rows(&service));
     renderer.host_facts = Some(HostFacts {
-        catalogue_source: source,
         database: database.clone(),
+        providers_path: norte_code_catalog::providers_path().unwrap_or_default(),
+        models_path: norte_code_catalog::models_path().unwrap_or_default(),
         prompt_source: system_prompt_source,
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));
@@ -1090,7 +1063,6 @@ async fn resume_session(
 async fn open_session(
     config: Config,
     catalog: Catalog,
-    source: Source,
     mut args: ResumeArgs,
     verbosity: &str,
     config_path: Option<PathBuf>,
@@ -1118,7 +1090,7 @@ async fn open_session(
         // replays the history and makes no request while the turn is over.
         Open::Existing { key, .. } => {
             args.session = Some(key.as_str().to_owned());
-            resume_session(config, catalog, source, args, verbosity, config_path).await
+            resume_session(config, catalog, args, verbosity, config_path).await
         }
         // A new session is created and read, never resumed: it holds no answer
         // yet, and a resume of that is an empty turn the engine answers by
@@ -1127,7 +1099,6 @@ async fn open_session(
             new_session(
                 config,
                 catalog,
-                source,
                 chosen.model,
                 NewArgs::bare(),
                 verbosity,

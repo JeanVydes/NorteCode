@@ -234,16 +234,6 @@ impl Service {
         })
     }
 
-    /// The summariser's spec, for a test: it is the one path where a configured
-    /// provider had to be resolved and was not.
-    #[cfg(test)]
-    pub(super) fn summary_spec_for_a_test(
-        &self,
-        session: &ModelSpec,
-    ) -> Result<ModelSpec, ServiceError> {
-        self.summary_spec(session)
-    }
-
     fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
         match &self.config().compaction.model {
             // The same resolution a switch uses: a summariser can be a provider

@@ -22,8 +22,8 @@ pub(crate) use debug::{
     HostFacts, mcp_panel, report_mcp, report_prompt, report_reasoning, report_start, report_tools,
     tools_panel,
 };
-pub(crate) use dial::{effort_span, reasoning_label, source_label, token_ratio};
-pub(crate) use helpers::{cache_percent_label, fallback_env, find_project_config, human_tokens};
+pub(crate) use dial::{effort_span, reasoning_label, token_ratio};
+pub(crate) use helpers::{cache_percent_label, find_project_config, human_tokens};
 #[cfg(test)]
 pub(crate) use labels::budget_label;
 pub(crate) use labels::{
@@ -39,6 +39,6 @@ use super::{
     ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
     Delta, DiffStyle, ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning,
     ReasoningEffort, ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey,
-    Source, StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, clip_text,
-    compact_json, duration_label,
+    StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, clip_text, compact_json,
+    duration_label,
 };

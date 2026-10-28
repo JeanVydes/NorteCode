@@ -6,7 +6,44 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The catalogue is two files a person owns, and nothing is fetched. It used to be
+  a models.dev snapshot downloaded into a cache and falling back to a copy
+  compiled into the binary; now `providers.json` says who serves models and over
+  which wires, and `models.json` is a flat list of the models themselves. A file
+  that is missing is an error naming it, because a process with no provider and
+  no model has nothing to open a session on. Adding a model is appending to a
+  list, and it does not touch the providers. A plugin may build the same two
+  shapes from an endpoint of its own and hand them to `Catalog::new`, which is
+  the same validation the files go through. The `cache`, `--offline`, `--refresh`
+  and `catalog.*` configuration are gone with the fetch.
+
+- A provider has `wires`, not one API: each is a base URL plus the schema it
+  speaks, and a session picks among them. `--wire` names one — `openai`,
+  `anthropic` or `google` — and a provider that serves several is reached over
+  its preferred one when nobody says, which is its `OpenAI` surface. The
+  `Responses` API is not reachable: this host speaks the chat completions shape
+  the three schemas share. `ProviderConfig`, `WireKind`, `AuthKind`, `--auth`,
+  `--api-key-env` and `--disable-prompt-cache-key` are gone: the wire says the
+  credential header, and the catalogue says the key's variables.
+
+- `configuration` no longer overrides a model. `ModelOverride`,
+  `ModalitiesOverride`, `ReasoningOverride` and `providers.<id>.models` are gone:
+  the catalogue is the authority, and a fact about a model belongs in the file
+  that describes models.
+
 ### Added
+
+- The catalogue's names are enums, so a typo is caught where the file is read and
+  not silently read as "not supported": `SupportedParams`, `Modality`,
+  `SupportedEffort`, `ModelStatus`, `WireSchema`. The error names the file, the
+  value and every name that would have worked.
+
+- `JobInfo.state` and `RequestStatus` are enums on the wire and in the store. A
+  client that matched on the word had a catch-all arm, so a state it did not know
+  was drawn as a finished job and a status it did not know was counted as an
+  error.
 
 - `tools.disabled` withholds tools from a new session. A tool named there is not
   registered at all: it is not in the schema the model is shown, not in the

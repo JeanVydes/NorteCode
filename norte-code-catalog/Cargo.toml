@@ -10,7 +10,6 @@ authors.workspace = true
 
 [dependencies]
 norte = { workspace = true }
-norte-code-config = { path = "../norte-code-config" }
 
 chrono = { workspace = true }
 reqwest = { workspace = true }

@@ -18,13 +18,13 @@ use norte_code_catalog::{Catalog, Model};
 use super::helpers::find_project_config;
 use super::names::{
     cache_name, feature_set, modality_set, reasoning_capabilities, streaming_name, structured_set,
-    tool_kind_set, yes_no,
+    tool_kind_set,
 };
 use crate::modal::{Action, Row};
 
+use super::approval_label;
 use super::{ApprovalMode, RuleScope, SessionKey, ToolRule};
-use super::{Config, ModelSpec, Path, Reasoning, Service, Source, Style};
-use super::{approval_label, source_label};
+use super::{Config, ModelSpec, Path, Reasoning, Service, Style};
 
 /// The facts only the host knows, set once at startup.
 ///
@@ -35,8 +35,10 @@ use super::{approval_label, source_label};
 /// without the whole CLI being plumbed through every caller.
 #[derive(Clone, Debug)]
 pub(crate) struct HostFacts {
-    /// Where the catalogue was loaded from.
-    pub(crate) catalogue_source: Source,
+    /// The providers file the catalogue was read from.
+    pub(crate) providers_path: PathBuf,
+    /// The models file the catalogue was read from.
+    pub(crate) models_path: PathBuf,
     /// The session database the process opened.
     pub(crate) database: PathBuf,
     /// Where the system prompt came from: `flag`, `config` or `default`.
@@ -106,8 +108,8 @@ pub(crate) fn report_start(
         .capabilities
         .max_context
         .map(|context| (context as f64 * configuration.compaction.threshold).round() as u64);
-    let provider_count = catalog.providers.len();
-    let model_count: usize = catalog.providers.values().map(|p| p.models.len()).sum();
+    let provider_count = catalog.providers().len();
+    let model_count = catalog.model_count();
     let max_iterations = configuration
         .max_iterations
         .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
@@ -178,10 +180,17 @@ pub(crate) fn report_start(
         String::new(),
         heading(style, "catalogue"),
         fact(
-            "source",
+            "providers",
             host.map_or_else(
                 || "(unknown)".to_owned(),
-                |host| source_label(host.catalogue_source).to_owned(),
+                |host| host.providers_path.display().to_string(),
+            ),
+        ),
+        fact(
+            "models file",
+            host.map_or_else(
+                || "(unknown)".to_owned(),
+                |host| host.models_path.display().to_string(),
             ),
         ),
         fact(
@@ -262,14 +271,21 @@ pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>)
         if let Some(updated) = &model.last_updated {
             metadata.push(format!("updated {updated}"));
         }
-        if let Some(open_weights) = model.open_weights {
-            metadata.push(format!("open weights {}", yes_no(open_weights)));
+        if model.open_weights {
+            metadata.push("open weights".to_owned());
         }
-        if model.attachment {
-            metadata.push("attachments".to_owned());
-        }
-        if let Some(temperature) = model.temperature {
-            metadata.push(format!("temperature {}", yes_no(temperature)));
+        // The parameters are a list and this is where it is worth showing: what
+        // a model accepts decides which controls are offered, and a name missing
+        // from here is a control that is not.
+        if !model.supported_params.is_empty() {
+            let mut params: Vec<&str> = model
+                .supported_params
+                .iter()
+                .copied()
+                .map(super::names::supported_param_name)
+                .collect();
+            params.sort_unstable();
+            metadata.push(format!("params {}", params.join(", ")));
         }
         if !metadata.is_empty() {
             lines.push(fact("catalogue", metadata.join(" · ")));

@@ -1,5 +1,5 @@
-//! Config paths, provider environment names and the small number labels
-//! the renderer and the reports share.
+//! Config paths and the small number labels the renderer and the reports
+//! share.
 
 use std::path::{Path, PathBuf};
 
@@ -9,36 +9,6 @@ pub(crate) fn find_project_config(start: &Path) -> Option<PathBuf> {
         .ancestors()
         .map(|dir| dir.join(".norte-code").join("config.json"))
         .find(|path| path.exists())
-}
-
-/// The environment variables a provider is likely to use.
-///
-/// The catalogue's `env` list is authoritative; this is only for a provider the
-/// catalogue does not list.
-pub(crate) fn fallback_env(provider: &str) -> Vec<String> {
-    let upper: String = provider
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let mut names = vec![format!("{upper}_API_KEY")];
-    if matches!(provider, "google" | "gemini") {
-        for name in [
-            "GOOGLE_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_GENERATIVE_AI_API_KEY",
-        ] {
-            if !names.iter().any(|existing| existing == name) {
-                names.push(name.to_owned());
-            }
-        }
-    }
-    names
 }
 
 /// A path as it is shown in the footer: under the home directory it loses it.

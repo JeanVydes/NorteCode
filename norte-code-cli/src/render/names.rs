@@ -159,6 +159,32 @@ pub(crate) fn effort_label(effort: ReasoningEffort) -> &'static str {
     }
 }
 
-pub(crate) fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+/// The name a catalogue file writes for a supported parameter.
+///
+/// It is a function and not a `Display` impl because the names are the file's
+/// vocabulary and not Rust's: `frequency_penalty` is what a person types in
+/// `models.json`, and the debug output has to read like the file it describes.
+pub(crate) fn supported_param_name(param: norte_code_catalog::SupportedParams) -> &'static str {
+    use norte_code_catalog::SupportedParams as P;
+    match param {
+        P::FrequencyPenalty => "frequency_penalty",
+        P::IncludeReasoning => "include_reasoning",
+        P::Logprobs => "logprobs",
+        P::MaxTokens => "max_tokens",
+        P::MinP => "min_p",
+        P::PresencePenalty => "presence_penalty",
+        P::Reasoning => "reasoning",
+        P::ReasoningEffort => "reasoning_effort",
+        P::ResponseFormat => "response_format",
+        P::Seed => "seed",
+        P::Stop => "stop",
+        P::StructuredOutput => "structured_output",
+        P::Temperature => "temperature",
+        P::ToolChoice => "tool_choice",
+        P::Tools => "tools",
+        P::TopP => "top_p",
+        P::TopLogprobs => "top_logprobs",
+        P::TopK => "top_k",
+        P::Verbosity => "verbosity",
+    }
 }

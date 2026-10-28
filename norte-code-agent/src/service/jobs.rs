@@ -32,32 +32,12 @@ use norte_code_protocol::JobInfo;
 /// while nobody is looking at it.
 pub(super) const JOB_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Where a job stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum JobState {
-    /// Running, or waiting to be read.
-    Running,
-    /// Ended on its own.
-    Finished,
-    /// Ended because someone asked it to.
-    Cancelled,
-}
-
-impl JobState {
-    /// The word the model and the CLI read.
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Finished => "finished",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    /// Whether the job is over.
-    pub(super) fn is_done(self) -> bool {
-        !matches!(self, Self::Running)
-    }
-}
+/// Where a job stands, as the wire names it.
+///
+/// It is the protocol's own enum and not a copy: the service writes it into
+/// every `JobInfo` it hands out, and a second type here would be a second
+/// spelling of the same three words — which is what the string was.
+pub(super) use norte_code_protocol::JobState;
 
 /// What a job looks like from outside.
 #[derive(Clone, Debug)]
@@ -304,7 +284,7 @@ pub(super) fn job_info(job: &JobSummary) -> JobInfo {
     JobInfo {
         id: job.id.clone(),
         script: job.script.clone(),
-        state: job.state.label().to_owned(),
+        state: job.state,
         exit_code: job.exit_code,
         timed_out: job.timed_out,
         elapsed_ms: job.elapsed_ms,

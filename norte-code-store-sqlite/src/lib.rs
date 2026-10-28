@@ -84,6 +84,63 @@ pub struct StoredSession {
     pub workdir: Option<String>,
 }
 
+/// How one request ended.
+///
+/// It is an enum and not a word because a reader that matched on the word had a
+/// catch-all arm, so a status this build did not know was counted as an error —
+/// silently, and wrongly. A row written by a newer build is a parse error that
+/// names the variant, which is a thing to act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStatus {
+    /// The provider answered.
+    Ok,
+    /// The request failed.
+    Error,
+    /// The caller stopped it.
+    Cancelled,
+}
+
+impl RequestStatus {
+    /// Reads the word the column holds.
+    ///
+    /// An unknown word is an error and not a default: a row written by a newer
+    /// build is a thing to report, and counting it as an error — which is what
+    /// a catch-all arm did — is a wrong number nobody can trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the row and the word when the word is not one
+    /// this build knows.
+    fn parse(word: &str, what: &str) -> std::result::Result<Self, Fault> {
+        match word {
+            "ok" => Ok(Self::Ok),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            other => Err(Fault::Corrupt {
+                what: format!("the status of {what}"),
+                reason: format!("`{other}` is not a status this build knows"),
+            }),
+        }
+    }
+
+    /// The word the column holds.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for RequestStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// One provider request, with everything a local telemetry report needs.
 ///
 /// A request row is written even when the provider fails, so the report counts
@@ -166,8 +223,8 @@ pub struct RequestRecord {
     /// Why generation stopped, as the wire named it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
-    /// `ok`, `error` or `cancelled`.
-    pub status: String,
+    /// How the request ended.
+    pub status: RequestStatus,
     /// The provider or transport error, when the request failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1657,7 +1714,7 @@ impl SessionDirectory for SqliteStore {
                         encode(&record.metadata, "request metadata")?,
                         record.cost_usd,
                         record.finish_reason,
-                        record.status,
+                        record.status.as_str(),
                         record.error,
                         record.error_kind,
                         record.retry_after_ms.map(sqlite_u64),
@@ -1811,6 +1868,7 @@ impl SessionDirectory for SqliteStore {
                     sandbox,
                     sandbox_network,
                 ) = row;
+                let status = RequestStatus::parse(&status, &id)?;
                 let token = |value: Option<i64>, what: &str| {
                     value.map(|value| rust_u64(value, what)).transpose()
                 };
@@ -2097,7 +2155,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             cost_usd: None,
             finish_reason: None,
-            status: "ok".to_owned(),
+            status: RequestStatus::Ok,
             error: None,
             error_kind: None,
             retry_after_ms: None,
@@ -2510,7 +2568,7 @@ mod tests {
                 metadata: serde_json::Value::Null,
                 cost_usd: None,
                 finish_reason: None,
-                status: "ok".to_owned(),
+                status: RequestStatus::Ok,
                 error: None,
                 error_kind: None,
                 retry_after_ms: None,

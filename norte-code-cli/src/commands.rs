@@ -1,20 +1,20 @@
 //! Non-interactive subcommands and shared configuration loading.
 
 use super::{
-    BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, Duration,
-    LoadOptions, McpArgs, McpCommand, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory,
-    SessionsArgs, SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand, Source, SqliteStore,
-    Style, TelemetryArgs, Utc, by_day, by_session, by_turn, cache_dir, cache_percent_label,
-    discovery_roots, find_project_config, human_tokens, list_models, load_catalog, new_session,
-    open_session, resume_named, short, summarize, token_ratio, user_config_path,
+    BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, McpArgs,
+    McpCommand, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory, SessionsArgs,
+    SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand, SqliteStore, Style, TelemetryArgs,
+    Utc, by_day, by_session, by_turn, cache_percent_label, discovery_roots, find_project_config,
+    human_tokens, list_models, new_session, open_session, resume_named, short, summarize,
+    user_config_path,
 };
+use norte_code_catalog::{models_path, providers_path};
 use norte_code_config::{add_user_mcp_server, remove_user_mcp_server, set_user_mcp_enabled};
+use norte_code_store_sqlite::RequestStatus;
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let config_path = cli.config.clone();
     let user_config = config_path.clone().or_else(user_config_path);
-    let offline = cli.offline;
-    let refresh = cli.refresh;
     // Where the work happens. The whole process moves, not just the tools:
     // everything downstream — the skills roots, the project instructions, the
     // tools, the sandbox — is built from the process's own directory, and one
@@ -41,29 +41,35 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
         Command::Telemetry(args) => telemetry_command(&args).await,
         Command::Mcp(args) => mcp_command(&config, user_config, &args),
         command => {
-            let (catalog, source) = load_catalogue(&config, offline, refresh).await?;
+            // The catalogue is not optional. A session is opened on a model, a
+            // model is in `models.json` and its provider is in `providers.json`,
+            // and a process with neither has nothing to talk to. Failing here
+            // names the file to write instead of failing later on the first
+            // message.
+            let catalog = load_catalogue()?;
             match command {
                 // `new` names its model with a flag when it wants one and
                 // falls back to `default_model` when it does not, so the flow
                 // is not consulted: a session asked for on the command line is
                 // not a session the menu should ask about.
                 Command::New(args) => {
-                    new_session(config, catalog, source, None, args, &verbose, user_config).await
+                    new_session(config, catalog, None, args, &verbose, user_config).await
                 }
                 Command::Resume(args) => match args.session.clone() {
                     // A named session is resumed even with no terminal, which is
                     // what a scripted client uses.
                     Some(key) => {
-                        resume_named(config, catalog, source, key, args, &verbose, user_config)
-                            .await
+                        resume_named(config, catalog, key, args, &verbose, user_config).await
                     }
                     // No key: nothing to continue until someone says what, so
                     // the startup flow asks.
-                    None => {
-                        open_session(config, catalog, source, args, &verbose, user_config).await
-                    }
+                    None => open_session(config, catalog, args, &verbose, user_config).await,
                 },
-                Command::Models(args) => list_models(&config, &catalog, source, &args),
+                Command::Models(args) => {
+                    let providers = providers_path()?;
+                    let models = models_path()?;
+                    list_models(&catalog, &args, &providers, &models)
+                }
                 Command::Skills(_)
                 | Command::Sessions(_)
                 | Command::Cost(_)
@@ -416,7 +422,7 @@ pub(crate) fn cost_summary(summary: &CostSummary) -> String {
     }
     parts.push(format!(
         "in:out {}",
-        token_ratio(summary.input_tokens, summary.output_tokens)
+        crate::render::token_ratio(summary.input_tokens, summary.output_tokens)
     ));
     if summary.not_reported == summary.requests {
         parts.push("cost not reported".to_owned());
@@ -488,10 +494,10 @@ impl RequestSummary {
         } else {
             self.unpriced += 1;
         }
-        match record.status.as_str() {
-            "ok" => {}
-            "cancelled" => self.cancelled += 1,
-            _ => self.errors += 1,
+        match record.status {
+            RequestStatus::Ok => {}
+            RequestStatus::Cancelled => self.cancelled += 1,
+            RequestStatus::Error => self.errors += 1,
         }
         self.durations.push(record.duration_ms);
         if let Some(first_token) = record.first_token_ms {
@@ -1047,29 +1053,25 @@ pub(crate) fn apply_extensions(config: &mut Config, values: &[String]) -> Result
     Ok(())
 }
 
-pub(crate) async fn load_catalogue(
-    config: &Config,
-    offline: bool,
-    refresh: bool,
-) -> Result<(Catalog, Source), String> {
-    let dir = cache_dir().unwrap_or_else(|| PathBuf::from(".norte-code").join("cache"));
-    let ttl = if refresh {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(config.catalog.ttl_hours.saturating_mul(60 * 60))
-    };
-    let loaded = load_catalog(&LoadOptions {
-        url: &config.catalog.url,
-        ttl,
-        offline: offline || config.catalog.offline,
-        cache_dir: &dir,
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    for warning in &loaded.warnings {
-        eprintln!("warning: {}", crate::text::terminal(warning));
+/// Reads the two catalogue files, naming what to write when one is missing.
+///
+/// Every command that needs a model calls this, and nothing is fetched: the
+/// files are a person's, and a plugin that builds them writes them. The message
+/// a missing file produces says which path and what to put in it, because the
+/// first run of a new install is exactly where this is reached.
+///
+/// # Errors
+///
+/// Returns the catalogue's own message when a file is missing, unreadable, too
+/// large or malformed, and the warnings it produced when it loaded.
+pub(crate) fn load_catalogue() -> Result<Catalog, String> {
+    let providers = providers_path()?;
+    let models = models_path()?;
+    let mut catalog = Catalog::load(&providers, &models).map_err(|error| error.to_string())?;
+    for warning in catalog.validate() {
+        eprintln!("warning: {}", crate::text::terminal(&warning));
     }
-    Ok((loaded.catalog, loaded.source))
+    Ok(catalog)
 }
 
 #[cfg(test)]

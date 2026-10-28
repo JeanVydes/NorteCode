@@ -1,477 +1,429 @@
-//! Mapping catalogue entries to Norte.
+//! Mapping a catalogue model to Norte's capability declaration.
 //!
-//! This is the one place where provider facts become [`norte::Capabilities`]:
-//! modalities, limits, tool calling, structured output, prompt-cache mode and
-//! reasoning. Config overrides always win, and a missing field stays missing
-//! rather than becoming a guess.
+//! This is the one place where a provider fact becomes [`norte::Capabilities`].
+//! Every mapping here is total and from an enum to an enum: a name the
+//! catalogue does not carry is a name that was never in the file, because the
+//! file's enums refused it at parse time. Nothing is guessed and nothing is
+//! inferred from a string, and there are no overrides above it — the catalogue
+//! is the authority on what a model can do, and the configuration no longer
+//! holds a second opinion.
 
 use std::collections::BTreeSet;
 
 use norte::{
-    CacheMode, Capabilities, Modality, Reasoning, ReasoningEffort, StreamingGranularity,
+    CacheMode, Capabilities, Feature, Modality, Reasoning, ReasoningEffort, StreamingGranularity,
     StructuredOutputMode, ToolKind,
 };
-use norte_code_config::{ModalityKind, ModelOverride, ReasoningOverride, WireKind};
 
-use crate::schema::{Model, ReasoningOption};
+use crate::schema::{
+    Modality as DeclaredModality, Model, SupportedEffort, SupportedParams, WireSchema,
+};
 
-/// The wire protocol a provider speaks.
+/// The wire family an engine speaks.
+///
+/// It is derived from the catalogue's [`WireSchema`] and it names a wire of
+/// Norte's own: the crate that implements each one owns the string, and this
+/// type is what the rest of the host passes around instead of a string of its
+/// own that could drift from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wire {
-    /// `OpenAI` Responses (`@ai-sdk/openai`).
-    Responses,
-    /// `OpenAI` chat completions, the `OpenAI`-compatible wire.
+pub enum WireKind {
+    /// `OpenAI` chat completions, the surface every compatible vendor speaks.
     Chat,
-    /// Anthropic Messages (`@ai-sdk/anthropic`).
+    /// Anthropic Messages.
     Messages,
-    /// Google `generateContent` (`@ai-sdk/google`).
+    /// Google `generateContent`.
     GenerateContent,
 }
 
-impl From<WireKind> for Wire {
-    fn from(kind: WireKind) -> Self {
-        match kind {
-            WireKind::Responses => Self::Responses,
-            WireKind::Chat => Self::Chat,
-            WireKind::Messages => Self::Messages,
-            WireKind::GenerateContent => Self::GenerateContent,
+impl From<WireSchema> for WireKind {
+    fn from(schema: WireSchema) -> Self {
+        match schema {
+            WireSchema::OpenAI => Self::Chat,
+            WireSchema::Anthropic => Self::Messages,
+            WireSchema::Google => Self::GenerateContent,
         }
     }
 }
 
-impl Wire {
-    /// Maps a models.dev `npm` package to a wire.    ///
-    /// `openai-compatible` means the chat wire, `anthropic` the Messages wire,
-    /// `google` the `generateContent` wire, and `@ai-sdk/openai` the Responses
-    /// wire. Everything else is assumed OpenAI-compatible, which is what most
-    /// of the catalogue's `openai-compatible` entries are.
-    #[must_use]
-    pub fn from_npm(npm: &str) -> Self {
-        if npm.contains("openai-compatible") {
-            Self::Chat
-        } else if npm.contains("anthropic") {
-            Self::Messages
-        } else if npm.contains("google") {
-            Self::GenerateContent
-        } else if npm == "@ai-sdk/openai" {
-            Self::Responses
-        } else {
-            Self::Chat
-        }
-    }
-
-    /// The fallback for the four providers the spec names, before the
-    /// catalogue is available.
-    #[must_use]
-    pub fn for_provider(provider: &str) -> Self {
-        match provider {
-            "openai" => Self::Responses,
-            "anthropic" => Self::Messages,
-            "google" | "gemini" => Self::GenerateContent,
-            _ => Self::Chat,
-        }
-    }
-
+impl WireKind {
     /// The Norte wire-family string.
     #[must_use]
     pub fn family(self) -> &'static str {
         match self {
-            Self::Responses => norte::openai::WIRE_RESPONSES,
             Self::Chat => norte::openai::WIRE_CHAT,
             Self::Messages => norte::anthropic::WIRE_MESSAGES,
             Self::GenerateContent => norte::gemini::WIRE_GENERATE,
         }
     }
 
-    /// How the provider caches prompt prefixes.
+    /// How the wire's provider caches prompt prefixes.
+    ///
+    /// Anthropic's cache is explicit — the request marks the blocks it wants
+    /// cached — and the other two do it themselves from the prefix.
     #[must_use]
     pub fn cache_mode(self) -> CacheMode {
         match self {
             Self::Messages => CacheMode::Explicit,
-            Self::Responses | Self::Chat | Self::GenerateContent => CacheMode::Automatic,
+            Self::Chat | Self::GenerateContent => CacheMode::Automatic,
         }
     }
 }
 
-/// Builds the capability declaration for one catalogue model.
+/// The capabilities a catalogue model declares.
 ///
-/// Config overrides win for the context window, the output limit and the
-/// reasoning declaration. A missing limit stays absent, which makes compaction
-/// refuse for that model with a visible warning instead of guessing.
+/// A missing limit stays absent, which makes compaction refuse for that model
+/// with a visible warning instead of guessing at a window it does not know.
 #[must_use]
-pub fn capabilities(model: &Model, wire: Wire, overrides: Option<&ModelOverride>) -> Capabilities {
-    let mut declared = reasoning(
-        model,
-        overrides.and_then(|overrides| overrides.reasoning.as_ref()),
-    );
-    // models.dev exposes a `toggle` for a visible off switch, but several
-    // Anthropic models accept `thinking: {type: "disabled"}` without one. Add
-    // the API fact unless the host has an explicit override.
-    if wire == Wire::Messages
-        && overrides
-            .and_then(|overrides| overrides.reasoning.as_ref())
-            .and_then(|overrides| overrides.can_disable)
-            .is_none()
-        && anthropic_can_disable(&model.id)
-    {
-        declared.can_disable = true;
-    }
+pub fn capabilities(model: &Model, wire: WireKind) -> Capabilities {
     let mut builder = Capabilities::builder()
         .streaming(StreamingGranularity::Delta)
         .cache(wire.cache_mode())
-        .reasoning(declared);
+        .reasoning(reasoning(model));
 
-    // The configured modalities win outright: a list replaces what the
-    // catalogue declared rather than adding to it, so a host can take an image
-    // away from a model the catalogue overstates as well as give one to a model
-    // the catalogue does not describe at all. Each key falls back on its own: a
-    // model with an input list and no output one keeps the output the catalogue
-    // declared.
-    let modalities = overrides.and_then(|overrides| overrides.modalities.as_ref());
-    let configured_input = modalities.and_then(|modalities| modalities.input.as_ref());
-    let configured_output = modalities.and_then(|modalities| modalities.output.as_ref());
-
-    let input: Vec<Modality> = match configured_input {
-        Some(configured) => configured.iter().copied().map(modality_of_kind).collect(),
-        None => declared_modalities(&model.modalities.input, Modality::Text).collect(),
+    // An empty input list means the file said nothing, and an entry that says
+    // nothing is not an entry that refuses everything: a model that accepted no
+    // part could not hold a conversation either, so text is assumed.
+    let input: Vec<Modality> = if model.modalities.input.is_empty() {
+        vec![Modality::Text]
+    } else {
+        model
+            .modalities
+            .input
+            .iter()
+            .copied()
+            .map(modality_of)
+            .collect()
     };
     for modality in input {
         builder = builder.input(modality);
     }
-
-    let output: Vec<Modality> = match configured_output {
-        Some(configured) => configured.iter().copied().map(modality_of_kind).collect(),
-        None => declared_modalities(&model.modalities.output, Modality::Text).collect(),
+    let output: Vec<Modality> = if model.modalities.output.is_empty() {
+        vec![Modality::Text]
+    } else {
+        model
+            .modalities
+            .output
+            .iter()
+            .copied()
+            .map(modality_of)
+            .collect()
     };
     for modality in output {
         builder = builder.output(modality);
     }
 
-    if model.tool_call {
+    for feature in features(model) {
+        builder = builder.feature(feature);
+    }
+    if model.supported_params.contains(&SupportedParams::Tools) {
         builder = builder.tool_kind(ToolKind::Function);
     }
-    // The catalogue says whether structured output exists, not which mode; the
-    // conservative reading is a JSON object without a schema.
-    if model.structured_output == Some(true) {
+    // Which mode is not declared: the catalogue says whether a schema is
+    // enforced, and the conservative reading of "structured output" is a JSON
+    // object shaped by the prompt rather than enforced by the provider.
+    if model
+        .supported_params
+        .contains(&SupportedParams::StructuredOutput)
+    {
         builder = builder.structured_output(StructuredOutputMode::JsonObject);
     }
-
-    if let Some(context) = overrides
-        .and_then(|overrides| overrides.max_context)
-        .or(model.limit.context)
-    {
+    if let Some(context) = model.limit.context {
         builder = builder.max_context(context);
     }
-    if let Some(output) = overrides
-        .and_then(|overrides| overrides.max_output)
-        .or(model.limit.output)
-    {
+    if let Some(output) = model.limit.output {
         builder = builder.max_output(output);
     }
 
     builder.build()
 }
 
-/// Maps the catalogue's reasoning declaration, then applies config overrides.
+/// The independent on/off capabilities a model's parameter list implies.
 ///
-/// When the catalogue only says `reasoning: true`, the result is supported
-/// with no declared effort and no budget, which leaves `Automatic` as the only
-/// choice. That is deliberate: Norte's check is strict, so Norte Code never
-/// offers a control the provider did not declare.
+/// Norte's [`Feature`] set is the closed list for this, so a parameter that is
+/// a feature is mapped here and one that is a request field is not:
+/// `temperature` and `seed` are things a request may carry, which is not a
+/// question Norte's capability type asks.
+fn features(model: &Model) -> Vec<Feature> {
+    let mut features = Vec::new();
+    let has = |param: SupportedParams| model.supported_params.contains(&param);
+    if has(SupportedParams::ToolChoice) {
+        features.push(Feature::ForcedToolChoice);
+    }
+    if has(SupportedParams::Logprobs) || has(SupportedParams::TopLogprobs) {
+        features.push(Feature::Logprobs);
+    }
+    features
+}
+
+/// Norte's modality for a catalogue one.
 #[must_use]
-pub fn reasoning(model: &Model, overrides: Option<&ReasoningOverride>) -> Reasoning {
-    let mut result = if model.reasoning {
-        let mut efforts = BTreeSet::new();
-        let mut can_disable = false;
-        let mut supports_budget = false;
-        let mut max_budget = None;
-        for option in &model.reasoning_options {
-            match option {
-                ReasoningOption::Effort { values } => {
-                    for value in values {
-                        if matches!(value.as_str(), "none" | "off" | "disabled") {
-                            can_disable = true;
-                        } else if let Some(effort) = effort_of(value) {
-                            efforts.insert(effort);
-                        }
-                    }
-                }
-                ReasoningOption::BudgetTokens { max, .. } => {
-                    supports_budget = true;
-                    // `-1` and `0` mean "no declared ceiling"; Norte's field is
-                    // a positive u32.
-                    if let Some(max) = max {
-                        if *max > 0 {
-                            max_budget = u32::try_from(*max).ok();
-                        }
-                    }
-                }
-                ReasoningOption::Toggle => can_disable = true,
-                ReasoningOption::Unknown => {}
-            }
-        }
-        Reasoning {
-            supported: true,
-            can_disable,
-            efforts,
-            supports_budget,
-            max_budget,
-        }
-    } else {
-        Reasoning::default()
-    };
-
-    if let Some(overrides) = overrides {
-        if let Some(supported) = overrides.supported {
-            result.supported = supported;
-        }
-        if let Some(can_disable) = overrides.can_disable {
-            result.can_disable = can_disable;
-        }
-        if let Some(efforts) = &overrides.efforts {
-            result.efforts = efforts.iter().filter_map(|name| effort_of(name)).collect();
-        }
-        if let Some(supports_budget) = overrides.supports_budget {
-            result.supports_budget = supports_budget;
-        }
-        if let Some(max_budget) = overrides.max_budget {
-            result.max_budget = Some(max_budget);
-        }
+pub fn modality_of(modality: DeclaredModality) -> Modality {
+    match modality {
+        DeclaredModality::Text => Modality::Text,
+        DeclaredModality::Image => Modality::Image,
+        DeclaredModality::Audio => Modality::Audio,
+        DeclaredModality::Video => Modality::Video,
+        DeclaredModality::File => Modality::Document,
     }
-    result
 }
 
-/// The modalities a catalogue list names, or `fallback` when it names none this
-/// build knows.
+/// The reasoning declaration a catalogue model carries.
 ///
-/// A model that declares no input modality at all is taken to take text: an
-/// entry that says nothing is not an entry that says "nothing is accepted", and
-/// a model that refused every part could not hold a conversation either.
-fn declared_modalities(
-    names: &[String],
-    fallback: Modality,
-) -> impl Iterator<Item = Modality> + '_ {
-    let known: Vec<Modality> = names.iter().filter_map(|name| modality_of(name)).collect();
-    if known.is_empty() {
-        return vec![fallback].into_iter();
-    }
-    known.into_iter()
-}
-
-/// The Norte modality a configured one names.
-///
-/// A free function and not a `From` impl: neither [`Modality`] nor
-/// [`ModalityKind`] is local here, so the orphan rule forbids the impl. It lives
-/// in this crate because this is where a provider fact becomes a Norte
-/// capability, and the host uses it too so both paths agree on the spelling.
+/// `mandatory` is what makes `can_disable` false: a model that always reasons
+/// cannot be asked not to, which is a fact about the model and not a default a
+/// person may change.
 #[must_use]
-pub fn modality_of_kind(kind: ModalityKind) -> Modality {
-    match kind {
-        ModalityKind::Text => Modality::Text,
-        ModalityKind::Image => Modality::Image,
-        ModalityKind::Audio => Modality::Audio,
-        ModalityKind::Video => Modality::Video,
-        ModalityKind::Pdf => Modality::Document,
+pub fn reasoning(model: &Model) -> Reasoning {
+    let declared = &model.reasoning;
+    let mut efforts: BTreeSet<ReasoningEffort> = declared
+        .supported_efforts
+        .iter()
+        .filter_map(|effort| effort_of(*effort))
+        .collect();
+    if let Some(default) = declared.default_effort.and_then(effort_of) {
+        efforts.insert(default);
+    }
+    // A model that reasons but declares no effort at all still reasons: the
+    // declaration says so, and refusing every setting would leave a control the
+    // provider offers unusable. The effort set stays empty in that case, which
+    // is what leaves the neutral request as the only choice.
+    let supported = declared.mandatory
+        || declared.default_enabled
+        || declared.budget_supported
+        || !declared.supported_efforts.is_empty();
+    Reasoning {
+        supported,
+        // A model that does not reason has nothing to turn off, and one that
+        // always reasons cannot be asked to stop. The file says the rest: an
+        // effort list that names `none` is a provider that accepts off, and a
+        // provider that accepts it without listing it is a provider whose
+        // dialect this host does not guess at.
+        can_disable: supported
+            && !declared.mandatory
+            && declared.supported_efforts.contains(&SupportedEffort::None),
+        efforts,
+        supports_budget: declared.budget_supported,
+        // The catalogue carries no ceiling, only whether a budget is taken: a
+        // number invented here would be a limit the provider never agreed to.
+        max_budget: None,
     }
 }
 
-fn modality_of(name: &str) -> Option<Modality> {
-    match name {
-        "text" => Some(Modality::Text),
-        "image" => Some(Modality::Image),
-        "audio" => Some(Modality::Audio),
-        "video" => Some(Modality::Video),
-        "pdf" | "document" | "file" => Some(Modality::Document),
-        _ => None,
-    }
-}
-
-fn effort_of(name: &str) -> Option<ReasoningEffort> {
-    match name {
-        "minimal" => Some(ReasoningEffort::Minimal),
-        "low" => Some(ReasoningEffort::Low),
-        "medium" => Some(ReasoningEffort::Medium),
-        "high" => Some(ReasoningEffort::High),
-        "xhigh" => Some(ReasoningEffort::XHigh),
-        "max" => Some(ReasoningEffort::Max),
-        _ => None,
-    }
-}
-
-/// Whether the Anthropic generation accepts `thinking: {type: "disabled"}`.
+/// Norte's effort for a catalogue one, when the two name the same thing.
 ///
-/// The Anthropic thinking table is the source: 4.5 through 4.8 and Opus 5
-/// accept it; Opus 5.5 and Sonnet 5.5 reject it (Sonnet 5.5's lowest setting is
-/// `between_tools`, which the neutral request does not express), and Fable,
-/// Mythos and the 5.5 Opus/Sonnet models cannot turn thinking off. `toggle`
-/// already covers Sonnet 5 and Haiku 5.5.
-fn anthropic_can_disable(id: &str) -> bool {
-    let id = id.to_ascii_lowercase();
-    if !id.contains("claude") || id.contains("fable") || id.contains("mythos") {
-        return false;
+/// `None` is not an effort — it is reasoning turned off — so it maps to nothing
+/// here and is read where `can_disable` is decided.
+#[must_use]
+pub fn effort_of(effort: SupportedEffort) -> Option<ReasoningEffort> {
+    match effort {
+        SupportedEffort::None => None,
+        SupportedEffort::Minimal => Some(ReasoningEffort::Minimal),
+        SupportedEffort::Low => Some(ReasoningEffort::Low),
+        SupportedEffort::Medium => Some(ReasoningEffort::Medium),
+        SupportedEffort::High => Some(ReasoningEffort::High),
+        SupportedEffort::Xhigh => Some(ReasoningEffort::XHigh),
+        SupportedEffort::Max => Some(ReasoningEffort::Max),
     }
-    if id.contains("opus-5-5") || id.contains("sonnet-5-5") {
-        return false;
-    }
-    id.contains("opus-5")
-        || id.contains("4-5")
-        || id.contains("4-6")
-        || id.contains("4-7")
-        || id.contains("4-8")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::Catalog;
-    use norte_code_config::ModalitiesOverride;
+    use crate::schema::{Limit, Modalities, Reasoning as Declared};
 
-    #[test]
-    fn npm_selects_the_wire() {
-        assert_eq!(Wire::from_npm("@ai-sdk/openai-compatible"), Wire::Chat);
-        assert_eq!(Wire::from_npm("@ai-sdk/anthropic"), Wire::Messages);
-        assert_eq!(Wire::from_npm("@ai-sdk/google"), Wire::GenerateContent);
-        assert_eq!(Wire::from_npm("@ai-sdk/openai"), Wire::Responses);
-        assert_eq!(Wire::from_npm("@ai-sdk/groq"), Wire::Chat);
-    }
-
-    #[test]
-    fn a_configured_wire_maps_to_its_kind() {
-        assert_eq!(Wire::from(WireKind::Messages), Wire::Messages);
-        assert_eq!(Wire::from(WireKind::Chat), Wire::Chat);
-        assert_eq!(Wire::from(WireKind::Responses), Wire::Responses);
-        assert_eq!(Wire::from(WireKind::GenerateContent), Wire::GenerateContent);
-    }
-
-    #[test]
-    fn gemini_maps_limits_modalities_and_cache() {
-        let catalog = Catalog::bundled();
-        let model = catalog.find("google", "gemini-2.5-pro").expect("model");
-        let capabilities = capabilities(model, Wire::GenerateContent, None);
-        assert_eq!(capabilities.max_context, Some(1_048_576));
-        assert!(
-            capabilities
-                .modalities
-                .input
-                .contains_key(&Modality::Document)
-        );
-        assert!(capabilities.modalities.output.contains(&Modality::Text));
-        assert!(capabilities.tool_kinds.contains(&ToolKind::Function));
-        assert_eq!(capabilities.cache, CacheMode::Automatic);
-    }
-
-    #[test]
-    fn anthropic_caches_explicitly_and_keeps_its_efforts() {
-        let catalog = Catalog::bundled();
-        let model = catalog
-            .find("anthropic", "claude-sonnet-5-5")
-            .expect("model");
-        let capabilities = capabilities(model, Wire::Messages, None);
-        assert_eq!(capabilities.cache, CacheMode::Explicit);
-        assert!(capabilities.reasoning.supported);
-        assert!(
-            capabilities
-                .reasoning
-                .efforts
-                .contains(&ReasoningEffort::High)
-        );
-        assert!(
-            capabilities
-                .reasoning
-                .efforts
-                .contains(&ReasoningEffort::XHigh)
-        );
-        assert!(
-            capabilities
-                .reasoning
-                .efforts
-                .contains(&ReasoningEffort::Max)
-        );
-    }
-
-    #[test]
-    fn anthropic_models_that_accept_disabled_say_so() {
-        let catalog = Catalog::bundled();
-        for id in [
-            "claude-opus-4-5",
-            "claude-opus-4-8",
-            "claude-opus-5",
-            "claude-sonnet-5",
-            "claude-haiku-5-5",
-        ] {
-            let model = catalog.find("anthropic", id).expect(id);
-            let capabilities = capabilities(model, Wire::Messages, None);
-            assert!(capabilities.reasoning.can_disable, "{id}");
-        }
-        for id in ["claude-opus-5-5", "claude-sonnet-5-5"] {
-            let model = catalog.find("anthropic", id).expect(id);
-            let capabilities = capabilities(model, Wire::Messages, None);
-            assert!(!capabilities.reasoning.can_disable, "{id}");
+    fn model() -> Model {
+        Model {
+            id: "m".to_owned(),
+            provider_id: "p".to_owned(),
+            canonical_slug: "p/m".to_owned(),
+            name: "m".to_owned(),
+            limit: Limit {
+                context: Some(128_000),
+                output: Some(8_192),
+            },
+            modalities: Modalities {
+                input: vec![DeclaredModality::Text, DeclaredModality::Image],
+                output: vec![DeclaredModality::Text],
+            },
+            supported_params: vec![SupportedParams::Tools, SupportedParams::Temperature],
+            ..Model::default()
         }
     }
 
     #[test]
-    fn overrides_win_over_the_catalogue() {
-        let catalog = Catalog::bundled();
-        let model = catalog.find("google", "gemini-2.5-pro").expect("model");
-        let overrides = ModelOverride {
-            max_context: Some(1234),
-            max_output: Some(99),
-            reasoning: Some(ReasoningOverride {
-                supported: Some(false),
-                ..ReasoningOverride::default()
-            }),
-            ..ModelOverride::default()
-        };
-        let capabilities = capabilities(model, Wire::GenerateContent, Some(&overrides));
-        assert_eq!(capabilities.max_context, Some(1234));
-        assert_eq!(capabilities.max_output, Some(99));
-        assert!(!capabilities.reasoning.supported);
+    fn the_three_schemas_map_to_the_three_wire_families() {
+        assert_eq!(WireKind::from(WireSchema::OpenAI), WireKind::Chat);
+        assert_eq!(WireKind::from(WireSchema::Anthropic), WireKind::Messages);
+        assert_eq!(
+            WireKind::from(WireSchema::Google),
+            WireKind::GenerateContent
+        );
+        assert_eq!(
+            WireKind::from(WireSchema::OpenAI).family(),
+            norte::openai::WIRE_CHAT
+        );
+        assert_eq!(
+            WireKind::from(WireSchema::Anthropic).family(),
+            norte::anthropic::WIRE_MESSAGES
+        );
+        assert_eq!(
+            WireKind::from(WireSchema::Google).family(),
+            norte::gemini::WIRE_GENERATE
+        );
     }
 
     #[test]
-    fn a_configured_modality_gives_a_text_model_an_image() {
-        // The case the whole override exists for: a model the catalogue does not
-        // describe, or describes without an image, takes one because the host
-        // said so. Without this the part is refused as an input modality the
-        // model was believed not to have.
-        let catalog = Catalog::bundled();
-        let model = catalog.find("google", "gemini-2.5-pro").expect("model");
-        let overrides = ModelOverride {
-            modalities: Some(ModalitiesOverride {
-                input: Some(vec![ModalityKind::Text, ModalityKind::Image]),
-                output: None,
-            }),
-            ..ModelOverride::default()
-        };
-        let declared = capabilities(model, Wire::GenerateContent, Some(&overrides));
+    fn only_anthropic_caches_explicitly() {
+        assert_eq!(WireKind::Messages.cache_mode(), CacheMode::Explicit);
+        assert_eq!(WireKind::Chat.cache_mode(), CacheMode::Automatic);
+        assert_eq!(WireKind::GenerateContent.cache_mode(), CacheMode::Automatic);
+    }
+
+    #[test]
+    fn a_model_that_takes_tools_declares_the_function_tool_kind() {
+        let declared = capabilities(&model(), WireKind::Chat);
+        assert!(declared.tool_kinds.contains(&ToolKind::Function));
+        assert_eq!(declared.max_context, Some(128_000));
+        assert_eq!(declared.max_output, Some(8_192));
         assert!(declared.modalities.supports_input(Modality::Image));
-        assert!(declared.modalities.supports_input(Modality::Text));
-        // The output half was left out, so it keeps what the catalogue said.
         assert!(declared.modalities.supports_output(Modality::Text));
     }
 
     #[test]
-    fn a_configured_modality_takes_one_away_too() {
-        // It replaces, rather than adds: a host that reads the catalogue as
-        // overstating a model has to be able to say so.
-        let catalog = Catalog::bundled();
-        let model = catalog.find("google", "gemini-2.5-pro").expect("model");
-        let overrides = ModelOverride {
-            modalities: Some(ModalitiesOverride {
-                input: Some(vec![ModalityKind::Text]),
-                output: None,
-            }),
-            ..ModelOverride::default()
-        };
-        let declared = capabilities(model, Wire::GenerateContent, Some(&overrides));
-        assert!(declared.modalities.supports_input(Modality::Text));
-        assert!(!declared.modalities.supports_input(Modality::Document));
+    fn a_model_with_no_parameter_list_takes_no_tools() {
+        // The list is what says so: an entry that does not name `tools` is an
+        // entry whose model cannot call one, and the conservative reading is
+        // what the provider declared.
+        let mut bare = model();
+        bare.supported_params.clear();
+        let declared = capabilities(&bare, WireKind::Chat);
+        assert!(!declared.tool_kinds.contains(&ToolKind::Function));
     }
 
     #[test]
-    fn a_pdf_and_a_document_name_the_same_modality() {
-        assert_eq!(modality_of_kind(ModalityKind::Pdf), Modality::Document);
-        assert_eq!(modality_of("pdf"), Some(Modality::Document));
+    fn structured_output_follows_the_parameter_list() {
+        let mut sample = model();
+        assert!(
+            capabilities(&sample, WireKind::Chat)
+                .structured_output
+                .is_empty()
+        );
+        sample
+            .supported_params
+            .push(SupportedParams::StructuredOutput);
+        assert!(
+            capabilities(&sample, WireKind::Chat)
+                .structured_output
+                .contains(&StructuredOutputMode::JsonObject)
+        );
+    }
+
+    #[test]
+    fn an_empty_modality_list_is_text_and_not_nothing() {
+        let mut bare = model();
+        bare.modalities.input.clear();
+        bare.modalities.output.clear();
+        let declared = capabilities(&bare, WireKind::Chat);
+        assert!(declared.modalities.supports_input(Modality::Text));
+        assert!(declared.modalities.supports_output(Modality::Text));
+    }
+
+    #[test]
+    fn a_mandatory_model_cannot_be_turned_off() {
+        // The case the field exists for: some models always reason, and asking
+        // otherwise is asking for something the provider will not do.
+        let mut sample = model();
+        sample.reasoning = Declared {
+            mandatory: true,
+            default_enabled: true,
+            supported_efforts: vec![SupportedEffort::Low, SupportedEffort::High],
+            ..Declared::default()
+        };
+        let declared = reasoning(&sample);
+        assert!(declared.supported);
+        assert!(!declared.can_disable, "mandatory means it cannot be off");
+        assert!(declared.efforts.contains(&ReasoningEffort::High));
+    }
+
+    #[test]
+    fn efforts_and_the_default_are_both_offered() {
+        let mut sample = model();
+        sample.reasoning = Declared {
+            default_enabled: true,
+            default_effort: Some(SupportedEffort::Medium),
+            supported_efforts: vec![
+                SupportedEffort::None,
+                SupportedEffort::Low,
+                SupportedEffort::Xhigh,
+            ],
+            budget_supported: true,
+            ..Declared::default()
+        };
+        let declared = reasoning(&sample);
+        assert!(declared.supported);
+        assert!(declared.can_disable);
+        assert!(declared.efforts.contains(&ReasoningEffort::Low));
+        assert!(declared.efforts.contains(&ReasoningEffort::XHigh));
+        assert!(
+            declared.efforts.contains(&ReasoningEffort::Medium),
+            "the default is offered whether or not the list repeats it"
+        );
+        assert!(declared.supports_budget);
+    }
+
+    #[test]
+    fn a_model_that_does_not_reason_declares_nothing() {
+        let declared = reasoning(&model());
+        assert!(!declared.supported);
+        assert!(declared.efforts.is_empty());
+        assert!(!declared.can_disable);
+    }
+
+    #[test]
+    fn a_parameter_that_is_a_feature_becomes_one() {
+        let mut sample = model();
+        sample.supported_params.push(SupportedParams::ToolChoice);
+        sample.supported_params.push(SupportedParams::Logprobs);
+        let declared = capabilities(&sample, WireKind::Chat);
+        assert!(declared.features.contains(&Feature::ForcedToolChoice));
+        assert!(declared.features.contains(&Feature::Logprobs));
+    }
+
+    #[test]
+    fn every_documented_parameter_is_accepted() {
+        // Not every name maps to something Norte asks about — `temperature` and
+        // `seed` are request fields, not capabilities — so this asserts the ones
+        // that do and that the rest are read without a panic.
+        let mut sample = model();
+        sample.supported_params = vec![
+            SupportedParams::FrequencyPenalty,
+            SupportedParams::IncludeReasoning,
+            SupportedParams::Logprobs,
+            SupportedParams::MaxTokens,
+            SupportedParams::MinP,
+            SupportedParams::PresencePenalty,
+            SupportedParams::Reasoning,
+            SupportedParams::ReasoningEffort,
+            SupportedParams::ResponseFormat,
+            SupportedParams::Seed,
+            SupportedParams::Stop,
+            SupportedParams::StructuredOutput,
+            SupportedParams::Temperature,
+            SupportedParams::ToolChoice,
+            SupportedParams::Tools,
+            SupportedParams::TopP,
+            SupportedParams::TopLogprobs,
+            SupportedParams::TopK,
+            SupportedParams::Verbosity,
+        ];
+        let declared = capabilities(&sample, WireKind::Chat);
+        assert!(declared.tool_kinds.contains(&ToolKind::Function));
+        assert!(
+            declared
+                .structured_output
+                .contains(&StructuredOutputMode::JsonObject)
+        );
+        assert!(declared.features.contains(&Feature::ForcedToolChoice));
+        assert!(declared.features.contains(&Feature::Logprobs));
     }
 }

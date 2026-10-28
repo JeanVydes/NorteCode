@@ -1,21 +1,17 @@
 //! Model selection and the `models` report.
 
-use std::borrow::Cow;
+use norte_code_catalog::WireSchema;
 
-use norte_code_config::{AuthKind, WireKind};
+use super::{Catalog, Config, ModelInfo, ModelSpec, ModelsArgs, model_list, reasoning_label};
 
-use super::{
-    Catalog, Config, ModelInfo, ModelSpec, ModelsArgs, ServiceError, Source, fallback_env,
-    human_tokens, model_list, reasoning_label, source_label,
-};
-
+/// Writes the model list, filtered the way the flags asked.
 pub(crate) fn list_models(
-    config: &Config,
     catalog: &Catalog,
-    source: Source,
     args: &ModelsArgs,
+    providers_path: &std::path::Path,
+    models_path: &std::path::Path,
 ) -> Result<u8, String> {
-    let mut models = model_list(config, catalog);
+    let mut models = model_list(catalog);
     models.retain(|model| {
         args.provider
             .as_ref()
@@ -37,10 +33,14 @@ pub(crate) fn list_models(
             println!("{line}");
         }
     } else {
+        // The two files are named, and not a "source": there is one source now,
+        // and saying which file the list was read from is what tells a person
+        // where to add a model.
         eprintln!(
-            "catalogue: {} models from {}",
+            "catalogue: {} models from {} and {}",
             models.len(),
-            source_label(source)
+            providers_path.display(),
+            models_path.display()
         );
         for model in &models {
             print_model(model);
@@ -54,7 +54,7 @@ pub(crate) fn print_model(model: &ModelInfo) {
     let reference = crate::text::terminal(&reference_text);
     let context = model
         .max_context
-        .map_or_else(|| "-".to_owned(), human_tokens);
+        .map_or_else(|| "-".to_owned(), super::human_tokens);
     let tools = if model.tools { "tools" } else { "-" };
     let reasoning_text = reasoning_label(&model.reasoning);
     let reasoning = crate::text::terminal(&reasoning_text);
@@ -72,8 +72,8 @@ pub(crate) fn print_model(model: &ModelInfo) {
 /// Neither name is ever split: the provider is its own key and the model is an
 /// opaque string that may carry slashes of its own — `nvidia/nemotron` is a
 /// model of the `nvidia` provider. `--provider` wins over `default_provider`,
-/// `--model` over `default_model`, and each falls back to its own config key;
-/// a model with no provider (from either) is an error rather than a default
+/// `--model` over `default_model`, and each falls back to its own config key; a
+/// model with no provider (from either) is an error rather than a default
 /// guessed at.
 fn resolve_reference(
     config: &Config,
@@ -91,188 +91,160 @@ fn resolve_reference(
     Ok((provider, model))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The spec a run opens on.
+///
+/// The catalogue is the only place a model comes from, so a reference it does
+/// not carry is not resolved from somewhere else: an unknown provider or model
+/// is an error naming what is missing, and the fix is an entry in one of the two
+/// files rather than a flag that papers over it.
 pub(crate) fn resolve_spec(
     config: &Config,
     catalog: &Catalog,
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
-    wire: Option<WireKind>,
-    auth: Option<AuthKind>,
-    api_key_env: Option<String>,
-    disable_prompt_cache_key: bool,
+    wire: Option<WireSchema>,
 ) -> Result<ModelSpec, String> {
     let (provider, model_name) = resolve_reference(config, provider, model)?;
-
-    let reference = format!("{provider}/{model_name}");
-
-    // When provider is "disabled", it's a non-persistent custom provider:
-    // require explicit wire, endpoint, and api_key_env.
-    let is_disabled = provider == "disabled";
-    if is_disabled {
-        if wire.is_none() {
-            return Err("--provider disabled requires --wire".to_owned());
-        }
-        if endpoint.is_none()
-            && config
-                .providers
-                .get("disabled")
-                .and_then(|e| e.endpoint.clone())
-                .is_none()
-        {
-            return Err("--provider disabled requires --endpoint".to_owned());
-        }
-        if api_key_env.is_none()
-            && config
-                .providers
-                .get("disabled")
-                .and_then(|e| e.api_key_env.clone())
-                .is_none()
-        {
-            return Err("--provider disabled requires --api-key-env".to_owned());
-        }
-    } else {
-        // Validate that the provider exists in the catalogue or config.
-        let in_catalogue = catalog.provider(&provider).is_some();
-        let in_config = config.providers.contains_key(&provider);
-        if !in_catalogue && !in_config {
-            return Err(format!(
-                "unknown provider `{provider}`; use a catalogue provider, a configured provider, or --provider disabled"
-            ));
-        }
+    if catalog.provider(&provider).is_none() {
+        return Err(format!(
+            "unknown provider `{provider}`; add it to providers.json, or pick one of: {}",
+            catalog
+                .providers()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
-
-    let config =
-        if wire.is_some() || auth.is_some() || api_key_env.is_some() || disable_prompt_cache_key {
-            let mut config = config.clone();
-            let entry = config.providers.entry(provider.clone()).or_default();
-            if wire.is_some() {
-                entry.wire = wire;
-            }
-            if auth.is_some() {
-                entry.auth = auth;
-            }
-            if api_key_env.is_some() {
-                entry.api_key_env = api_key_env;
-            }
-            if disable_prompt_cache_key {
-                entry.prompt_cache_key = Some(false);
-            }
-            Cow::Owned(config)
-        } else {
-            Cow::Borrowed(config)
-        };
-    let config = config.as_ref();
-    match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
-        Ok(spec) => Ok(spec),
-        // The provider is in the catalogue and the model is not: a fresh
-        // release, or a model named in the config and nowhere else. The
-        // provider still supplies the wire, the endpoint and the key, so the
-        // reference resolves with conservative capabilities and whatever the
-        // host declared under `providers.<id>.models` rather than failing.
-        //
-        // This is the same fallback the service makes in `default_spec_for`:
-        // `/provider liquid` inside a session resolved a model the command
-        // line refused, which is one reference answered two ways.
-        Err(ServiceError::UnknownModel {
-            provider: unknown, ..
-        }) if catalog.provider(&unknown).is_some() => {
-            ModelSpec::from_provider(config, catalog, &reference, endpoint.clone())
-                .map_err(|error| error.to_string())
-        }
-        Err(ServiceError::UnknownProvider(_)) => {
-            if !is_disabled {
-                eprintln!(
-                    "note: `{}` names a provider the catalogue does not list; using the fallback",
-                    crate::text::terminal(&reference)
-                );
-            }
-            let fallback_provider = if is_disabled { "disabled" } else { &provider };
-            ModelSpec::resolve(
-                config,
-                &reference,
-                endpoint,
-                &fallback_env(fallback_provider),
-            )
-            .map_err(|error| error.to_string())
-        }
-        Err(error) => Err(error.to_string()),
+    if catalog.find(&provider, &model_name).is_none() {
+        return Err(format!(
+            "the provider `{provider}` has no model `{model_name}`; add it to models.json"
+        ));
     }
+    let mut spec =
+        ModelSpec::from_catalog(config, catalog, &format!("{provider}/{model_name}"), wire)
+            .map_err(|error| error.to_string())?;
+    // `--endpoint` replaces the wire's base URL for one run: a proxy, a local
+    // mirror, a staging host. It is the one override left, and it is about
+    // *where* the request goes and never about what it says.
+    if let Some(endpoint) = endpoint {
+        spec.endpoint = endpoint;
+    }
+    Ok(spec)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use norte_code_catalog::Wire;
-    use norte_code_config::{AuthKind, WireKind};
-
     use super::*;
+    use norte_code_catalog::{Models, Providers};
+
+    /// A catalogue with one provider that serves one `OpenAI` wire.
+    fn catalog() -> Catalog {
+        let providers: Providers = serde_json::from_str(
+            r#"{"providers":{"p":{"name":"P","environment_keys":["PATH"],
+                "wires":[{"api":"https://p.invalid/v1","schema":"openai"}]}}}"#,
+        )
+        .expect("providers");
+        let models: Models = serde_json::from_str(
+            r#"{"models":[{"id":"m","provider_id":"p","name":"M",
+                "supported_params":["tools"],
+                "modalities":{"input":["text"],"output":["text"]},
+                "limit":{"context":1000,"output":100}}]}"#,
+        )
+        .expect("models");
+        Catalog::new(providers, models).expect("catalogue")
+    }
 
     #[test]
-    fn the_command_line_overrides_the_provider_wire_and_auth() {
-        let catalog = Catalog::parse(
-            br#"{
-                "providers": {
-                    "openrouter": {
-                        "id": "openrouter",
-                        "env": ["OPENROUTER_API_KEY"],
-                        "npm": "@openrouter/ai-sdk-provider",
-                        "api": "https://openrouter.ai/api/v1",
-                        "models": {
-                            "anthropic/claude-sonnet-4.5": {
-                                "id": "anthropic/claude-sonnet-4.5",
-                                "name": "Claude Sonnet 4.5",
-                                "tool_call": true,
-                                "modalities": {"input": ["text"], "output": ["text"]},
-                                "limit": {"context": 200000, "output": 64000}
-                            }
-                        }
-                    }
-                }
-            }"#,
-        )
-        .expect("catalog");
-        let key_file =
-            std::env::temp_dir().join(format!("norte-code-resolve-{}-key", std::process::id()));
-        fs::write(&key_file, "sk-or-test\n").expect("key file");
-        let config = Config::from_json(&format!(
-            r#"{{"providers":{{"openrouter":{{"api_key_file":"{}"}}}}}}"#,
-            key_file.display()
-        ))
-        .expect("config")
-        .config;
+    fn the_flags_beat_the_configuration_and_the_configuration_beats_nothing() {
+        let config = Config {
+            default_provider: Some("p".to_owned()),
+            default_model: Some("m".to_owned()),
+            ..Config::default()
+        };
+        let spec = resolve_spec(&config, &catalog(), None, None, None, None).expect("spec");
+        assert_eq!(spec.label(), "p/m");
 
-        let plain = resolve_spec(
+        // A flag wins over the configured default, and an explicit endpoint
+        // replaces the catalogue's for one run.
+        let spec = resolve_spec(
             &config,
-            &catalog,
-            Some("openrouter".to_owned()),
-            Some("anthropic/claude-sonnet-4.5".to_owned()),
+            &catalog(),
+            Some("p".to_owned()),
+            Some("m".to_owned()),
+            Some("https://proxy.invalid/v1".to_owned()),
             None,
-            None,
-            None,
-            None,
-            false,
         )
         .expect("spec");
-        assert_eq!(plain.wire, Wire::Chat);
-        assert_eq!(plain.auth, None);
+        assert_eq!(spec.endpoint, "https://proxy.invalid/v1");
+    }
 
-        let overridden = resolve_spec(
+    #[test]
+    fn a_provider_the_catalogue_does_not_have_is_refused_by_name() {
+        let config = Config::default();
+        let error = resolve_spec(
             &config,
-            &catalog,
-            Some("openrouter".to_owned()),
-            Some("anthropic/claude-sonnet-4.5".to_owned()),
+            &catalog(),
+            Some("nowhere".to_owned()),
+            Some("m".to_owned()),
             None,
-            Some(WireKind::Messages),
-            Some(AuthKind::Bearer),
             None,
-            false,
+        )
+        .expect_err("unknown provider");
+        assert!(error.contains("nowhere"), "{error}");
+        assert!(error.contains("providers.json"), "{error}");
+    }
+
+    #[test]
+    fn a_model_the_catalogue_does_not_have_says_which_file_to_edit() {
+        let config = Config::default();
+        let error = resolve_spec(
+            &config,
+            &catalog(),
+            Some("p".to_owned()),
+            Some("nope".to_owned()),
+            None,
+            None,
+        )
+        .expect_err("unknown model");
+        assert!(error.contains("models.json"), "{error}");
+    }
+
+    #[test]
+    fn a_named_wire_picks_among_the_ones_the_provider_serves() {
+        // The provider serves the OpenAI schema only, so naming another is an
+        // error that lists what it has rather than a silent downgrade.
+        let config = Config::default();
+        let error = resolve_spec(
+            &config,
+            &catalog(),
+            Some("p".to_owned()),
+            Some("m".to_owned()),
+            None,
+            Some(WireSchema::Anthropic),
+        )
+        .expect_err("no anthropic wire");
+        assert!(error.contains("anthropic"), "{error}");
+        assert!(error.contains("openai"), "{error}");
+
+        let spec = resolve_spec(
+            &config,
+            &catalog(),
+            Some("p".to_owned()),
+            Some("m".to_owned()),
+            None,
+            Some(WireSchema::OpenAI),
         )
         .expect("spec");
-        assert_eq!(overridden.wire, Wire::Messages);
-        assert_eq!(overridden.auth, Some(AuthKind::Bearer));
-        let _ = fs::remove_file(key_file);
+        assert_eq!(spec.schema, WireSchema::OpenAI);
+    }
+
+    #[test]
+    fn no_reference_at_all_asks_for_the_two_keys() {
+        let config = Config::default();
+        let error =
+            resolve_spec(&config, &catalog(), None, None, None, None).expect_err("nothing named");
+        assert!(error.contains("--provider"), "{error}");
     }
 }

@@ -20,7 +20,7 @@ use norte::{
     Continuation, Layer, LayerContext, ModelRequest, ModelStream, ReasoningRequest, StreamEvent,
     Usage,
 };
-use norte_code_store_sqlite::RequestRecord;
+use norte_code_store_sqlite::{RequestRecord, RequestStatus};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -212,7 +212,7 @@ impl Layer for TelemetryLayer {
                     &self.spec,
                     started_at,
                     started.elapsed(),
-                    "error",
+                    RequestStatus::Error,
                 );
                 record.error = Some(error.to_string());
                 record.error_kind = error_kind_label(&error);
@@ -276,7 +276,7 @@ impl RequestMetadata {
         spec: &ModelSpec,
         started_at: DateTime<Utc>,
         elapsed: std::time::Duration,
-        status: &str,
+        status: RequestStatus,
     ) -> RequestRecord {
         RequestRecord {
             id: Uuid::new_v4().to_string(),
@@ -285,7 +285,7 @@ impl RequestMetadata {
             turn,
             provider: spec.provider.clone(),
             model: spec.model.clone(),
-            endpoint: spec.endpoint.clone(),
+            endpoint: Some(spec.endpoint.clone()),
             started_at,
             duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             first_token_ms: None,
@@ -309,7 +309,7 @@ impl RequestMetadata {
             metadata: self.metadata.clone(),
             cost_usd: None,
             finish_reason: None,
-            status: status.to_owned(),
+            status,
             error: None,
             error_kind: None,
             retry_after_ms: None,
@@ -330,7 +330,7 @@ struct TelemetryStream {
     usage: Option<Usage>,
     finish_reason: Option<String>,
     tool_calls: Vec<String>,
-    status: Option<&'static str>,
+    status: Option<RequestStatus>,
     error: Option<String>,
     error_kind: Option<String>,
     retry_after_ms: Option<u64>,
@@ -341,7 +341,7 @@ struct TelemetryStream {
 use std::time::Duration;
 
 impl TelemetryStream {
-    fn finish(&mut self, status: &'static str) {
+    fn finish(&mut self, status: RequestStatus) {
         if self.finished {
             return;
         }
@@ -403,17 +403,17 @@ impl Stream for TelemetryStream {
                 Poll::Ready(Some(Ok(event)))
             }
             Poll::Ready(Some(Err(error))) => {
-                self.status = Some("error");
+                self.status = Some(RequestStatus::Error);
                 self.error = Some(error.to_string());
                 self.error_kind = error_kind_label(&error);
                 self.retry_after_ms = error
                     .retry_after()
                     .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX));
-                self.finish("error");
+                self.finish(RequestStatus::Error);
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
-                let status = self.status.unwrap_or("ok");
+                let status = self.status.unwrap_or(RequestStatus::Ok);
                 self.finish(status);
                 Poll::Ready(None)
             }
@@ -425,7 +425,7 @@ impl Stream for TelemetryStream {
 impl Drop for TelemetryStream {
     fn drop(&mut self) {
         if !self.finished {
-            self.finish(self.status.unwrap_or("cancelled"));
+            self.finish(self.status.unwrap_or(RequestStatus::Cancelled));
         }
     }
 }
@@ -534,11 +534,9 @@ mod tests {
             provider: "test".to_owned(),
             model: "test".to_owned(),
             wire: crate::provider::Wire::Chat,
-            endpoint: None,
+            endpoint: "https://example.invalid/v1".to_owned(),
+            schema: norte_code_catalog::WireSchema::OpenAI,
             api_key: norte_code_config::ApiKey::new("test"),
-            auth: None,
-            no_prompt_cache_key: false,
-            api_key_env: None,
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };
@@ -564,7 +562,7 @@ mod tests {
         assert!(stream.next().await.is_none());
         let records = telemetry.take(context.session);
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].status, "ok");
+        assert_eq!(records[0].status, RequestStatus::Ok);
         assert!(records[0].sandbox);
         assert!(!records[0].sandbox_network);
     }
@@ -594,11 +592,9 @@ mod tests {
             provider: "test".to_owned(),
             model: "test".to_owned(),
             wire: crate::provider::Wire::Chat,
-            endpoint: None,
+            endpoint: "https://example.invalid/v1".to_owned(),
+            schema: norte_code_catalog::WireSchema::OpenAI,
             api_key: norte_code_config::ApiKey::new("test"),
-            auth: None,
-            no_prompt_cache_key: false,
-            api_key_env: None,
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };
@@ -638,7 +634,7 @@ mod tests {
             text: "thinking".to_owned(),
         })
         .await;
-        assert_eq!(record.status, "cancelled");
+        assert_eq!(record.status, RequestStatus::Cancelled);
         assert_eq!(record.input_tokens, None);
         assert_eq!(record.output_tokens, None);
         assert_eq!(record.cost_usd, None);
@@ -653,7 +649,7 @@ mod tests {
             .vendor
             .insert("cost".to_owned(), serde_json::json!(0.25));
         let (record, _) = cancelled_row(StreamEvent::Usage(usage)).await;
-        assert_eq!(record.status, "cancelled");
+        assert_eq!(record.status, RequestStatus::Cancelled);
         assert_eq!(record.input_tokens, Some(120));
         assert_eq!(record.output_tokens, Some(30));
         assert_eq!(record.cost_usd, Some(0.25));

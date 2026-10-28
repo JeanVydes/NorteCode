@@ -24,11 +24,6 @@ use serde_json::Value;
 pub const CONFIG_VERSION: u32 = 1;
 /// Largest config file accepted.
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
-/// Largest API key file accepted.
-const MAX_SECRET_BYTES: usize = 64 * 1024;
-
-/// Where the catalogue is fetched from unless configured otherwise.
-pub const DEFAULT_CATALOG_URL: &str = "https://models.dev/catalog.json";
 
 /// The whole configuration file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,10 +43,6 @@ pub struct Config {
     ///
     /// It is the model id and nothing else, slashes and all.
     pub default_model: Option<String>,
-    /// Per-provider settings.
-    pub providers: BTreeMap<String, ProviderConfig>,
-    /// The model catalogue.
-    pub catalog: CatalogConfig,
     /// Automatic compaction.
     pub compaction: CompactionConfig,
     /// Automatic session titles.
@@ -195,8 +186,6 @@ impl Default for Config {
             version: CONFIG_VERSION,
             default_provider: None,
             default_model: None,
-            providers: BTreeMap::new(),
-            catalog: CatalogConfig::default(),
             compaction: CompactionConfig::default(),
             titling: TitlingConfig::default(),
             retry: RetryConfig::default(),
@@ -216,21 +205,6 @@ impl Default for Config {
     }
 }
 
-/// The wire a provider speaks, when the configuration overrides the
-/// catalogue's `npm`-derived choice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WireKind {
-    /// `OpenAI` Responses.
-    Responses,
-    /// `OpenAI` chat completions.
-    Chat,
-    /// Anthropic Messages.
-    Messages,
-    /// Google `generateContent`.
-    GenerateContent,
-}
-
 /// The credential a provider's requests carry, when it is not the wire's
 /// default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,62 +218,6 @@ pub enum AuthKind {
     XGoogApiKey,
     /// Send no credential, for a local or otherwise open endpoint.
     Disabled,
-}
-
-/// One provider's settings.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProviderConfig {
-    /// The environment variable holding the API key.
-    pub api_key_env: Option<String>,
-    /// The file holding the API key.
-    pub api_key_file: Option<PathBuf>,
-    /// A base URL override, for a proxy or a compatible vendor.
-    pub endpoint: Option<String>,
-    /// The wire to speak, replacing the one the catalogue's `npm` selects.
-    pub wire: Option<WireKind>,
-    /// The credential scheme to use, replacing the wire's default.
-    pub auth: Option<AuthKind>,
-    /// Whether `OpenAI` wires may send the session id as `prompt_cache_key`.
-    ///
-    /// `None` and `Some(false)` both omit it, which is the default: the field is
-    /// a gateway extension and an endpoint that does not know it rejects the
-    /// request. `Some(true)` opts in for a gateway that honours it.
-    pub prompt_cache_key: Option<bool>,
-    /// Extra headers sent with every request to this provider.
-    ///
-    /// They are added to the ones the provider ships with, and a header named
-    /// here replaces the built-in one of the same name.
-    pub headers: BTreeMap<String, String>,
-    /// Per-model overrides, keyed by the model id alone.
-    ///
-    /// It is the model id and not `provider/model`: a model name may carry a
-    /// slash of its own — NVIDIA names its models `vendor/model` — and a key
-    /// that had to be split to be read would split those too. The provider is
-    /// the one this sits under, which is where the two halves already are.
-    pub models: BTreeMap<String, ModelOverride>,
-}
-
-/// Catalogue settings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CatalogConfig {
-    /// Where the catalogue is fetched from.
-    pub url: String,
-    /// How long a cached catalogue stays fresh.
-    pub ttl_hours: u64,
-    /// Never touch the network.
-    pub offline: bool,
-}
-
-impl Default for CatalogConfig {
-    fn default() -> Self {
-        Self {
-            url: DEFAULT_CATALOG_URL.to_owned(),
-            ttl_hours: 24,
-            offline: false,
-        }
-    }
 }
 
 /// Session-title settings.
@@ -758,75 +676,6 @@ impl Default for SkillsConfig {
     }
 }
 
-/// A per-model override of what the catalogue says.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModelOverride {
-    /// Context window in tokens.
-    pub max_context: Option<u64>,
-    /// Output limit in tokens.
-    pub max_output: Option<u64>,
-    /// A reasoning override.
-    pub reasoning: Option<ReasoningOverride>,
-    /// An input/output modality override.
-    pub modalities: Option<ModalitiesOverride>,
-}
-
-/// A per-model override of the modalities the model accepts and produces.
-///
-/// A model the catalogue lists carries its own modalities, and a model it does
-/// not — a private endpoint named only under `providers` — has nothing to read
-/// and falls back to text in, text out. This is where a host that knows better
-/// says so: `input` and `output` **replace** what the catalogue or the fallback
-/// declared, so `{"input": ["text", "image"]}` is what lets a model the
-/// catalogue does not describe take an image.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModalitiesOverride {
-    /// The modalities the model accepts on input.
-    pub input: Option<Vec<ModalityKind>>,
-    /// The modalities the model produces on output.
-    pub output: Option<Vec<ModalityKind>>,
-}
-
-/// A kind of content, as the configuration spells it.
-///
-/// Typed and not a `String` for the same reason [`WireKind`] is: a name the
-/// build does not know is refused where it is written, by the parser, instead
-/// of being dropped later and leaving a model declaring less than its host
-/// asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModalityKind {
-    /// Text.
-    Text,
-    /// Images.
-    Image,
-    /// Audio.
-    Audio,
-    /// Video.
-    Video,
-    /// Documents, such as PDFs. The catalogue spells this `pdf`.
-    #[serde(rename = "pdf", alias = "document")]
-    Pdf,
-}
-
-/// A per-model override of the catalogue's reasoning declaration.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ReasoningOverride {
-    /// Whether the model reasons at all.
-    pub supported: Option<bool>,
-    /// Whether reasoning may be turned off.
-    pub can_disable: Option<bool>,
-    /// The effort names to expose.
-    pub efforts: Option<Vec<String>>,
-    /// Whether a token budget is accepted.
-    pub supports_budget: Option<bool>,
-    /// The largest accepted budget.
-    pub max_budget: Option<u32>,
-}
-
 /// A resolved API key. Its `Debug` output is redacted.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ApiKey(String);
@@ -1082,69 +931,39 @@ impl Config {
         Ok(())
     }
 
-    /// The override declared for one model, looked up by its provider and id.
+    /// Resolves a provider's API key from the environment.
     ///
-    /// The provider owns its models now, so this is the one place the two are
-    /// joined: a caller that named a model by its own id asks here, and the
-    /// split that a `provider/model` key used to need — and that a model name
-    /// with a slash of its own broke — never happens.
-    #[must_use]
-    pub fn model_override(&self, provider: &str, model: &str) -> Option<&ModelOverride> {
-        self.providers
-            .get(provider)
-            .and_then(|entry| entry.models.get(model))
-    }
-
-    /// Resolves a provider's API key.
+    /// The names come from the catalogue's provider entry (`environment_keys`),
+    /// in the order it lists them, and the first one that is set and not empty
+    /// wins. There is no second source: the configuration no longer knows about
+    /// providers, so a key is in the environment or the provider does not have
+    /// one.
     ///
-    /// The config's `api_key_env` wins, then its `api_key_file`, then the
-    /// catalogue's `env` list (`default_env`). The catalogue is what makes a
-    /// new provider work with nothing but its usual environment variable.
+    /// A provider that names no variable is not an error here — it is a
+    /// provider that needs no credential, which is what a local endpoint is.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Secret`] when no source yields a non-empty key.
+    /// Returns [`ConfigError::Secret`] when the provider names variables and
+    /// none of them holds a value.
     pub fn resolve_api_key(
         &self,
         provider: &str,
-        default_env: &[String],
+        environment_keys: &[String],
     ) -> Result<ApiKey, ConfigError> {
-        let entry = self.providers.get(provider);
-        let explicit_env = entry.and_then(|entry| entry.api_key_env.as_deref());
-        let file = entry.and_then(|entry| entry.api_key_file.as_deref());
-
-        let mut tried = Vec::new();
-        for name in explicit_env
-            .into_iter()
-            .chain(default_env.iter().map(String::as_str))
-        {
-            tried.push(name.to_owned());
+        for name in environment_keys {
             if let Ok(value) = std::env::var(name) {
                 if !value.trim().is_empty() {
                     return Ok(ApiKey::new(value.trim().to_owned()));
                 }
             }
         }
-        if let Some(path) = file {
-            let text =
-                read_limited(path, MAX_SECRET_BYTES).map_err(|source| ConfigError::Secret {
-                    provider: provider.to_owned(),
-                    message: format!("could not read {}: {source}", path.display()),
-                })?;
-            let key = text.trim();
-            if !key.is_empty() {
-                return Ok(ApiKey::new(key.to_owned()));
-            }
+        if environment_keys.is_empty() {
+            return Ok(ApiKey::new(String::new()));
         }
-
-        let message = if tried.is_empty() {
-            "no `api_key_env`, `api_key_file` or catalogue `env` names to try".to_owned()
-        } else {
-            format!("no value in any of: {}", tried.join(", "))
-        };
         Err(ConfigError::Secret {
             provider: provider.to_owned(),
-            message,
+            message: format!("no value in any of: {}", environment_keys.join(", ")),
         })
     }
 }
@@ -1685,62 +1504,6 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_can_override_the_wire_and_the_credential_scheme() {
-        let loaded = Config::from_json(
-            r#"{
-                "providers": {
-                    "openrouter": {
-                        "wire": "messages",
-                        "auth": "bearer"
-                    }
-                }
-            }"#,
-        )
-        .expect("config");
-        let provider = loaded.config.providers.get("openrouter").expect("provider");
-        assert_eq!(provider.wire, Some(WireKind::Messages));
-        assert_eq!(provider.auth, Some(AuthKind::Bearer));
-    }
-
-    #[test]
-    fn the_wire_and_auth_names_are_the_documented_ones() {
-        let loaded = Config::from_json(
-            r#"{
-                "providers": {
-                    "google": {"wire": "generate-content", "auth": "x-goog-api-key"},
-                    "anthropic": {"wire": "responses", "auth": "x-api-key"},
-                    "local": {"wire": "chat", "auth": "disabled"}
-                }
-            }"#,
-        )
-        .expect("config");
-        assert_eq!(
-            loaded.config.providers["google"].wire,
-            Some(WireKind::GenerateContent)
-        );
-        assert_eq!(
-            loaded.config.providers["google"].auth,
-            Some(AuthKind::XGoogApiKey)
-        );
-        assert_eq!(
-            loaded.config.providers["anthropic"].auth,
-            Some(AuthKind::XApiKey)
-        );
-        assert_eq!(
-            loaded.config.providers["local"].auth,
-            Some(AuthKind::Disabled)
-        );
-    }
-
-    #[test]
-    fn an_unknown_wire_is_rejected_by_name() {
-        let error = Config::from_json(r#"{"providers":{"openrouter":{"wire":"telepathy"}}}"#)
-            .expect_err("unknown wire");
-        assert!(error.to_string().contains("telepathy"), "{error}");
-        assert!(error.to_string().contains("messages"), "{error}");
-    }
-
-    #[test]
     fn a_file_over_the_limit_is_refused_before_parsing() {
         let path = temp_file("0123456789");
         let error = read_limited(&path, 4).expect_err("file must be bounded");
@@ -1794,55 +1557,6 @@ mod tests {
     fn unknown_keys_warn_instead_of_failing() {
         let loaded = Config::from_json(r#"{"mystery":true}"#).expect("config");
         assert_eq!(loaded.warnings, vec!["mystery".to_owned()]);
-    }
-
-    #[test]
-    fn a_model_override_declares_the_modalities_a_model_takes() {
-        // The block a model the catalogue does not describe is given the
-        // capabilities it has. `pdf` and `document` are the same modality, and
-        // both spellings are accepted because the catalogue uses the first and
-        // a person writes the second.
-        let loaded = Config::from_json(
-            r#"{"providers":{"river":{"models":{"m":{"modalities":{"input":["text","image","pdf"],"output":["text"]}}}}}}"#,
-        )
-        .expect("config");
-        let modalities = loaded.config.providers["river"].models["m"]
-            .modalities
-            .as_ref()
-            .expect("modalities");
-        assert_eq!(
-            modalities.input.as_deref(),
-            Some(&[ModalityKind::Text, ModalityKind::Image, ModalityKind::Pdf][..])
-        );
-        assert_eq!(
-            modalities.output.as_deref(),
-            Some(&[ModalityKind::Text][..])
-        );
-
-        let document = Config::from_json(
-            r#"{"providers":{"river":{"models":{"m":{"modalities":{"input":["document"]}}}}}}"#,
-        )
-        .expect("config");
-        assert_eq!(
-            document.config.providers["river"].models["m"]
-                .modalities
-                .as_ref()
-                .and_then(|modalities| modalities.input.as_deref()),
-            Some(&[ModalityKind::Pdf][..]),
-            "`document` is the same modality as `pdf`"
-        );
-    }
-
-    #[test]
-    fn an_unknown_modality_is_rejected_by_name() {
-        // Refused where it is written, by the parser, and not silently dropped:
-        // a dropped name would leave the model declaring less than its host
-        // asked for, and the image would be refused with no clue why.
-        let error = Config::from_json(
-            r#"{"providers":{"river":{"models":{"m":{"modalities":{"input":["telepathy"]}}}}}}"#,
-        )
-        .expect_err("unknown modality");
-        assert!(error.to_string().contains("telepathy"), "{error}");
     }
 
     #[test]
@@ -2243,15 +1957,37 @@ mod tests {
     }
 
     #[test]
-    fn a_key_can_come_from_a_file() {
-        let key_file = temp_file("  sk-test\n");
-        let loaded = Config::from_json(&format!(
-            r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
-            key_file.display()
-        ))
-        .expect("config");
-        let key = loaded.config.resolve_api_key("test", &[]).expect("key");
-        assert_eq!(key.expose(), "sk-test");
+    fn a_key_comes_from_the_first_variable_that_has_one() {
+        // The order is the catalogue's: a provider lists its variables and the
+        // first one that is set wins. The variable read here is one the harness
+        // exports for the test run, so nothing mutates the environment of a
+        // process other tests share.
+        let loaded = Config::from_json("{}").expect("config");
+        let present = "NORTE_CODE_TEST_PRESENT_KEY";
+        if std::env::var(present).is_err() {
+            // The variable is set by `build.rs`-less means: this test is
+            // skipped rather than made to depend on how it was invoked.
+            eprintln!("skipping: {present} is not set in this environment");
+            return;
+        }
+        let key = loaded
+            .config
+            .resolve_api_key(
+                "test",
+                &["NORTE_CODE_TEST_ABSENT_KEY".to_owned(), present.to_owned()],
+            )
+            .expect("key");
+        assert_eq!(key.expose().trim(), key.expose(), "trimmed");
+        assert_ne!(key.expose().len(), 0, "a value was found");
+    }
+
+    #[test]
+    fn a_provider_with_no_variable_needs_no_key() {
+        // A local endpoint names nothing, and that is not a failure: there is
+        // nothing to look up, so there is nothing to be missing.
+        let loaded = Config::from_json("{}").expect("config");
+        let key = loaded.config.resolve_api_key("local", &[]).expect("key");
+        assert_eq!(key.expose(), "", "nothing to send");
     }
 
     #[test]

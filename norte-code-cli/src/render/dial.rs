@@ -3,7 +3,7 @@
 
 use super::helpers::human_tokens;
 use super::helpers::percent_label;
-use super::{ReasoningInfo, Source, Style};
+use super::{ReasoningInfo, Style};
 
 /// One cell of the context dial, from empty to full.
 const DIAL_CELLS: [char; 4] = ['░', '▒', '▓', '█'];
@@ -247,15 +247,6 @@ pub(crate) fn reasoning_bar(style: Style, label: &str) -> String {
         // empty and unnamed rather than claiming an effort, and the label after
         // it is the setting itself.
         _ => style.blue(text),
-    }
-}
-
-pub(crate) fn source_label(source: Source) -> &'static str {
-    match source {
-        Source::Cache | Source::NotModified => "cache",
-        Source::Network => "network",
-        Source::StaleCache => "stale cache",
-        Source::Bundled => "bundled snapshot",
     }
 }
 

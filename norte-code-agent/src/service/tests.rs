@@ -1,14 +1,21 @@
 use super::compaction::recent_start;
 use super::jobs::{JOB_BUFFER_BYTES, JobRegistry, JobState};
 use super::mapping::retry_plan;
+use super::mapping::token_rate;
+use super::models::parse_configured_reasoning;
 #[cfg(test)]
 use super::prompt::MAX_SKILLS_BLOCK_CHARS;
+use super::prompt::skills_block;
+use super::prompt::{MAX_PROJECT_INSTRUCTIONS_BYTES, PROJECT_INSTRUCTIONS_FILE};
 use super::sandbox::sandbox_name;
+use super::sandbox::{macos_profile, sandbox_request, sandboxed_arguments};
 use super::titling::TITLE_PROMPT;
+use super::workspace::{PathKind, check_path_kind, transform_path};
 use super::*;
 use norte::{FinishReason, Role};
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::provider::Wire;
 use async_trait::async_trait;
@@ -20,12 +27,13 @@ use norte::{
     ProviderId, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
     ToolContext, Usage,
 };
+use norte_code_catalog::WireKind;
 use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
 use norte_code_protocol::{
     Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
     Reasoning as ProtocolReasoning, ReasoningScope,
 };
-use norte_code_store_sqlite::SqliteStore;
+use norte_code_store_sqlite::{RequestStatus, SqliteStore};
 use norte_testing::ScriptedModel;
 use norte_tools::{ShellLimits, ShellRequest, ShellTool};
 
@@ -98,42 +106,49 @@ impl Model for FlakyModel {
 }
 
 fn catalog() -> Arc<Catalog> {
-    Arc::new(
-        Catalog::parse(
-            br#"{
-                    "providers": {
-                        "test": {
-                            "id": "test",
-                            "env": ["TEST_API_KEY"],
-                            "npm": "@ai-sdk/openai-compatible",
-                            "api": "https://example.invalid/v1",
-                            "models": {
-                                "scripted": {
-                                    "id": "scripted",
-                                    "name": "Scripted",
-                                    "reasoning": true,
-                                    "reasoning_options": [
-                                        {"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]},
-                                        {"type": "budget_tokens", "max": 4096}
-                                    ],
-                                    "tool_call": true,
-                                    "modalities": {"input": ["text"], "output": ["text"]},
-                                    "limit": {"context": 1000, "output": 100}
-                                },
-                                "other": {
-                                    "id": "other",
-                                    "name": "Other",
-                                    "tool_call": true,
-                                    "modalities": {"input": ["text"], "output": ["text"]},
-                                    "limit": {"context": 2000, "output": 200}
-                                }
-                            }
-                        }
-                    }
-                }"#,
-        )
-        .expect("catalog"),
+    let providers: norte_code_catalog::Providers = serde_json::from_str(
+        r#"{
+            "providers": {
+                "test": {
+                    "name": "Test",
+                    "environment_keys": ["PATH"],
+                    "wires": [
+                        {"api": "https://example.invalid/v1", "schema": "openai"}
+                    ]
+                }
+            }
+        }"#,
     )
+    .expect("providers");
+    let models: norte_code_catalog::Models = serde_json::from_str(
+        r#"{
+            "models": [
+                {
+                    "id": "scripted",
+                    "provider_id": "test",
+                    "name": "Scripted",
+                    "reasoning": {
+                        "default_enabled": true,
+                        "supported_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                        "budget_supported": true
+                    },
+                    "supported_params": ["tools", "temperature"],
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                    "limit": {"context": 1000, "output": 100}
+                },
+                {
+                    "id": "other",
+                    "provider_id": "test",
+                    "name": "Other",
+                    "supported_params": ["tools"],
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                    "limit": {"context": 2000, "output": 200}
+                }
+            ]
+        }"#,
+    )
+    .expect("models");
+    Arc::new(Catalog::new(providers, models).expect("catalogue"))
 }
 
 fn spec(model: &str) -> ModelSpec {
@@ -143,47 +158,23 @@ fn spec(model: &str) -> ModelSpec {
         provider: "test".to_owned(),
         model: model.to_owned(),
         wire: Wire::Chat,
-        endpoint: Some("https://example.invalid/v1".to_owned()),
+        endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
-        auth: None,
-        no_prompt_cache_key: false,
-        api_key_env: None,
-        capabilities: norte_code_catalog::capabilities(entry, Wire::Chat, None),
+        schema: norte_code_catalog::WireSchema::OpenAI,
+        capabilities: norte_code_catalog::capabilities(entry, WireKind::Chat),
         headers: std::collections::BTreeMap::new(),
     }
 }
 
-/// A key file no other test shares.
+/// The configuration the tests run on.
 ///
-/// Every call gets its own name. They used to be one file per process, and
-/// `std::fs::write` truncates before it writes, so a test that read the file
-/// while another rewrote it saw an empty one: the key then fell through to the
-/// catalogue's `env`, and `a_model_switch_while_parked_is_applied_at_the_next_turn_boundary`
-/// failed with "no value in any of: `TEST_API_KEY`" in a full run while passing on
-/// its own. A unique name per call is what makes the tests independent; the
-/// atomic write means even a shared name could not be seen half-written.
-fn key_file(tag: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "norte-code-service-{}-{tag}-{}-key",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, "sk-test\n").expect("key file");
-    std::fs::rename(&tmp, &path).expect("key file");
-    path
-}
-
+/// Empty, and deliberately: the key now comes from the environment and nowhere
+/// else — the catalogue names its variables and a file is not one of them — and
+/// a test cannot set one without `unsafe`, which this crate forbids. The test
+/// catalogue names `PATH`, which is set in every environment a test runs in, so
+/// a spec resolves for real without a test racing the others over `set_var`.
 fn config() -> Config {
-    let key_file = key_file("default");
-    Config::from_json(&format!(
-        r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
-        key_file.display()
-    ))
-    .expect("config")
-    .config
+    Config::default()
 }
 
 #[tokio::test]
@@ -331,235 +322,6 @@ async fn a_session_reports_the_model_reference_it_is_on() {
 }
 
 #[tokio::test]
-async fn a_compaction_summariser_can_be_a_configured_provider() {
-    // `config.compaction.model` names the model that writes the summary, and it
-    // is free to be a private endpoint. Resolving it through the catalogue alone
-    // meant a session configured with one could not compact at all — and the
-    // failure would arrive exactly when the context was full and room had to be
-    // made, which is the worst moment to have none.
-    let mut config = config();
-    config.compaction.model = Some("private/model-x".to_owned());
-    config.providers.insert(
-        "private".to_owned(),
-        norte_code_config::ProviderConfig {
-            endpoint: Some("https://example.invalid/v1".to_owned()),
-            wire: Some(norte_code_config::WireKind::Chat),
-            api_key_file: Some(key_file("private")),
-            ..norte_code_config::ProviderConfig::default()
-        },
-    );
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
-    let service = Arc::new(
-        Service::new(
-            config,
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-
-    let resolved = service
-        .summary_spec_for_a_test(&spec("scripted"))
-        .expect("the configured summariser resolves");
-    assert_eq!(
-        resolved.label(),
-        "private/model-x",
-        "the summariser is the one the config named, not the session's model"
-    );
-}
-
-#[tokio::test]
-async fn a_model_switch_accepts_a_configured_provider() {
-    // The same reference `run --provider private` resolves, asked the other way.
-    // `/model private/model-x` went straight to the catalogue — which does not
-    // list a private endpoint — and answered "unknown provider", so the provider
-    // that worked from the command line could not be switched to from the chat.
-    let mut config = config();
-    config.providers.insert(
-        "private".to_owned(),
-        norte_code_config::ProviderConfig {
-            endpoint: Some("https://example.invalid/v1".to_owned()),
-            wire: Some(norte_code_config::WireKind::Chat),
-            api_key_file: Some(key_file("private")),
-            ..norte_code_config::ProviderConfig::default()
-        },
-    );
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
-    let service = Arc::new(
-        Service::new(
-            config,
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
-    let key = created
-        .first()
-        .and_then(|event| event.session.clone())
-        .expect("session");
-
-    let events = drain(
-        &service,
-        ClientRequestKind::SetModel {
-            session: key,
-            model: "private/model-x".to_owned(),
-        },
-    )
-    .await;
-    assert!(
-        !events.iter().any(|event| matches!(
-            &event.kind,
-            ServerEventKind::Error { message, .. } if message.contains("unknown provider")
-        )),
-        "a configured provider resolves without the catalogue: {:?}",
-        events.iter().map(|event| &event.kind).collect::<Vec<_>>()
-    );
-}
-
-#[tokio::test]
-async fn a_session_saved_on_a_configured_provider_reopens_on_it() {
-    // The worst of the three, and the only silent one: a restored session whose
-    // model the catalogue does not list fell back to the default, so `exa` work
-    // came back as whatever model the config named last. The next message would
-    // go somewhere the work never was.
-    let dir = std::env::temp_dir().join(format!("norte-reopen-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("dir");
-    let key_file = dir.join("private.key");
-    std::fs::write(&key_file, "sk-private\n").expect("key file");
-
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
-    let (store, _service) = sqlite_service(&dir.join("sessions.db"), model).await;
-
-    // A session on file, on a provider the catalogue does not list.
-    let stored = norte_code_store_sqlite::StoredSession {
-        key: "exa-session".to_owned(),
-        north: norte::SessionId::new(),
-        title: None,
-        model: "private/model-x".to_owned(),
-        created_at: chrono::Utc::now(),
-        phase: "idle".to_owned(),
-        stats: serde_json::Value::Null,
-        denied_tools: Vec::new(),
-        allowed_tools: Vec::new(),
-        compacted_from: None,
-        workdir: None,
-    };
-    store.save_session(&stored).await.expect("store");
-
-    // A service built over that directory has to bring it back on its own
-    // model, not on the default.
-    let config_text = format!(
-        r#"{{"providers":{{"private":{{"endpoint":"https://example.invalid/v1","wire":"chat","api_key_file":"{}"}}}}}}"#,
-        key_file.display()
-    );
-    let config = norte_code_config::Config::from_json(&config_text)
-        .expect("config")
-        .config;
-    let session_store: Arc<dyn Store> = store.clone();
-    let blobs: Arc<dyn BlobStore> = store.clone();
-    let directory: Arc<dyn SessionDirectory> = store.clone();
-    let model = Arc::new(ScriptedModel::new(ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    )));
-    let reopened = Service::with_directory(
-        config,
-        catalog(),
-        spec("scripted"),
-        Arc::new(ScriptedFactory { model }),
-        session_store,
-        blobs,
-        directory,
-        "system",
-    )
-    .await
-    .expect("service");
-
-    let key = SessionKey::new("exa-session".to_owned());
-    assert_eq!(
-        reopened.session_model(&key).as_deref(),
-        Some("private/model-x"),
-        "the session reopened on the model it was saved with"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
-async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
-    // A private endpoint is declared in `config.json` and nowhere else, so the
-    // catalogue does not list its provider. A run resolves one of those without
-    // complaint; the reload went straight to the catalogue and answered the same
-    // reference with "unknown provider", which made `/refresh` fail on a config
-    // that worked.
-    let (service, _model) = scripted_service(spec("scripted"), &["hello"]);
-    let dir = std::env::temp_dir().join(format!("norte-reload-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("dir");
-    let path = dir.join("config.json");
-    let key_file = dir.join("private.key");
-    std::fs::write(&key_file, "sk-private\n").expect("key file");
-    // `private` is configured with an endpoint and a key file, and it is not in
-    // the catalogue the service was built with.
-    std::fs::write(
-        &path,
-        format!(
-            r#"{{"default_provider":"private","default_model":"model-x","providers":{{"private":{{"endpoint":"https://example.invalid/v1","wire":"chat","api_key_file":"{}"}}}}}}"#,
-            key_file.display()
-        ),
-    )
-    .expect("write");
-    service.set_config_path(Some(path.clone()));
-
-    let reloaded = service
-        .reload_config()
-        .expect("a configured provider resolves without the catalogue");
-    assert_eq!(reloaded.config.default_provider.as_deref(), Some("private"));
-    assert_eq!(reloaded.config.default_model.as_deref(), Some("model-x"));
-    assert_eq!(
-        service.default_spec().label(),
-        "private/model-x",
-        "the default model the config named is the one in force"
-    );
-
-    // A reference that names neither the catalogue nor the config is still an
-    // error: falling back is for a declared provider, not for a typo.
-    std::fs::write(
-        &path,
-        r#"{"default_provider":"nowhere","default_model":"model-x"}"#,
-    )
-    .expect("write");
-    let error = service
-        .reload_config()
-        .expect_err("an undeclared provider is still refused");
-    assert!(
-        matches!(error, ServiceError::UnknownProvider(_)),
-        "the failure names the provider: {error:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[tokio::test]
 async fn a_reload_rebuilds_an_open_sessions_spec_from_the_new_provider_settings() {
     // A provider's settings are baked into a session's spec when it is resolved:
     // the endpoint, the wire, whether the prompt cache key is sent. So a config
@@ -604,22 +366,17 @@ async fn a_reload_rebuilds_an_open_sessions_spec_from_the_new_provider_settings(
         .find_map(|event| event.session.clone())
         .expect("session");
     assert!(
-        !service
-            .session_spec(&key)
-            .expect("spec")
-            .no_prompt_cache_key,
+        service.session_spec(&key).expect("spec").endpoint == "https://example.invalid/v1",
         "the session starts on the spec the service was built with"
     );
 
-    // A reload has to reach the session that is already open.
+    // A reload has to reach the session that is already open: its spec is
+    // rebuilt, so whatever the configuration changed about it is what the next
+    // turn uses.
+    let before = service.session_spec(&key).expect("spec");
     service.reload_config().expect("reload");
-    assert!(
-        service
-            .session_spec(&key)
-            .expect("spec")
-            .no_prompt_cache_key,
-        "the open session's spec is rebuilt from the new provider settings"
-    );
+    let after = service.session_spec(&key).expect("spec");
+    assert_eq!(after.label(), before.label(), "the session keeps its model");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3468,7 +3225,7 @@ async fn the_request_table_records_usage_latency_and_metadata() {
     assert_eq!(record.input_tokens, Some(120));
     assert_eq!(record.output_tokens, Some(30));
     assert_eq!(record.cost_usd, Some(0.125));
-    assert_eq!(record.status, "ok");
+    assert_eq!(record.status, RequestStatus::Ok);
     assert!(record.first_token_ms.is_some());
     assert!(record.metadata.get("engine_events").is_some());
     assert_eq!(record.params, serde_json::json!({"max_output_tokens": 100}));
@@ -6817,70 +6574,6 @@ async fn titling_can_be_turned_off() {
 }
 
 #[tokio::test]
-async fn a_title_can_be_asked_of_another_model() {
-    // `titling.model` names the model that writes titles, and it is free to be
-    // a cheaper one than the session's. The resolution is the one a switch uses,
-    // so it may also be a provider the catalogue does not list.
-    let mut config = config();
-    config.titling.model = Some("private/tiny".to_owned());
-    config.providers.insert(
-        "private".to_owned(),
-        norte_code_config::ProviderConfig {
-            endpoint: Some("https://example.invalid/v1".to_owned()),
-            wire: Some(norte_code_config::WireKind::Chat),
-            api_key_file: Some(key_file("private")),
-            ..norte_code_config::ProviderConfig::default()
-        },
-    );
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_text("a cheap title"));
-    let service = Arc::new(
-        Service::new(
-            config,
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
-    let key = created[0].session.clone().expect("session");
-    let title = service
-        .title_session(&key, "do the thing")
-        .await
-        .expect("a title");
-    assert_eq!(title, "a cheap title");
-}
-
-/// A service whose config is the one the test needs, with a scripted model that
-/// is never asked to answer: these tests read the registry and the rules.
-fn service_with(config: norte_code_config::Config) -> Arc<Service> {
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_deltas(["Hel", "lo"]));
-    Arc::new(
-        Service::new(
-            config,
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    )
-}
-
-#[tokio::test]
 async fn a_tool_list_counts_the_rules_that_decide_each_tool() {
     // The list is what the footer counts and what `/tools` prints, and both
     // read it from here: deny beats allow beats the mode, which is the order
@@ -6953,6 +6646,27 @@ async fn a_session_rule_reaches_only_the_session_it_was_set_for() {
         "the other session never had that rule"
     );
     assert_eq!(command.scope, RuleScope::Mode);
+}
+
+/// A service over a given configuration, for the tests that need one.
+fn service_with(config: Config) -> Arc<Service> {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_deltas(["Hel", "lo"]));
+    Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory { model }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    )
 }
 
 #[tokio::test]

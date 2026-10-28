@@ -7,10 +7,11 @@ use super::{
 use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use norte_code_config::{AuthKind, BudgetConfig, Config, WireKind};
+use norte_code_catalog::{WireKind, WireSchema};
+use norte_code_config::{BudgetConfig, Config};
 use norte_code_cost::CostSummary;
 use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
-use norte_code_store_sqlite::RequestRecord;
+use norte_code_store_sqlite::{RequestRecord, RequestStatus};
 
 /// A request row for the telemetry tests.
 fn telemetry_record(
@@ -45,7 +46,7 @@ fn telemetry_record(
         metadata: serde_json::Value::Null,
         cost_usd: Some(0.01),
         finish_reason: None,
-        status: "ok".to_owned(),
+        status: RequestStatus::Ok,
         error: None,
         error_kind: None,
         retry_after_ms: None,
@@ -538,30 +539,33 @@ fn budget_labels_say_what_is_measured_and_what_happens() {
 
 #[test]
 fn wire_and_auth_flags_are_parsed_and_validated() {
-    let cli = Cli::try_parse_from([
-        "norte-code",
-        "new",
-        "--wire",
-        "messages",
-        "--auth",
-        "bearer",
-    ])
-    .expect("parse");
+    // The schema is the one `providers.json` writes, so a person who read the
+    // file knows what to type. `openai` is the chat completions surface: the
+    // Responses API exists in Norte and is deliberately not reachable here.
+    let cli = Cli::try_parse_from(["norte-code", "new", "--wire", "openai"]).expect("parse");
     let Some(Command::New(args)) = cli.command else {
         panic!("expected new");
     };
-    assert_eq!(args.wire, Some(WireKind::Messages));
-    assert_eq!(args.auth, Some(AuthKind::Bearer));
+    assert_eq!(args.wire, Some(WireSchema::OpenAI));
 
-    let cli = Cli::try_parse_from(["norte-code", "new", "--auth", "disabled"])
-        .expect("parse disabled auth");
+    let cli = Cli::try_parse_from(["norte-code", "new", "--wire", "anthropic"]).expect("parse");
     let Some(Command::New(args)) = cli.command else {
         panic!("expected new");
     };
-    assert_eq!(args.auth, Some(AuthKind::Disabled));
+    assert_eq!(args.wire, Some(WireSchema::Anthropic));
 
-    assert!(Cli::try_parse_from(["norte-code", "new", "--wire", "telepathy"]).is_err());
-    assert!(Cli::try_parse_from(["norte-code", "new", "--auth", "none"]).is_err());
+    // A name that is not a schema is refused where it is typed, and the message
+    // names the three that exist.
+    // clap reports a bad `value_parser` as a parse error, and `Cli` is not
+    // `Debug`, so the error is read from the result by hand.
+    match Cli::try_parse_from(["norte-code", "new", "--wire", "telepathy"]) {
+        Ok(_) => panic!("an unknown wire must be refused"),
+        Err(error) => {
+            let message = error.to_string();
+            assert!(message.contains("telepathy"), "{message}");
+            assert!(message.contains("anthropic"), "{message}");
+        }
+    }
 }
 
 #[test]
@@ -688,8 +692,8 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
     use futures_util::StreamExt;
     use norte::harness::{InMemoryBlobStore, InMemoryStore};
     use norte::{CallId, Capabilities, Model, ModelId, ModelRef, ProviderId};
-    use norte_code_agent::{EventStream, ModelFactory, ModelSpec, Service, ServiceError, Wire};
-    use norte_code_catalog::{Catalog, capabilities};
+    use norte_code_agent::{EventStream, ModelFactory, ModelSpec, Service, ServiceError};
+    use norte_code_catalog::Catalog;
     use norte_code_config::ApiKey;
     use norte_code_protocol::{ClientRequest, ServerEventKind};
     use norte_testing::ScriptedModel;
@@ -723,30 +727,19 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
         ));
     let _ = std::fs::remove_file(&target);
 
-    let catalog = Arc::new(
-        Catalog::parse(
-            br#"{
-                "providers": {
-                    "test": {
-                        "id": "test",
-                        "env": ["TEST_API_KEY"],
-                        "npm": "@ai-sdk/openai-compatible",
-                        "api": "https://example.invalid/v1",
-                        "models": {
-                            "scripted": {
-                                "id": "scripted",
-                                "name": "Scripted",
-                                "tool_call": true,
-                                "modalities": {"input": ["text"], "output": ["text"]},
-                                "limit": {"context": 1000, "output": 100}
-                            }
-                        }
-                    }
-                }
-            }"#,
-        )
-        .expect("catalog"),
-    );
+    let providers: norte_code_catalog::Providers = serde_json::from_str(
+        r#"{"providers":{"test":{"name":"Test","environment_keys":["PATH"],
+            "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
+    )
+    .expect("providers");
+    let models: norte_code_catalog::Models = serde_json::from_str(
+        r#"{"models":[{"id":"scripted","provider_id":"test","name":"Scripted",
+            "supported_params":["tools"],
+            "modalities":{"input":["text"],"output":["text"]},
+            "limit":{"context":1000,"output":100}}]}"#,
+    )
+    .expect("models");
+    let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
     // A unique name, written atomically: a shared file could be read while
     // another test truncated it, and the reader would see an empty key.
     let key_file = std::env::temp_dir().join(format!(
@@ -756,23 +749,16 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
     let key_tmp = key_file.with_extension("tmp");
     std::fs::write(&key_tmp, "sk-test\n").expect("key file");
     std::fs::rename(&key_tmp, &key_file).expect("key file");
-    let config = Config::from_json(&format!(
-        r#"{{"providers":{{"test":{{"api_key_file":"{}"}}}}}}"#,
-        key_file.display()
-    ))
-    .expect("config")
-    .config;
+    let config = Config::from_json("{}").expect("config").config;
     let entry = catalog.find("test", "scripted").expect("model");
     let spec = ModelSpec {
         provider: "test".to_owned(),
         model: "scripted".to_owned(),
-        wire: Wire::Chat,
-        endpoint: Some("https://example.invalid/v1".to_owned()),
+        wire: WireKind::Chat,
+        endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
-        auth: None,
-        no_prompt_cache_key: false,
-        api_key_env: None,
-        capabilities: capabilities(entry, Wire::Chat, None),
+        schema: WireSchema::OpenAI,
+        capabilities: norte_code_catalog::capabilities(entry, WireKind::Chat),
         headers: BTreeMap::new(),
     };
     let reference = ModelRef::new(

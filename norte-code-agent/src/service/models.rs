@@ -7,27 +7,36 @@
 use std::sync::Arc;
 
 use norte::{Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind};
-use norte_code_catalog::{Catalog, LoadOptions, load_catalog};
-use norte_code_config::Config;
+use norte_code_catalog::{Catalog, load_catalog_files};
 use norte_code_protocol::{
-    ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo, ServerEvent, ServerEventKind,
-    SessionKey,
+    Modality, ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo, ServerEvent,
+    ServerEventKind, SessionKey,
 };
 
 use crate::ServiceError;
-use crate::provider::{ModelSpec, Wire};
+use crate::provider::ModelSpec;
 
 use super::mapping::single;
 use super::{EventStream, Service};
 
-/// Flattens a catalogue for a picker, applying the config overrides.
+/// Flattens a catalogue for a picker.
+///
+/// The capabilities come from the provider's preferred wire — the one a session
+/// opens on when nobody named another — because the list is what a person picks
+/// from and the entry has to describe what picking it will get.
 #[must_use]
-pub fn model_list(config: &Config, catalog: &Catalog) -> Vec<ModelInfo> {
+pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
     let mut models = Vec::new();
     for entry in catalog.models() {
-        let wire = Wire::from_npm(entry.provider.npm.as_deref().unwrap_or_default());
-        let overrides = config.model_override(&entry.provider.id, &entry.model.id);
-        let capabilities = norte_code_catalog::capabilities(entry.model, wire, overrides);
+        let Some(wire) = entry.provider.preferred_wire() else {
+            // A provider with no wire cannot serve anything, and offering its
+            // models would be offering a choice that fails when taken.
+            continue;
+        };
+        let capabilities = norte_code_catalog::capabilities(
+            entry.model,
+            norte_code_catalog::WireKind::from(wire.schema),
+        );
         let mut efforts: Vec<String> = capabilities
             .reasoning
             .efforts
@@ -36,15 +45,29 @@ pub fn model_list(config: &Config, catalog: &Catalog) -> Vec<ModelInfo> {
             .collect();
         efforts.sort();
         models.push(ModelInfo {
-            provider: entry.provider.id.clone(),
+            provider: entry.model.provider_id.clone(),
             model: entry.model.id.clone(),
             name: entry.model.name.clone(),
             description: entry.model.description.clone(),
             max_context: capabilities.max_context,
             max_output: capabilities.max_output,
             tools: capabilities.tool_kinds.contains(&ToolKind::Function),
-            input: entry.model.modalities.input.clone(),
-            output: entry.model.modalities.output.clone(),
+            input: entry
+                .model
+                .modalities
+                .input
+                .iter()
+                .copied()
+                .map(modality_of)
+                .collect(),
+            output: entry
+                .model
+                .modalities
+                .output
+                .iter()
+                .copied()
+                .map(modality_of)
+                .collect(),
             reasoning: ReasoningInfo {
                 supported: capabilities.reasoning.supported,
                 can_disable: capabilities.reasoning.can_disable,
@@ -52,10 +75,21 @@ pub fn model_list(config: &Config, catalog: &Catalog) -> Vec<ModelInfo> {
                 supports_budget: capabilities.reasoning.supports_budget,
                 max_budget: capabilities.reasoning.max_budget,
             },
-            deprecated: entry.model.status.as_deref() == Some("deprecated"),
+            deprecated: entry.model.status == Some(norte_code_catalog::ModelStatus::Deprecated),
         });
     }
     models
+}
+
+/// The wire's name for a catalogue modality.
+fn modality_of(modality: norte_code_catalog::Modality) -> Modality {
+    match modality {
+        norte_code_catalog::Modality::Text => Modality::Text,
+        norte_code_catalog::Modality::Image => Modality::Image,
+        norte_code_catalog::Modality::Audio => Modality::Audio,
+        norte_code_catalog::Modality::Video => Modality::Video,
+        norte_code_catalog::Modality::File => Modality::File,
+    }
 }
 
 /// Resolves the effective reasoning setting without turning it into a Norte
@@ -319,23 +353,24 @@ impl Service {
 
     /// Flattens the catalogue for a picker, applying the config overrides.
     pub(super) fn list_models(&self) -> Vec<ModelInfo> {
-        model_list(&self.lock_config(), &self.catalog())
+        model_list(&self.catalog())
     }
 
-    /// Refreshes the catalogue from where it came from.
-    pub(super) async fn refresh_catalog(
-        &self,
-        request_id: u64,
-    ) -> Result<EventStream, ServiceError> {
-        let loaded = load_catalog(&LoadOptions {
-            url: &self.catalog_settings.url,
-            ttl: self.catalog_settings.ttl,
-            offline: self.catalog_settings.offline,
-            cache_dir: &self.catalog_settings.cache_dir,
-        })
-        .await?;
-        let models = loaded.catalog.model_count();
-        *self.lock_catalog_write() = Arc::new(loaded.catalog);
+    /// Re-reads the two catalogue files.
+    ///
+    /// A person who added a model to `models.json` should not have to restart
+    /// the process to see it. Nothing is fetched: the files are the only place
+    /// a model comes from, and a plugin writes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when a file is missing or malformed.
+    /// The catalogue already in memory is left alone in that case: a file being
+    /// edited is not a reason to lose the models the session can already use.
+    pub(super) fn reload_catalog(&self, request_id: u64) -> Result<EventStream, ServiceError> {
+        let catalog = load_catalog_files()?;
+        let models = catalog.model_count();
+        *self.lock_catalog_write() = Arc::new(catalog);
         Ok(single(
             request_id,
             None,

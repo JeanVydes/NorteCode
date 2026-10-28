@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
-use norte_code_store_sqlite::RequestRecord;
+use norte_code_store_sqlite::{RequestRecord, RequestStatus};
 
 /// The window the panel totals over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,10 +263,13 @@ impl Slice {
         } else {
             self.unpriced += 1;
         }
-        match record.status.as_str() {
-            "ok" => {}
-            "cancelled" => self.cancelled += 1,
-            _ => {
+        // Exhaustive over the enum and with no catch-all: a status the store
+        // grows is a compile error here rather than a request silently counted
+        // as an error, which is what the string's `_` arm did.
+        match record.status {
+            RequestStatus::Ok => {}
+            RequestStatus::Cancelled => self.cancelled += 1,
+            RequestStatus::Error => {
                 self.errors += 1;
                 self.error_tally.add(record);
             }
@@ -1141,9 +1144,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn record(provider: &str, model: &str, status: &str) -> RequestRecord {
+    fn record(provider: &str, model: &str, status: RequestStatus) -> RequestRecord {
         RequestRecord {
-            id: format!("{provider}-{model}-{status}"),
+            id: format!("{provider}-{model}-{}", status.as_str()),
             session: "s1".to_owned(),
             north_session: "n1".to_owned(),
             turn: 1,
@@ -1170,7 +1173,7 @@ mod tests {
             metadata: json!({}),
             cost_usd: Some(0.01),
             finish_reason: None,
-            status: status.to_owned(),
+            status,
             error: None,
             error_kind: None,
             retry_after_ms: None,
@@ -1183,8 +1186,8 @@ mod tests {
         // name served by two providers bills and caches differently, and merging
         // them would average away the comparison.
         let records = vec![
-            record("openai", "gpt-5", "ok"),
-            record("openrouter", "gpt-5", "ok"),
+            record("openai", "gpt-5", RequestStatus::Ok),
+            record("openrouter", "gpt-5", RequestStatus::Ok),
         ];
         let report = Report::of(&records, Range::All);
         assert_eq!(report.models.len(), 2, "{:?}", report.models.keys());
@@ -1195,9 +1198,9 @@ mod tests {
     #[test]
     fn a_provider_expands_into_its_own_models_only() {
         let records = vec![
-            record("openai", "gpt-5", "ok"),
-            record("openai", "gpt-4", "ok"),
-            record("openrouter", "gpt-5", "ok"),
+            record("openai", "gpt-5", RequestStatus::Ok),
+            record("openai", "gpt-4", RequestStatus::Ok),
+            record("openrouter", "gpt-5", RequestStatus::Ok),
         ];
         let report = Report::of(&records, Range::All);
         let models = report.models_of("openai", Metric::Tokens);
@@ -1209,9 +1212,9 @@ mod tests {
     fn errors_are_subdivided_by_their_typed_kind() {
         // A bar that says "three errors" is not enough: which three decides what
         // a person does about it, and the kind is in the row.
-        let mut rate_limited = record("openai", "gpt-5", "error");
+        let mut rate_limited = record("openai", "gpt-5", RequestStatus::Error);
         rate_limited.error_kind = Some("rate_limited".to_owned());
-        let mut other = record("openai", "gpt-5", "error");
+        let mut other = record("openai", "gpt-5", RequestStatus::Error);
         other.error_kind = None;
         let records = vec![rate_limited, other];
         let report = Report::of(&records, Range::All);
@@ -1225,11 +1228,11 @@ mod tests {
     fn the_rank_changes_with_the_metric() {
         // Same rows, two questions: the busiest provider and the one that costs
         // most, and the answer must be the row that is first for each.
-        let mut cheap = record("cheap", "m", "ok");
+        let mut cheap = record("cheap", "m", RequestStatus::Ok);
         cheap.input_tokens = Some(0);
         cheap.output_tokens = Some(10);
         cheap.cost_usd = Some(0.001);
-        let mut busy = record("busy", "m", "ok");
+        let mut busy = record("busy", "m", RequestStatus::Ok);
         busy.input_tokens = Some(1_000);
         busy.output_tokens = Some(1_000);
         busy.cost_usd = Some(0.5);
@@ -1240,11 +1243,14 @@ mod tests {
         assert_eq!(by_cost[0].0, "busy");
         // By output tokens alone, only the answer counts: still busy here, so use
         // a case where they differ.
-        let mut talker = record("talker", "m", "ok");
+        let mut talker = record("talker", "m", RequestStatus::Ok);
         talker.input_tokens = Some(10);
         talker.output_tokens = Some(5_000);
         talker.cost_usd = Some(0.2);
-        let report = Report::of(&[record("reader", "m", "ok"), talker], Range::All);
+        let report = Report::of(
+            &[record("reader", "m", RequestStatus::Ok), talker],
+            Range::All,
+        );
         let by_output = report.providers_by(Metric::Output);
         assert_eq!(by_output[0].0, "talker", "the one that answered most");
         let by_tokens = report.providers_by(Metric::Tokens);
@@ -1254,9 +1260,9 @@ mod tests {
     #[test]
     fn the_range_holds_what_falls_inside_it() {
         let now = Utc::now();
-        let mut old = record("openai", "gpt-5", "ok");
+        let mut old = record("openai", "gpt-5", RequestStatus::Ok);
         old.started_at = now - Duration::days(40);
-        let fresh = record("openai", "gpt-5", "ok");
+        let fresh = record("openai", "gpt-5", RequestStatus::Ok);
         assert!(!Range::Today.holds(&old, now));
         assert!(Range::Today.holds(&fresh, now));
         // A month reaches back thirty days, so the forty-day-old row is out.
@@ -1277,8 +1283,8 @@ mod tests {
     #[test]
     fn the_panel_draws_the_tabs_the_range_and_the_rank() {
         let records = vec![
-            record("openai", "gpt-5", "ok"),
-            record("openrouter", "gpt-5", "ok"),
+            record("openai", "gpt-5", RequestStatus::Ok),
+            record("openrouter", "gpt-5", RequestStatus::Ok),
         ];
         let panel = Panel::new(records, None);
         let text = text_of(&panel);
@@ -1296,9 +1302,9 @@ mod tests {
         // The two tabs are one roll-up over two filters: this session is the
         // session's own slice of exactly what the provider tab rolls up, so a
         // row of another session is not in it.
-        let mut mine = record("openai", "gpt-5", "ok");
+        let mut mine = record("openai", "gpt-5", RequestStatus::Ok);
         mine.session = "mine".to_owned();
-        let mut other = record("openai", "gpt-5", "ok");
+        let mut other = record("openai", "gpt-5", RequestStatus::Ok);
         other.session = "other".to_owned();
         other.id = "other".to_owned();
         let panel = Panel::new(vec![mine, other], Some("mine".to_owned()));
@@ -1310,8 +1316,8 @@ mod tests {
     #[test]
     fn a_provider_expands_in_the_panel_to_show_its_models() {
         let records = vec![
-            record("openai", "gpt-5", "ok"),
-            record("openai", "gpt-4", "ok"),
+            record("openai", "gpt-5", RequestStatus::Ok),
+            record("openai", "gpt-4", RequestStatus::Ok),
         ];
         let mut panel = Panel::new(records, None);
         panel.next_tab();
@@ -1328,9 +1334,9 @@ mod tests {
 
     #[test]
     fn the_error_section_subdivides_a_bar_by_kind() {
-        let mut rate = record("openai", "gpt-5", "error");
+        let mut rate = record("openai", "gpt-5", RequestStatus::Error);
         rate.error_kind = Some("rate_limited".to_owned());
-        let mut timeout = record("openai", "gpt-5", "error");
+        let mut timeout = record("openai", "gpt-5", RequestStatus::Error);
         timeout.id = "timeout".to_owned();
         timeout.error_kind = Some("timeout".to_owned());
         let panel = Panel::new(vec![rate, timeout], None);
@@ -1346,15 +1352,15 @@ mod tests {
         // use, not a merged total.
         let today = Utc::now();
         let yesterday = today - Duration::days(1);
-        let mut a1 = record("openai", "gpt-5", "ok");
+        let mut a1 = record("openai", "gpt-5", RequestStatus::Ok);
         a1.started_at = yesterday;
         a1.id = "a1".to_owned();
         a1.input_tokens = Some(100);
-        let mut a2 = record("openai", "gpt-5", "ok");
+        let mut a2 = record("openai", "gpt-5", RequestStatus::Ok);
         a2.started_at = today;
         a2.id = "a2".to_owned();
         a2.input_tokens = Some(1_000);
-        let mut b = record("openrouter", "gpt-5", "ok");
+        let mut b = record("openrouter", "gpt-5", RequestStatus::Ok);
         b.started_at = today;
         let mut panel = Panel::new(vec![a1, a2, b], None);
         panel.tab = Tab::Time;
@@ -1380,7 +1386,7 @@ mod tests {
     fn the_panel_animates_in_and_then_settles() {
         // The entry animation is the panel telling a person it just appeared: it
         // runs a few frames and then stops, so the clock that drew it stops too.
-        let records = vec![record("openai", "gpt-5", "ok")];
+        let records = vec![record("openai", "gpt-5", RequestStatus::Ok)];
         let mut panel = Panel::new(records, None);
         assert!(panel.animating(), "it starts animating");
         let first = text_of(&panel);
@@ -1398,9 +1404,9 @@ mod tests {
 
     #[test]
     fn the_cost_section_shows_what_was_not_reported() {
-        let mut priced = record("openai", "gpt-5", "ok");
+        let mut priced = record("openai", "gpt-5", RequestStatus::Ok);
         priced.cost_usd = Some(1.0);
-        let mut unpriced = record("free", "m", "ok");
+        let mut unpriced = record("free", "m", RequestStatus::Ok);
         unpriced.cost_usd = None;
         let mut panel = Panel::new(vec![priced, unpriced], None);
         panel.tab = Tab::Providers;
