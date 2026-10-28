@@ -7,8 +7,14 @@ use super::{
     mpsc,
 };
 
-/// Answers a `QuestionAsked` event, walking the choices with the arrow keys.
+/// How often the question on screen is repainted while it waits for an answer.
 ///
+/// The clock is what paints a key that moved the cursor: without it the choice
+/// under the cursor would move in the editor and not on screen until something
+/// else happened to draw.
+const QUESTION_TICK_MS: u64 = 60;
+
+/// Answers a `QuestionAsked` event, walking the choices with the arrow keys.///
 /// With closed `options` the choices are drawn as a list the cursor walks, and
 /// the last row is "something else": choosing it opens the input box, which is
 /// why nothing is prompted for until it is chosen. Before that there is no box
@@ -23,6 +29,7 @@ pub(crate) async fn answer_if_asked(
     event: &ServerEvent,
     input: Option<&mut crate::input::InteractiveInput>,
     interrupts: &mut mpsc::Receiver<()>,
+    draw: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<bool, String> {
     let ServerEventKind::QuestionAsked {
         question,
@@ -67,11 +74,24 @@ pub(crate) async fn answer_if_asked(
         options.clone(),
         *multiple,
     );
+    // The frame has to be written here and on every tick while the question
+    // waits. `ask` only marks the block dirty, and nothing else draws while
+    // this loop is parked on the answer: without this the question was set and
+    // never shown, which is a question nobody can answer.
+    draw()?;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(QUESTION_TICK_MS));
     let answer = loop {
         let next = tokio::select! {
             biased;
             Some(()) = interrupts.recv() => break None,
             event = input.recv() => event,
+            // The clock so the choice under the cursor redraws as the arrows
+            // move it: a key changes the block and the tick is what paints it,
+            // exactly as it is at the prompt.
+            _ = tick.tick() => {
+                draw()?;
+                continue;
+            }
         };
         // The editor reports what the person did as a question event: it is the
         // only thing that reads a key, so it is the only thing that knows which

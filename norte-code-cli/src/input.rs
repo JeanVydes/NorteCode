@@ -1204,6 +1204,19 @@ mod unix {
             true
         }
 
+        /// The draft as the frame draws it: what is shown, chips included.
+        ///
+        /// It is [`text`] and not the buffer's characters for the frame: the
+        /// frame draws the columns the person sees, and a chip is one of them.
+        /// The cursor the frame is handed is an index into *this* string, which
+        /// is why the two have to be the same string — handing the frame the
+        /// expanded paste put a cursor on a character that is not on screen.
+        ///
+        /// [`text`]: LineBuffer::text
+        fn display(&self) -> String {
+            self.chars.iter().collect()
+        }
+
         fn clear(&mut self) {
             self.chars.clear();
             self.chips.clear();
@@ -1392,8 +1405,10 @@ mod unix {
                             // Every other key belongs to the line, which is what
                             // rebuilds the menu and puts the choice back on the
                             // first row.
-                            let rows =
-                                crate::interaction::completion_rows(&buffer.text(), buffer.cursor);
+                            let rows = crate::interaction::completion_rows(
+                                &buffer.display(),
+                                buffer.cursor,
+                            );
                             if rows > 1 {
                                 match key.code {
                                     KeyCode::Up => {
@@ -1470,7 +1485,7 @@ mod unix {
                                 // that changes it.
                                 let picked = if rows > 1 {
                                     crate::interaction::completion_text(
-                                        &buffer.text(),
+                                        &buffer.display(),
                                         buffer.cursor,
                                         pinned.completion_pick(),
                                     )
@@ -1585,7 +1600,7 @@ mod unix {
                         // meet, and it is a copy rather than the buffer so
                         // neither waits for the other.
                         pinned.reset_completion_pick();
-                        pinned.set_draft(buffer.text(), buffer.cursor);
+                        pinned.set_draft(buffer.display(), buffer.cursor);
                     }
                 }
                 Ok(false) => {}

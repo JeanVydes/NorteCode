@@ -8,6 +8,26 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A pasted paragraph shows its `[Copied: …]` label again, and the cursor lands
+  where it is drawn. The frame was handed the *expanded* paste — what is sent —
+  instead of what is on screen, so the label never appeared and the cursor was
+  placed by an index into a string that was not the one drawn.
+
+- The input block is as tall as the text it holds. Its height was measured at
+  the full terminal width while it is drawn in the body beside the sidebar, so a
+  draft that wrapped to two rows in the narrower body was given room for one and
+  the last row was cut off. A draft taller than the block now scrolls to keep the
+  line the cursor is on in view instead of pinning to its first row.
+
+- The cursor is one box on one row. Every wrapped line whose end the cursor
+  clamped to drew its own box; the box now sits only on the line the cursor is
+  actually on.
+
+- `ask_user` draws its question. The block was set on the editor's handle and
+  nothing painted it — the turn is parked inside the wait, and that wait had no
+  draw and no tick of its own — so a question the model asked never appeared and
+  could not be answered.
+
 - The modal no longer flickers. Every frame was drawn twice — once for the
   interface and once for the panel — and each draw is its own flush of the
   terminal, so the screen between them was the interface without its panel.

@@ -2445,12 +2445,14 @@ pub(crate) async fn drive_turns_titled(
                         });
                     }
                 }
+                let pinned = Arc::clone(&renderer.pinned);
                 if answer_if_asked(
                     service,
-                    &renderer.pinned,
+                    &pinned,
                     &event,
                     input.as_deref_mut(),
                     &mut interrupt_rx,
+                    &mut || renderer.draw(),
                 )
                 .await?
                 {

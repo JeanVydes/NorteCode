@@ -211,9 +211,7 @@ impl State {
     pub(crate) fn paint(&self, frame: &mut Draw<'_>, style: Style, pinned: &crate::input::Pinned) {
         {
             let area = frame.area();
-            let input = self.input_height(area.width);
             let waiting = u16::from(self.waiting.is_some());
-            // The screen is divided into two regions and one rule:
             //
             //   ┌──────────────────────────┬──────────────┐
             //   │ conversation             │ sidebar      │
@@ -258,6 +256,15 @@ impl State {
             // status row is always exactly one line, so the transcript takes
             // whatever those two do not, which is what keeps it scrollable
             // against a terminal of any height.
+            //
+            // The input's height is measured against the *body* width and not
+            // the screen's: the sidebar takes a column on the right, so the
+            // draft wraps sooner than the terminal would. Counting it at the
+            // full width gave the block one row fewer than the text needed, and
+            // the last row of a draft was cut off at the bottom of its own
+            // space — the words being typed, which are the last thing that
+            // should disappear.
+            let input = self.input_height(body.width);
             let [conversation, spinner, entry, suggestion, rule, status] = Layout::vertical([
                 Constraint::Fill(1),
                 Constraint::Length(waiting),
@@ -1368,17 +1375,16 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     // is the one thing the person is looking at.
     let prompt = "› ";
     let width = usize::from(area.width).saturating_sub(prompt.len()).max(1);
-    for (index, line) in state.input.split('\n').enumerate() {
-        let offset = state
-            .input
-            .split('\n')
-            .take(index)
-            .map(|line| line.chars().count() + 1)
-            .sum::<usize>();
-        let at = state
-            .cursor
-            .saturating_sub(offset)
-            .min(line.chars().count());
+    let mut cursor_row = 0usize;
+    let lines: Vec<&str> = state.input.split('\n').collect();
+    let mut offset = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        let len = line.chars().count();
+        // Whether the cursor is on *this* logical line at all. A line that does
+        // not hold it has no cursor of its own: reading the clamp below as "the
+        // cursor is at the end of every line" is what drew a box on each one.
+        let holds_cursor = offset <= state.cursor && state.cursor <= offset + len;
+        let at = state.cursor.saturating_sub(offset).min(len);
         // The line broken into rows of `width` columns, which is what the
         // terminal would otherwise do to it at the edge of the screen.
         let chars: Vec<char> = line.chars().collect();
@@ -1389,6 +1395,12 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
         };
         for (index_of_row, part) in chunks.iter().enumerate() {
             let from = index_of_row * width;
+            if holds_cursor
+                && (from <= at && at < from + part.len()
+                    || at == len && from + part.len() == chars.len())
+            {
+                cursor_row = rows.len();
+            }
             let label = if index == 0 && index_of_row == 0 {
                 prompt
             } else {
@@ -1396,7 +1408,9 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
             };
             let mut spans = vec![Span::styled(label, style.faint_span())];
             for (position, character) in part.iter().enumerate() {
-                if from + position == at {
+                // The absolute index of this character in the draft, which is
+                // what both the cursor and the selection are measured in.
+                if holds_cursor && from + position == at {
                     spans.push(Span::styled(character.to_string(), Style::selected()));
                 } else {
                     spans.push(Span::raw(character.to_string()));
@@ -1404,11 +1418,12 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
             }
             // A cursor at the very end of the line still needs a cell to sit
             // on, or it would be invisible at the one moment it is looked for.
-            if at == line.chars().count() && from + part.len() == chars.len() {
+            if holds_cursor && at == len && from + part.len() == chars.len() {
                 spans.push(Span::styled(" ", Style::selected()));
             }
             rows.push(Line::from(spans));
         }
+        offset += len + 1;
     }
     // The completion sits under the draft, on the rows the block already has.
     if let Some(completion) = &state.completion {
@@ -1422,19 +1437,38 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
             });
         }
     }
-    draw_block(frame, area, &rows);
+    // A draft taller than the block shows the rows around the cursor rather
+    // than the first rows: the line being written is the one being looked at,
+    // and a block pinned to its top would scroll the cursor off the bottom.
+    let height = usize::from(area.height);
+    let start = if cursor_row >= height {
+        cursor_row + 1 - height
+    } else {
+        0
+    };
+    draw_block_from(frame, area, &rows, start);
 }
 
 /// Draws rows inside a block, from the top of the area it was given.
 fn draw_block(frame: &mut Draw<'_>, area: Rect, rows: &[Line]) {
-    let take = usize::from(area.height).min(rows.len());
+    draw_block_from(frame, area, rows, 0);
+}
+
+/// Draws rows inside a block, starting at `start`, clipped to the area.
+///
+/// The offset is what keeps a draft taller than the block around its cursor:
+/// a block that always started at row zero would scroll the line being typed
+/// off its own bottom whenever the draft grew past the block.
+fn draw_block_from(frame: &mut Draw<'_>, area: Rect, rows: &[Line], start: usize) {
+    let from = start.min(rows.len());
+    let take = usize::from(area.height).min(rows.len() - from);
     let inside = Rect::new(
         area.x,
         area.y,
         area.width,
         u16::try_from(take).unwrap_or(area.height),
     );
-    Paragraph::new(rows[..take].to_vec()).render(inside, frame.buffer_mut());
+    Paragraph::new(rows[from..from + take].to_vec()).render(inside, frame.buffer_mut());
 }
 
 #[cfg(test)]
@@ -1653,8 +1687,85 @@ mod tests {
     }
 
     #[test]
+    fn the_input_wraps_at_the_body_width_and_shows_every_row() {
+        // The sidebar takes a column, so the draft wraps sooner than the
+        // terminal would. Counting the block's height at the full width gave it
+        // one row fewer than the text needed and cut the last row off — the
+        // words being typed. The input is drawn in the body, so its height is
+        // measured there too.
+        let mut state = State::new();
+        state.mcp = vec![crate::input::McpRow {
+            name: "srv".to_owned(),
+            tools: 1,
+            state: crate::input::McpState::On,
+        }];
+        // 80 columns with a 25% sidebar leaves 59 for the body, so a 70-column
+        // draft is two rows there and only one at 80.
+        state.input = "x".repeat(70);
+        let rows_of_x: Vec<usize> = screen_of(&state, 80, 24)
+            .iter()
+            .map(|row| row.chars().filter(|c| *c == 'x').count())
+            .filter(|count| *count > 0)
+            .collect();
+        assert_eq!(
+            rows_of_x.len(),
+            2,
+            "the draft wrapped to two rows: {rows_of_x:?}"
+        );
+        assert_eq!(
+            rows_of_x.iter().sum::<usize>(),
+            70,
+            "and no character was lost: {rows_of_x:?}"
+        );
+    }
+
+    #[test]
+    fn a_draft_taller_than_the_block_shows_the_line_the_cursor_is_on() {
+        // The block is bounded, and a draft past the bound scrolls inside it. A
+        // block pinned to its first row scrolls the cursor off the bottom, and
+        // the line being written is the one thing the block exists to show.
+        let mut state = State::new();
+        state.input = (0..30)
+            .map(|n| format!("row {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.cursor = state.input.chars().count();
+        let screen = screen_of(&state, 80, 24).join("\n");
+        assert!(
+            screen.contains("row 29"),
+            "the last row, where the cursor is, is shown: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_is_a_box_on_one_row_and_not_on_every_line() {
+        // Reading the clamp as "the cursor sits at the end of every line" drew a
+        // box after each one. There is one cursor, and it sits on one row.
+        let mut state = State::new();
+        state.input = "alpha\nbeta\ngamma".to_owned();
+        state.cursor = state.input.chars().count();
+        // The cursor cells are the reversed ones: count them per screen row.
+        let reversed = reversed_rows(&state, 40, 12);
+        let with_cursor: Vec<usize> = reversed
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(row, _)| row)
+            .collect();
+        assert_eq!(
+            with_cursor.len(),
+            1,
+            "there is one cursor row, not one per line: {reversed:?}"
+        );
+        // And the two lines above it carry no cursor at all.
+        assert!(
+            with_cursor[0] >= 2,
+            "the cursor is on the last line, not the first: {with_cursor:?}"
+        );
+    }
+
+    #[test]
     fn a_new_line_does_not_move_what_is_being_read() {
-        // The offset counts from the end, which is what makes the view usable
         // while an answer streams in: a person reading history stays on the
         // line they were on, and one at the tail sees the newest line because
         // zero is the tail.
@@ -1863,6 +1974,30 @@ mod tests {
         let pinned = Pinned::new();
         paint_into(&pinned, state, width, height);
         pinned
+    }
+
+    /// The interface painted once, as the reversed (cursor) cells per row.
+    ///
+    /// It is what tells a real cursor from a stray one: the text alone cannot
+    /// say which cells were inverted, and the cursor is the inversion.
+    fn reversed_rows(state: &State, width: u16, height: u16) -> Vec<usize> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let pinned = Pinned::new();
+        let state = state.clone();
+        terminal
+            .draw(|frame| state.paint(frame, Style::plain(), &pinned))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .filter(|x| buffer[(*x, y)].modifier.contains(Modifier::REVERSED))
+                    .count()
+            })
+            .collect()
     }
 
     /// The whole interface painted once, as the rows the screen shows.
