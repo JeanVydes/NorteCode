@@ -90,8 +90,6 @@ pub(crate) struct State {
     /// the turn. The frame is what turns it into a number: a duration the frame
     /// computes itself is one it can draw without asking anything.
     pub(crate) waiting_since: Option<u128>,
-    /// How many lines the view is scrolled back from the end.
-    pub(crate) scroll: usize,
     /// What the mouse has selected, as two corners of the screen.
     ///
     /// The frame draws it and the frame is what reads it back as text: only it
@@ -286,7 +284,7 @@ impl State {
             ])
             .areas(body);
 
-            draw_transcript(frame, conversation, self, style);
+            draw_transcript(frame, conversation, self, pinned, style);
             if waiting > 0 {
                 draw_spinner(frame, spinner, self, style);
             }
@@ -553,7 +551,13 @@ pub(crate) struct Row {
 }
 
 /// Draws the conversation: the part that fits, newest at the bottom.
-fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
+fn draw_transcript(
+    frame: &mut Draw<'_>,
+    area: Rect,
+    state: &State,
+    pinned: &crate::input::Pinned,
+    style: Style,
+) {
     if area.height == 0 {
         return;
     }
@@ -562,12 +566,19 @@ fn draw_transcript(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style
     // of the terminal, where it is cut.
     let width = area.width.saturating_sub(MARGIN_COLS).max(1);
     let lines = transcript_lines(&state.transcript, width);
+    // Every frame reads the scroll from the shared handle rather than the state
+    // it was handed, and folds in the rows the conversation just gained. The
+    // offset counts rows back from the end, so a chunk of a streaming answer
+    // would otherwise push the text being read up the screen; counting the
+    // growth into the offset holds it still. At the tail the offset is zero and
+    // nothing is folded: there the newest line is the one to follow.
+    pinned.transcript_grew(lines.len());
+    let scroll = pinned.transcript_scroll();
     // From the bottom up: the newest line is the one being read, and a view
     // that grew from the top would put it off the screen. The frame is what
     // clamps the offset, because it is the only thing that knows how many rows
     // fit: the reader moves a number of lines and never knows the height.
-    let (from, take) = viewport(lines.len(), area.height, state.scroll);
-
+    let (from, take) = viewport(lines.len(), area.height, scroll);
     // The conversation sits against the input and not against the top: what a
     // person reads is the newest line, and a view pinned to the top row would
     // leave the transcript floating at the top of an empty screen with a gap
@@ -1823,40 +1834,66 @@ mod tests {
     }
 
     #[test]
-    fn a_new_line_does_not_move_what_is_being_read() {
-        // while an answer streams in: a person reading history stays on the
-        // line they were on, and one at the tail sees the newest line because
-        // zero is the tail.
+    fn a_line_at_the_end_does_not_move_what_is_being_read() {
+        // While an answer streams in, a person reading history stays on the line
+        // they were on. The offset counts rows back from the end, so a line
+        // arriving at the end used to shift the window up by a row and the text
+        // under the eyes walked away; the frame folds that growth into the offset
+        // now, which is what holds the view still.
         let mut transcript = Transcript::new();
         for index in 0..40 {
             transcript.push(Entry::line(Kind::Answer, format!("line {index}")));
         }
         let width = 80;
-        // Twenty rows of a hundred, three lines back: the window is fixed to
-        // its offset from the end, wherever the end is.
+        let pinned = Pinned::new();
+        // Three rows back from the tail, which is where a scroll leaves it.
+        pinned.scroll_transcript(-3);
+
         let before = transcript_lines(&transcript, width);
-        // The same row, counted the same way back from the end: the offset is
-        // from the tail, whichever row it lands on, and adding a line at the end
-        // moves the window by exactly the rows that line added.
-        let row = |rows: &[Row], back: usize| rows[rows.len() - back].text.clone();
-        let back = 23;
-        let seen = row(&before, back);
+        pinned.transcript_grew(before.len());
+        let (from, take) = viewport(before.len(), 20, pinned.transcript_scroll());
+        let seen: Vec<&str> = before[from..from + take]
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect();
+
+        // A chunk of the streaming answer lands as two more rows.
         transcript.push(Entry::line(Kind::Answer, "one more".to_owned()));
         let after = transcript_lines(&transcript, width);
-        // One new answer is one line plus its padding row, so the same distance
-        // back from the end is two rows further into the conversation.
-        let added = after.len() - before.len();
+        let added = after.len().saturating_sub(before.len());
         assert!(added >= 1, "the new entry added rows: {added}");
+        pinned.transcript_grew(after.len());
+        let (from, take) = viewport(after.len(), 20, pinned.transcript_scroll());
+        let now: Vec<&str> = after[from..from + take]
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect();
+
         assert_eq!(
-            row(&before, back),
-            seen,
-            "the window is fixed to its offset from the end"
+            now, seen,
+            "the rows under the eye did not move as the answer grew"
         );
-        assert_ne!(
-            row(&after, back),
-            seen,
-            "and a line at the end moved what is on screen"
-        );
+    }
+
+    #[test]
+    fn the_view_follows_the_tail_while_it_is_at_the_tail() {
+        // At the tail the offset is zero and nothing is folded: the newest line
+        // is the one to show, so a chunk arriving has to push the window forward
+        // with it.
+        let mut transcript = Transcript::new();
+        for index in 0..40 {
+            transcript.push(Entry::line(Kind::Answer, format!("line {index}")));
+        }
+        let width = 80;
+        let pinned = Pinned::new();
+        let before = transcript_lines(&transcript, width);
+        pinned.transcript_grew(before.len());
+        transcript.push(Entry::line(Kind::Answer, "one more".to_owned()));
+        let after = transcript_lines(&transcript, width);
+        pinned.transcript_grew(after.len());
+        assert_eq!(pinned.transcript_scroll(), 0, "the tail stays the tail");
+        let (from, take) = viewport(after.len(), 20, pinned.transcript_scroll());
+        assert_eq!(from + take, after.len(), "the last row is on screen");
     }
 
     /// The frame a state draws, as lines of text.
@@ -1876,7 +1913,7 @@ mod tests {
             .draw(|frame| {
                 let area = frame.area();
                 let body = Rect::new(area.x, area.y, area.width, area.height);
-                draw_transcript(frame, body, &state, Style::plain());
+                draw_transcript(frame, body, &state, &Pinned::new(), Style::plain());
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
@@ -1905,7 +1942,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    draw_transcript(frame, area, &state, Style::plain());
+                    draw_transcript(frame, area, &state, &Pinned::new(), Style::plain());
                 })
                 .expect("draw");
         }

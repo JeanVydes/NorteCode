@@ -8,6 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The conversation stays where it is read while an answer streams. The scroll
+  offset counts rows back from the end, so every chunk of a growing answer
+  shifted the window up and the text under the eye walked away; the frame folds
+  the rows it gained into the offset now, so an older line stays put. At the
+  tail nothing is folded, because there the newest line is the one to follow.
+
 - North Code refuses to start, with the name of the missing variable, when
   neither `XDG_DATA_HOME` nor `HOME` is set. It used to fall back to a relative
   `.norte-code/sessions.db` that resolved against the working directory: a

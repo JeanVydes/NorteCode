@@ -233,6 +233,13 @@ pub(crate) struct Pinned {
     /// keyboard's: the reader moves it and the frame draws it, and neither
     /// waits for the other.
     completion_pick: AtomicUsize,
+    /// The transcript height the last frame drew, in rows.
+    ///
+    /// The offset counts rows back from the end, so an answer that streams in
+    /// while a person reads history shifts the window by every row it adds.
+    /// Keeping the last height lets the frame fold that growth into the offset,
+    /// which is what holds the line being read where it is.
+    transcript_drawn: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -284,6 +291,7 @@ impl Default for Pinned {
             selecting: AtomicBool::new(false),
             completion_pick: AtomicUsize::new(0),
             transcript_scroll: AtomicUsize::new(0),
+            transcript_drawn: AtomicUsize::new(0),
         }
     }
 }
@@ -560,6 +568,23 @@ impl Pinned {
     /// How far the conversation is scrolled back from its end.
     pub(crate) fn transcript_scroll(&self) -> usize {
         self.transcript_scroll.load(Ordering::Relaxed)
+    }
+
+    /// Folds the rows a frame just gained into the scroll offset.
+    ///
+    /// The offset counts rows back from the end, so an answer that streams in
+    /// while a person reads history shifts the window by every row it adds and
+    /// the text under their eyes walks up the screen. Adding that growth to the
+    /// offset cancels it, so the line being read stays where it is. At the tail —
+    /// offset zero — nothing is folded: there the newest line is the one to
+    /// show, and the window is meant to follow it.
+    pub(crate) fn transcript_grew(&self, rows: usize) {
+        let before = self.transcript_drawn.swap(rows, Ordering::Relaxed);
+        if before == 0 || rows <= before || self.transcript_scroll.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        self.transcript_scroll
+            .fetch_add(rows - before, Ordering::Relaxed);
     }
 
     /// Moves the completion menu, and says whether there was one to move.
@@ -2365,6 +2390,27 @@ mod pinned_tests {
         pinned.follow_tail();
         assert!(pinned.take_dirty(), "following the tail is a move");
         assert_eq!(pinned.transcript_scroll(), 0);
+    }
+
+    #[test]
+    fn an_older_line_stays_put_as_a_new_one_arrives() {
+        // The offset counts rows back from the end, so a chunk of a streaming
+        // answer moves the window by every row it adds. Folding that growth into
+        // the offset is what keeps the line being read where it is.
+        let pinned = Pinned::new();
+        pinned.scroll_transcript(-3);
+        assert_eq!(pinned.transcript_scroll(), 3);
+        pinned.transcript_grew(40);
+        assert_eq!(pinned.transcript_scroll(), 3, "an intial draw adds nothing");
+        pinned.transcript_grew(42);
+        assert_eq!(pinned.transcript_scroll(), 5, "two new rows fold in");
+        // A frame that did not grow folds nothing, and one at the tail never
+        // folds: there the newest line is the one to follow.
+        pinned.transcript_grew(42);
+        assert_eq!(pinned.transcript_scroll(), 5);
+        pinned.follow_tail();
+        pinned.transcript_grew(50);
+        assert_eq!(pinned.transcript_scroll(), 0, "the tail stays the tail");
     }
 
     #[test]
