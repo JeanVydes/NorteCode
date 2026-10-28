@@ -21,16 +21,19 @@ not handed a message.
 
 ## Choose a model
 
-The default comes from `default_model` in the config, or from `--model`:
+The default comes from `default_provider` and `default_model` in the config,
+and `--provider`/`--model` override them:
 
 ```sh
 norte-code new --model openrouter/anthropic/claude-sonnet-4
 ```
 
-When `default_model` is not configured and no flag names one, the startup flow
+When `default_provider`/`default_model` are not configured and no flag names
+them, the startup flow
 asks: it lists the providers named in the configuration first and the catalogue's
 after them, then the models of the one chosen, and writes the answer to the config
-file as `default_model`, so the question is asked once. `norte-code models` shows
+file as `default_provider`/`default_model`, so the question is asked once.
+`norte-code models` shows
 what the catalogue knows.
 
 ## Change the prompt or endpoint

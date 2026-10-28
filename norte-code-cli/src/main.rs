@@ -150,17 +150,19 @@ enum Command {
 /// A new session is created and then read from the terminal, so there is no
 /// prompt to pass: the first line typed is the first message. Everything here
 /// overrides what the configuration would have used, and `--model`/`--provider`
-/// are what make a session open on something other than `default_model`.
+/// are what make a session open on something other than `default_provider` and
+/// `default_model`.
 #[derive(Args)]
 // A command line has flags: clap needs each one as a bool field, and they are
 // not a state machine to model. `SkillsConfig` carries the same allow.
 #[allow(clippy::struct_excessive_bools)]
 struct NewArgs {
-    /// A `provider/model` reference (defaults to `default_model` in config).
-    #[arg(long, short = 'm', value_name = "PROVIDER/MODEL")]
+    /// The model id (defaults to `default_model` in config). It is an opaque
+    /// string and may contain slashes (e.g. `nvidia/nemotron`).
+    #[arg(long, short = 'm', value_name = "MODEL")]
     model: Option<String>,
-    /// The provider id (e.g. `openai`, `groq`). Overrides the provider part
-    /// of `--model`. When `--model` omits the provider, this is required.
+    /// The provider id (e.g. `openai`, `groq`). Defaults to `default_provider`
+    /// in config. A model is never taken apart to find one.
     #[arg(long, value_name = "PROVIDER")]
     provider: Option<String>,
     /// Replace the built-in system prompt for this run.
@@ -220,9 +222,9 @@ struct ResumeArgs {
     /// Replace the built-in system prompt for this resume.
     #[arg(long, value_name = "TEXT")]
     system_prompt: Option<String>,
-    /// A `provider/model` reference to resume with, replacing the one the
-    /// session holds.
-    #[arg(long, short = 'm', value_name = "PROVIDER/MODEL")]
+    /// The model id to resume with, replacing the one the session holds. It is
+    /// an opaque string and may contain slashes (e.g. `nvidia/nemotron`).
+    #[arg(long, short = 'm', value_name = "MODEL")]
     model: Option<String>,
     /// Replace the session budget before resuming.
     #[arg(long, value_name = "LIMIT")]
@@ -1039,7 +1041,7 @@ async fn open_session(
         return Err(
             "the startup flow asks which session to open, so it needs a terminal; \
              pass a session key (`norte-code resume <KEY>`) or name a model \
-             (`norte-code new --model PROVIDER/MODEL`) instead"
+             (`norte-code new --provider PROVIDER --model MODEL`) instead"
                 .to_owned(),
         );
     }

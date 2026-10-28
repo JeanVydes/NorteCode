@@ -34,7 +34,8 @@ file is:
 ```json
 {
   "version": 1,
-  "default_model": "openrouter/anthropic/claude-sonnet-4",
+  "default_provider": "openrouter",
+  "default_model": "anthropic/claude-sonnet-4",
   "providers": {
     "openrouter": {
       "api_key_env": "OPENROUTER_API_KEY"

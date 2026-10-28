@@ -18,7 +18,8 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `version` | integer | `1` | Schema revision. |
-| `default_model` | string or null | null | `provider/model` for new sessions. |
+| `default_provider` | string or null | null | Provider for new sessions. |
+| `default_model` | string or null | null | Model id for new sessions; may contain slashes. |
 | `providers` | object | `{}` | Key source and endpoint per provider. |
 | `catalog` | object | see below | models.dev source and cache. |
 | `compaction` | object | see below | Automatic compaction. |

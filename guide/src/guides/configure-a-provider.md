@@ -5,7 +5,8 @@
 ```json
 {
   "version": 1,
-  "default_model": "openrouter/anthropic/claude-sonnet-4",
+  "default_provider": "openrouter",
+  "default_model": "anthropic/claude-sonnet-4",
   "providers": {
     "openrouter": {
       "api_key_env": "OPENROUTER_API_KEY"
@@ -120,7 +121,8 @@ Point the provider at the endpoint and keep the catalogue entry's model id:
 
 ```json
 {
-  "default_model": "local/my-model",
+  "default_provider": "local",
+  "default_model": "my-model",
   "providers": {
     "local": {
       "endpoint": "http://127.0.0.1:8080/v1",
@@ -138,7 +140,8 @@ output limits.
 
 ## Why did it fail?
 
-- **No model selected**: pass `--model` or set `default_model`.
+- **No model selected**: pass `--model` or set `default_model` (with
+  `default_provider`).
 - **Unknown provider/model**: run `norte-code models` and use a listed pair.
 - **Missing key**: check the environment variable named by `api_key_env`; a key
   file must exist and be readable.

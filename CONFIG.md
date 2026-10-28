@@ -22,7 +22,8 @@ that names the field; it is never silently replaced.
 ```json
 {
   "version": 1,
-  "default_model": "openrouter/anthropic/claude-sonnet-4",
+  "default_provider": "openrouter",
+  "default_model": "anthropic/claude-sonnet-4",
   "providers": {
     "openrouter": {
       "api_key_env": "OPENROUTER_API_KEY",
@@ -116,7 +117,8 @@ that names the field; it is never silently replaced.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `version` | integer | `1` | Schema revision; must be `1`. |
-| `default_model` | string or `null` | `null` | `provider/model` for a new session without `--model`. |
+| `default_provider` | string or `null` | `null` | Provider for a new session without `--provider`. |
+| `default_model` | string or `null` | `null` | Model id for a new session without `--model`; an opaque string that may contain slashes. |
 | `providers` | object | `{}` | Per-provider keys and endpoint overrides. |
 | `catalog` | object | see below | models.dev download and cache. |
 | `compaction` | object | see below | Automatic context compaction. |

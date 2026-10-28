@@ -23,7 +23,7 @@
 use std::io::IsTerminal as _;
 use std::path::Path;
 
-use norte_code_config::{Config, update_user_default_model};
+use norte_code_config::{Config, update_user_default};
 use norte_code_protocol::{Phase, SessionKey};
 use norte_code_store_sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
 
@@ -429,20 +429,21 @@ fn remember(
         eprintln!(
             "{}",
             style.yellow(format!(
-                "nowhere to write the choice; set default_model to `{reference}` yourself"
+                "nowhere to write the choice; set default_provider to `{provider}` and default_model to `{model}` yourself"
             ))
         );
         return reference;
     };
-    match update_user_default_model(&path, &reference) {
+    match update_user_default(&path, provider, model) {
         Ok(()) => {
-            config.default_model = Some(reference.clone());
+            config.default_provider = Some(provider.to_owned());
+            config.default_model = Some(model.to_owned());
             eprintln!("{}", style.dim(format!("saved to {}", path.display())));
         }
         Err(error) => eprintln!(
             "{}",
             style.yellow(format!(
-                "could not write {}: {error}; set default_model to `{reference}` yourself",
+                "could not write {}: {error}; set default_provider to `{provider}` and default_model to `{model}` yourself",
                 path.display()
             ))
         ),
@@ -609,6 +610,7 @@ mod tests {
         std::fs::write(&path, r#"{"version":1,"cost":{"show":false}}"#).expect("write");
         let mut config = Config::from_json("{}").expect("config").config;
         assert_eq!(config.default_model, None);
+        assert_eq!(config.default_provider, None);
         let reference = remember(
             &mut config,
             Some(&path),
@@ -617,15 +619,22 @@ mod tests {
             Style::plain(),
         );
         assert_eq!(reference, "river/deepseek-ai/DeepSeek-V4.1-Flash");
-        assert_eq!(config.default_model.as_deref(), Some(reference.as_str()));
+        // The two are written apart, and the model keeps its slash: a name is a
+        // string and the provider is its own key.
+        assert_eq!(config.default_provider.as_deref(), Some("river"));
+        assert_eq!(
+            config.default_model.as_deref(),
+            Some("deepseek-ai/DeepSeek-V4.1-Flash")
+        );
         // The rest of the file survives, and what was written is a config the
         // next run can load.
         let written = std::fs::read_to_string(&path).expect("read");
         assert!(written.contains("\"show\": false"), "{written}");
         let reloaded = Config::from_json(&written).expect("reload");
+        assert_eq!(reloaded.config.default_provider.as_deref(), Some("river"));
         assert_eq!(
             reloaded.config.default_model.as_deref(),
-            Some(reference.as_str())
+            Some("deepseek-ai/DeepSeek-V4.1-Flash")
         );
         let _ = std::fs::remove_dir_all(dir);
     }

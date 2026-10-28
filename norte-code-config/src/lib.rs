@@ -36,7 +36,17 @@ pub const DEFAULT_CATALOG_URL: &str = "https://models.dev/catalog.json";
 pub struct Config {
     /// Schema revision. Must be [`CONFIG_VERSION`].
     pub version: u32,
-    /// The `provider/model` a new session uses when none is named.
+    /// The provider a new session uses when none is named.
+    ///
+    /// It is separate from the model because a model name is a string and may
+    /// carry slashes of its own — NVIDIA names its models `vendor/model`, and
+    /// several OpenAI-compatible vendors do the same — so splitting a
+    /// `provider/model` reference to find the two is wrong the moment a model
+    /// name has one.
+    pub default_provider: Option<String>,
+    /// The model a new session uses when none is named.
+    ///
+    /// It is the model id and nothing else, slashes and all.
     pub default_model: Option<String>,
     /// Per-provider settings.
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -185,6 +195,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            default_provider: None,
             default_model: None,
             providers: BTreeMap::new(),
             catalog: CatalogConfig::default(),
@@ -925,6 +936,34 @@ impl Config {
         Ok(Loaded { config, warnings })
     }
 
+    /// Checks the default provider and model, which are written together.
+    ///
+    /// Both or neither: a model with no provider cannot be resolved, and a
+    /// provider with no model names half a session. Neither is checked for a
+    /// slash — a model name is a string that may carry one, and the provider is
+    /// its own key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Invalid`] when exactly one of the two is set, or
+    /// when the provider is blank.
+    fn validate_default_model(&self) -> Result<(), ConfigError> {
+        match (&self.default_provider, &self.default_model) {
+            (Some(provider), Some(_)) if provider.trim().is_empty() => {
+                Err(invalid("default_provider", "must not be empty"))
+            }
+            (Some(_), None) => Err(invalid(
+                "default_provider",
+                "is set without a default_model to go with it",
+            )),
+            (None, Some(_)) => Err(invalid(
+                "default_model",
+                "is set without a default_provider to go with it",
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Checks the invariants the loader cannot express.
     ///
     /// # Errors
@@ -943,14 +982,7 @@ impl Config {
         if self.max_iterations == Some(0) {
             return Err(invalid("max_iterations", "must be at least 1"));
         }
-        if let Some(model) = &self.default_model {
-            if model.split_once('/').is_none() {
-                return Err(invalid(
-                    "default_model",
-                    format!("`{model}` is not a `provider/model` reference"),
-                ));
-            }
-        }
+        self.validate_default_model()?;
         if self.skills.max_skills == 0 {
             return Err(invalid("skills.max_skills", "must be at least 1"));
         }
@@ -1177,24 +1209,25 @@ pub fn resolve_user_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
     explicit.map(Path::to_path_buf).or_else(user_config_path)
 }
 
-/// Sets `default_model` in a config file, preserving the rest of it.
+/// Sets `default_provider` and `default_model` in a config file, preserving the
+/// rest of it.
 ///
-/// The value is a `provider/model` reference, which is the same shape
-/// `pickers` and `run` resolve, so the check here is the one `validate` makes:
-/// a reference with no provider is refused rather than written and reported at
-/// the next startup.
+/// The two are written together and kept apart, because a model name is a string
+/// that may carry slashes and a provider is its own key: the pair is what
+/// `run` and the pickers resolve, and neither is ever split to find the other.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError`] when the reference is not `provider/model`, or when
-/// the file cannot be read or written.
-pub fn update_user_default_model(path: &Path, reference: &str) -> Result<(), ConfigError> {
-    let reference = reference.trim();
-    if reference.split_once('/').is_none() {
-        return Err(invalid(
-            "default_model",
-            format!("`{reference}` is not a `provider/model` reference"),
-        ));
+/// Returns [`ConfigError`] when either name is empty, or when the file cannot be
+/// read or written.
+pub fn update_user_default(path: &Path, provider: &str, model: &str) -> Result<(), ConfigError> {
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() {
+        return Err(invalid("default_provider", "the provider name is empty"));
+    }
+    if model.is_empty() {
+        return Err(invalid("default_model", "the model name is empty"));
     }
     let mut root = if path.exists() {
         read_value(path)?
@@ -1205,9 +1238,10 @@ pub fn update_user_default_model(path: &Path, reference: &str) -> Result<(), Con
         .as_object_mut()
         .ok_or_else(|| invalid("default_model", "the config root must be a JSON object"))?;
     root.insert(
-        "default_model".to_owned(),
-        Value::String(reference.to_owned()),
+        "default_provider".to_owned(),
+        Value::String(provider.to_owned()),
     );
+    root.insert("default_model".to_owned(), Value::String(model.to_owned()));
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1578,11 +1612,14 @@ mod tests {
 
     #[test]
     fn the_project_overlay_wins() {
-        let user = temp_file(r#"{"default_model":"openai/gpt-5","max_iterations":4}"#);
+        let user = temp_file(
+            r#"{"default_provider":"openai","default_model":"gpt-5","max_iterations":4}"#,
+        );
         let project = temp_file(r#"{"max_iterations":8}"#);
         let loaded = Config::load(Some(&user), Some(&project)).expect("config");
         assert_eq!(loaded.config.max_iterations, Some(8));
-        assert_eq!(loaded.config.default_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(loaded.config.default_provider.as_deref(), Some("openai"));
+        assert_eq!(loaded.config.default_model.as_deref(), Some("gpt-5"));
     }
 
     #[test]

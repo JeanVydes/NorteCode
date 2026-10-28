@@ -44,7 +44,8 @@ secret type and are registered for output redaction with the command tool.
 
 | Section | What it controls |
 | --- | --- |
-| `default_model` | The `provider/model` for a new session. |
+| `default_provider` | The provider for a new session. |
+| `default_model` | The model id for a new session; an opaque string that may contain slashes. |
 | `providers` | Key source and endpoint override per provider. |
 | `catalog` | models.dev URL, cache TTL and offline mode. |
 | `compaction` | Threshold, trigger, recent messages and summary model. |

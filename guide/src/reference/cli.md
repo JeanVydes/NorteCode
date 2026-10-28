@@ -30,7 +30,7 @@ the home abbreviated to `~`.
 
 | Option | Meaning |
 | --- | --- |
-| `--config PATH` | Use this user config file instead of the platform path. A `default_model` chosen at startup is written here. |
+| `--config PATH` | Use this user config file instead of the platform path. A `default_provider`/`default_model` chosen at startup is written here. |
 | `--offline` | Never touch the network for the catalogue. |
 | `--refresh` | Revalidate the catalogue even when the cache is fresh. |
 | `--verbose LEVEL` | How much to show: `low` (the answer alone), `medium` (the default) or `high` (reasoning, tool arguments and results, every counter). |
@@ -49,7 +49,7 @@ speaks the protocol.
 
 | Option | Meaning |
 | --- | --- |
-| `-m, --model MODEL` | A `provider/model` reference, overriding `default_model`. |
+| `-m, --model MODEL` | The model id, overriding `default_model`. It is opaque and may contain slashes. |
 | `--provider PROVIDER` | Override the provider id (e.g. `openai`, `groq`, `disabled`). |
 | `--system-prompt TEXT` | Replace the base system prompt for this session. |
 | `--endpoint URL` | Override the provider endpoint. |
@@ -68,9 +68,10 @@ speaks the protocol.
 | `--max-iterations N` | Cap model iterations for this session. |
 | `--extension KEY=JSON` | Add a vendor request field; repeatable. |
 
-Without `--model` or `--provider` the session opens on `default_model`, and when
+Without `--model` or `--provider` the session opens on `default_provider` and
+`default_model`, and when
 that is not configured the startup flow asks which provider and model to use and
-writes the answer to the config file as `default_model`.
+writes the answer to the config file as `default_provider`/`default_model`.
 
 ## The startup menu
 
@@ -82,10 +83,12 @@ it names — a session key off an older footer, a provider the catalogue does no
 list — so a bounded list never puts an entry out of reach. The list scrolls
 around the cursor and says how many entries it left out.
 
-When no `default_model` is configured, the same menu asks which provider and
+When no `default_provider`/`default_model` is configured, the same menu asks
+which provider and
 which model. The providers named in the configuration come first, and the
 catalogue's follow; the choice is written to the config file the process was
-started with (`--config FILE`, else the platform user path) as `default_model`,
+started with (`--config FILE`, else the platform user path), as
+`default_provider`/`default_model`,
 so the question is asked once.
 
 ## `resume`

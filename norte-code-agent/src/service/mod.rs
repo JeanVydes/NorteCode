@@ -1031,11 +1031,16 @@ impl Service {
 
         // Everything that can fail happens before the live service is touched.
         let catalog = self.catalog();
-        let spec = match next.default_model.clone() {
-            Some(reference) => Self::default_spec_for(&next, &catalog, &reference)?,
-            // No default model: keep the one in force rather than fail, since a
-            // config that only changes unrelated settings must still reload.
-            None => self.default_spec(),
+        // The provider and the model are two config keys and never a split
+        // reference: joined here only because the resolver takes the pair as
+        // `provider/model` and the model keeps every slash it has.
+        let spec = match (&next.default_provider, &next.default_model) {
+            (Some(provider), Some(model)) => {
+                Self::default_spec_for(&next, &catalog, &format!("{provider}/{model}"))?
+            }
+            // No default: keep the one in force rather than fail, since a config
+            // that only changes unrelated settings must still reload.
+            _ => self.default_spec(),
         };
         let secrets = collect_secrets(&next, &catalog);
         let skills = Arc::new(discover_skills(&next, &self.workspace_root));

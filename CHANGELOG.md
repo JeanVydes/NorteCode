@@ -8,6 +8,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The config names a `default_provider` and a `default_model` instead of one
+  `default_model` reference. The old key held two facts in one string and every
+  reader split it on the first slash to find them, which is wrong the moment a
+  model name carries a slash — NVIDIA names its models `vendor/model`, and so
+  do several OpenAI-compatible vendors. Nothing in the code splits a model any
+  more: a model is an opaque string, a provider is its own key, and the two are
+  written and read apart. An existing `default_model` of `p/m` must become
+  `default_provider: p` and `default_model: m`; a config with only one of the
+  two is refused with the key it is missing.
+
 - A model reference is a string and never split to find a provider. `/model`
   used to send a name containing a slash as-is and let the service read the
   first segment as the provider, so `nvidia/nemotron` looked like a provider

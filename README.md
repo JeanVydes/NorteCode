@@ -60,7 +60,8 @@ file names a model and a provider key source:
 ```json
 {
   "version": 1,
-  "default_model": "openrouter/anthropic/claude-sonnet-4",
+  "default_provider": "openrouter",
+  "default_model": "anthropic/claude-sonnet-4",
   "providers": {
     "openrouter": { "api_key_env": "OPENROUTER_API_KEY" }
   }
@@ -96,7 +97,7 @@ exact revision and is committed.
 ```sh
 norte-code                     # pick a session, then talk to it
 norte-code ~/src/thing         # the same, working in that directory
-norte-code new                 # a new session, on default_model
+norte-code new                 # a new session, on default_provider/default_model
 norte-code new --model openai/gpt-5
 norte-code resume <key>
 norte-code resume <key> --budget 20000 --budget-unit tokens

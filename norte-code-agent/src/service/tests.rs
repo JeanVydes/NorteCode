@@ -523,7 +523,7 @@ async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
     std::fs::write(
         &path,
         format!(
-            r#"{{"default_model":"private/model-x","providers":{{"private":{{"endpoint":"https://example.invalid/v1","wire":"chat","api_key_file":"{}"}}}}}}"#,
+            r#"{{"default_provider":"private","default_model":"model-x","providers":{{"private":{{"endpoint":"https://example.invalid/v1","wire":"chat","api_key_file":"{}"}}}}}}"#,
             key_file.display()
         ),
     )
@@ -533,10 +533,8 @@ async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
     let reloaded = service
         .reload_config()
         .expect("a configured provider resolves without the catalogue");
-    assert_eq!(
-        reloaded.config.default_model.as_deref(),
-        Some("private/model-x")
-    );
+    assert_eq!(reloaded.config.default_provider.as_deref(), Some("private"));
+    assert_eq!(reloaded.config.default_model.as_deref(), Some("model-x"));
     assert_eq!(
         service.default_spec().label(),
         "private/model-x",
@@ -545,7 +543,11 @@ async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
 
     // A reference that names neither the catalogue nor the config is still an
     // error: falling back is for a declared provider, not for a typo.
-    std::fs::write(&path, r#"{"default_model":"nowhere/model-x"}"#).expect("write");
+    std::fs::write(
+        &path,
+        r#"{"default_provider":"nowhere","default_model":"model-x"}"#,
+    )
+    .expect("write");
     let error = service
         .reload_config()
         .expect_err("an undeclared provider is still refused");

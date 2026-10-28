@@ -67,48 +67,28 @@ pub(crate) fn print_model(model: &ModelInfo) {
     println!("{reference:<54} {context:>8}  {tools:<5}  {reasoning:<18} {name}");
 }
 
-/// Splits the provider and the model name out of the command line and the
-/// config.
+/// The provider and the model a run opens on, from the flags and the config.
 ///
-/// `--provider` takes precedence for the provider; the model name is used
-/// as-is and may contain slashes (e.g. `nvidia/nemotron`). Without a
-/// `--provider`, the provider comes from `default_model` and the model name is
-/// still not split on `/`.
+/// Neither name is ever split: the provider is its own key and the model is an
+/// opaque string that may carry slashes of its own — `nvidia/nemotron` is a
+/// model of the `nvidia` provider. `--provider` wins over `default_provider`,
+/// `--model` over `default_model`, and each falls back to its own config key;
+/// a model with no provider (from either) is an error rather than a default
+/// guessed at.
 fn resolve_reference(
     config: &Config,
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<(String, String), String> {
-    if let Some(provider) = provider {
-        let model = model.or_else(|| {
-            config
-                .default_model
-                .as_ref()
-                .and_then(|d| d.split_once('/').map(|(_, name)| name.to_owned()))
-        });
-        let model = model
-            .ok_or_else(|| "no model selected: pass --model or set default_model".to_owned())?;
-        Ok((provider, model))
-    } else if let Some(model) = model {
-        // No --provider: use the default provider from config. Do NOT split
-        // the model name on '/'. If there is no default, error out instead of
-        // silently assuming openai.
-        let default_provider = config
-            .default_model
-            .as_ref()
-            .and_then(|d| d.split_once('/').map(|(p, _)| p.to_owned()))
-            .ok_or_else(|| {
-                "no provider specified: pass --provider or set default_model in config".to_owned()
-            })?;
-        Ok((default_provider, model))
-    } else if let Some(default) = &config.default_model {
-        default
-            .split_once('/')
-            .map(|(p, m)| (p.to_owned(), m.to_owned()))
-            .ok_or_else(|| "no model selected: pass --model or set default_model".to_owned())
-    } else {
-        Err("no model selected: pass --model or set default_model".to_owned())
-    }
+    let provider = provider.or_else(|| config.default_provider.clone());
+    let provider = provider.ok_or_else(|| {
+        "no provider specified: pass --provider or set default_provider in config".to_owned()
+    })?;
+    let model = model.or_else(|| config.default_model.clone());
+    let model = model.ok_or_else(|| {
+        "no model selected: pass --model or set default_model in config".to_owned()
+    })?;
+    Ok((provider, model))
 }
 
 #[allow(clippy::too_many_arguments)]
