@@ -26,6 +26,7 @@ mod render;
 mod select;
 mod startup;
 mod style;
+mod telemetry_panel;
 mod terminal;
 mod text;
 mod transcript;
