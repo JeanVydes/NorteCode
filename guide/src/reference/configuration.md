@@ -36,7 +36,7 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `budgets` | object | all null | Message, session, daily limits. |
 | `tools` | object | see below | Web fetch and sandbox. |
 | `skills` | object | see below | Skill discovery. |
-| `model_overrides` | object | `{}` | Per-model overrides. |
+| `providers.<id>.models` | object | `{}` | Per-model overrides, keyed by model id. |
 
 ## `providers.<id>`
 
@@ -212,7 +212,7 @@ number and line ranges:
 | `honor_allowed_tools` | `false` | Let a skill pre-approve calls. |
 | `max_skills` | `128` | Maximum valid skills. |
 
-## `model_overrides.<provider/model>`
+## `providers.<id>.models.<model-id>`
 
 | Key | Meaning |
 | --- | --- |

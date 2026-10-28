@@ -135,8 +135,8 @@ Point the provider at the endpoint and keep the catalogue entry's model id:
 
 `auth: "disabled"` sends no credential and needs no API key, which is what a
 local server usually expects. A provider the catalogue does not list gets
-conservative fallback capabilities; `model_overrides` can set its context and
-output limits.
+conservative fallback capabilities; the provider's `models` block can set its
+context and output limits.
 
 ## Why did it fail?
 

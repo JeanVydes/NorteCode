@@ -158,9 +158,7 @@ impl ModelSpec {
         let endpoint = endpoint_override
             .or(configured)
             .or(expand_endpoint(provider)?);
-        let overrides = config
-            .model_overrides
-            .get(&format!("{}/{}", provider.id, model.id));
+        let overrides = config.model_override(&provider.id, &model.id);
         let capabilities = norte_code_catalog::capabilities(model, wire, overrides);
         Ok(Self {
             provider: provider.id.clone(),
@@ -246,7 +244,7 @@ impl ModelSpec {
         let endpoint = endpoint_override
             .or(configured)
             .or(expand_endpoint(provider)?);
-        let overrides = config.model_overrides.get(reference);
+        let overrides = config.model_override(&provider.id, model_id);
         Ok(Self {
             provider: provider.id.clone(),
             model: model_id.to_owned(),
@@ -299,7 +297,7 @@ impl ModelSpec {
             .get(provider)
             .and_then(|entry| entry.wire)
             .map_or_else(|| Wire::for_provider(provider), Wire::from);
-        let overrides = config.model_overrides.get(reference);
+        let overrides = config.model_override(provider, model);
         Ok(Self {
             provider: provider.to_owned(),
             model: model.to_owned(),
@@ -765,6 +763,56 @@ mod tests {
     }
 
     #[test]
+    fn a_model_the_provider_lists_but_the_catalogue_does_not_keeps_its_override() {
+        // The exact case a person hits: the catalogue knows the provider and
+        // carries one model, the config names another and overrides it. The
+        // model must resolve with the declared capabilities and not be refused
+        // for not being in the catalogue.
+        let key_file = std::env::temp_dir().join(format!(
+            "norte-code-provider-{}-listed-key",
+            std::process::id()
+        ));
+        std::fs::write(&key_file, "test-key\n").expect("key file");
+        let config = Config::from_json(
+            &r#"{
+                "providers":{"liquid":{
+                    "api_key_file":"KEY",
+                    "endpoint":"https://api.liquid.test/v1",
+                    "wire":"chat",
+                    "models":{"lfm3-vl-2":{"modalities":{"input":["text","image"]}}}
+                }}
+            }"#
+            .replace("KEY", &key_file.display().to_string()),
+        )
+        .expect("config")
+        .config;
+        let catalog = Catalog::parse(
+            br#"{
+                "providers": {
+                    "liquid": {
+                        "id": "liquid",
+                        "env": ["LIQUID_API_KEY"],
+                        "npm": "@ai-sdk/openai-compatible",
+                        "api": "https://api.liquid.ai/openai/v1",
+                        "models": {
+                            "liquid.auto": { "id": "liquid.auto", "name": "Liquid Auto" }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("catalog");
+        let spec = ModelSpec::from_provider(&config, &catalog, "liquid/lfm3-vl-2", None)
+            .expect("a model the catalogue does not list still resolves");
+        assert_eq!(spec.model, "lfm3-vl-2");
+        assert!(
+            spec.capabilities.modalities.supports_input(Modality::Image),
+            "the override under the provider reached the spec"
+        );
+        let _ = std::fs::remove_file(key_file);
+    }
+
+    #[test]
     fn a_configured_modality_reaches_a_model_the_catalogue_does_not_list() {
         // The path `river` and every other private endpoint takes: the provider
         // is not in the catalogue, so the capabilities come from the fallback
@@ -776,8 +824,12 @@ mod tests {
         std::fs::write(&key_file, "test-key\n").expect("key file");
         let config = Config::from_json(
             &r#"{
-                "providers":{"river":{"api_key_file":"KEY","endpoint":"https://api.river.test/v1","wire":"chat"}},
-                "model_overrides":{"river/m":{"modalities":{"input":["text","image"]}}}
+                "providers":{"river":{
+                    "api_key_file":"KEY",
+                    "endpoint":"https://api.river.test/v1",
+                    "wire":"chat",
+                    "models":{"m":{"modalities":{"input":["text","image"]}}}
+                }}
             }"#
             .replace("KEY", &key_file.display().to_string()),
         )
@@ -792,8 +844,8 @@ mod tests {
             "a model nothing is known about takes text"
         );
 
-        // The override is keyed by `provider/model`, not by provider, so it
-        // only lands on the model it names — a second model on the same
+        // The override sits under the provider and is keyed by the model id, so
+        // it only lands on the model it names — a second model on the same
         // endpoint keeps the conservative default.
         let spec = ModelSpec::resolve(&config, "river/m", None, &[]).expect("spec");
         assert!(spec.capabilities.modalities.supports_input(Modality::Image));

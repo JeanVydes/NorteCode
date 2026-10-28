@@ -60,7 +60,7 @@ secret type and are registered for output redaction with the command tool.
 | `budgets` | Message, session and daily limits. |
 | `tools` | `web_fetch`, the command output cap and the command sandbox. |
 | `skills` | Discovery roots, scripts and allowed-tools behaviour. |
-| `model_overrides` | Per-model context, output and reasoning overrides. |
+| `providers.<id>.models` | Per-model context, output and reasoning overrides, keyed by model id. |
 
 The complete tables, defaults and validation ranges are in the
 [configuration reference](../reference/configuration.md). The repository's

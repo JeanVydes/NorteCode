@@ -26,9 +26,7 @@ pub fn model_list(config: &Config, catalog: &Catalog) -> Vec<ModelInfo> {
     let mut models = Vec::new();
     for entry in catalog.models() {
         let wire = Wire::from_npm(entry.provider.npm.as_deref().unwrap_or_default());
-        let overrides = config
-            .model_overrides
-            .get(&format!("{}/{}", entry.provider.id, entry.model.id));
+        let overrides = config.model_override(&entry.provider.id, &entry.model.id);
         let capabilities = norte_code_catalog::capabilities(entry.model, wire, overrides);
         let mut efforts: Vec<String> = capabilities
             .reasoning

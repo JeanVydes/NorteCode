@@ -1387,8 +1387,8 @@ fn kind_of_mime(mime: &str) -> MediaKind {
 /// Checked against the model's own capabilities before the turn commits
 /// anything. The message names the modality and the model, because the two
 /// things a person needs to act are what was refused and what refused it; the
-/// way out — declare it under `model_overrides` or use an image-capable model —
-/// is in the message for the same reason.
+/// way out — declare it under the provider's `models` block or use an
+/// image-capable model — is in the message for the same reason.
 fn unsupported_attachment(
     capabilities: &norte::Capabilities,
     attachments: &[Attachment],
@@ -1403,7 +1403,7 @@ fn unsupported_attachment(
             format!(
                 "the model does not accept {modality:?} input, so `{}` was not sent; \
                  use a model that takes {modality:?}, or declare `modalities.input` for \
-                 it under `model_overrides`",
+                 it under the provider's `models` block",
                 attachment.name
             ),
         ));

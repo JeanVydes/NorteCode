@@ -4892,7 +4892,7 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
         .expect("an error event");
     assert_eq!(error.0, ErrorCode::Capability, "{}", error.1);
     assert!(error.1.contains("Image"), "{}", error.1);
-    assert!(error.1.contains("model_overrides"), "{}", error.1);
+    assert!(error.1.contains("`models` block"), "{}", error.1);
     assert!(
         refused.iter().any(|event| matches!(
             &event.kind,

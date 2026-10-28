@@ -84,8 +84,6 @@ pub struct Config {
     pub tools: ToolsConfig,
     /// Agent Skills settings.
     pub skills: SkillsConfig,
-    /// Per-model overrides, keyed by `provider/model`.
-    pub model_overrides: BTreeMap<String, ModelOverride>,
     /// MCP servers whose tools the agent may call.
     ///
     /// The block keeps the name and the shape the rest of the ecosystem uses
@@ -213,7 +211,6 @@ impl Default for Config {
             budgets: BudgetsConfig::default(),
             tools: ToolsConfig::default(),
             skills: SkillsConfig::default(),
-            model_overrides: BTreeMap::new(),
             mcp_servers: BTreeMap::new(),
         }
     }
@@ -274,6 +271,13 @@ pub struct ProviderConfig {
     /// They are added to the ones the provider ships with, and a header named
     /// here replaces the built-in one of the same name.
     pub headers: BTreeMap<String, String>,
+    /// Per-model overrides, keyed by the model id alone.
+    ///
+    /// It is the model id and not `provider/model`: a model name may carry a
+    /// slash of its own — NVIDIA names its models `vendor/model` — and a key
+    /// that had to be split to be read would split those too. The provider is
+    /// the one this sits under, which is where the two halves already are.
+    pub models: BTreeMap<String, ModelOverride>,
 }
 
 /// Catalogue settings.
@@ -1062,6 +1066,19 @@ impl Config {
         Ok(())
     }
 
+    /// The override declared for one model, looked up by its provider and id.
+    ///
+    /// The provider owns its models now, so this is the one place the two are
+    /// joined: a caller that named a model by its own id asks here, and the
+    /// split that a `provider/model` key used to need — and that a model name
+    /// with a slash of its own broke — never happens.
+    #[must_use]
+    pub fn model_override(&self, provider: &str, model: &str) -> Option<&ModelOverride> {
+        self.providers
+            .get(provider)
+            .and_then(|entry| entry.models.get(model))
+    }
+
     /// Resolves a provider's API key.
     ///
     /// The config's `api_key_env` wins, then its `api_key_file`, then the
@@ -1770,10 +1787,10 @@ mod tests {
         // both spellings are accepted because the catalogue uses the first and
         // a person writes the second.
         let loaded = Config::from_json(
-            r#"{"model_overrides":{"river/m":{"modalities":{"input":["text","image","pdf"],"output":["text"]}}}}"#,
+            r#"{"providers":{"river":{"models":{"m":{"modalities":{"input":["text","image","pdf"],"output":["text"]}}}}}}"#,
         )
         .expect("config");
-        let modalities = loaded.config.model_overrides["river/m"]
+        let modalities = loaded.config.providers["river"].models["m"]
             .modalities
             .as_ref()
             .expect("modalities");
@@ -1787,11 +1804,11 @@ mod tests {
         );
 
         let document = Config::from_json(
-            r#"{"model_overrides":{"river/m":{"modalities":{"input":["document"]}}}}"#,
+            r#"{"providers":{"river":{"models":{"m":{"modalities":{"input":["document"]}}}}}}"#,
         )
         .expect("config");
         assert_eq!(
-            document.config.model_overrides["river/m"]
+            document.config.providers["river"].models["m"]
                 .modalities
                 .as_ref()
                 .and_then(|modalities| modalities.input.as_deref()),
@@ -1806,7 +1823,7 @@ mod tests {
         // a dropped name would leave the model declaring less than its host
         // asked for, and the image would be refused with no clue why.
         let error = Config::from_json(
-            r#"{"model_overrides":{"river/m":{"modalities":{"input":["telepathy"]}}}}"#,
+            r#"{"providers":{"river":{"models":{"m":{"modalities":{"input":["telepathy"]}}}}}}"#,
         )
         .expect_err("unknown modality");
         assert!(error.to_string().contains("telepathy"), "{error}");

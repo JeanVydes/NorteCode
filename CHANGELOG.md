@@ -58,6 +58,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Per-model overrides moved under the provider that owns them. A top-level
+  `model_overrides` map keyed `provider/model` was split on its first `/` to be
+  read, which is wrong the moment a model name carries a slash of its own —
+  `anthropic/claude-sonnet-4` and `deepseek-ai/DeepSeek-V4.1-Flash` are single
+  names, not `provider/model` pairs. The block is now
+  `providers.<id>.models.<model-id>`, keyed by the model id alone: the provider
+  is the block it sits in, so there is nothing to split. A file still carrying
+  the old top-level key gets an unknown-key warning from the loader.
+
 - Entries in the conversation are separated by a blank row. A message used to sit
   against the one above it, so a conversation read as one wall of text; now a
   said line, an answer and a notice each start apart from what came before. A

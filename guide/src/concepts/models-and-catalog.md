@@ -73,25 +73,32 @@ that cannot honour a stored setting is refused rather than silently lowering it.
 
 ## Model overrides
 
-The catalogue is not always right or complete. `model_overrides` can replace
-`max_context`, `max_output` and the reasoning controls for one
-`provider/model`:
+The catalogue is not always right or complete. A provider's `models` block can
+replace `max_context`, `max_output` and the reasoning controls for one model,
+keyed by its id alone:
 
 ```json
 {
-  "model_overrides": {
-    "openrouter/anthropic/claude-sonnet-4": {
-      "max_context": 200000,
-      "max_output": 64000,
-      "reasoning": {
-        "supported": true,
-        "can_disable": true,
-        "efforts": ["low", "medium", "high"]
+  "providers": {
+    "openrouter": {
+      "models": {
+        "anthropic/claude-sonnet-4": {
+          "max_context": 200000,
+          "max_output": 64000,
+          "reasoning": {
+            "supported": true,
+            "can_disable": true,
+            "efforts": ["low", "medium", "high"]
+          }
+        }
       }
     }
   }
 }
 ```
+
+The key is the model id and nothing else: `anthropic/claude-sonnet-4` is one
+name, and the provider it belongs to is the block it sits in.
 
 Overrides win over catalogue values for that model.
 

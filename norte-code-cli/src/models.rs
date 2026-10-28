@@ -166,15 +166,20 @@ pub(crate) fn resolve_spec(
     let config = config.as_ref();
     match ModelSpec::from_catalog(config, catalog, &reference, endpoint.clone()) {
         Ok(spec) => Ok(spec),
-        Err(ServiceError::UnknownModel { .. }) => {
-            // The provider exists in the catalogue but the model does not.
-            // Do not silently fall back: the user should pick a listed model
-            // or use --provider disabled for a custom one.
-            Err(format!(
-                "model `{model_name}` is not in the catalogue for provider `{provider}`. \
-                 Run `norte-code models --provider {provider}` to see available models, \
-                 or use --provider disabled for a custom endpoint."
-            ))
+        // The provider is in the catalogue and the model is not: a fresh
+        // release, or a model named in the config and nowhere else. The
+        // provider still supplies the wire, the endpoint and the key, so the
+        // reference resolves with conservative capabilities and whatever the
+        // host declared under `providers.<id>.models` rather than failing.
+        //
+        // This is the same fallback the service makes in `default_spec_for`:
+        // `/provider liquid` inside a session resolved a model the command
+        // line refused, which is one reference answered two ways.
+        Err(ServiceError::UnknownModel {
+            provider: unknown, ..
+        }) if catalog.provider(&unknown).is_some() => {
+            ModelSpec::from_provider(config, catalog, &reference, endpoint.clone())
+                .map_err(|error| error.to_string())
         }
         Err(ServiceError::UnknownProvider(_)) => {
             if !is_disabled {

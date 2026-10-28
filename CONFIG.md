@@ -92,20 +92,24 @@ that names the field; it is never silently replaced.
     "honor_allowed_tools": false,
     "max_skills": 128
   },
-  "model_overrides": {
-    "openrouter/anthropic/claude-sonnet-4": {
-      "max_context": 200000,
-      "max_output": 64000,
-      "modalities": {
-        "input": ["text", "image"],
-        "output": ["text"]
-      },
-      "reasoning": {
-        "supported": true,
-        "can_disable": true,
-        "efforts": ["low", "medium", "high"],
-        "supports_budget": false,
-        "max_budget": null
+  "providers": {
+    "openrouter": {
+      "models": {
+        "anthropic/claude-sonnet-4": {
+          "max_context": 200000,
+          "max_output": 64000,
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          },
+          "reasoning": {
+            "supported": true,
+            "can_disable": true,
+            "efforts": ["low", "medium", "high"],
+            "supports_budget": false,
+            "max_budget": null
+          }
+        }
       }
     }
   }
@@ -133,7 +137,7 @@ that names the field; it is never silently replaced.
 | `budgets` | object | all `null` | Optional message, session and daily limits. |
 | `tools` | object | see below | Tool switches and the command sandbox. |
 | `skills` | object | see below | Agent Skills discovery and execution. |
-| `model_overrides` | object | `{}` | Per-model overrides keyed `provider/model`. |
+
 
 ## `providers.<id>`
 
@@ -143,6 +147,7 @@ that names the field; it is never silently replaced.
 | `api_key_file` | path or `null` | `null` | File containing the API key. Used after `api_key_env`. |
 | `endpoint` | string or `null` | `null` | Base URL override for a proxy or compatible vendor. |
 | `headers` | object | `{}` | Extra headers sent with every request to this provider. |
+| `models` | object | `{}` | Per-model overrides, keyed by the model id alone. |
 
 Key resolution order for a provider: `api_key_env`, `api_key_file`, then the
 `env` names the catalogue declares for that provider. Keys are held in Norte's
@@ -360,7 +365,7 @@ not, with the reason.
 `/refresh` in the interactive prompt re-scans these roots; the next turn
 registers the refreshed tools.
 
-## `model_overrides.<provider/model>`
+## `providers.<id>.models.<model-id>`
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -393,13 +398,22 @@ capabilities fall back to text in, text out; without an `input` list naming
 
 ```json
 {
-  "model_overrides": {
-    "river/deepseek-ai/DeepSeek-V4.1-Flash": {
-      "modalities": { "input": ["text", "image"], "output": ["text"] }
+  "providers": {
+    "river": {
+      "models": {
+        "deepseek-ai/DeepSeek-V4.1-Flash": {
+          "modalities": { "input": ["text", "image"], "output": ["text"] }
+        }
+      }
     }
   }
 }
 ```
+
+The override sits under its provider and is keyed by the model id **alone**:
+a model name may carry a slash of its own — `deepseek-ai/DeepSeek-V4.1-Flash`,
+`anthropic/claude-sonnet-4` — and a key that had to be split on the first `/`
+to be read would split those too.
 
 ## `extensions`
 
