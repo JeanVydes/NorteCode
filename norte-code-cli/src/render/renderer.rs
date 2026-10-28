@@ -819,7 +819,7 @@ impl Renderer {
     /// knows, everything below is what the screen shows, and this is the
     /// translation between them.
     fn ui_state(&self) -> crate::app::State {
-        let (input, cursor) = self.pinned.draft();
+        let (input, cursor, anchor) = self.pinned.draft();
         let completion = self.completion_for(&input, cursor);
         // The hint speaks only when no menu is up: an open menu is already
         // saying what may be typed, and a row repeating the first candidate
@@ -837,6 +837,7 @@ impl Renderer {
             sidebar: self.sidebar.clone(),
             input,
             cursor,
+            select: anchor,
             completion,
             // The question on screen, when one is: the frame draws it where the
             // draft would be, and the editor owns it, so this is the one bridge

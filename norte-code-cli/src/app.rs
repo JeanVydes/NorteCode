@@ -51,6 +51,12 @@ pub(crate) struct State {
     pub(crate) input: String,
     /// Where the cursor is in the draft, in characters.
     pub(crate) cursor: usize,
+    /// The other end of the draft's selection, when there is one.
+    ///
+    /// The cursor is one end and this is the other, so the frame draws the range
+    /// the two describe as an inverted run — the same reverse video the mouse
+    /// selection uses.
+    pub(crate) select: Option<usize>,
     /// The completion, when the line offers one.
     pub(crate) completion: Option<Completion>,
     /// The question the model asked, when it is waiting for an answer.
@@ -1376,6 +1382,16 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     let prompt = "› ";
     let width = usize::from(area.width).saturating_sub(prompt.len()).max(1);
     let mut cursor_row = 0usize;
+    // The selected range, in the draft's own character indices, normalised so
+    // the low end is first: a selection drawn backwards is the same text as one
+    // drawn forwards, and only the ranges between the ends are inverted.
+    let selection = state.select.map(|anchor| {
+        if anchor <= state.cursor {
+            (anchor, state.cursor)
+        } else {
+            (state.cursor, anchor)
+        }
+    });
     let lines: Vec<&str> = state.input.split('\n').collect();
     let mut offset = 0usize;
     for (index, line) in lines.iter().enumerate() {
@@ -1410,7 +1426,14 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
             for (position, character) in part.iter().enumerate() {
                 // The absolute index of this character in the draft, which is
                 // what both the cursor and the selection are measured in.
-                if holds_cursor && from + position == at {
+                let at_char = offset + from + position;
+                // The cursor is one cell and the selection is a run of them; both
+                // are drawn the same way, so one test decides for either. The
+                // cursor is the cell the next keystroke lands on, and it is part
+                // of the run whenever the selection reaches it.
+                let selected = selection.is_some_and(|(lo, hi)| lo <= at_char && at_char < hi);
+                let cursor = holds_cursor && from + position == at;
+                if cursor || selected {
                     spans.push(Span::styled(character.to_string(), Style::selected()));
                 } else {
                     spans.push(Span::raw(character.to_string()));
@@ -1738,6 +1761,41 @@ mod tests {
     }
 
     #[test]
+    fn the_selection_is_drawn_as_an_inverted_run() {
+        // A selection in the draft is the same reverse video the mouse selection
+        // uses: the frame inverts the range and the cursor is one cell of it.
+        let mut state = State::new();
+        state.input = "hello world".to_owned();
+        state.cursor = 5;
+        state.select = Some(0);
+        let reversed = reversed_rows(&state, 40, 12);
+        let row = reversed
+            .iter()
+            .position(|count| *count > 0)
+            .expect("the draft's row");
+        // Five selected characters and the cursor's own cell on the space after
+        // `hello`: the run is the selection, and the cursor sits at its end.
+        assert!(
+            reversed[row] >= 5,
+            "the selected run is inverted: {reversed:?}"
+        );
+
+        // With no selection only the cursor is inverted, which is one cell.
+        let mut plain = State::new();
+        plain.input = "hello world".to_owned();
+        plain.cursor = 5;
+        let reversed = reversed_rows(&plain, 40, 12);
+        let row = reversed
+            .iter()
+            .position(|count| *count > 0)
+            .expect("the draft's row");
+        assert_eq!(
+            reversed[row], 1,
+            "with no selection one cell is the cursor: {reversed:?}"
+        );
+    }
+
+    #[test]
     fn the_cursor_is_a_box_on_one_row_and_not_on_every_line() {
         // Reading the clamp as "the cursor sits at the end of every line" drew a
         // box after each one. There is one cursor, and it sits on one row.
@@ -1976,7 +2034,29 @@ mod tests {
         pinned
     }
 
-    /// The interface painted once, as the reversed (cursor) cells per row.
+    /// The whole interface painted once, as the rows the screen shows.
+    fn screen_of(state: &State, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let pinned = Pinned::new();
+        let state = state.clone();
+        terminal
+            .draw(|frame| state.paint(frame, Style::plain(), &pinned))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The whole interface painted once, as the reversed (cursor) cells per row.
     ///
     /// It is what tells a real cursor from a stray one: the text alone cannot
     /// say which cells were inverted, and the cursor is the inversion.
@@ -1996,28 +2076,6 @@ mod tests {
                 (0..width)
                     .filter(|x| buffer[(*x, y)].modifier.contains(Modifier::REVERSED))
                     .count()
-            })
-            .collect()
-    }
-
-    /// The whole interface painted once, as the rows the screen shows.
-    fn screen_of(state: &State, width: u16, height: u16) -> Vec<String> {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        let pinned = Pinned::new();
-        let state = state.clone();
-        terminal
-            .draw(|frame| state.paint(frame, Style::plain(), &pinned))
-            .expect("draw");
-        let buffer = terminal.backend().buffer().clone();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol().to_owned())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
             })
             .collect()
     }

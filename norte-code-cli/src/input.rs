@@ -258,6 +258,8 @@ struct PinnedInner {
     draft: String,
     /// Where the cursor is in the draft, in characters.
     draft_cursor: usize,
+    /// The other end of the draft's selection, when there is one.
+    draft_anchor: Option<usize>,
 
     /// The messages that reached the running request but are not in the
     /// transcript yet, oldest first.
@@ -609,19 +611,24 @@ impl Pinned {
     }
 
     /// Records the draft, so the frame draws what is being typed.
-    pub(crate) fn set_draft(&self, text: String, cursor: usize) {
+    ///
+    /// `anchor` is the other end of the selection, when there is one: the frame
+    /// draws the range it and the cursor describe, so an inverted run on screen
+    /// is the selection the editor holds.
+    pub(crate) fn set_draft(&self, text: String, cursor: usize, anchor: Option<usize>) {
         let mut inner = self.lock();
-        if inner.draft != text || inner.draft_cursor != cursor {
+        if inner.draft != text || inner.draft_cursor != cursor || inner.draft_anchor != anchor {
             inner.draft = text;
             inner.draft_cursor = cursor;
+            inner.draft_anchor = anchor;
             self.dirty.store(true, Ordering::Relaxed);
         }
     }
 
-    /// The draft and where the cursor is in it.
-    pub(crate) fn draft(&self) -> (String, usize) {
+    /// The draft, where the cursor is in it, and the other end of the selection.
+    pub(crate) fn draft(&self) -> (String, usize, Option<usize>) {
         let inner = self.lock();
-        (inner.draft.clone(), inner.draft_cursor)
+        (inner.draft.clone(), inner.draft_cursor, inner.draft_anchor)
     }
 
     /// The question on screen and its cursor, for the frame that draws it.
@@ -900,6 +907,12 @@ mod unix {
         /// whole, because half a paragraph is not a smaller paragraph — it is a
         /// sentence nobody wrote.
         chips: Vec<Chip>,
+        /// The other end of a selection, when there is one.
+        ///
+        /// The cursor is one end and this is the other: a selection is a range
+        /// the two describe together, and it is `None` when the cursor is the
+        /// only end — which is almost always.
+        anchor: Option<usize>,
     }
 
     /// A run of the buffer that stands for something else.
@@ -925,10 +938,72 @@ mod unix {
 
     impl LineBuffer {
         fn insert(&mut self, character: char) {
+            // Typing over a selection replaces it, which is what every editor
+            // does and what the delete key on a selection already means.
+            self.delete_selection();
             self.settle_cursor();
             self.shift_chips(1);
             self.chars.insert(self.cursor, character);
             self.cursor += 1;
+        }
+
+        /// The selected range, if there is one, as `(lo, hi)` in `chars` order.
+        fn selection(&self) -> Option<(usize, usize)> {
+            let anchor = self.anchor?;
+            let (lo, hi) = if anchor <= self.cursor {
+                (anchor, self.cursor)
+            } else {
+                (self.cursor, anchor)
+            };
+            (lo != hi).then_some((lo, hi))
+        }
+
+        /// The far end of the selection, or `None` when there is none.
+        ///
+        /// It is the anchor when a selection exists and `None` when the anchor
+        /// and the cursor coincide, so the frame is handed a range only when
+        /// there is one to draw.
+        fn selection_anchor(&self) -> Option<usize> {
+            self.selection()?;
+            self.anchor
+        }
+
+        /// Starts a selection at the cursor, if one has not been started.
+        ///
+        /// A shifted motion is the start of one: the first shifted arrow anchors
+        /// the selection where the cursor was, and every one after it moves the
+        /// other end.
+        fn start_selection(&mut self) {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        }
+
+        /// Selects the whole draft.
+        fn select_all(&mut self) {
+            self.anchor = Some(0);
+            self.cursor = self.chars.len();
+        }
+
+        /// Removes the selection, if there is one, and says whether it did.
+        fn delete_selection(&mut self) -> bool {
+            let Some((lo, hi)) = self.selection() else {
+                return false;
+            };
+            self.anchor = None;
+            self.remove_range(lo, hi)
+        }
+
+        /// Collapses the selection to one of its ends, and says whether there
+        /// was one. A plain Left or Right over a selection moves to its edge
+        /// rather than by one character, which is what every editor does.
+        fn collapse_selection(&mut self, to_end: bool) -> bool {
+            let Some((lo, hi)) = self.selection() else {
+                return false;
+            };
+            self.cursor = if to_end { hi } else { lo };
+            self.anchor = None;
+            true
         }
 
         /// Moves every chip at or after the cursor forward by `delta`.
@@ -1001,6 +1076,7 @@ mod unix {
             original: String,
             attachment: Option<Attachment>,
         ) {
+            self.delete_selection();
             self.settle_cursor();
             let start = self.cursor;
             // The label goes in front of whatever follows, so every chip after
@@ -1076,10 +1152,14 @@ mod unix {
             } else {
                 lo
             };
+            self.anchor = None;
             true
         }
 
         fn backspace(&mut self) -> bool {
+            if self.delete_selection() {
+                return true;
+            }
             if self.cursor == 0 {
                 return false;
             }
@@ -1087,6 +1167,9 @@ mod unix {
         }
 
         fn delete(&mut self) -> bool {
+            if self.delete_selection() {
+                return true;
+            }
             if self.cursor >= self.chars.len() {
                 return false;
             }
@@ -1220,12 +1303,14 @@ mod unix {
         fn clear(&mut self) {
             self.chars.clear();
             self.chips.clear();
+            self.anchor = None;
             self.cursor = 0;
         }
 
         fn replace(&mut self, text: &str) {
             self.chars = text.chars().collect();
             self.chips.clear();
+            self.anchor = None;
             self.cursor = self.chars.len();
         }
 
@@ -1600,7 +1685,11 @@ mod unix {
                         // meet, and it is a copy rather than the buffer so
                         // neither waits for the other.
                         pinned.reset_completion_pick();
-                        pinned.set_draft(buffer.display(), buffer.cursor);
+                        pinned.set_draft(
+                            buffer.display(),
+                            buffer.cursor,
+                            buffer.selection_anchor(),
+                        );
                     }
                 }
                 Ok(false) => {}
@@ -1676,7 +1765,40 @@ mod unix {
     ) -> KeyOutcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
+            // A shifted motion extends a selection; the reader below is what
+            // decides which keys are motions.
+            KeyCode::Left if shift => {
+                buffer.start_selection();
+                buffer.left();
+                KeyOutcome::Continue
+            }
+            KeyCode::Right if shift => {
+                buffer.start_selection();
+                buffer.right();
+                KeyOutcome::Continue
+            }
+            KeyCode::Home if shift => {
+                buffer.start_selection();
+                buffer.home();
+                KeyOutcome::Continue
+            }
+            KeyCode::End if shift => {
+                buffer.start_selection();
+                buffer.end();
+                KeyOutcome::Continue
+            }
+            KeyCode::Up if shift => {
+                buffer.start_selection();
+                buffer.up();
+                KeyOutcome::Continue
+            }
+            KeyCode::Down if shift => {
+                buffer.start_selection();
+                buffer.down();
+                KeyOutcome::Continue
+            }
             KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 buffer.insert('\n');
                 KeyOutcome::Continue
@@ -1734,8 +1856,10 @@ mod unix {
             KeyCode::Char('b' | 'B') if control && key.modifiers.contains(KeyModifiers::SHIFT) => {
                 KeyOutcome::Detach
             }
+            // Ctrl-A selects the whole draft, which is what it means in every
+            // editor; a cursor to the start is a plain Home.
             KeyCode::Char('a') if control => {
-                buffer.home();
+                buffer.select_all();
                 KeyOutcome::Continue
             }
             KeyCode::Char('e') if control => {
@@ -1784,11 +1908,18 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Left => {
-                buffer.left();
+                // Over a selection a plain arrow collapses to its edge rather
+                // than moving by one, which is what makes a selection usable
+                // with the arrows alone.
+                if !buffer.collapse_selection(false) {
+                    buffer.left();
+                }
                 KeyOutcome::Continue
             }
             KeyCode::Right => {
-                buffer.right();
+                if !buffer.collapse_selection(true) {
+                    buffer.right();
+                }
                 KeyOutcome::Continue
             }
             KeyCode::Home => {
@@ -1969,6 +2100,104 @@ mod unix {
             }
         }
         out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A buffer holding `text`, with the cursor at its end unless moved.
+        fn draft(text: &str) -> LineBuffer {
+            let mut buffer = LineBuffer::default();
+            for character in text.chars() {
+                buffer.insert(character);
+            }
+            buffer
+        }
+
+        #[test]
+        fn a_selection_replaces_what_is_typed_over_it() {
+            // The point of a selection in the editor: it is a range the next
+            // keystroke replaces, which is what makes typing over a word work.
+            let mut buffer = draft("hello world");
+            buffer.cursor = 0;
+            buffer.start_selection();
+            buffer.cursor = 5;
+            assert_eq!(buffer.selection(), Some((0, 5)));
+            buffer.insert('X');
+            assert_eq!(buffer.display(), "X world");
+            assert_eq!(buffer.selection(), None, "the selection left with the text");
+        }
+
+        #[test]
+        fn backspace_and_delete_take_the_selection_whole() {
+            // A deletion key over a selection removes the selection and not one
+            // character beside it, which is what a person expects from it. The
+            // range here is `two` inside `one two three` — its own spaces stay,
+            // because they were not selected.
+            let mut buffer = draft("one two three");
+            buffer.cursor = 4;
+            buffer.start_selection();
+            buffer.cursor = 7;
+            assert!(buffer.backspace());
+            assert_eq!(buffer.display(), "one  three");
+
+            let mut buffer = draft("one two three");
+            buffer.cursor = 4;
+            buffer.start_selection();
+            buffer.cursor = 7;
+            assert!(buffer.delete());
+            assert_eq!(buffer.display(), "one  three");
+        }
+
+        #[test]
+        fn select_all_takes_the_whole_draft_and_the_cursor_is_one_end() {
+            let mut buffer = draft(
+                "a
+b
+c",
+            );
+            buffer.select_all();
+            assert_eq!(buffer.selection(), Some((0, 5)));
+            assert_eq!(buffer.cursor, 5);
+            buffer.delete_selection();
+            assert!(
+                buffer.is_empty(),
+                "select-all then delete empties the draft"
+            );
+        }
+
+        #[test]
+        fn a_plain_arrow_collapses_a_selection_to_its_edge() {
+            // An arrow over a selection moves to the edge rather than by one
+            // character, so a selection can be narrowed with the arrows alone.
+            let mut buffer = draft("abcdef");
+            buffer.cursor = 1;
+            buffer.start_selection();
+            buffer.cursor = 4;
+            assert!(buffer.collapse_selection(true), "right goes to the end");
+            assert_eq!(buffer.cursor, 4);
+            assert_eq!(buffer.selection(), None);
+
+            buffer.cursor = 1;
+            buffer.start_selection();
+            buffer.cursor = 4;
+            assert!(buffer.collapse_selection(false), "left goes to the start");
+            assert_eq!(buffer.cursor, 1);
+        }
+
+        #[test]
+        fn a_selection_over_a_chip_takes_the_chip_whole() {
+            // Half a pasted paragraph is not a smaller paragraph, so a selection
+            // that touches a chip removes the chip and not the part it covered.
+            let mut buffer = LineBuffer::default();
+            buffer.insert_paste(&"x".repeat(CHIP_MIN_CHARS + 8));
+            assert_eq!(buffer.chips.len(), 1, "the paste became one chip");
+            buffer.select_all();
+            buffer.delete_selection();
+            assert!(buffer.is_empty(), "the chip went with the selection");
+            assert!(buffer.chips.is_empty(), "and its range went with it");
+        }
     }
 }
 

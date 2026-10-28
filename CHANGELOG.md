@@ -50,6 +50,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The input line can select text and replace it. Shift with the arrows, Home,
+  End or Up/Down extends a selection from the cursor; `Ctrl-A` takes the whole
+  draft. `Backspace` and `Delete` remove the selection whole, typing replaces
+  it, and a plain `Left`/`Right` collapses it to its edge instead of moving a
+  character. The selection is drawn as the reverse video the mouse selection
+  uses. A selection that touches a pasted `[Copied: …]` chip removes the chip
+  and not the part of its label it covered, because half the label and half
+  what it stands for is the state the chip exists to prevent.
+
 - The telemetry panel assembles itself when it opens: its bars grow to their
   value over a few frames, so the panel reads as something that just appeared
   and not as a screen that was always there. The clock the client already runs
