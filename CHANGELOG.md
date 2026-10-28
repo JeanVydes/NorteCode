@@ -8,6 +8,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The sidebar shows the connected MCP servers, each with its state and how many
+  tools it publishes, under a `mcp on/total` heading. It is read when a session
+  opens and after every `/refresh` or switch, so the column and `/mcp` cannot
+  disagree about which server is on.
+
 - MCP servers are managed where they are named. `norte-code mcp add <name>
   <command> [args…]`, `mcp enable|disable <name>`, `mcp remove <name>` and `mcp
   list` write the config file, and the same verbs work at the prompt as `/mcp

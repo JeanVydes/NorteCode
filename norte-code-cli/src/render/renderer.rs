@@ -833,6 +833,7 @@ impl Renderer {
             // the frame draws with spans: what reaches it is the text, and the
             // ink is the widget's.
             status: crate::select::strip_style(&self.session_status()),
+            mcp: self.pinned.mcp(),
             todos: self.task_rows(),
             suggestion,
             waiting: self.waiting,
@@ -880,6 +881,16 @@ impl Renderer {
             .map_or_else(String::new, |suggestion| {
                 crate::select::strip_style(&suggestion.hint)
             })
+    }
+
+    /// Records the connected MCP servers, so the sidebar can draw them.
+    ///
+    /// The renderer does not hold the service and cannot ask it: the CLI calls
+    /// this when it opens a session and after every `/refresh`, which is exactly
+    /// when the set of connected servers can change. What the sidebar draws is
+    /// then a snapshot taken at those moments, which is what a column of state is.
+    pub(crate) fn set_mcp(&mut self, servers: Vec<crate::input::McpRow>) {
+        self.pinned.set_mcp(servers);
     }
 
     /// The task list, as the rows the sidebar shows.

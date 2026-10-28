@@ -1627,6 +1627,18 @@ async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
     if !failed.is_empty() {
         renderer.notice(format!("{} mcp server(s) unreachable", failed.len()));
     }
+    // The sidebar follows: it is a column of state, and the state just changed.
+    renderer.set_mcp(
+        service
+            .mcp_status()
+            .into_iter()
+            .map(|server| crate::input::McpRow {
+                name: server.name,
+                tools: server.tools.len(),
+                active: server.active,
+            })
+            .collect(),
+    );
 }
 
 /// Rebuilds the MCP connections and reports how many are up.
@@ -1641,6 +1653,18 @@ async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
     for (name, reason) in failed {
         renderer.notice(format!("`{name}` did not start: {reason}"));
     }
+    // The sidebar follows: it is a column of state, and the state just changed.
+    renderer.set_mcp(
+        service
+            .mcp_status()
+            .into_iter()
+            .map(|server| crate::input::McpRow {
+                name: server.name,
+                tools: server.tools.len(),
+                active: server.active,
+            })
+            .collect(),
+    );
 }
 
 /// Lists, adds, removes or switches an MCP server.
@@ -1746,6 +1770,18 @@ fn apply_mcp_action(
         .iter()
         .find(|server| server.name == *name)
         .is_some_and(|server| !server.active);
+    // The switch is written to the config file, not only the process: a server
+    // turned off in the panel is off in the next run too, which is what makes
+    // the key mean something beyond this session.
+    if let Some(path) = service
+        .config_path()
+        .or_else(norte_code_config::user_config_path)
+    {
+        if let Err(error) = norte_code_config::set_user_mcp_enabled(&path, name, active) {
+            renderer.failure(format!("could not change `{name}`: {error}"));
+            return;
+        }
+    }
     match service.set_mcp_active(name, active) {
         Some(state) => {
             let word = if state { "enabled" } else { "disabled" };
@@ -1753,6 +1789,17 @@ fn apply_mcp_action(
             if !state {
                 renderer.notice("its tools leave the next turn; the process stays up");
             }
+            renderer.set_mcp(
+                service
+                    .mcp_status()
+                    .into_iter()
+                    .map(|server| crate::input::McpRow {
+                        name: server.name,
+                        tools: server.tools.len(),
+                        active: server.active,
+                    })
+                    .collect(),
+            );
             let rows = mcp_panel(style, service);
             if rows.is_empty() {
                 renderer.close_modal();

@@ -32,6 +32,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 
+use crate::input::McpRow;
 use crate::style::Style;
 use crate::terminal::{self, Draw};
 use crate::transcript::{Ink, Kind, Transcript};
@@ -61,6 +62,8 @@ pub(crate) struct State {
     /// Empty when nothing was loaded, which is every ordinary run: the column
     /// takes no space when there is nothing to put in it.
     pub(crate) sidebar: Vec<(String, Vec<norte_code_plugins::SidebarRow>)>,
+    /// The connected MCP servers, as the sidebar shows them.
+    pub(crate) mcp: Vec<McpRow>,
     /// The model's task list, as the sidebar shows it.
     ///
     /// It was a footer tab and a footer row is one line: a plan is a list, and
@@ -221,8 +224,9 @@ impl State {
             // what it costs is the conversation, which is the thing the screen
             // is for: below the bound the column is not drawn and the
             // conversation keeps the width.
-            let aside = (!self.sidebar.is_empty() || !self.todos.is_empty())
-                && area.width >= SIDEBAR_MIN_WIDTH;
+            let aside =
+                (!self.sidebar.is_empty() || !self.todos.is_empty() || !self.mcp.is_empty())
+                    && area.width >= SIDEBAR_MIN_WIDTH;
             let body = if aside {
                 let [main, rule, side] = Layout::horizontal([
                     Constraint::Fill(1),
@@ -1138,6 +1142,33 @@ fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
             .collect();
         panels.push((format!("tasks {done}/{}", state.todos.len()), rows));
     }
+    if !state.mcp.is_empty() {
+        let on = state.mcp.iter().filter(|row| row.active).count();
+        let rows = state
+            .mcp
+            .iter()
+            .map(|row| {
+                // The state is a word and not only a colour: a terminal with no
+                // colour shows none, and whether a server is on is what this row
+                // is for.
+                let (mark, ink) = if row.active {
+                    ("on ", style.dim_span())
+                } else {
+                    ("off", style.faint_span())
+                };
+                let text = format!(
+                    "{mark} {} ({})",
+                    clip_visible(
+                        &crate::text::terminal(&row.name),
+                        usize::from(width).saturating_sub(14)
+                    ),
+                    row.tools
+                );
+                Line::from(Span::styled(text, ink))
+            })
+            .collect();
+        panels.push((format!("mcp {on}/{}", state.mcp.len()), rows));
+    }
     for (plugin, list) in &state.sidebar {
         // The name leads, because a column of rows with no attribution is one
         // nobody can turn off.
@@ -1703,6 +1734,37 @@ mod tests {
                     .to_owned()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_sidebar_shows_the_connected_mcp_servers() {
+        // The column is a column of state, and whether a server is on is part
+        // of it: a person watching the work wants to see the servers their
+        // tools came from beside it.
+        let mut state = State::new();
+        state.mcp = vec![
+            McpRow {
+                name: "context7".to_owned(),
+                tools: 2,
+                active: true,
+            },
+            McpRow {
+                name: "everything".to_owned(),
+                tools: 5,
+                active: false,
+            },
+        ];
+        let screen = screen_of(&state, 90, 24).join("\n");
+        assert!(screen.contains("context7"), "{screen}");
+        // A narrow column clips the name, which is why the row leads with its
+        // state: the word is what has to survive the cut.
+        assert!(screen.contains("everyth"), "{screen}");
+        assert!(screen.contains("on  context7"), "{screen}");
+        assert!(screen.contains("off everyth"), "{screen}");
+        assert!(
+            screen.contains("mcp 1/2"),
+            "the count of what is on: {screen}"
+        );
     }
 
     #[test]

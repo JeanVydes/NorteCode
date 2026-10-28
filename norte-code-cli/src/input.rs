@@ -24,6 +24,17 @@ pub(crate) struct Attachment {
     pub(crate) name: String,
 }
 
+/// One MCP server, as the sidebar renders it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct McpRow {
+    /// The name the configuration gave it.
+    pub(crate) name: String,
+    /// How many tools it publishes.
+    pub(crate) tools: usize,
+    /// Whether it is on.
+    pub(crate) active: bool,
+}
+
 /// One item in the session's todo list, as the footer renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TodoItem {
@@ -213,6 +224,8 @@ struct PinnedInner {
     todos: Vec<TodoItem>,
     /// The question being answered, when the model asked one.
     asked: Option<Asked>,
+    /// The connected MCP servers, as the sidebar draws them.
+    mcp: Vec<McpRow>,
     /// What the mouse has selected, in cells of the frame.
     ///
     /// A cell is a column and a row of the terminal, and the range is the two
@@ -408,6 +421,20 @@ impl Pinned {
     /// Whether a question is on screen at all.
     pub(crate) fn is_asking(&self) -> bool {
         self.lock().asked.is_some()
+    }
+
+    /// Replaces the MCP server list the sidebar shows. Empty clears it.
+    pub(crate) fn set_mcp(&self, servers: Vec<McpRow>) {
+        let mut inner = self.lock();
+        if inner.mcp != servers {
+            inner.mcp = servers;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The connected MCP servers, in configuration order.
+    pub(crate) fn mcp(&self) -> Vec<McpRow> {
+        self.lock().mcp.clone()
     }
 
     /// Replaces the todo widget. An empty list clears it.
