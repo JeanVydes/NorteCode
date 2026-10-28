@@ -6,13 +6,61 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/refresh` reaches the sessions that are already open. A provider's settings —
+  the endpoint, the wire, the headers, whether the prompt cache key is sent — are
+  baked into a session's spec when it is resolved, and a reload rebuilt only the
+  default one, so a session already open kept using the settings it started with.
+  Opting a provider out of `prompt_cache_key` and refreshing left the field being
+  sent, and a provider that rejects it refused every turn until the process was
+  restarted. A reload now rebuilds every open session's spec from the new
+  configuration, keeping each session on the model it was on.
+
 ### Changed
+
+- The spinner says `thinking` while reasoning is arriving and `streaming` only
+  once answer text starts. Both used to say `streaming` from the first reasoning
+  token, which claimed the answer had started when only the thought had.
 
 - `/refresh` rebuilds the MCP connections from the configuration in force, so a
   server added, removed or disabled in the file takes effect without a restart.
   It used to retry only the servers that had already failed at startup, which
   could never pick up a server the file did not name when the process began. A
   server turned off in the panel stays off across a refresh.
+
+- The config names a `default_provider` and a `default_model` instead of one
+  `default_model` reference. The old key held two facts in one string and every
+  reader split it on the first slash to find them, which is wrong the moment a
+  model name carries a slash — NVIDIA names its models `vendor/model`, and so
+  do several OpenAI-compatible vendors. Nothing in the code splits a model any
+  more: a model is an opaque string, a provider is its own key, and the two are
+  written and read apart. An existing `default_model` of `p/m` must become
+  `default_provider: p` and `default_model: m`; a config with only one of the
+  two is refused with the key it is missing.
+
+- A model reference is a string and never split to find a provider. `/model`
+  used to send a name containing a slash as-is and let the service read the
+  first segment as the provider, so `nvidia/nemotron` looked like a provider
+  called `nvidia` — and a provider whose model names carry the vendor, like
+  `nvidia/nvidia/modelo`, was impossible to set. The provider is the session's
+  and only `/provider` changes it; `/model` now always prefixes the session's
+  provider the way `--provider`/`--model` already did.
+
+- `/provider` switches even when the model the session was on is not in the new
+  provider's catalogue. Refusing was the only outcome available, so a session
+  could not move to a provider whose catalogue does not list the current model
+  even when the person meant to switch model next. It switches and warns, and
+  the reference now resolves with conservative capabilities for a model the
+  provider lists nowhere. The listing also shows where each provider comes from
+  and, when a config entry sits over a catalogue one, which fields it overrides.
+
+- `prompt_cache_key` is omitted unless a provider opts in with
+  `providers.<id>.prompt_cache_key: true`. It was sent by default, and an
+  OpenAI-compatible endpoint that does not know the field rejects the whole
+  request — which reads as the model being unreachable rather than as one extra
+  field. Omitting it costs nothing: a provider that honours it falls back to its
+  own key. `--disable-prompt-cache-key` is now the default and redundant.
 
 ### Added
 

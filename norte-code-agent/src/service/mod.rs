@@ -926,6 +926,42 @@ impl Service {
         count
     }
 
+    /// Rebuilds the MCP connections from the current configuration.
+    ///
+    /// A server added, removed or disabled in the config takes effect here: the
+    /// connections are made from the configuration in force, not the one the
+    /// process started with. The on/off state a person set in the panel is
+    /// carried across by name, so a server they turned off is not turned back on
+    /// by a refresh, and a process that is no longer configured is dropped with
+    /// its children.
+    ///
+    /// Returns how many servers are up afterwards.
+    pub async fn reload_mcp(&self) -> usize {
+        let root = self.workspace_root.clone();
+        let configured = self.lock_config().mcp_servers.clone();
+        let was_active = self
+            .mcp_servers
+            .read()
+            .map(|servers| servers.active_by_name())
+            .unwrap_or_default();
+        let mut connected = McpServers::connect(&configured, &root).await;
+        for (name, reason) in &connected.failures {
+            tracing::warn!(server = %name, %reason, "an MCP server could not be started");
+        }
+        // The state a person set wins over the default the connection has: a
+        // server carried across the reload keeps whether it was on.
+        for server in &mut connected.servers {
+            if let Some(active) = was_active.get(&server.name) {
+                server.active = *active;
+            }
+        }
+        let up = connected.servers.len();
+        if let Ok(mut slot) = self.mcp_servers.write() {
+            *slot = connected;
+        }
+        up
+    }
+
     /// The skills registry in use.
     #[must_use]
     pub fn skills(&self) -> Arc<SkillRegistry> {
@@ -1055,6 +1091,35 @@ impl Service {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = spec;
         *self.lock_skills_write() = skills;
+
+        // Every open session's spec is rebuilt from the new configuration. A
+        // spec is resolved once and carries the provider's settings baked into
+        // it — the endpoint, the wire, the headers, whether the prompt cache key
+        // is sent — so a config that changed one of them changed nothing for a
+        // session already open: the record kept the spec built at startup and
+        // the next turn used it. Reloading the file and still sending the field
+        // a provider rejects is the worst version of this, because the person
+        // did what they were told and the request was refused anyway.
+        //
+        // The reference is not touched: a session stays on the model it was on,
+        // and only the settings around it are re-read. A reference that no
+        // longer resolves is left as it was rather than failing the whole
+        // reload, and the turn reports its own error if it comes to that.
+        {
+            let references: Vec<(SessionKey, String)> = self
+                .lock_sessions()
+                .iter()
+                .map(|(key, record)| (key.clone(), record.spec.label()))
+                .collect();
+            for (key, reference) in references {
+                if let Ok(spec) = Self::default_spec_for(&next, &catalog, &reference) {
+                    if let Some(record) = self.lock_sessions().get_mut(&key) {
+                        record.spec = spec;
+                    }
+                }
+            }
+        }
+
         // Only the global rules come from the config; the per-session grants the
         // user made during this run are session state and stay.
         for tool in &next.approvals.allow {

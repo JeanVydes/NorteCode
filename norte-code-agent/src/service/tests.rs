@@ -560,6 +560,71 @@ async fn a_reload_accepts_a_default_model_from_a_configured_provider() {
 }
 
 #[tokio::test]
+async fn a_reload_rebuilds_an_open_sessions_spec_from_the_new_provider_settings() {
+    // A provider's settings are baked into a session's spec when it is resolved:
+    // the endpoint, the wire, whether the prompt cache key is sent. So a config
+    // that changed one of them changed nothing for a session already open — the
+    // record kept the spec it was built with and the next turn used it. This
+    // pins the fix, with the one field that is the difference between a request
+    // that is accepted and one that is refused.
+    let (service, _model) = scripted_service(spec("scripted"), &["hello"]);
+    let dir = std::env::temp_dir().join(format!("norte-reload-spec-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("config.json");
+    let key_file = dir.join("test.key");
+    std::fs::write(&key_file, "sk-test\n").expect("key file");
+    // The config names the session's own provider and model, and opts the
+    // cache key *out*: the reload resolves this and the session spec follows.
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"default_provider":"test","default_model":"scripted","providers":{{"test":{{"api_key_file":"{}","prompt_cache_key":false}}}}}}"#,
+            key_file.display()
+        ),
+    )
+    .expect("write");
+    service.set_config_path(Some(path.clone()));
+
+    // A session is opened with the spec the service was built with, which sends
+    // the cache key.
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    assert!(
+        !service
+            .session_spec(&key)
+            .expect("spec")
+            .no_prompt_cache_key,
+        "the session starts on the spec the service was built with"
+    );
+
+    // A reload has to reach the session that is already open.
+    service.reload_config().expect("reload");
+    assert!(
+        service
+            .session_spec(&key)
+            .expect("spec")
+            .no_prompt_cache_key,
+        "the open session's spec is rebuilt from the new provider settings"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn a_reload_applies_a_good_config_and_discards_a_bad_one() {
     let (service, _model) = scripted_service(spec("scripted"), &["hello"]);
     let dir = std::env::temp_dir().join(format!("norte-reload-{}", uuid::Uuid::new_v4()));
