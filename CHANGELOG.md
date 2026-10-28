@@ -50,6 +50,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/menu` returns to the startup screen from inside a session, listing every
+  provider and the models each one lists, with the session's own provider marked
+  and the current one left in place. `/back` is an alias. It does not drop the
+  session: `/restart` is the command that starts a fresh one.
+
 - The input line can select text and replace it. Shift with the arrows, Home,
   End or Up/Down extends a selection from the cursor; `Ctrl-A` takes the whole
   draft. `Backspace` and `Delete` remove the selection whole, typing replaces

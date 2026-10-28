@@ -208,6 +208,7 @@ reject unknown values instead of forwarding them to the model.
 | `/rename [TITLE]` | Name the session. Bare, ask the model for a name from the first message. |
 | `/tab [NAME\|NUMBER]` | Show a footer tab: `stats`, `todo`, `tools` or `mcp`. Bare, list them. |
 | `/debug` | Print what the process knows about itself: paths, model, catalogue, tools, servers. |
+| `/menu`, `/back` | Go back to the startup screen: every provider and the models each lists, with the session's own marked. Pick one with `/provider` and `/model`. |
 | `/exit`, `/quit` | Leave the chat. |
 
 The footer carries a row of tabs above the input: `stats` is what the session

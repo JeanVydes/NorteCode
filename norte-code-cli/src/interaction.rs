@@ -114,6 +114,9 @@ pub(crate) enum ChatCommand {
     },
     /// Start a fresh session, leaving this one saved.
     Restart,
+    /// Go back to choosing a provider and a model: the screen the process opens
+    /// on, reachable from inside a session.
+    Menu,
 
     /// Report what the process knows about itself: the model, its
     /// capabilities, the tools, the servers, the paths. Built when it is asked
@@ -174,6 +177,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/compact" => ChatCommand::Compact,
         "/refresh" => ChatCommand::Refresh,
         "/restart" => ChatCommand::Restart,
+        "/menu" => ChatCommand::Menu,
         "/debug" => ChatCommand::Debug,
         "/telemetry" => ChatCommand::Telemetry,
         "/tools" => ChatCommand::Tools,
@@ -683,6 +687,51 @@ pub(crate) async fn interactive_loop(
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
+                // Going back to the menu is the startup screen reached from
+                // inside a session: it lists the providers and the models the
+                // way the window before the session does, and the choice is
+                // made with `/provider` and `/model`. It does not drop the
+                // session: a screen that threw the conversation away to show a
+                // list would be a worse answer than the list on its own, and
+                // `/restart` is the command that starts a fresh one.
+                ChatCommand::Menu => {
+                    let catalog = service.catalog();
+                    let config = service.config();
+                    let current = session
+                        .as_ref()
+                        .and_then(|current| provider_of(service, current));
+                    let mut lines = vec!["Choose a provider and a model:".to_owned()];
+                    let mut providers: Vec<String> = catalog.providers.keys().cloned().collect();
+                    for id in config.providers.keys() {
+                        if !providers.contains(id) {
+                            providers.push(id.clone());
+                        }
+                    }
+                    providers.sort();
+                    for provider in &providers {
+                        let marked = if current.as_deref() == Some(provider.as_str()) {
+                            "*"
+                        } else {
+                            " "
+                        };
+                        let mut models: Vec<String> = catalog
+                            .provider(provider)
+                            .map(|entry| entry.models.keys().cloned().collect())
+                            .unwrap_or_default();
+                        models.sort();
+                        if models.is_empty() {
+                            lines.push(format!("{marked} {provider} (no models listed)"));
+                            continue;
+                        }
+                        lines.push(format!("{marked} {provider}"));
+                        for model in &models {
+                            lines.push(format!("    {model}"));
+                        }
+                    }
+                    lines.push(String::new());
+                    lines.push("pick one with /provider <id> and /model <id>".to_owned());
+                    renderer.open_modal("menu", lines);
+                }
                 // A restart drops the session and starts a fresh one. The
                 // service creates a session on the first message, so clearing
                 // this is the whole of it, and the old session stays saved and
@@ -964,6 +1013,12 @@ async fn handle_live_command(
         // turn loop does it, where the boundary is known.
         ChatCommand::Restart => {
             renderer.notice("wait until the current turn finishes, then /restart");
+        }
+        // `/menu` reads the catalogue and the session's provider, and both are
+        // settled between turns: mid-turn the list would be the one the running
+        // turn is already answering from, which is the list that helps least.
+        ChatCommand::Menu => {
+            renderer.notice("wait until the current turn finishes, then /menu");
         }
     }
 }
@@ -2953,6 +3008,27 @@ mod tests {
             Some("/jobs [list|check|stop] [job-id]".to_owned())
         );
         assert_eq!(usage_of("/restart"), Some("/restart".to_owned()));
+    }
+
+    #[test]
+    fn the_menu_is_reachable_under_the_name_and_the_alias() {
+        // The startup screen is a list, and the command is the second way to
+        // reach it. `/back` is the name a person reaches for after wandering
+        // into something; both must land on the same thing, or the help would
+        // offer one and the parser answer only the other.
+        assert!(matches!(
+            parse_chat_command("/menu"),
+            Some(Ok(ChatCommand::Menu))
+        ));
+        assert!(matches!(
+            parse_chat_command("/back"),
+            Some(Ok(ChatCommand::Menu))
+        ));
+        assert!(offered("/menu"), "the list must offer it");
+        assert_eq!(usage_of("/menu"), Some("/menu".to_owned()));
+        // It takes no argument, so one is the mistake it is elsewhere: a word
+        // after the command is a word the command does not use.
+        assert!(matches!(parse_chat_command("/menu now"), Some(Err(_))));
     }
 
     #[tokio::test]

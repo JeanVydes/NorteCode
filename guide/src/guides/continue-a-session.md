@@ -72,6 +72,7 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | `/debug` | Report what the process knows: model, tools, paths. |
 | `/refresh`, `/reload` | Re-read the config, the skills and the MCP servers. |
 | `/restart` | Start a fresh session; this one stays saved. |
+| `/menu`, `/back` | Go back to the startup screen: the providers and their models, with the session's own marked. It keeps the session; pick with `/provider` and `/model`. |
 | `/exit`, `/quit` | Leave. |
 
 Ctrl-D or Ctrl-C at the prompt also leaves. Commands with no argument at all —

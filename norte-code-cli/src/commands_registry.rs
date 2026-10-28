@@ -152,6 +152,9 @@ pub(crate) fn built() -> Registry {
         "/telemetry",
         "the request ledger: this session, and every provider",
     ));
+    registry.register(
+        CommandSpec::new("/menu", "go back to choosing a provider and a model").aliased(&["/back"]),
+    );
     registry.register(CommandSpec::new("/exit", "leave the chat").aliased(&["/quit"]));
     // The plugins lead: a command of theirs that names one of the client's is
     // the one that wins, because the plugin was asked for by name and the
@@ -194,6 +197,7 @@ mod tests {
             "/restart",
             "/rename",
             "/debug",
+            "/menu",
             "/exit",
         ] {
             assert!(names.contains(&expected.to_owned()), "missing {expected}");
