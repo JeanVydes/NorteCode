@@ -6,6 +6,31 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A model reference is a string and never split to find a provider. `/model`
+  used to send a name containing a slash as-is and let the service read the
+  first segment as the provider, so `nvidia/nemotron` looked like a provider
+  called `nvidia` — and a provider whose model names carry the vendor, like
+  `nvidia/nvidia/modelo`, was impossible to set. The provider is the session's
+  and only `/provider` changes it; `/model` now always prefixes the session's
+  provider the way `--provider`/`--model` already did.
+
+- `/provider` switches even when the model the session was on is not in the new
+  provider's catalogue. Refusing was the only outcome available, so a session
+  could not move to a provider whose catalogue does not list the current model
+  even when the person meant to switch model next. It switches and warns, and
+  the reference now resolves with conservative capabilities for a model the
+  provider lists nowhere. The listing also shows where each provider comes from
+  and, when a config entry sits over a catalogue one, which fields it overrides.
+
+- `prompt_cache_key` is omitted unless a provider opts in with
+  `providers.<id>.prompt_cache_key: true`. It was sent by default, and an
+  OpenAI-compatible endpoint that does not know the field rejects the whole
+  request — which reads as the model being unreachable rather than as one extra
+  field. Omitting it costs nothing: a provider that honours it falls back to its
+  own key. `--disable-prompt-cache-key` is now the default and redundant.
+
 ### Added
 
 - A model's answer is drawn with more of its markdown: `~~struck~~` and

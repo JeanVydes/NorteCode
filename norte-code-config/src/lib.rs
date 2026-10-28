@@ -254,8 +254,9 @@ pub struct ProviderConfig {
     pub auth: Option<AuthKind>,
     /// Whether `OpenAI` wires may send the session id as `prompt_cache_key`.
     ///
-    /// `None` keeps the wire default, which sends it; `Some(false)` omits it for
-    /// a gateway that rejects the field.
+    /// `None` and `Some(false)` both omit it, which is the default: the field is
+    /// a gateway extension and an endpoint that does not know it rejects the
+    /// request. `Some(true)` opts in for a gateway that honours it.
     pub prompt_cache_key: Option<bool>,
     /// Extra headers sent with every request to this provider.
     ///

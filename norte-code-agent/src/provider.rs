@@ -107,12 +107,20 @@ fn auth_for(config: &Config, provider: &str) -> Option<AuthKind> {
     config.providers.get(provider).and_then(|entry| entry.auth)
 }
 
+/// Whether the session id is left out of the request as `prompt_cache_key`.
+///
+/// It is left out unless the configuration opts in with `prompt_cache_key: true`.
+/// The field is a gateway extension and not every OpenAI-compatible endpoint
+/// accepts it: sending one the endpoint does not know is a rejected request, and
+/// the failure reads as the model being unreachable rather than as one extra
+/// field. Omitting it costs nothing — a provider that honours it falls back to
+/// its own cache key — so the safe default is to send it only when asked.
 fn no_prompt_cache_key(config: &Config, provider: &str) -> bool {
     config
         .providers
         .get(provider)
         .and_then(|entry| entry.prompt_cache_key)
-        == Some(false)
+        != Some(true)
 }
 
 impl ModelSpec {
@@ -661,6 +669,42 @@ mod tests {
         assert_eq!(
             headers.get("X-OpenRouter-Title").map(String::as_str),
             Some("Norte Code")
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_is_omitted_unless_opted_in() {
+        // The field is a gateway extension: sending one an endpoint does not
+        // know is a rejected request, so it is left out unless the provider says
+        // to send it.
+        let mut config = Config::default();
+        assert!(
+            no_prompt_cache_key(&config, "openai"),
+            "no config entry means it is omitted"
+        );
+
+        let absent = norte_code_config::ProviderConfig::default();
+        config.providers.insert("openai".to_owned(), absent);
+        assert!(
+            no_prompt_cache_key(&config, "openai"),
+            "an entry that does not mention it still omits it"
+        );
+
+        let off = norte_code_config::ProviderConfig {
+            prompt_cache_key: Some(false),
+            ..norte_code_config::ProviderConfig::default()
+        };
+        config.providers.insert("openai".to_owned(), off);
+        assert!(no_prompt_cache_key(&config, "openai"), "false omits it");
+
+        let on = norte_code_config::ProviderConfig {
+            prompt_cache_key: Some(true),
+            ..norte_code_config::ProviderConfig::default()
+        };
+        config.providers.insert("openai".to_owned(), on);
+        assert!(
+            !no_prompt_cache_key(&config, "openai"),
+            "true is the only thing that sends it"
         );
     }
 

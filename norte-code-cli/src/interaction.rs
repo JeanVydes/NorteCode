@@ -516,23 +516,21 @@ pub(crate) async fn interactive_loop(
                         }
                         renderer.open_modal(format!("models of {provider}"), lines);
                     } else if let Some(current) = session.clone() {
-                        // If model doesn't contain '/', prepend the provider from
-                        // the renderer's current model name.
-                        // A model named with its provider is sent as it was
-                        // written, because the client does not take a reference
-                        // apart and a model id may carry a slash of its own. A
-                        // bare name is completed with the session's provider,
-                        // which is read from the spec rather than guessed.
-                        let full_model = if model.contains('/') {
-                            model
-                        } else {
-                            let provider = provider_of(service, &current);
-                            let Some(provider) = provider else {
-                                renderer.notice("the session has no provider yet");
-                                continue;
-                            };
-                            format!("{provider}/{model}")
+                        // The model is a string and nothing else: it may carry
+                        // slashes of its own — `nvidia/nemotron` is a model of
+                        // the `nvidia` provider, and a provider that names its
+                        // models `vendor/model` makes it `nvidia/nvidia/modelo`.
+                        // So this never takes the string apart to find a
+                        // provider: the provider is the session's, read from its
+                        // spec, and it is what `/provider` changes. Splitting on
+                        // the first slash here would read `nvidia` as a provider
+                        // the moment the model name had one.
+                        let provider = provider_of(service, &current);
+                        let Some(provider) = provider else {
+                            renderer.notice("the session has no provider yet");
+                            continue;
                         };
+                        let full_model = format!("{provider}/{model}");
                         renderer.model_name = Some(full_model.clone());
                         run_model(service, current, full_model, renderer).await;
                     } else {
@@ -554,9 +552,56 @@ pub(crate) async fn interactive_loop(
                         }
                         providers.sort();
                         for p in &providers {
-                            let in_catalog = catalog.provider(p).is_some();
-                            let tag = if in_catalog { "catalog" } else { "config" };
-                            lines.push(format!("  {p} ({tag})"));
+                            let catalog_entry = catalog.provider(p);
+                            let configured = config.providers.get(p);
+                            // Where the provider comes from and, when it is both,
+                            // what the config changes about it: a configured
+                            // entry over the catalogue silently replaces the
+                            // endpoint, the wire or the key variable, and a
+                            // person debugging a request needs to see that it is
+                            // overriding and not merely present.
+                            let mut tags: Vec<&str> = Vec::new();
+                            if catalog_entry.is_some() {
+                                tags.push("catalog");
+                            }
+                            if configured.is_some() {
+                                tags.push("config");
+                            }
+                            if let (Some(_), Some(entry)) = (catalog_entry, configured) {
+                                let mut over: Vec<&str> = Vec::new();
+                                if entry.endpoint.is_some() {
+                                    over.push("endpoint");
+                                }
+                                if entry.wire.is_some() {
+                                    over.push("wire");
+                                }
+                                if entry.auth.is_some() {
+                                    over.push("auth");
+                                }
+                                if entry.api_key_env.is_some() || entry.api_key_file.is_some() {
+                                    over.push("key");
+                                }
+                                if entry.prompt_cache_key.is_some() {
+                                    over.push("prompt_cache_key");
+                                }
+                                if !entry.headers.is_empty() {
+                                    over.push("headers");
+                                }
+                                if !over.is_empty() {
+                                    lines.push(format!(
+                                        "  {p} (catalog+config, overrides {})",
+                                        over.join(", ")
+                                    ));
+                                    continue;
+                                }
+                            }
+                            let models = catalog_entry.map_or(0, |entry| entry.models.len());
+                            let count = if models > 0 {
+                                format!(", {models} model(s)")
+                            } else {
+                                String::new()
+                            };
+                            lines.push(format!("  {p} ({}{count})", tags.join("+")));
                         }
                         renderer.open_modal("providers", lines);
                     } else if let Some(current) = session.clone() {
@@ -567,6 +612,20 @@ pub(crate) async fn interactive_loop(
                         // model id that contains a slash.
                         let model_name = model_name_of(service, &current)
                             .unwrap_or_else(|| "default".to_owned());
+                        // The provider is explicit and the model is not: a switch
+                        // keeps the model the session was on even when the new
+                        // provider's catalogue does not list it. Say so, because
+                        // the next turn would be refused with a name the person
+                        // no longer recognises, and the fix is one `/model` away.
+                        let known = service
+                            .catalog()
+                            .provider(&provider)
+                            .is_some_and(|entry| entry.models.contains_key(&model_name));
+                        if !known {
+                            renderer.notice(format!(
+                                "`{provider}` does not list `{model_name}`; switch it with /model"
+                            ));
+                        }
                         let full = format!("{provider}/{model_name}");
                         renderer.model_name = Some(full.clone());
                         run_model(service, current, full, renderer).await;

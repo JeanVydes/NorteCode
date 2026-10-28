@@ -1100,6 +1100,18 @@ impl Service {
                 // provider resolve a key from a variable it never declared.
                 ModelSpec::resolve(config, reference, None, &[])
             }
+            // The provider is in the catalogue and the model is not: a fresh
+            // release, or a model named in the config and nowhere else. The
+            // provider still supplies the wire, the endpoint and the key, so the
+            // reference resolves with conservative capabilities instead of
+            // failing. This is what lets `/provider` name a provider whose
+            // catalogue does not carry the model the session was on: the model
+            // stays whatever it was, and the person is told to switch it.
+            Err(ServiceError::UnknownModel { provider, .. })
+                if catalog.provider(&provider).is_some() =>
+            {
+                ModelSpec::from_provider(config, catalog, reference, None)
+            }
             other => other,
         }
     }
