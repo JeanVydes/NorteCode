@@ -6,6 +6,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Entries in the conversation are separated by a blank row. A message used to sit
+  against the one above it, so a conversation read as one wall of text; now a
+  said line, an answer and a notice each start apart from what came before. A
+  tool announcement and its output are one call and stay together, and the blank
+  row carries no frame, so a selection over it copies a blank line and not part
+  of a box.
+
 ### Added
 
 - The sidebar shows the connected MCP servers, each with its state and how many

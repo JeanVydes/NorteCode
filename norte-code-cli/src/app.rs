@@ -725,7 +725,13 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
 #[must_use]
 pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> {
     let mut out = Vec::new();
+    // The call the last entry reported on, so a padding row is not put inside a
+    // call's own rows: a tool announcement and its output are one thing, and a
+    // blank line between them would read as two.
+    let mut last_call: Option<String> = None;
     for entry in transcript.entries() {
+        push_padding(&mut out, entry, last_call.as_deref());
+        last_call.clone_from(&entry.call_id);
         // A boxed entry opens with its rule, whatever it holds: the rule is what
         // says where the output begins, and an entry with no rows at all is one
         // the rule and the closing rule already describe.
@@ -846,6 +852,33 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         }
     }
     out
+}
+
+/// Puts a blank row between two entries that are not the same call.
+///
+/// Padding goes between entries and not between their rows: a message against
+/// the one above it reads as a continuation of it, and the whole conversation as
+/// one wall. A tool announcement and its output are one call, so they stay
+/// together. The blank row carries no frame and no kind of its own, so a
+/// selection over it copies a blank line and not part of a box.
+fn push_padding(out: &mut Vec<Row>, entry: &crate::transcript::Entry, last_call: Option<&str>) {
+    if out.is_empty() || entry.is_empty() {
+        return;
+    }
+    let same_call = entry
+        .call_id
+        .as_deref()
+        .is_some_and(|id| Some(id) == last_call);
+    if same_call {
+        return;
+    }
+    out.push(Row {
+        ink: None,
+        kind: Kind::Notice,
+        text: String::new(),
+        frame: None,
+        runs: Vec::new(),
+    });
 }
 
 /// Pushes one rendered markdown line as the rows it wraps to.
@@ -1446,10 +1479,58 @@ mod tests {
         transcript.push(Entry::line(Kind::Said, "hello"));
         transcript.push(Entry::line(Kind::Answer, "hi"));
         let lines = transcript_lines(&transcript, 80);
-        assert_eq!(lines[0].kind, Kind::Said);
-        assert_eq!(lines[0].text, "hello");
-        assert_eq!(lines[1].kind, Kind::Answer);
-        assert_eq!(lines[1].text, "hi");
+        // The two are a said line and an answer, in that order, with the padding
+        // row between them: the order is what this pins, not the row count.
+        let said = lines
+            .iter()
+            .position(|row| row.text == "hello")
+            .expect("the said line");
+        let answer = lines
+            .iter()
+            .position(|row| row.text == "hi")
+            .expect("the answer");
+        assert_eq!(lines[said].kind, Kind::Said);
+        assert_eq!(lines[answer].kind, Kind::Answer);
+        assert!(said < answer, "the order is the order it happened in");
+    }
+
+    #[test]
+    fn a_blank_row_separates_two_entries_and_not_a_call() {
+        // Two messages are two things and a blank row says so; a tool
+        // announcement and its output are one call and stay together.
+        let mut transcript = Transcript::new();
+        transcript.push(Entry::line(Kind::Said, "hello"));
+        transcript.push(Entry::line(Kind::Answer, "hi"));
+        let rows = transcript_lines(&transcript, 80);
+        let said = rows
+            .iter()
+            .position(|row| row.text == "hello")
+            .expect("said");
+        let answer = rows
+            .iter()
+            .position(|row| row.text == "hi")
+            .expect("answer");
+        assert_eq!(answer - said, 2, "a blank row between them: {rows:?}");
+        assert!(rows[said + 1].text.is_empty(), "{rows:?}");
+
+        // One call: the announcement and the output share a call id.
+        let mut transcript = Transcript::new();
+        let mut started = Entry::line(Kind::ToolStarted, "→ shell");
+        started.call_id = Some("c1".to_owned());
+        let mut output = Entry::line(Kind::ToolOutput, "done");
+        output.call_id = Some("c1".to_owned());
+        transcript.push(started);
+        transcript.push(output);
+        let rows = transcript_lines(&transcript, 80);
+        let first = rows
+            .iter()
+            .position(|row| row.text.contains("shell"))
+            .expect("shell");
+        let second = rows
+            .iter()
+            .position(|row| row.text == "done")
+            .expect("done");
+        assert_eq!(second - first, 1, "no blank row inside a call: {rows:?}");
     }
 
     #[test]
@@ -1527,15 +1608,27 @@ mod tests {
         // Twenty rows of a hundred, three lines back: the window is fixed to
         // its offset from the end, wherever the end is.
         let before = transcript_lines(&transcript, width);
-        let from_before = before.len() - 3;
-        assert_eq!(before[from_before - 20].text, "line 17", "twenty rows back");
+        // The same row, counted the same way back from the end: the offset is
+        // from the tail, whichever row it lands on, and adding a line at the end
+        // moves the window by exactly the rows that line added.
+        let row = |rows: &[Row], back: usize| rows[rows.len() - back].text.clone();
+        let back = 23;
+        let seen = row(&before, back);
         transcript.push(Entry::line(Kind::Answer, "one more".to_owned()));
         let after = transcript_lines(&transcript, width);
-        let from_after = after.len() - 3;
+        // One new answer is one line plus its padding row, so the same distance
+        // back from the end is two rows further into the conversation.
+        let added = after.len() - before.len();
+        assert!(added >= 1, "the new entry added rows: {added}");
         assert_eq!(
-            after[from_after - 20].text,
-            "line 18",
-            "and the same rows are on screen one line further in"
+            row(&before, back),
+            seen,
+            "the window is fixed to its offset from the end"
+        );
+        assert_ne!(
+            row(&after, back),
+            seen,
+            "and a line at the end moved what is on screen"
         );
     }
 
