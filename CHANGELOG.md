@@ -8,6 +8,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The telemetry panel assembles itself when it opens: its bars grow to their
+  value over a few frames, so the panel reads as something that just appeared
+  and not as a screen that was always there. The clock the client already runs
+  for the spinner drives it and stops once it has settled. The `providers` tab
+  also draws, per provider, a bar of the money reported and, beside it, the share
+  of requests the provider priced nothing for — a provider that reports no cost
+  is a fact about the provider, not a zero.
+
 - The telemetry panel's `over time` tab draws one sparkline per model — the
   shape of its use across the range's buckets, by the metric in force — with the
   peak named on the line. A day is bucketed by hour and everything longer by day,

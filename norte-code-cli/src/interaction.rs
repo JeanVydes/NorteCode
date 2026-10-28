@@ -1963,6 +1963,9 @@ pub(crate) async fn read_repl_line(
             // hide/show pair sixteen times a second and a core burned to draw
             // the screen it had just drawn.
             _ = tick.tick() => {
+                if renderer.animating() {
+                    renderer.tick_modal();
+                }
                 if renderer.animating() || renderer.take_dirty() {
                     renderer.draw()?;
                 }

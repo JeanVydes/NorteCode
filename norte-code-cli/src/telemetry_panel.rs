@@ -537,6 +537,13 @@ pub(crate) struct Panel {
     open: BTreeSet<String>,
     /// Which provider row the cursor is on, in the `providers` tab.
     pub(crate) cursor: usize,
+    /// How many frames have been drawn since the panel opened.
+    ///
+    /// It is what an entry animation counts on: the bars grow from nothing to
+    /// their value over the first few frames, which is what tells a person the
+    /// panel just appeared and is not a screen that was always there. Past the
+    /// last frame the panel stops animating and the clock stops drawing it.
+    pub(crate) frame: usize,
 }
 
 impl Panel {
@@ -552,7 +559,37 @@ impl Panel {
             metric: Metric::Tokens,
             open: BTreeSet::new(),
             cursor: 0,
+            frame: 0,
         }
+    }
+
+    /// How many frames the entry animation runs for.
+    const REVEAL_FRAMES: usize = 8;
+
+    /// Whether the panel is still animating, so the clock keeps drawing it.
+    #[must_use]
+    pub(crate) fn animating(&self) -> bool {
+        self.frame < Self::REVEAL_FRAMES
+    }
+
+    /// Advances the animation one frame.
+    pub(crate) fn tick(&mut self) {
+        if self.frame < Self::REVEAL_FRAMES {
+            self.frame += 1;
+        }
+    }
+
+    /// The share of a bar the reveal has grown to, in cells.
+    ///
+    /// It is the animation: a bar is drawn at `full * reveal / frames`, so the
+    /// first frame shows nothing and the last shows the bar. A percentage and not
+    /// a per-bar counter, so every bar grows together and the chart assembles
+    /// itself instead of each bar racing the others.
+    fn reveal(&self, full: usize) -> usize {
+        if self.frame >= Self::REVEAL_FRAMES {
+            return full;
+        }
+        full * self.frame / Self::REVEAL_FRAMES
     }
 
     /// The rows the current tab and range cover.
@@ -688,9 +725,10 @@ impl Panel {
                 slice,
                 self.metric,
                 busiest,
+                self.reveal(BAR_CELLS),
             )));
         }
-        error_section(out, report);
+        error_section(out, report, self.reveal(BAR_CELLS));
     }
 
     /// Every provider, each expandable into its models.
@@ -711,19 +749,32 @@ impl Panel {
             let lead = if index == self.cursor { "›" } else { " " };
             out.push(ViewLine::plain(format!(
                 "{lead}{marker} {}",
-                rank_row(provider, slice, self.metric, busiest)
+                rank_row(
+                    provider,
+                    slice,
+                    self.metric,
+                    busiest,
+                    self.reveal(BAR_CELLS)
+                )
             )));
             if open {
                 for (model, model_slice) in report.models_of(provider, self.metric) {
                     let name = model.split_once('/').map_or(model, |(_, name)| name);
                     out.push(ViewLine::plain(format!(
                         "     {}",
-                        rank_row(name, model_slice, self.metric, busiest)
+                        rank_row(
+                            name,
+                            model_slice,
+                            self.metric,
+                            busiest,
+                            self.reveal(BAR_CELLS)
+                        )
                     )));
                 }
             }
         }
-        error_section(out, report);
+        cost_section(out, report, self.reveal(BAR_CELLS));
+        error_section(out, report, self.reveal(BAR_CELLS));
     }
 
     /// One sparkline per model: its metric across the day buckets of the range.
@@ -838,12 +889,70 @@ fn metric_scalar(value: u64, metric: Metric) -> String {
     }
 }
 
+/// A stacked bar per provider: the money reported against the requests with no
+/// price, because a provider that reports no cost is a fact about the provider
+/// and not a zero.
+///
+/// The two are not the same quantity and not on the same scale — one is dollars
+/// and the other a count — so the bar is two bars side by side: the cost as a
+/// length, and beside it how much of the provider's traffic came back unpriced,
+/// as a share. A provider that reports nothing shows the second bar full and the
+/// first empty, which is exactly the thing a person needs to see.
+fn cost_section(out: &mut Vec<ViewLine>, report: &Report, grow: usize) {
+    let rows: Vec<(&str, &Slice)> = report
+        .providers
+        .iter()
+        .map(|(name, slice)| (name.as_str(), slice))
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    out.push(ViewLine::plain(""));
+    out.push(ViewLine::bold("cost reported, and the share not reported"));
+    let most = rows
+        .iter()
+        .map(|(_, slice)| cost_cents(slice.cost_usd))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    for (provider, slice) in rows {
+        let priced = usize::try_from(cost_cents(slice.cost_usd))
+            .unwrap_or(usize::MAX)
+            .saturating_mul(grow)
+            .checked_div(usize::try_from(most).unwrap_or(1))
+            .unwrap_or(0)
+            .min(BAR_CELLS);
+        let unpriced_share = usize::try_from(
+            slice
+                .unpriced
+                .saturating_mul(BAR_CELLS as u64)
+                .checked_div(slice.requests)
+                .unwrap_or(0),
+        )
+        .unwrap_or(0)
+        .min(BAR_CELLS);
+        let cost_bar: String = "█".repeat(priced) + &"·".repeat(BAR_CELLS - priced);
+        // The unpriced share is drawn in a lighter mark, so the two bars cannot
+        // be read as one quantity.
+        let miss_bar: String = "▒".repeat(unpriced_share) + &"·".repeat(BAR_CELLS - unpriced_share);
+        out.push(ViewLine::plain(format!(
+            "  {:<LABEL_COLUMN$} ${:<10.4} {miss_bar} {} of {} unpriced",
+            clip(provider, LABEL_COLUMN),
+            slice.cost_usd,
+            slice.unpriced,
+            slice.requests
+        )));
+        // The cost bar on a line of its own keeps the two scales apart.
+        out.push(ViewLine::dim(format!("  {:<LABEL_COLUMN$} {cost_bar}", "")));
+    }
+}
+
 /// The error bars: one per provider, subdivided by the kind of error.
 ///
 /// A bar that says "three errors" is not enough — rate limits, auth and timeouts
 /// are three different things to do something about — so each provider's bar is
 /// cut into its kinds, and the longest bar sets the scale.
-fn error_section(out: &mut Vec<ViewLine>, report: &Report) {
+fn error_section(out: &mut Vec<ViewLine>, report: &Report, grow: usize) {
     let with_errors: Vec<(&str, &Slice)> = report
         .providers
         .iter()
@@ -864,7 +973,7 @@ fn error_section(out: &mut Vec<ViewLine>, report: &Report) {
     for (provider, slice) in with_errors {
         out.push(ViewLine::plain(format!(
             "  {provider:<LABEL_COLUMN$} {}",
-            error_bar(slice, busiest)
+            error_bar(slice, busiest, grow)
         )));
         for (kind, count) in slice.error_tally.ranked() {
             out.push(ViewLine::dim(format!("      {count:>4}  {kind}")));
@@ -873,10 +982,10 @@ fn error_section(out: &mut Vec<ViewLine>, report: &Report) {
 }
 
 /// One provider's errors as a bar cut into segments by kind.
-fn error_bar(slice: &Slice, busiest: u64) -> String {
+fn error_bar(slice: &Slice, busiest: u64, grow: usize) -> String {
     let filled = usize::try_from(slice.errors)
         .unwrap_or(usize::MAX)
-        .saturating_mul(BAR_CELLS)
+        .saturating_mul(grow)
         .checked_div(usize::try_from(busiest).unwrap_or(1))
         .unwrap_or(0)
         .clamp(1, BAR_CELLS);
@@ -922,15 +1031,19 @@ fn metric_total(slice: &Slice, metric: Metric) -> u64 {
 }
 
 /// One ranked row: a label, a bar, and the value the bar is drawn for.
+///
+/// `grow` is how much of each bar is drawn: the entry animation passes a value
+/// under `BAR_CELLS` for the first frames, and `BAR_CELLS` once the panel has
+/// settled, which is every frame after the last.
 #[must_use]
-fn rank_row(label: &str, slice: &Slice, metric: Metric, busiest: u64) -> String {
+fn rank_row(label: &str, slice: &Slice, metric: Metric, busiest: u64, grow: usize) -> String {
     let value = metric_total(slice, metric);
     let filled = usize::try_from(value)
         .unwrap_or(usize::MAX)
-        .saturating_mul(BAR_CELLS)
+        .saturating_mul(grow)
         .checked_div(usize::try_from(busiest).unwrap_or(1))
         .unwrap_or(0)
-        .min(BAR_CELLS);
+        .min(grow);
     let bar: String = "█".repeat(filled) + &"·".repeat(BAR_CELLS - filled);
     let clipped: String = label.chars().take(LABEL_COLUMN).collect();
     format!(
@@ -1261,6 +1374,42 @@ mod tests {
         assert_eq!(chars.len(), 3);
         assert_eq!(chars[1], '█', "the peak is the full block");
         assert!(chars[0] < chars[1], "the small one is shorter");
+    }
+
+    #[test]
+    fn the_panel_animates_in_and_then_settles() {
+        // The entry animation is the panel telling a person it just appeared: it
+        // runs a few frames and then stops, so the clock that drew it stops too.
+        let records = vec![record("openai", "gpt-5", "ok")];
+        let mut panel = Panel::new(records, None);
+        assert!(panel.animating(), "it starts animating");
+        let first = text_of(&panel);
+        for _ in 0..Panel::REVEAL_FRAMES {
+            panel.tick();
+        }
+        assert!(!panel.animating(), "and it settles");
+        let last = text_of(&panel);
+        assert_ne!(first, last, "the drawn frame changed as it grew");
+        // A tick past the end changes nothing.
+        let settled = text_of(&panel);
+        panel.tick();
+        assert_eq!(text_of(&panel), settled);
+    }
+
+    #[test]
+    fn the_cost_section_shows_what_was_not_reported() {
+        let mut priced = record("openai", "gpt-5", "ok");
+        priced.cost_usd = Some(1.0);
+        let mut unpriced = record("free", "m", "ok");
+        unpriced.cost_usd = None;
+        let mut panel = Panel::new(vec![priced, unpriced], None);
+        panel.tab = Tab::Providers;
+        for _ in 0..Panel::REVEAL_FRAMES {
+            panel.tick();
+        }
+        let text = text_of(&panel);
+        assert!(text.contains("unpriced"), "{text}");
+        assert!(text.contains("cost reported"), "{text}");
     }
 
     #[test]

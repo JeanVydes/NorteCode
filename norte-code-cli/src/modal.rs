@@ -306,6 +306,23 @@ impl Modal {
             .unwrap_or(0)
     }
 
+    /// Whether the panel is animating, so the clock has to keep drawing it.
+    #[must_use]
+    pub(crate) fn animating(&self) -> bool {
+        self.telemetry
+            .as_ref()
+            .is_some_and(crate::telemetry_panel::Panel::animating)
+    }
+
+    /// Advances the panel's animation one frame and rebuilds the rows.
+    pub(crate) fn tick(&mut self) {
+        let Some(panel) = self.telemetry.as_mut() else {
+            return;
+        };
+        panel.tick();
+        self.refresh_telemetry();
+    }
+
     /// Whether there is anything to draw.
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {

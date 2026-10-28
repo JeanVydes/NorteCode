@@ -741,7 +741,24 @@ impl Renderer {
     /// same screen.
     #[must_use]
     pub(crate) fn animating(&self) -> bool {
-        self.waiting.is_some() || self.transcript.running_for().is_some()
+        self.waiting.is_some()
+            || self.transcript.running_for().is_some()
+            || self
+                .modal
+                .as_ref()
+                .is_some_and(crate::modal::Modal::animating)
+    }
+
+    /// Advances an open panel's animation one frame.
+    ///
+    /// The clock that keeps an animation moving is the loop's, and this is what
+    /// the loop calls on each tick: the panel counts its own frames and the
+    /// renderer marks its own state dirty, so the next draw shows the new frame
+    /// and stops once the animation has run.
+    pub(crate) fn tick_modal(&mut self) {
+        if let Some(modal) = self.modal.as_mut() {
+            modal.tick();
+        }
     }
 
     /// Takes the "something changed" flag the keyboard's thread set.
