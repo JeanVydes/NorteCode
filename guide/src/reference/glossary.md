@@ -10,8 +10,9 @@ bound to the call and its arguments.
 **Budget** — A message, session or daily limit in USD, tokens or requests. `warn`
 continues, `stop` ends the turn uncommitted, `ask` currently behaves like a stop.
 
-**Catalogue** — The models.dev data plus the local cache and bundled snapshot.
-It supplies capabilities and endpoints; it does not supply prices to the ledger.
+**Catalogue** — The two files that say who serves models and what each one can
+do: `providers.json` and `models.json`. It supplies capabilities and endpoints,
+and it is never a source of prices for the ledger.
 
 **Compaction** — Summarising a long transcript into a fresh Norte session while
 keeping the logical session key. The old session stays for audit.

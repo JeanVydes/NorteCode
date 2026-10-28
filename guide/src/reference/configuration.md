@@ -20,8 +20,7 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `version` | integer | `1` | Schema revision. |
 | `default_provider` | string or null | null | Provider for new sessions. |
 | `default_model` | string or null | null | Model id for new sessions; may contain slashes. |
-| `providers` | object | `{}` | Key source and endpoint per provider. |
-| `catalog` | object | see below | models.dev source and cache. |
+| `catalog` | — | — | Removed. Providers and models are `providers.json` and `models.json` beside this file. |
 | `compaction` | object | see below | Automatic compaction. |
 | `titling` | object | see below | Automatic session titles. |
 | `retry` | object | see below | Transient retry policy. |
@@ -36,55 +35,22 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `budgets` | object | all null | Message, session, daily limits. |
 | `tools` | object | see below | Web fetch and sandbox. |
 | `skills` | object | see below | Skill discovery. |
-| `providers.<id>.models` | object | `{}` | Per-model overrides, keyed by model id. |
 
-## `providers.<id>`
+## `providers` and `catalog`
 
-| Key | Meaning |
-| --- | --- |
-| `api_key_env` | Environment variable with the key. |
-| `api_key_file` | File containing the key. |
-| `endpoint` | Base URL override. |
-| `wire` | Wire to speak: `responses`, `chat`, `messages` or `generate-content`; overrides the catalogue's choice. |
-| `auth` | Credential scheme: `bearer`, `x-api-key`, `x-goog-api-key` or `disabled`; overrides the wire's default. `disabled` sends no credential and needs no key. |
-| `headers` | Extra headers sent with every request to this provider. |
-
-Resolution order: `api_key_env`, `api_key_file`, then the catalogue's `env`.
-There is no plaintext key field.
-
-The catalogue's `npm` selects the wire and the key is sent the way that wire
-expects. `wire` and `auth` are escape hatches for a compatible gateway: changing
-the wire without `auth` keeps that wire's credential scheme.
-
-The headers are added to the ones the provider already carries, and a header
-named here replaces the one of the same name. `openrouter` gets the
-attribution headers by default, so the app can appear in OpenRouter's
-rankings: `HTTP-Referer` (the site's URL, which identifies the app),
-`X-OpenRouter-Title` (the name it shows) and `X-OpenRouter-Categories` (the
-marketplace category, `cli-agent` for a terminal coding assistant).
-
-```json
-{
-  "version": 1,
-  "providers": {
-    "openrouter": {
-      "headers": {
-        "X-OpenRouter-Categories": "cli-agent,programming-app"
-      }
-    }
-  }
-}
-```
-
-## `catalog`
+Both are gone. A provider is an entry of `providers.json` and a model is an
+entry of `models.json`, beside this file — see
+[Configure a provider](../guides/configure-a-provider.md). The configuration
+names only which pair a new session opens on:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `url` | `https://models.dev/catalog.json` | Catalogue source. |
-| `ttl_hours` | `24` | Cache freshness. |
-| `offline` | `false` | Never use the network. |
+| `default_provider` | null | The provider a new session opens on. |
+| `default_model` | null | The model a new session opens on; may contain slashes. |
 
-`--offline` and `--refresh` override this section for one command.
+A key comes from the environment, named by the provider's `environment_keys` and
+tried in order. There is no plaintext key field, no file to point at and no
+override to write.
 
 ## `compaction`
 
@@ -214,14 +180,9 @@ number and line ranges:
 
 ## `providers.<id>.models.<model-id>`
 
-| Key | Meaning |
-| --- | --- |
-| `max_context` | Context window override. |
-| `max_output` | Output limit override. |
-| `reasoning.supported` | Whether the model reasons. |
-| `reasoning.can_disable` | Whether reasoning may be disabled. |
-| `reasoning.efforts` | Effort names to expose. |
-| `reasoning.max_budget` | Maximum reasoning budget. |
+Removed. A model's limits, modalities and reasoning are facts about the model,
+and they live in the entry that describes it — `models.json` — where they can be
+edited without a second file having a say.
 
 ## `extensions`
 

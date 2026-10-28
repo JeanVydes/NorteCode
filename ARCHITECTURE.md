@@ -17,7 +17,7 @@ instead of worked around here.
 | `norte-code-protocol` | Versioned serde types for `ClientRequest` and `ServerEvent`. No Norte type appears on this wire. |
 | `norte-code-agent` | `Service`: sessions, engines, agent loop, compaction, retries, approvals, sandbox, telemetry, skills. |
 | `norte-code-config` | Typed config, merge, validation, approval-rule updates and secret resolution. |
-| `norte-code-catalog` | models.dev client, ETag/TTL disk cache and mapping to Norte capabilities. |
+| `norte-code-catalog` | The catalogue's schema — providers, models, wires — read from two local files, plus the mapping to Norte capabilities. |
 | `norte-code-cost` | Cost ledger and budget evaluation. Provider-reported amounts only. |
 | `norte-code-tools` | Host tools: `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | Norte `Store` + `BlobStore`, logical sessions, approvals, questions, effects, costs and request telemetry. |
@@ -32,7 +32,7 @@ CLI
    ▼
 norte-code-protocol
    ▼
-Service ────────────────► Catalogue (models.dev + cache)
+Service ────────────────► Catalogue (providers.json + models.json)
    │                         │
    │                         ▼
    │                    ModelSpec / capabilities
@@ -261,11 +261,10 @@ price table is involved.
 
 ## Network and privacy
 
-The only network destinations are the configured model endpoints and the
-models.dev catalogue. `--offline` and `catalog.offline` prevent the catalogue
-fetch; the cache and bundled snapshot are used instead. API keys live in Norte's
+The only network destination is the configured model endpoint: the catalogue is
+two local files, read at startup and never fetched. API keys live in Norte's
 redacted secret type and are registered with the command tool for output
-redaction. `--debug` never prints keys or endpoint URLs. There is no remote
+redaction. `--debug` never prints keys or base URLs. There is no remote
 telemetry, crash reporting or update check.
 
 ## Verification

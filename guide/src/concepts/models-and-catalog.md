@@ -10,107 +10,117 @@ openrouter/anthropic/claude-sonnet-4
 provider    model id
 ```
 
-The model id may contain slashes. The provider id selects the catalogue entry,
-key source, endpoint and wire.
+The model id may contain slashes. The provider id names an entry of
+`providers.json`, which supplies the wire, the base URL and the variables a key
+may come from.
+
+Two providers may serve a model with the same id, and they are two models: the
+pair is what identifies one.
 
 ## Where models come from
 
-The catalogue is models.dev. Norte Code downloads it, caches it on disk with an
-ETag and a TTL, and falls back to the stale cache or the bundled snapshot when
-the network is unavailable. `catalog.offline` and `--offline` forbid the network
-entirely; `--refresh` forces a revalidation.
+Two files beside your configuration, and nothing else:
 
-The catalogue maps a model to Norte capabilities: input/output modalities,
-context and output limits, tool support, reasoning controls, streaming
-granularity, cache mode, structured output and feature flags. The host does not
-trust every numeric field blindly; implausible limits are dropped rather than
-turned into a bad request.
+| File | What it says |
+| --- | --- |
+| `providers.json` | Who serves models, over which wires, and where each one lives. |
+| `models.json` | Every model, in a flat list, each naming its `provider_id`. |
 
-`norte-code models` is the quickest way to see the flattened result:
+They are split so a model can be added by appending to a list, without touching
+a provider. Nothing is downloaded, cached or bundled: `norte-code` reads these
+two files at startup, and a file that is missing is an error naming it.
+
+They live in `$XDG_CONFIG_HOME/norte-code/` when that is set and
+`~/.config/norte-code/` otherwise, beside `config.json`.
+
+### `providers.json`
+
+```json
+{
+  "providers": {
+    "openai": {
+      "name": "OpenAI",
+      "doc": "https://platform.openai.com/docs",
+      "environment_keys": ["OPENAI_API_KEY"],
+      "wires": [
+        { "api": "https://api.openai.com/v1", "schema": "openai" }
+      ]
+    }
+  }
+}
+```
+
+`environment_keys` is a list, tried in order: a gateway often reads its own
+variable and the one you already have exported.
+
+### `models.json`
+
+```json
+{
+  "models": [
+    {
+      "id": "gpt-5",
+      "provider_id": "openai",
+      "name": "GPT-5",
+      "limit": { "context": 400000, "output": 128000 },
+      "modalities": { "input": ["text", "image"], "output": ["text"] },
+      "supported_params": ["tools", "temperature", "structured_output"],
+      "reasoning": {
+        "default_enabled": true,
+        "default_effort": "medium",
+        "supported_efforts": ["none", "low", "medium", "high", "xhigh"],
+        "budget_supported": true
+      }
+    }
+  ]
+}
+```
+
+`supported_params` is the list of request fields the model accepts, and it is a
+closed set: `tools`, `temperature`, `structured_output`, `reasoning_effort`,
+`logprobs`, `seed`, `stop` and the rest. A name that is not in it is refused
+where the file is read, with the line and every name that would have worked — a
+typo cannot pass as "the model does not support that".
+
+`reasoning.mandatory` says the model always reasons. It cannot be turned off,
+which is a fact about the model and not a default you may change.
+
+`pricing` may be carried for reference. It is never a source of cost: Norte Code
+reports what the provider said a request cost.
+
+## Wires
+
+A provider has `wires` and not one API: each is a base URL plus the **schema** it
+speaks. The three schemas are the ones the ecosystem converges on:
+
+| Schema | What it is |
+| --- | --- |
+| `openai` | Chat completions, the shape every compatible vendor speaks. |
+| `anthropic` | Anthropic Messages. |
+| `google` | Google `generateContent`. |
+
+A session reaches a provider over its **preferred** wire when nobody says which,
+and the preference is OpenAI, then Anthropic, then Google.
+
+`--wire` names one:
+
+```sh
+norte-code new --provider openai --model gpt-5 --wire openai
+```
+
+A schema the provider does not serve is an error listing the ones it does.
+
+The credential header follows from the schema and from nothing else — `Bearer`
+for OpenAI, `x-api-key` for Anthropic, `x-goog-api-key` for Google — so there is
+nothing to configure about it.
+
+The Responses API exists in Norte and is deliberately not reachable here: it is
+another shape entirely, and this host speaks the one the three schemas share.
+
+## Listing what you have
 
 ```sh
 norte-code models
-norte-code models --provider openrouter --tools --reasoning
+norte-code models --provider openai --tools --reasoning
 norte-code models --json
 ```
-
-## Providers and wires
-
-The provider entry's catalogue `npm` field selects the wire family. The `api`
-field supplies the endpoint, and `env` names the key. A configured endpoint
-overrides both. Native OpenAI, Anthropic and Google requests use Norte's presets
-when no endpoint is configured; OpenRouter and other OpenAI-compatible services
-use the chat wire.
-
-A provider config can override the key source and endpoint:
-
-```json
-{
-  "providers": {
-    "openrouter": {
-      "api_key_env": "OPENROUTER_API_KEY",
-      "endpoint": "https://openrouter.ai/api/v1"
-    }
-  }
-}
-```
-
-Key resolution is `api_key_env`, then `api_key_file`, then the catalogue's `env`
-names. Keys are held in Norte's redacted secret type and never enter a model
-event, a log or a child process.
-
-## Reasoning
-
-`--reasoning` accepts `auto`, `off`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, `max` or a budget object in config. The setting is checked against the
-model before the turn starts. With `auto`, the implicit default asks for
-`medium` when the model declares it and otherwise uses the closest lower effort;
-a model with no declared efforts keeps `auto`.
-
-`SetReasoning` stores the setting for the whole session or for one message. Both
-forms are validated immediately and are applied by the next turn. A model switch
-that cannot honour a stored setting is refused rather than silently lowering it.
-
-## Model overrides
-
-The catalogue is not always right or complete. A provider's `models` block can
-replace `max_context`, `max_output` and the reasoning controls for one model,
-keyed by its id alone:
-
-```json
-{
-  "providers": {
-    "openrouter": {
-      "models": {
-        "anthropic/claude-sonnet-4": {
-          "max_context": 200000,
-          "max_output": 64000,
-          "reasoning": {
-            "supported": true,
-            "can_disable": true,
-            "efforts": ["low", "medium", "high"]
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-The key is the model id and nothing else: `anthropic/claude-sonnet-4` is one
-name, and the provider it belongs to is the block it sits in.
-
-Overrides win over catalogue values for that model.
-
-## Switching models
-
-`SetModel` (and the interactive model picker) switches at a turn boundary. The
-logical session, its history, its approvals and its cost totals stay; a new
-engine is built for the new model over the same stores. A switch that would make
-a session budget unmeasurable is refused before it happens.
-
-## What is not here
-
-There is no local price table. A model's catalogue `cost.*` fields are ignored.
-A provider that reports a cost in its usage payload is recorded; a provider that
-does not leaves the request unpriced.

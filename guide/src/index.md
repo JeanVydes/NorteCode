@@ -33,8 +33,9 @@ Five ideas hold the host together.
 
 - Not a separate server. The protocol is transport-agnostic, but v1 ships only
   the in-process tokio transport.
-- Not a model catalogue. Models come from models.dev, with local overrides and a
-  cache; the host does not bake in a price table.
+- Not a model catalogue of its own. Models come from two files you own,
+  `providers.json` and `models.json`; nothing is fetched and no price table is
+  baked in.
 - Not a fork of Norte. Sessions, history, policies and commits are Norte's.
 - Not finished. The service and CLI are usable.
 

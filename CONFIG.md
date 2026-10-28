@@ -24,18 +24,6 @@ that names the field; it is never silently replaced.
   "version": 1,
   "default_provider": "openrouter",
   "default_model": "anthropic/claude-sonnet-4",
-  "providers": {
-    "openrouter": {
-      "api_key_env": "OPENROUTER_API_KEY",
-      "api_key_file": null,
-      "endpoint": "https://openrouter.ai/api/v1"
-    }
-  },
-  "catalog": {
-    "url": "https://models.dev/catalog.json",
-    "ttl_hours": 24,
-    "offline": false
-  },
   "compaction": {
     "enabled": true,
     "threshold": 0.90,
@@ -123,8 +111,7 @@ that names the field; it is never silently replaced.
 | `version` | integer | `1` | Schema revision; must be `1`. |
 | `default_provider` | string or `null` | `null` | Provider for a new session without `--provider`. |
 | `default_model` | string or `null` | `null` | Model id for a new session without `--model`; an opaque string that may contain slashes. |
-| `providers` | object | `{}` | Per-provider keys and endpoint overrides. |
-| `catalog` | object | see below | models.dev download and cache. |
+| `catalog` | — | — | Removed. Providers and models live in `providers.json` and `models.json`, in the same directory as this file. |
 | `compaction` | object | see below | Automatic context compaction. |
 | `retry` | object | see below | Bounded retries for transient provider failures. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
@@ -139,39 +126,21 @@ that names the field; it is never silently replaced.
 | `skills` | object | see below | Agent Skills discovery and execution. |
 
 
-## `providers.<id>`
+## `providers` and `catalog`
+
+Both are gone. A provider is an entry of `providers.json` and a model is an
+entry of `models.json`, in the same directory as this file, and the
+configuration no longer names either beyond the default pair:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `api_key_env` | string or `null` | `null` | Environment variable with the API key. Wins over the catalogue's `env` names. |
-| `api_key_file` | path or `null` | `null` | File containing the API key. Used after `api_key_env`. |
-| `endpoint` | string or `null` | `null` | Base URL override for a proxy or compatible vendor. |
-| `headers` | object | `{}` | Extra headers sent with every request to this provider. |
-| `models` | object | `{}` | Per-model overrides, keyed by the model id alone. |
+| `default_provider` | string or `null` | `null` | The provider a new session opens on. |
+| `default_model` | string or `null` | `null` | The model a new session opens on. |
 
-Key resolution order for a provider: `api_key_env`, `api_key_file`, then the
-`env` names the catalogue declares for that provider. Keys are held in Norte's
-redacted secret type and never enter a model event, a log or a child process.
-Prefer the environment or a file outside the repository; the config schema has
-no plaintext `api_key` field.
-
-The headers are added to the ones the provider already carries, and a header
-named in the configuration replaces the one of the same name. `openrouter`
-gets the attribution headers by default, so the app can appear in OpenRouter's
-rankings: `HTTP-Referer` (the site's URL, which identifies the app),
-`X-OpenRouter-Title` (the name it shows) and `X-OpenRouter-Categories` (the
-marketplace category; `cli-agent` is the one for a terminal coding
-assistant).
-
-## `catalog`
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `url` | string | `https://models.dev/catalog.json` | Catalogue source. |
-| `ttl_hours` | integer | `24` | How long the disk cache is fresh. |
-| `offline` | boolean | `false` | Never touch the network; use the cache or the bundled snapshot. |
-
-`--offline` and `--refresh` override this section for one command.
+A key comes from the environment, named by the provider's `environment_keys` and
+tried in order. There is no file to point at and no `api_key_env` to set: the
+environment is the one source. Keys are held in Norte's redacted secret type and
+never enter a model event, a log or a child process.
 
 ## `compaction`
 

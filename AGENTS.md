@@ -18,7 +18,7 @@ and that code disagree, the code is right.
 - Remote `origin` is `https://github.com/JeanVydes/NorteCode`.
 - Never force-push, and never rewrite history that has been pushed.
 - Commits are [Conventional Commits](https://www.conventionalcommits.org/) scoped
-  to the crate: `feat(catalog): cache models.dev with ETag`. Types in use:
+  to the crate: `feat(catalog): read the catalogue from two files`. Types in use:
   `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `build`, `ci`, `perf`.
 - One logical change per commit. Do not mix a refactor with a feature, and do not
   commit `WIP` or `fix typo`. Fixup and autosquash only on local, unpushed commits.
@@ -113,6 +113,16 @@ feature.
 
 ## Code
 
+- **An enum, always, when the set is closed.** A `String` that holds one of three
+  things is three bugs waiting: a typo compiles and runs, a `match` grows a
+  catch-all arm that swallows the value nobody meant, and nothing tells a reader
+  what the values are. Name the set, derive `Deserialize` on it, and let a bad
+  name fail where the file is read — with the file, the line and every name that
+  would have worked. The exceptions are a name a person chose (a session title,
+  a model id, a path) and a value whose set is genuinely open.
+- A `match` over an enum has no `_` arm when the enum is local: a variant added
+  later must be a compile error, not a silent fall into the default case. That is
+  the whole reason the enum exists.
 - `#![forbid(unsafe_code)]`; typed errors; no panics on external input, including
   the catalogue and config files.
 - `missing_docs` is denied workspace-wide: document every public item.
@@ -128,10 +138,25 @@ feature.
 
 ## Providers and cost
 
-- Provider-reported cost only. Never derive a price from a list price, and ignore
-  the catalogue's `cost.*` fields.
+- The catalogue is two files a person owns, beside the configuration:
+  `providers.json` (who serves models, over which wires) and `models.json` (a
+  flat list, each model naming its provider). **Nothing is fetched, cached or
+  bundled.** A file that is missing is an error naming it, and a plugin that
+  builds the same two shapes hands them to `Catalog::new`.
+- A provider has `wires`, each a base URL plus the schema it speaks. The three
+  schemas are `openai` (chat completions, the shape every compatible vendor
+  speaks), `anthropic` and `google`. `--wire` picks one; the preferred order is
+  OpenAI, then Anthropic, then Google. The Responses API is deliberately
+  unreachable — this host speaks the shape the three share.
+- A wire's credential header follows from its schema and from nothing else. A
+  configuration that could change it could only make the request wrong.
+- The catalogue is the sole authority on a model. The configuration does not
+  override a model's limits, modalities or reasoning.
+- Provider-reported cost only. Never derive a price from a list price; the
+  catalogue may carry `pricing` for reference and it is never a source of cost.
 - OpenAI, Anthropic, Gemini and OpenRouter (OpenAI-compatible chat) are the v1
-  providers. Keys come from the environment or from config, are held in Norte's
-  `Secret`, and never reach a model event, a log or a child process.
+  providers. Keys come from the environment, named by the provider's
+  `environment_keys`, are held in Norte's `Secret`, and never reach a model
+  event, a log or a child process.
 - The command tool clears the environment: pass only what is needed, and register
   every configured key with `with_secrets` so it is redacted.

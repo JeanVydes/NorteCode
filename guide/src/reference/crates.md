@@ -8,7 +8,7 @@ never depends on the CLI.
 | `norte-code-protocol` | Versioned serde types for `ClientRequest` and `ServerEvent`. No Norte types. |
 | `norte-code-agent` | `Service`: engines, sessions, agent loop, compaction, retries, approvals, sandbox, telemetry, skills. |
 | `norte-code-config` | Typed config, merge, validation, approval-rule updates and secret resolution. |
-| `norte-code-catalog` | models.dev client, ETag/TTL cache and mapping to Norte capabilities. |
+| `norte-code-catalog` | The catalogue's schema — providers, models, wires — read from two local files, and the mapping to Norte capabilities. |
 | `norte-code-cost` | Cost ledger and budget evaluation. Provider-reported amounts only. |
 | `norte-code-tools` | Host tools: `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | Norte `Store` + `BlobStore`, logical sessions, approvals, questions, effects, costs and request telemetry. |

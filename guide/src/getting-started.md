@@ -35,12 +35,7 @@ file is:
 {
   "version": 1,
   "default_provider": "openrouter",
-  "default_model": "anthropic/claude-sonnet-4",
-  "providers": {
-    "openrouter": {
-      "api_key_env": "OPENROUTER_API_KEY"
-    }
-  }
+  "default_model": "anthropic/claude-sonnet-4"
 }
 ```
 
@@ -116,7 +111,7 @@ counts, tokens, cache, tools and latency. Neither leaves the machine.
 The catalogue can be read from its cache or bundled snapshot:
 
 ```sh
-norte-code --offline models
+norte-code models
 ```
 
 The workspace checks are:

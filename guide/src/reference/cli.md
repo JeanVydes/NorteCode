@@ -31,8 +31,6 @@ the home abbreviated to `~`.
 | Option | Meaning |
 | --- | --- |
 | `--config PATH` | Use this user config file instead of the platform path. A `default_provider`/`default_model` chosen at startup is written here. |
-| `--offline` | Never touch the network for the catalogue. |
-| `--refresh` | Revalidate the catalogue even when the cache is fresh. |
 | `--verbose LEVEL` | How much to show: `low` (the answer alone), `medium` (the default) or `high` (reasoning, tool arguments and results, every counter). |
 | `--debug` | Print startup details, model metadata, paths and extensions. |
 
@@ -53,10 +51,7 @@ speaks the protocol.
 | `--provider PROVIDER` | Override the provider id (e.g. `openai`, `groq`, `disabled`). |
 | `--system-prompt TEXT` | Replace the base system prompt for this session. |
 | `--endpoint URL` | Override the provider endpoint. |
-| `--wire WIRE` | Override the provider wire: `responses`, `chat`, `messages` or `generate-content`. |
-| `--auth AUTH` | Override the credential scheme: `bearer`, `x-api-key`, `x-goog-api-key` or `disabled`. |
-| `--api-key-env VAR` | Read the key from this environment variable instead of the configured one. |
-| `--disable-prompt-cache-key` | Omit `prompt_cache_key` for providers that reject it. |
+| `--wire SCHEMA` | Pick among the wires the provider serves: `openai`, `anthropic` or `google`. Left out, the provider's preferred one. |
 | `--budget LIMIT` | A limit for the first message. |
 | `--budget-unit usd\|tokens\|requests` | What the limit measures. Default `usd`. |
 | `--budget-action warn\|ask\|stop` | What to do at the limit. Default `stop` for `--budget`. |

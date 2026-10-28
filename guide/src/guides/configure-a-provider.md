@@ -1,57 +1,94 @@
 # Configure a provider
 
-## Name the model and the key
+There is no per-provider configuration any more. A provider is an entry in
+`providers.json`, a model is an entry in `models.json`, and the configuration
+names only which pair a new session opens on:
 
 ```json
 {
   "version": 1,
   "default_provider": "openrouter",
-  "default_model": "anthropic/claude-sonnet-4",
+  "default_model": "anthropic/claude-sonnet-4"
+}
+```
+
+## The key
+
+A key comes from the environment, and from the variables the provider names:
+
+```json
+{
   "providers": {
     "openrouter": {
-      "api_key_env": "OPENROUTER_API_KEY"
+      "name": "OpenRouter",
+      "environment_keys": ["OPENROUTER_API_KEY", "OPENAI_API_KEY"],
+      "wires": [
+        { "api": "https://openrouter.ai/api/v1", "schema": "openai" }
+      ]
     }
   }
 }
 ```
 
-Resolution order for a key:
+`environment_keys` is tried in order, and the first one that is set and not empty
+wins. It is a list because a gateway often reads its own variable and the one you
+already have exported.
 
-1. `providers.<id>.api_key_env`
-2. `providers.<id>.api_key_file`
-3. The catalogue's `env` names for that provider
+A provider that names none needs no key, which is what a local endpoint is. A
+provider whose variables are all unset is an error naming them:
 
-The catalogue entry also supplies the wire and the base endpoint. A configured
-`endpoint` overrides the endpoint.
+```text
+could not resolve the API key for openai: no value in any of: OPENAI_API_KEY
+```
 
-## Native providers
+There is no `api_key_file` and no `--api-key-env`: the environment is the one
+source, so there is nothing to keep in step with it.
 
-When no endpoint is configured, OpenAI, Anthropic and Google use Norte's native
-presets:
+## Three native providers
 
 ```json
 {
   "providers": {
-    "openai": {"api_key_env": "OPENAI_API_KEY"},
-    "anthropic": {"api_key_env": "ANTHROPIC_API_KEY"},
-    "google": {"api_key_env": "GEMINI_API_KEY"}
+    "openai": {
+      "name": "OpenAI",
+      "environment_keys": ["OPENAI_API_KEY"],
+      "wires": [{ "api": "https://api.openai.com/v1", "schema": "openai" }]
+    },
+    "anthropic": {
+      "name": "Anthropic",
+      "environment_keys": ["ANTHROPIC_API_KEY"],
+      "wires": [{ "api": "https://api.anthropic.com/v1", "schema": "anthropic" }]
+    },
+    "google": {
+      "name": "Google",
+      "environment_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+      "wires": [
+        {
+          "api": "https://generativelanguage.googleapis.com/v1beta",
+          "schema": "google"
+        }
+      ]
+    }
   }
 }
 ```
 
-The exact provider id is the one in the catalogue. For Google, the catalogue may
-also accept `GOOGLE_API_KEY`; `api_key_env` wins.
+The variable list is yours to write, and it is the only place a name is looked
+up: the host does not guess at `GOOGLE_API_KEY` for you.
 
 ## OpenRouter
 
-OpenRouter is an OpenAI-compatible chat endpoint:
+OpenRouter speaks the OpenAI chat schema, and its base URL is its own:
 
 ```json
 {
   "providers": {
     "openrouter": {
-      "api_key_env": "OPENROUTER_API_KEY",
-      "endpoint": "https://openrouter.ai/api/v1"
+      "name": "OpenRouter",
+      "environment_keys": ["OPENROUTER_API_KEY"],
+      "wires": [
+        { "api": "https://openrouter.ai/api/v1", "schema": "openai" }
+      ]
     }
   }
 }
@@ -60,8 +97,7 @@ OpenRouter is an OpenAI-compatible chat endpoint:
 Upstream routing is a vendor extension, not a Norte Code setting:
 
 ```sh
-norte-code new \
-  --extension 'openai.chat:provider.order=["deepinfra"]'
+norte-code new --extension 'openai.chat:provider.order=["deepinfra"]'
 ```
 
 The config form is:
@@ -76,82 +112,87 @@ The config form is:
 
 A key whose wire family does not match the active model is ignored.
 
-### Test the Messages wire
+### A provider that serves more than one wire
 
-OpenRouter also serves an Anthropic-compatible endpoint at
-`https://openrouter.ai/api/v1/messages`. Point a separate config at it:
+A gateway may serve the same models over more than one API surface. Each is an
+entry in `wires`, and `--wire` picks one:
 
 ```json
 {
-  "version": 1,
   "providers": {
     "openrouter": {
-      "wire": "messages",
-      "auth": "bearer"
+      "environment_keys": ["OPENROUTER_API_KEY"],
+      "wires": [
+        { "api": "https://openrouter.ai/api/v1", "schema": "openai" },
+        { "api": "https://openrouter.ai/api/v1", "schema": "anthropic" }
+      ]
     }
   }
 }
 ```
-
-```sh
-OPENROUTER_API_KEY=... norte-code --config ./openrouter-messages.json run \
-  --model openrouter/anthropic/claude-sonnet-4.5 \
-  "Reply with exactly: ok"
-```
-
-The same override can stay out of the config for one run:
 
 ```sh
 OPENROUTER_API_KEY=... norte-code new \
   --model openrouter/anthropic/claude-sonnet-4.5 \
-  --wire messages --auth bearer
+  --wire anthropic
 ```
 
-The catalogue supplies the base URL (`https://openrouter.ai/api/v1`), and the
-Messages adapter appends `messages`. If you pass `--endpoint`, pass that base,
-not the full `/messages` URL. `auth` is needed because OpenRouter authenticates
-gateways with `Authorization: Bearer`; the Messages wire defaults to `x-api-key`.
-`wire` applies to the whole provider, so every OpenRouter model uses the
-Messages wire while that file is active; remove the override to go back to the
-chat wire. `--debug` prints the effective wire.
+With nothing named, the preferred wire is used: OpenAI, then Anthropic, then
+Google. A schema the provider does not serve is an error listing the ones it
+does.
 
-## Any OpenAI-compatible endpoint
+The credential header follows from the schema — `Bearer` for OpenAI,
+`x-api-key` for Anthropic, `x-goog-api-key` for Google — so there is no `auth`
+setting. A gateway that wants a different header is a gateway whose schema this
+host does not speak.
 
-Point the provider at the endpoint and keep the catalogue entry's model id:
+## A local endpoint
 
 ```json
 {
-  "default_provider": "local",
-  "default_model": "my-model",
   "providers": {
     "local": {
-      "endpoint": "http://127.0.0.1:8080/v1",
-      "wire": "chat",
-      "auth": "disabled"
+      "name": "A local server",
+      "wires": [{ "api": "http://127.0.0.1:8080/v1", "schema": "openai" }]
     }
   }
 }
 ```
 
-`auth: "disabled"` sends no credential and needs no API key, which is what a
-local server usually expects. A provider the catalogue does not list gets
-conservative fallback capabilities; the provider's `models` block can set its
-context and output limits.
+No `environment_keys` means no credential is sent, which is what a local server
+usually expects.
+
+The model still has to be in `models.json` — a provider with no models has
+nothing to open a session on:
+
+```json
+{
+  "models": [
+    {
+      "id": "my-model",
+      "provider_id": "local",
+      "limit": { "context": 32768, "output": 4096 },
+      "modalities": { "input": ["text"], "output": ["text"] },
+      "supported_params": ["tools"]
+    }
+  ]
+}
+```
 
 ## Why did it fail?
 
 - **No model selected**: pass `--model` or set `default_model` (with
   `default_provider`).
-- **Unknown provider/model**: run `norte-code models` and use a listed pair.
-- **Missing key**: check the environment variable named by `api_key_env`; a key
-  file must exist and be readable.
-- **Wrong endpoint**: `--debug` prints the effective model and wire, but never
-  the endpoint URL or the key.
-- **Catalogue offline**: `--offline` uses the cache or bundled snapshot; a
-  provider absent from both cannot be resolved.
+- **Unknown provider**: it is not in `providers.json`. The error lists the ones
+  you have.
+- **Unknown model**: the provider has no such entry in `models.json`.
+- **Missing key**: the error names every variable it tried.
+- **Wrong wire**: `--debug` prints the effective model and wire, but never the
+  base URL or the key.
+- **A typo in a file**: the error names the file, the line and every value that
+  would have been accepted.
 
 ## Do not put keys in the repository
 
-The config schema has no plaintext `api_key` field. Prefer an environment
-variable or a file outside the repository. Keys are redacted from command output
-and never reach a log or a model event.
+The schema has no plaintext key field. Prefer an environment variable. Keys are
+redacted from command output and never reach a log or a model event.

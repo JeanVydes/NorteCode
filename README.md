@@ -18,7 +18,7 @@ Norte Code never forks Norte.
 | `norte-code-protocol` | The versioned serde types on the client wire. No Norte types. |
 | `norte-code-agent` | The service library: engines, agent loop, policies, sessions, compaction. |
 | `norte-code-config` | `config.json` loading, validation, merging and secrets. |
-| `norte-code-catalog` | The models.dev client, its disk cache and the mapping to Norte capabilities. |
+| `norte-code-catalog` | The catalogue's schema — providers, models, wires — and the mapping to Norte capabilities. |
 | `norte-code-cost` | The cost ledger and budget evaluation. Provider-reported cost only. |
 | `norte-code-tools` | The tools Norte does not ship: `grep`, `todo`, `ask_user`, `web_fetch`. |
 | `norte-code-store-sqlite` | A Norte `Store` + `BlobStore` over SQLite, plus Norte Code's own tables. |
@@ -61,16 +61,14 @@ file names a model and a provider key source:
 {
   "version": 1,
   "default_provider": "openrouter",
-  "default_model": "anthropic/claude-sonnet-4",
-  "providers": {
-    "openrouter": { "api_key_env": "OPENROUTER_API_KEY" }
-  }
+  "default_model": "anthropic/claude-sonnet-4"
 }
 ```
 
-The full schema also covers the catalogue cache, compaction, retries,
-reasoning, approval rules, budgets, the command sandbox, skills and per-model
-capability overrides.
+The providers and the models themselves are the two files beside it:
+`providers.json` and `models.json`. The full config schema also covers
+compaction, retries, reasoning, approval rules, budgets, the command sandbox
+and skills.
 
 ## Installing
 
@@ -333,10 +331,9 @@ existing USD budget unmeasurable is blocked.
 
 ## Network
 
-The only network destinations are the configured model endpoints and the model
-catalogue URL (default `https://models.dev/catalog.json`). Norte Code sends no
-telemetry; the request history and cost ledger stay in the local SQLite
-database.
+The only network destination is the model endpoint you configured: the
+catalogue is two local files, and Norte Code sends no telemetry. The request
+history and cost ledger stay in the local SQLite database.
 
 ## Documentation
 

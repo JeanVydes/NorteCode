@@ -26,19 +26,10 @@ Validation errors stop startup and name the field. `version` must be `1`.
 
 A provider names a key source, never a plaintext key:
 
-```json
-{
-  "providers": {
-    "openrouter": {
-      "api_key_env": "OPENROUTER_API_KEY"
-    }
-  }
-}
-```
-
-Resolution order is `api_key_env`, then `api_key_file`, then the environment
-names the catalogue declares for that provider. Keys are held in Norte's redacted
-secret type and are registered for output redaction with the command tool.
+The configuration names no provider: an entry of `providers.json` does, and a
+key comes from the environment, from the names that entry lists. Keys are held in
+Norte's redacted secret type and are registered for output redaction with the
+command tool.
 
 ## The main sections
 
@@ -46,8 +37,7 @@ secret type and are registered for output redaction with the command tool.
 | --- | --- |
 | `default_provider` | The provider for a new session. |
 | `default_model` | The model id for a new session; an opaque string that may contain slashes. |
-| `providers` | Key source and endpoint override per provider. |
-| `catalog` | models.dev URL, cache TTL and offline mode. |
+| `default_provider` | The provider a new session opens on, when no flag names one. |
 | `compaction` | Threshold, trigger, recent messages and summary model. |
 | `retry` | Bounded retries for transient provider failures. |
 | `reasoning` | The default reasoning setting. |

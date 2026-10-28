@@ -37,9 +37,9 @@ phase; `norte-code resume <key>` continues a parked or stopped session.
 
 ## Is my code sent anywhere else?
 
-The only network destinations are the configured model endpoint and models.dev
-for the catalogue. Telemetry is local SQLite. There is no remote crash
-reporting, update check or analytics.
+The only network destination is the model endpoint you configured. The
+catalogue is two local files, telemetry is local SQLite, and there is no remote
+crash reporting, update check or analytics.
 
 ## Are commands sandboxed by default?
 
