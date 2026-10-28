@@ -46,8 +46,6 @@ pub(crate) enum McpState {
     On,
     /// Connected, but switched off for the turn.
     Off,
-    /// Configured off, so it was never started.
-    Disabled,
     /// It did not start; the string is why.
     Failed(String),
 }
@@ -277,6 +275,13 @@ struct PinnedInner {
     /// landed. It waits here instead, above the input, until the engine reports
     /// it applied and the transcript prints it where it belongs.
     pending_steers: Vec<String>,
+    /// The row the "back to the tail" bar was drawn on, when one was.
+    ///
+    /// The frame paints it and the mouse is read on the keyboard's thread, so a
+    /// click cannot know which row it is without being told. `None` while the
+    /// view is at the tail, where no bar is drawn and a click is an ordinary
+    /// selection again.
+    tail_bar: Option<(u16, u16, u16)>,
 }
 impl Default for Pinned {
     fn default() -> Self {
@@ -568,6 +573,36 @@ impl Pinned {
     /// How far the conversation is scrolled back from its end.
     pub(crate) fn transcript_scroll(&self) -> usize {
         self.transcript_scroll.load(Ordering::Relaxed)
+    }
+
+    /// Records the row the "back to the tail" bar was drawn on, so a click can
+    /// jump to the end. `None` when no bar was drawn.
+    pub(crate) fn set_tail_bar(&self, bar: Option<(u16, u16, u16)>) {
+        self.lock().tail_bar = bar;
+    }
+
+    /// The row the "back to the tail" bar was drawn on, for a test that
+    /// asks whether one was drawn at all.
+    #[cfg(test)]
+    pub(crate) fn tail_bar(&self) -> Option<(u16, u16, u16)> {
+        self.lock().tail_bar
+    }
+
+    /// Whether a click at this cell landed on the "back to the tail" bar, and
+    /// jumps to the end when it did.
+    ///
+    /// The bar is caught before a click becomes a selection: a press on it is
+    /// the button, not the start of a drag over the text under it. A cell off
+    /// the bar — or a click while no bar is drawn — is left to the selection.
+    pub(crate) fn click_tail_bar(&self, column: u16, row: u16) -> bool {
+        let Some((left, bar_row, width)) = self.lock().tail_bar else {
+            return false;
+        };
+        if row != bar_row || column < left || column >= left.saturating_add(width) {
+            return false;
+        }
+        self.follow_tail();
+        true
     }
 
     /// Folds the rows a frame just gained into the scroll offset.
@@ -1676,9 +1711,16 @@ mod unix {
                                 // out of. The drag is read here and the frame
                                 // draws it; letting go copies it.
                                 MouseEventKind::Down(MouseButton::Left) => {
-                                    pinned.selecting.store(true, Ordering::Relaxed);
-                                    pinned.begin_selection(mouse.column, mouse.row);
-                                    redraw = true;
+                                    // The "back to the tail" bar is a button, not
+                                    // text: a press on it jumps to the end and
+                                    // does not start a selection under it.
+                                    if pinned.click_tail_bar(mouse.column, mouse.row) {
+                                        redraw = true;
+                                    } else {
+                                        pinned.selecting.store(true, Ordering::Relaxed);
+                                        pinned.begin_selection(mouse.column, mouse.row);
+                                        redraw = true;
+                                    }
                                 }
                                 MouseEventKind::Drag(MouseButton::Left) => {
                                     if pinned.selecting.load(Ordering::Relaxed) {

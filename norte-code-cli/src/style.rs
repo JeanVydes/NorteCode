@@ -280,6 +280,16 @@ impl Style {
         ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::REVERSED)
     }
 
+    /// The widget style for the "back to the tail" bar.
+    ///
+    /// Reverse video, the same inversion a selection and the startup menu's
+    /// cursor use: it reads as a control on a terminal whose colours this
+    /// client did not pick, and it is never mistaken for the text under it.
+    #[must_use]
+    pub(crate) const fn reverse_span() -> ratatui::style::Style {
+        ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::REVERSED)
+    }
+
     /// Bold, for names and headings.
     #[must_use]
     pub fn bold(self, text: impl Display) -> String {

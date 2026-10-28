@@ -1101,14 +1101,14 @@ fn report_tools_now(
     renderer.open_editable("tools", rows);
 }
 
-/// Every configured MCP server, as the sidebar's rows.
+/// Every MCP server the sidebar names: the ones switched on.
 ///
-/// It is built from the configuration and the status together, and not from the
-/// status alone: a server that is configured off, or that failed to start, is
-/// exactly what a person wants the column to say, and a list of only the running
-/// ones would hide both. The state comes from the status when there is one and
-/// from the configuration otherwise, so the sidebar and `/mcp` cannot disagree
-/// about which server is on.
+/// A server configured off is left out, not drawn as a dead row. It is off on
+/// purpose and a row that kept saying so took a line of the column for the life
+/// of the process, next to the ones that are actually up; the `/mcp` panel is
+/// where a person goes to see and switch every entry, including the off ones.
+/// A server that failed to start stays: it is configured on and not running,
+/// which is exactly what the column should warn about.
 pub(crate) fn mcp_rows(service: &norte_code_agent::Service) -> Vec<crate::input::McpRow> {
     use crate::input::{McpRow, McpState};
     let status = service.mcp_status();
@@ -1117,11 +1117,10 @@ pub(crate) fn mcp_rows(service: &norte_code_agent::Service) -> Vec<crate::input:
         .config()
         .mcp_servers
         .iter()
-        .map(|(name, config)| {
+        .filter(|(_, config)| config.enabled)
+        .map(|(name, _)| {
             let running = status.iter().find(|server| &server.name == name);
-            let state = if !config.enabled {
-                McpState::Disabled
-            } else if let Some(server) = running {
+            let state = if let Some(server) = running {
                 if server.active {
                     McpState::On
                 } else {
@@ -1846,6 +1845,13 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
             renderer.notice(format!("mcp server `{name}` {word}"));
             if !enabled {
                 renderer.notice("its tools leave the next turn; the process stays up");
+            }
+            // The file changed, so the configuration in memory is stale: a
+            // reload reads it back before the connections are rebuilt. Without
+            // this the sidebar was filtered from the old `enabled` flag and a
+            // server switched off here kept its row until a `/refresh`.
+            if let Err(error) = service.reload_config() {
+                renderer.notice(format!("warning: could not reload the config: {error}"));
             }
             reload_mcp(service, renderer).await;
             return;

@@ -6,7 +6,28 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A "back to the latest" bar sits on the last row of the conversation
+  while the view is scrolled back, naming the key that returns to the tail.
+  It is a button too: clicking it jumps to the newest line, so a person who
+  scrolled far up does not page back down. `Ctrl-End` does the same from the
+  keyboard; the bar is not drawn at the tail, where there is nothing to go
+  back to.
+
 ### Fixed
+
+- A server switched off in a session takes effect at once. `/mcp disable`
+  wrote the config file but the connections were rebuilt from the copy in
+  memory, so the switch only appeared after a `/refresh`; the configuration
+  is re-read before the rebuild now.
+
+- An MCP server switched off leaves the sidebar. It was drawn as a dead `--`
+  row for the life of the process, taking a line of the column next to the
+  servers that are actually up; a server that is off is off on purpose, and the
+  `/mcp` panel is where every entry, including the off ones, is listed and
+  switched. A server that failed to start is still shown, because it is
+  configured on and not running.
 
 - Every saved session is in the startup menu, newest first. The list was cut to
   the ten most recent before the menu was built, and the filter only searches

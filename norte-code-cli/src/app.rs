@@ -550,6 +550,14 @@ pub(crate) struct Row {
     pub(crate) runs: Vec<crate::markdown::Run>,
 }
 
+/// What the "back to the latest" bar says while the view is scrolled back.
+///
+/// It is the sign that what is on screen is not the end of the conversation,
+/// and the way back to it: the row is a button the mouse can click, and the
+/// key it names jumps there too. A reader who scrolled back should not have
+/// to find the tail a page at a time.
+const TAIL_BAR: &str = "↓ back to the latest · End";
+
 /// Draws the conversation: the part that fits, newest at the bottom.
 fn draw_transcript(
     frame: &mut Draw<'_>,
@@ -599,6 +607,22 @@ fn draw_transcript(
             .map(|row| row_line(row, area.width, style)),
     );
     Paragraph::new(rows).render(area, frame.buffer_mut());
+    // A bar over the bottom row while the view is scrolled back: it says
+    // the end is not on screen and gives the one key, and the click, that
+    // goes there. At the tail there is nothing to go back to, so no bar
+    // is drawn and the frame records none: a click is a selection, as
+    // everywhere else.
+    if scroll == 0 || area.height == 0 {
+        pinned.set_tail_bar(None);
+        return;
+    }
+    let bar = Line::styled(TAIL_BAR.to_owned(), Style::reverse_span());
+    let bar_row = area.y + area.height - 1;
+    Paragraph::new(bar).render(
+        Rect::new(area.x, bar_row, area.width, 1),
+        frame.buffer_mut(),
+    );
+    pinned.set_tail_bar(Some((area.x, bar_row, area.width)));
 }
 
 /// The rows of the conversation a view of `height` rows shows, and where.
@@ -1160,7 +1184,6 @@ fn mcp_panel_rows(state: &State, style: Style, width: u16) -> Option<(String, Ve
             let (mark, ink) = match &row.state {
                 McpState::On => ("on ", style.dim_span()),
                 McpState::Off => ("off", style.faint_span()),
-                McpState::Disabled => ("-- ", style.faint_span()),
                 McpState::Failed(_) => ("!! ", style.red_span()),
             };
             let text = format!(
@@ -1591,21 +1614,18 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_shows_a_disabled_mcp_server_too() {
-        // A server configured off, or one that failed, is what a person wants
-        // the column to say: a list of only the running ones would hide exactly
-        // the entry they are looking for.
+    fn the_sidebar_shows_only_the_servers_that_are_on() {
+        // The column is what is *connected*: a server switched off in the config
+        // never reaches these rows, because `mcp_rows` drops it, so nothing of it
+        // takes a line here. The `/mcp` panel is where every configured entry is
+        // listed and switched. A server that failed is still a row, because it is
+        // configured on and not running, which is what the column should warn of.
         let mut state = State::new();
         state.mcp = vec![
             McpRow {
                 name: "on-one".to_owned(),
                 tools: 2,
                 state: McpState::On,
-            },
-            McpRow {
-                name: "off-one".to_owned(),
-                tools: 0,
-                state: McpState::Disabled,
             },
             McpRow {
                 name: "broken".to_owned(),
@@ -1615,9 +1635,8 @@ mod tests {
         ];
         let screen = screen_of(&state, 90, 24).join("\n");
         assert!(screen.contains("on-one"), "{screen}");
-        assert!(screen.contains("off-one"), "{screen}");
         assert!(screen.contains("broken"), "{screen}");
-        assert!(screen.contains("mcp 1/3"), "one of three is on: {screen}");
+        assert!(screen.contains("mcp 1/2"), "one of two is on: {screen}");
     }
 
     #[test]
@@ -2047,6 +2066,47 @@ mod tests {
             painted.trim_end().ends_with("short"),
             "the tail of the long line is still there: {rows:?}"
         );
+    }
+
+    #[test]
+    fn a_scrolled_view_shows_a_way_back_and_the_tail_does_not() {
+        // Reading history with no sign that it is history is how a person loses
+        // the newest line: the bar is the sign and the button, and it is gone at
+        // the tail, where there is nothing to go back to.
+        let mut state = State::new();
+        for index in 0..40 {
+            state
+                .transcript
+                .push(Entry::line(Kind::Answer, format!("line {index}")));
+        }
+        // At the tail there is no bar.
+        let at_tail = painted_state(&state, 60, 8);
+        assert!(at_tail.tail_bar().is_none(), "no bar is drawn at the tail");
+        // Scrolled back, the bar is drawn on the bottom row and is clickable.
+        let scrolled = Pinned::new();
+        scrolled.scroll_transcript(-5);
+        paint_into(&scrolled, &state, 60, 8);
+        let (left, row, width) = scrolled.tail_bar().expect("a bar when scrolled");
+        assert!(width > 0 && left < 60, "the bar spans into the frame");
+        assert!(row < 8, "the bar is inside an 8-row frame: {row}");
+        assert!(
+            scrolled.click_tail_bar(left, row),
+            "a click on the bar is caught"
+        );
+        assert_eq!(scrolled.transcript_scroll(), 0, "and goes to the tail");
+    }
+
+    #[test]
+    fn a_click_away_from_the_bar_does_not_jump() {
+        // The bar is a button, not a hot zone over the conversation: a click on
+        // the text is a selection, which is what reading and copying need.
+        let pinned = Pinned::new();
+        pinned.scroll_transcript(-5);
+        assert!(
+            !pinned.click_tail_bar(0, 0),
+            "nothing is drawn there, so nothing was caught"
+        );
+        assert_eq!(pinned.transcript_scroll(), 5, "the view did not move");
     }
 
     /// Paints a frame and hands back the pinned handle it wrote to.
