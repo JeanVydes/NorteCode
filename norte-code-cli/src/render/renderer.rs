@@ -813,7 +813,22 @@ impl Renderer {
             input,
             cursor,
             completion,
-            question: None,
+            // The question on screen, when one is: the frame draws it where the
+            // draft would be, and the editor owns it, so this is the one bridge
+            // between the two. Plain text, like everything else the widget
+            // draws, with the ink the widget's to choose.
+            question: self.pinned.question().map(|asked| crate::app::Question {
+                prompt: crate::select::strip_style(&asked.prompt),
+                choices: asked
+                    .choices
+                    .iter()
+                    .map(|choice| crate::select::strip_style(choice))
+                    .collect(),
+                cursor: asked.cursor,
+                multiple: asked.multiple,
+                taken: asked.taken.clone(),
+                typing: asked.typing,
+            }),
             // The status is built for a terminal that took escape codes, and
             // the frame draws with spans: what reaches it is the text, and the
             // ink is the widget's.

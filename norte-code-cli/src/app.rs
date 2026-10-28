@@ -161,7 +161,13 @@ impl State {
             .completion
             .as_ref()
             .map_or(0, |completion| completion.rows.len().min(COMPLETION_ROWS));
-        let question = usize::from(self.question.is_some());
+        // A question takes its own rows: the prompt, every choice, and the row
+        // that opens the box. Counting it as one row is what once cut the list
+        // to the prompt alone, so the choices never reached the screen.
+        let question = self
+            .question
+            .as_ref()
+            .map_or(0, |question| 1 + question.choices.len() + 1);
         u16::try_from(wrapped + completion + question)
             .unwrap_or(INPUT_ROWS)
             .clamp(1, INPUT_ROWS)
@@ -1181,6 +1187,72 @@ fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     Paragraph::new(shown).render(area, frame.buffer_mut());
 }
 
+/// Draws a question: the prompt, every choice, the row that opens the box, and
+/// the box itself once it is open.
+///
+/// It is its own function because a question replaces the block rather than
+/// growing it, and folding it into the draft's drawing made one function do two
+/// jobs. The prompt is the model's own words and keeps the amber ink the wait
+/// uses, so a question reads as the model speaking and not as a notice.
+fn draw_question(
+    frame: &mut Draw<'_>,
+    area: Rect,
+    question: &Question,
+    state: &State,
+    style: Style,
+) {
+    let mut rows: Vec<Line> = Vec::new();
+    rows.push(Line::from(Span::styled(
+        crate::text::terminal(&question.prompt).into_owned(),
+        style.ratatui((0xE5, 0xC0, 0x7B), 180, "33"),
+    )));
+    for (index, choice) in question.choices.iter().enumerate() {
+        let here = index == question.cursor;
+        let taken = question.taken.contains(&index);
+        let mark = if question.multiple {
+            if taken { "[x] " } else { "[ ] " }
+        } else {
+            ""
+        };
+        let text = format!("{} {mark}{choice}", if here { '›' } else { ' ' });
+        rows.push(if here {
+            Line::styled(text, Style::selected())
+        } else {
+            Line::from(Span::styled(text, style.dim_span()))
+        });
+    }
+    // The row that opens the box is not a choice and is drawn last, even when the
+    // model offered nothing: a question with no choices still has to be
+    // answerable, and this is the row that makes it so.
+    {
+        let here = question.cursor >= question.choices.len();
+        let text = format!(
+            "{} {}",
+            if here { '›' } else { ' ' },
+            if question.typing {
+                "something else:"
+            } else {
+                "something else"
+            }
+        );
+        rows.push(if here {
+            Line::styled(text, Style::selected())
+        } else {
+            Line::from(Span::styled(text, style.dim_span()))
+        });
+    }
+    // The box, once "something else" was chosen: the answer is typed at the
+    // prompt. Before that no letter belongs here, so nothing is drawn for it.
+    if question.typing {
+        let text = state.input.split('\n').next().unwrap_or_default();
+        rows.push(Line::from(Span::styled(
+            format!("> {text}"),
+            style.dim_span(),
+        )));
+    }
+    draw_block(frame, area, &rows);
+}
+
 /// Draws the input block: the draft, the completion and the question.
 ///
 /// All three live in the same rows, so they are one widget with three states
@@ -1193,26 +1265,7 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     // A question takes the block: it is what the model is waiting on, and the
     // draft is not what the person is working on while it is up.
     if let Some(question) = &state.question {
-        rows.push(Line::from(Span::styled(
-            crate::text::terminal(&question.prompt).into_owned(),
-            style.ratatui((0xE5, 0xC0, 0x7B), 180, "33"),
-        )));
-        for (index, choice) in question.choices.iter().enumerate() {
-            let here = index == question.cursor;
-            let taken = question.taken.contains(&index);
-            let mark = if question.multiple {
-                if taken { "[x] " } else { "[ ] " }
-            } else {
-                ""
-            };
-            let text = format!("{} {mark}{choice}", if here { '›' } else { ' ' });
-            rows.push(if here {
-                Line::styled(text, Style::selected())
-            } else {
-                Line::from(Span::styled(text, style.dim_span()))
-            });
-        }
-        draw_block(frame, area, &rows);
+        draw_question(frame, area, question, state, style);
         return;
     }
 
@@ -1627,6 +1680,69 @@ mod tests {
         let pinned = Pinned::new();
         paint_into(&pinned, state, width, height);
         pinned
+    }
+
+    /// The whole interface painted once, as the rows the screen shows.
+    fn screen_of(state: &State, width: u16, height: u16) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let pinned = Pinned::new();
+        let state = state.clone();
+        terminal
+            .draw(|frame| state.paint(frame, Style::plain(), &pinned))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_question_shows_its_prompt_and_every_choice() {
+        // The bug this pins: the block counted a question as one row, so the
+        // frame cut the list to the prompt and the choices never reached the
+        // screen. Every choice has to be there, with the row that opens the box
+        // under them.
+        let mut state = State::new();
+        state.question = Some(Question {
+            prompt: "which one?".to_owned(),
+            choices: vec!["alpha".to_owned(), "beta".to_owned()],
+            cursor: 0,
+            multiple: false,
+            taken: Vec::new(),
+            typing: false,
+        });
+        let screen = screen_of(&state, 60, 20).join("\n");
+        assert!(screen.contains("which one?"), "{screen}");
+        assert!(screen.contains("alpha"), "the first choice: {screen}");
+        assert!(screen.contains("beta"), "the second choice: {screen}");
+        assert!(screen.contains("something else"), "the box row: {screen}");
+    }
+
+    #[test]
+    fn a_question_with_no_choices_still_shows_the_box_row() {
+        // A model may ask without offering anything: the list is then the one row
+        // that opens the box, and it has to be drawn or there is nothing to
+        // choose at all.
+        let mut state = State::new();
+        state.question = Some(Question {
+            prompt: "what now?".to_owned(),
+            choices: Vec::new(),
+            cursor: 0,
+            multiple: false,
+            taken: Vec::new(),
+            typing: false,
+        });
+        let screen = screen_of(&state, 60, 20).join("\n");
+        assert!(screen.contains("what now?"), "{screen}");
+        assert!(screen.contains("something else"), "{screen}");
     }
 
     #[test]

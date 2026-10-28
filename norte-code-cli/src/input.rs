@@ -580,9 +580,13 @@ impl Pinned {
         (inner.draft.clone(), inner.draft_cursor)
     }
 
-    /// The question and its cursor, for the editor that draws and drives it.
-    #[cfg(test)]
-    fn question(&self) -> Option<Asked> {
+    /// The question on screen and its cursor, for the frame that draws it.
+    ///
+    /// The frame reads it the way it reads the draft: the editor owns the
+    /// question and the frame draws what it is told, and neither waits for the
+    /// other. It used to be a test-only reader, which is why the frame drew no
+    /// question at all.
+    pub(crate) fn question(&self) -> Option<Asked> {
         self.lock().asked.clone()
     }
 

@@ -1278,6 +1278,14 @@ log file gets the plain rows instead of the box drawing.
 
 ### Fixed
 
+- An `ask_user` question is drawn with its choices. The state the frame paints
+  had the question hard-wired to `None` and the only reader of the pending
+  question was test-only, so the widget never learned one was waiting: with
+  choices offered, the frame cut the block to a single row and nothing appeared
+  at all. The frame now reads the question the editor owns, the block counts it
+  as the prompt plus every choice plus the "something else" row, and that row is
+  drawn even when the model offered no choices.
+
 - A streamed tool output box is no longer up to 400 rows tall. It was a fixed
   count, about ten screens on a normal terminal: a long `shell` call filled the
   transcript with one box and there was nothing to scroll but the whole
