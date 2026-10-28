@@ -8,6 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Every saved session is in the startup menu, newest first. The list was cut to
+  the ten most recent before the menu was built, and the filter only searches
+  the rows it was given: typing the key of an eleventh session matched nothing,
+  so a session that existed looked absent. The menu draws its own scrolling
+  window, so the whole list costs nothing on screen.
+
 - The conversation stays where it is read while an answer streams. The scroll
   offset counts rows back from the end, so every chunk of a growing answer
   shifted the window up and the text under the eye walked away; the frame folds

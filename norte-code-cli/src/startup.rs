@@ -30,15 +30,6 @@ use norte_code_store_sqlite::{SessionDirectory as _, SqliteStore, StoredSession}
 use crate::select::{self, Item, Outcome};
 use crate::style::Style;
 
-/// How many sessions the startup list names.
-///
-/// A database with hundreds of sessions would otherwise print every one of them
-/// before the first question. The rest stay reachable: a key resolves to its row
-/// wherever it is in the list, and the count that was left out is printed beside
-/// it, because a bounded list that hides its own bound is worse than a short one
-/// that admits it.
-const LISTED_SESSIONS: usize = 10;
-
 /// How many providers the picker names.
 ///
 /// The configured ones come first and are never cut; the catalogue fills what is
@@ -204,17 +195,6 @@ pub(crate) fn choose_session(rows: &[SessionRow], style: Style) -> Result<Open, 
         return Ok(Open::New);
     }
     let items = session_items(rows);
-    let hidden = rows.len().saturating_sub(LISTED_SESSIONS);
-    if hidden > 0 {
-        eprintln!(
-            "{}",
-            style.dim(format!(
-                "{} session(s) saved, showing the {LISTED_SESSIONS} most recent; \
-                 {hidden} not shown (type a key to open one)",
-                rows.len()
-            ))
-        );
-    }
     match select::run(items, "which session?", style)? {
         // A bare Enter took the new session, and Escape means the same thing: it
         // is the one choice that needs nothing typed, so it is what an
@@ -251,7 +231,10 @@ fn open_of(row: &SessionRow) -> Open {
 ///
 /// The order is the contract the caller reads back: entry zero is a new session
 /// and entry one is the newest saved one, and the sessions follow in order, so
-/// `outcome - 2` is an index into `rows`.
+/// `outcome - 2` is an index into `rows`. Every session is a row, and the menu's
+/// own window is what bounds what is drawn: a filter has to be able to find a
+/// session that is not on the first screen, and it only searches the rows it was
+/// given — a list cut to ten here was a session that could not be typed to.
 fn session_items(rows: &[SessionRow]) -> Vec<Item> {
     let mut items = vec![
         Item::new("New session", true),
@@ -262,7 +245,7 @@ fn session_items(rows: &[SessionRow]) -> Vec<Item> {
         // its place: the second entry is the newest session.
         items[1] = items[1].clone().noted(state);
     }
-    for row in rows.iter().take(LISTED_SESSIONS) {
+    for row in rows {
         let mut item = Item::new(row.label(), false).searched_by(row.key.clone());
         if let Some(state) = row.state() {
             item = item.noted(state);
@@ -545,18 +528,28 @@ mod tests {
     }
 
     #[test]
-    fn the_session_list_is_bounded_and_says_how_many_it_left_out() {
-        // A database with hundreds of sessions must not print every one of them
-        // before the first question, and the rows that fell off must still be
-        // named somewhere: the count is that somewhere.
-        let rows: Vec<SessionRow> = (0..LISTED_SESSIONS + 3)
+    fn every_session_reaches_the_menu_so_the_filter_can_find_it() {
+        // The menu draws a window and scrolls it, so a long list is cheap to
+        // show; what it cannot do is search a row it was never given. The list
+        // was cut to a fixed ten here, so typing the key of the eleventh session
+        // matched nothing and the session looked absent though it existed. Every
+        // row is handed over now, newest first.
+        let rows: Vec<SessionRow> = (0..30)
             .map(|index| row(&format!("{index:08x}-0000"), None, Phase::Idle, false))
             .collect();
         let items = session_items(&rows);
         assert_eq!(
             items.len(),
-            LISTED_SESSIONS + 2,
-            "the fixed two and the bound"
+            rows.len() + 2,
+            "two fixed entries and every row"
+        );
+        // The last one is a row of the menu, and it is searchable by its key.
+        let last = &items[items.len() - 1];
+        assert_eq!(last.label, "0000001d");
+        assert!(
+            last.search.contains("0000001d-0000"),
+            "the whole key is searchable: {}",
+            last.search
         );
     }
 
