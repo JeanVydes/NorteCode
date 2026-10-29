@@ -8,6 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A tool's streamed output shows its last four lines instead of its first four
+  hundred. The box bounded itself by the screen and kept the head of the output,
+  so a build that failed at the end showed the file names that worked and
+  counted the failure away; the bound is now four rows and the oldest leaves as
+  each new one arrives. The model still receives the whole output, and the count
+  beneath the box says how many lines a person did not see.
 - The catalogue is two files a person owns, and nothing is fetched. It used to be
   a models.dev snapshot downloaded into a cache and falling back to a copy
   compiled into the binary; now `providers.json` says who serves models and over

@@ -1141,12 +1141,17 @@ fn a_line_that_never_ends_is_shown_once_it_is_long_enough() {
 }
 
 #[test]
-fn the_box_stops_printing_rows_past_its_height() {
-    // Without a bound, a command that prints thousands of lines pushes the
-    // transcript off the screen: the box shows its first rows and counts the
-    // rest rather than growing with the output.
+fn the_output_box_keeps_four_rows_and_the_last_four_are_the_ones_kept() {
+    // The box is a glance at how a call went, not a report: four rows, and the
+    // tail rather than the head. A build that scrolled past four lines is worth
+    // reading at its end, where the failure is.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
+    assert_eq!(
+        renderer.output_rows_len(),
+        0,
+        "nothing is in the box before a call opens it"
+    );
     for index in 0..40 {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1157,11 +1162,20 @@ fn the_box_stops_printing_rows_past_its_height() {
             last: false,
         });
     }
+    assert_eq!(renderer.output_rows_len(), 4, "the box holds four rows");
     assert_eq!(
-        renderer.output_rows_seen(),
-        40,
-        "every line that arrived is counted, whether shown or not"
+        renderer.output_rows(),
+        vec![
+            "line 36".to_owned(),
+            "line 37".to_owned(),
+            "line 38".to_owned(),
+            "line 39".to_owned(),
+        ],
+        "and what it holds is the end of the output, not the start"
     );
+    // The count of what was left out is the box's own, and the rows a person
+    // was shown are four of the forty that arrived.
+    assert_eq!(renderer.output_rows_dropped(), 36);
     renderer.tool_event(&ServerEventKind::ToolOutput {
         turn: 1,
         call_id: "call-1".to_owned(),
@@ -1170,37 +1184,38 @@ fn the_box_stops_printing_rows_past_its_height() {
         text: String::new(),
         last: true,
     });
-    assert_eq!(renderer.output_rows_seen(), 0, "closing resets the count");
+    assert_eq!(renderer.output_rows_len(), 0, "closing empties the box");
+    assert_eq!(renderer.output_rows_dropped(), 0, "and its count");
 }
 
 #[test]
-fn the_output_box_is_bounded_by_the_ceiling_without_a_screen() {
-    // A renderer with no terminal has no screen to measure, so the ceiling is
-    // the bound: the box holds that many rows and counts the rest.
+fn a_long_output_is_the_tail_and_not_the_head() {
+    // The bug this pins: the box kept the head while its comment promised the
+    // tail, so a command that failed at the end showed the four lines that
+    // worked and counted the failure away.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
-    let limit = renderer.output_limit_for_test();
-    assert_eq!(limit, 400, "no screen means the ceiling");
-    for index in 0..450 {
+    for label in ["first", "second", "third", "fourth", "fifth"] {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
             stream: "stdout".to_owned(),
-            text: format!("line {index}\n"),
+            text: format!("{label}\n"),
             last: false,
         });
     }
     assert_eq!(
-        renderer.output_rows_len(),
-        limit,
-        "the box holds the bound and no more"
+        renderer.output_rows(),
+        vec![
+            "second".to_owned(),
+            "third".to_owned(),
+            "fourth".to_owned(),
+            "fifth".to_owned(),
+        ],
+        "the first line left as the fifth arrived"
     );
-    assert_eq!(
-        renderer.output_rows_seen(),
-        450,
-        "and counts everything that arrived"
-    );
+    assert_eq!(renderer.output_rows_dropped(), 1, "and it is counted");
 }
 
 #[test]
