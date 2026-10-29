@@ -83,6 +83,60 @@ pub struct Wire {
     pub api: String,
     /// The shape of the requests and answers this surface speaks.
     pub schema: WireSchema,
+    /// The credential header this surface expects, when it is not the one the
+    /// schema implies.
+    ///
+    /// `None` is the common case and means the header follows from the schema,
+    /// which is what a vendor that speaks its own shape expects. A gateway that
+    /// serves another vendor's shape over its own credential — an Anthropic
+    /// Messages surface reached with `Authorization: Bearer` — names one here,
+    /// because the schema says how the body is shaped and not who is paying.
+    pub auth: Option<AuthKind>,
+}
+
+/// The credential a wire's requests carry.
+///
+/// It is a closed set and it is deliberately small: these are the headers the
+/// ecosystem converges on, and a vendor with a header of its own is a vendor
+/// this host does not reach over a compatible wire. Naming one is override and
+/// not default — a wire that says nothing carries what its schema implies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthKind {
+    /// `Authorization: Bearer <key>`.
+    Bearer,
+    /// `x-api-key: <key>`.
+    XApiKey,
+    /// `x-goog-api-key: <key>`.
+    XGoogApiKey,
+    /// Send no credential, for a local or otherwise open endpoint.
+    Disabled,
+}
+
+impl AuthKind {
+    /// The header this kind sets, as a name a person reads.
+    ///
+    /// `Disabled` names none, and a message that had to print it says so rather
+    /// than showing an empty header.
+    #[must_use]
+    pub fn header(self) -> Option<&'static str> {
+        match self {
+            Self::Bearer => Some("Authorization"),
+            Self::XApiKey => Some("x-api-key"),
+            Self::XGoogApiKey => Some("x-goog-api-key"),
+            Self::Disabled => None,
+        }
+    }
+
+    /// The kind a schema implies when a wire names none.
+    #[must_use]
+    pub fn for_schema(schema: WireSchema) -> Self {
+        match schema {
+            WireSchema::OpenAI => Self::Bearer,
+            WireSchema::Anthropic => Self::XApiKey,
+            WireSchema::Google => Self::XGoogApiKey,
+        }
+    }
 }
 
 /// The request/answer shape a wire speaks.
@@ -758,6 +812,7 @@ mod tests {
             wires: vec![Wire {
                 api: "https://example.invalid/v1".to_owned(),
                 schema: WireSchema::OpenAI,
+                auth: None,
             }],
         }
     }
@@ -855,14 +910,17 @@ mod tests {
             Wire {
                 api: "https://example.invalid/google".to_owned(),
                 schema: WireSchema::Google,
+                auth: None,
             },
             Wire {
                 api: "https://example.invalid/anthropic".to_owned(),
                 schema: WireSchema::Anthropic,
+                auth: None,
             },
             Wire {
                 api: "https://example.invalid/openai".to_owned(),
                 schema: WireSchema::OpenAI,
+                auth: None,
             },
         ];
         assert_eq!(

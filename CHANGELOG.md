@@ -8,6 +8,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A wire may name the credential header it carries. `providers.json` gains an
+  optional `auth` on each wire — `bearer`, `x_api_key`, `x_goog_api_key` or
+  `disabled` — for a gateway that serves another vendor's shape over its own
+  credential: an Anthropic Messages surface reached with `Authorization: Bearer`.
+  Leaving it out follows the schema, so nothing changes for a provider that
+  speaks its own shape, and `disabled` sends no credential for a local endpoint.
+  The configuration file still cannot set it — the wire is what a provider owns,
+  and a value in the config could only make the request wrong.
+
 - `/provider` holds a switch the current model cannot survive instead of sending
   it. A provider does not serve another's model, so `exa/river-model` was a
   request the service refused and the old provider could not be left: the two

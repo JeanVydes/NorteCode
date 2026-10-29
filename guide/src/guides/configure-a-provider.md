@@ -142,9 +142,28 @@ Google. A schema the provider does not serve is an error listing the ones it
 does.
 
 The credential header follows from the schema — `Bearer` for OpenAI,
-`x-api-key` for Anthropic, `x-goog-api-key` for Google — so there is no `auth`
-setting. A gateway that wants a different header is a gateway whose schema this
-host does not speak.
+`x-api-key` for Anthropic, `x-goog-api-key` for Google. A gateway that serves
+another vendor's *shape* over its own credential names one on the wire, because
+the schema says how the body is shaped and not who is paying:
+
+```json
+{
+  "providers": {
+    "gateway": {
+      "environment_keys": ["GATEWAY_API_KEY"],
+      "wires": [
+        { "api": "https://gateway.invalid/v1", "schema": "anthropic", "auth": "bearer" }
+      ]
+    }
+  }
+}
+```
+
+`auth` is one of `bearer`, `x_api_key`, `x_goog_api_key` or `disabled`, and it
+is optional: leaving it out follows the schema. `disabled` sends no credential,
+which is what a local endpoint wants when it has an `environment_keys` list for
+another reason. There is still no `auth` in the configuration file — the wire is
+the only place that may say it.
 
 ## A local endpoint
 

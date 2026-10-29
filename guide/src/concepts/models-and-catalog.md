@@ -110,9 +110,12 @@ norte-code new --provider openai --model gpt-5 --wire openai
 
 A schema the provider does not serve is an error listing the ones it does.
 
-The credential header follows from the schema and from nothing else — `Bearer`
-for OpenAI, `x-api-key` for Anthropic, `x-goog-api-key` for Google — so there is
-nothing to configure about it.
+The credential header follows from the schema — `Bearer` for OpenAI, `x-api-key`
+for Anthropic, `x-goog-api-key` for Google — and a wire may name its own `auth`
+when a gateway serves another vendor's shape over its own credential. It is
+optional: leaving it out follows the schema. The configuration file cannot set
+it, because a value there could only make the request wrong; the wire, which is
+what the provider owns, is the one place that may.
 
 The Responses API exists in Norte and is deliberately not reachable here: it is
 another shape entirely, and this host speaks the one the three schemas share.

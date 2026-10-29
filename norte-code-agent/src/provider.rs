@@ -24,7 +24,7 @@ use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 /// A `providers.json` entry's wire: a base URL and the schema it speaks.
 pub use norte_code_catalog::schema::Wire as CatalogWire;
 use norte_code_catalog::{
-    Catalog, CatalogError, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
+    AuthKind, Catalog, CatalogError, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
 };
 
 use norte_code_config::{ApiKey, Config};
@@ -45,10 +45,18 @@ pub struct ModelSpec {
     pub api_key: ApiKey,
     /// The schema the provider serves for this model.
     ///
-    /// It is the whole of what the wire is: which adapter speaks it, which
-    /// credential header it carries and whether the prompt cache is explicit all
-    /// follow from it, so nothing here duplicates it.
+    /// It is what the wire *is*: which adapter speaks it and whether the prompt
+    /// cache is explicit follow from it, and so does the credential header —
+    /// unless the wire named one of its own, which is `auth`.
     pub schema: WireSchema,
+    /// The credential header, when the wire named one its schema does not
+    /// imply.
+    ///
+    /// A gateway that serves another vendor's shape over its own credential —
+    /// an Anthropic Messages surface reached with `Authorization: Bearer` —
+    /// says so on its wire, and the header here is that. `None` is the common
+    /// case: the header follows from the schema.
+    pub auth: Option<AuthKind>,
     /// The capability declaration the catalogue entry and config produce.
     pub capabilities: Capabilities,
     /// The headers sent with every request to this provider.
@@ -101,6 +109,7 @@ impl ModelSpec {
             endpoint: wire.api.clone(),
             api_key,
             schema: wire.schema,
+            auth: wire.auth,
             capabilities: norte_code_catalog::capabilities(model, wire.schema),
             headers: headers_for(&model.provider_id),
         })
@@ -217,7 +226,14 @@ impl ModelFactory for VendorModels {
         // implies. There is no branch for a vendor this build has heard of,
         // because knowing the vendor is not what makes the request work — the
         // wire is.
-        let profile = profile(spec.schema, provider, &spec.endpoint, key, &spec.headers)?;
+        let profile = profile(
+            spec.schema,
+            spec.auth,
+            provider,
+            &spec.endpoint,
+            key,
+            &spec.headers,
+        )?;
         build_with_profile(spec.schema, reference, profile, capabilities.clone())
     }
 }
@@ -233,21 +249,26 @@ fn with_headers(profile: VendorProfile, headers: &BTreeMap<String, String>) -> V
 
 /// Builds the vendor profile for a catalogue entry: wire family, base URL and
 /// the credential header the wire expects.
+///
+/// The header follows from the schema, which is what a vendor that speaks its
+/// own shape expects; a wire that named one of its own overrides it, because a
+/// gateway may serve another vendor's body over its own credential. The wire is
+/// the only place that may say so — the configuration cannot, and a value it
+/// could set would only make the request wrong.
 fn profile(
     schema: WireSchema,
+    auth: Option<AuthKind>,
     provider: ProviderId,
     endpoint: &str,
     key: String,
     headers: &BTreeMap<String, String>,
 ) -> Result<VendorProfile, ServiceError> {
     let profile = VendorProfile::new(provider, WireFamily::new(schema.family())?, endpoint)?;
-    // The credential header follows from the wire and nothing else: it is part
-    // of what the schema *is*, so a configuration able to change it could only
-    // make the request wrong.
-    let profile = match schema {
-        WireSchema::OpenAI => profile.with_auth(AuthScheme::bearer(key)),
-        WireSchema::Anthropic => profile.with_auth(AuthScheme::header("x-api-key", key)),
-        WireSchema::Google => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+    let profile = match auth.unwrap_or_else(|| AuthKind::for_schema(schema)) {
+        AuthKind::Bearer => profile.with_auth(AuthScheme::bearer(key)),
+        AuthKind::XApiKey => profile.with_auth(AuthScheme::header("x-api-key", key)),
+        AuthKind::XGoogApiKey => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+        AuthKind::Disabled => profile,
     };
     let profile = if schema == WireSchema::Anthropic {
         profile.with_header("anthropic-version", "2023-06-01")
@@ -288,6 +309,7 @@ mod tests {
                 .map(|schema| CatalogWire {
                     api: format!("https://{name}.invalid/v1"),
                     schema: *schema,
+                    auth: None,
                 })
                 .collect(),
         }
@@ -393,6 +415,39 @@ mod tests {
         let spec =
             ModelSpec::from_entry(&Config::default(), &provider, &model, None).expect("spec");
         assert_eq!(spec.schema, WireSchema::OpenAI);
+    }
+
+    #[test]
+    fn a_wire_may_name_its_own_credential_header() {
+        // A gateway that serves another vendor's shape over its own credential:
+        // an Anthropic Messages surface reached with `Authorization: Bearer`.
+        // The schema says how the body is shaped and not who is paying, so the
+        // wire says which header carries the key, and `None` follows the schema.
+        let mut gateway = provider("gateway", &[WireSchema::Anthropic]);
+        gateway.wires[0].auth = Some(AuthKind::Bearer);
+        let model = model("m", "gateway");
+        let spec = ModelSpec::from_entry(&Config::default(), &gateway, &model, None).expect("spec");
+        assert_eq!(spec.auth, Some(AuthKind::Bearer));
+
+        // The default still follows the schema when the wire says nothing.
+        let plain = provider("anthropic", &[WireSchema::Anthropic]);
+        let spec = ModelSpec::from_entry(&Config::default(), &plain, &model, None).expect("spec");
+        assert_eq!(spec.auth, None, "the header follows the schema");
+        assert_eq!(
+            AuthKind::for_schema(WireSchema::Anthropic),
+            AuthKind::XApiKey
+        );
+        assert_eq!(AuthKind::for_schema(WireSchema::OpenAI), AuthKind::Bearer);
+        assert_eq!(
+            AuthKind::for_schema(WireSchema::Google),
+            AuthKind::XGoogApiKey
+        );
+        // And a wire may opt out for a local endpoint that wants no credential.
+        let mut local = provider("local", &[WireSchema::OpenAI]);
+        local.wires[0].auth = Some(AuthKind::Disabled);
+        let spec = ModelSpec::from_entry(&Config::default(), &local, &model, None).expect("spec");
+        assert_eq!(spec.auth, Some(AuthKind::Disabled));
+        assert_eq!(AuthKind::Disabled.header(), None);
     }
 
     #[test]

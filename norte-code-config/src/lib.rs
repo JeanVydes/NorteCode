@@ -205,21 +205,6 @@ impl Default for Config {
     }
 }
 
-/// The credential a provider's requests carry, when it is not the wire's
-/// default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AuthKind {
-    /// `Authorization: Bearer <key>`.
-    Bearer,
-    /// `x-api-key: <key>`.
-    XApiKey,
-    /// `x-goog-api-key: <key>`.
-    XGoogApiKey,
-    /// Send no credential, for a local or otherwise open endpoint.
-    Disabled,
-}
-
 /// Session-title settings.
 ///
 /// A session is named by its key until it has a title, and a key is not a name:

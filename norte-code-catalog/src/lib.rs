@@ -18,8 +18,8 @@ pub mod source;
 
 pub use map::{capabilities, modality_of, reasoning};
 pub use schema::{
-    Catalog, CatalogError, Limit, Modalities, Modality, Model, ModelEntry, ModelStatus, Models,
-    Pricing, Provider, Providers, Reasoning, SupportedEffort, SupportedParams, Wire, WireSchema,
-    load_catalog_files,
+    AuthKind, Catalog, CatalogError, Limit, Modalities, Modality, Model, ModelEntry, ModelStatus,
+    Models, Pricing, Provider, Providers, Reasoning, SupportedEffort, SupportedParams, Wire,
+    WireSchema, load_catalog_files,
 };
 pub use source::{catalog_dir, models_path, providers_path};

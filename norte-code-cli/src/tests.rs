@@ -757,6 +757,7 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
         endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
         schema: WireSchema::OpenAI,
+        auth: None,
         capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
         headers: BTreeMap::new(),
     };

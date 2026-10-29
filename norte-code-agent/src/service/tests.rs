@@ -159,6 +159,7 @@ fn spec(model: &str) -> ModelSpec {
         endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
         schema: norte_code_catalog::WireSchema::OpenAI,
+        auth: None,
         capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
         headers: std::collections::BTreeMap::new(),
     }
