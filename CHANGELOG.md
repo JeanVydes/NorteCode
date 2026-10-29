@@ -6,6 +6,18 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `/provider` holds a switch the current model cannot survive instead of sending
+  it. A provider does not serve another's model, so `exa/river-model` was a
+  request the service refused and the old provider could not be left: the two
+  commands each move one half of the pair, and whichever moved first was
+  refused. The provider is now remembered and the model left unset, a message
+  sent in that state is refused with `no model set for exa; pick one with
+  /model`, and the next `/model` names one for the provider that is waiting. The
+  held provider lives in the client and never on disk: closing with one held
+  reopens on the model the session already had.
+
 ### Changed
 
 - A tool's streamed output shows its last four lines instead of its first four

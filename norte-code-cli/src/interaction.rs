@@ -570,19 +570,14 @@ pub(crate) async fn interactive_loop(
                     } else if let Some(current) = session.clone() {
                         // The model is a string and nothing else: it may carry
                         // slashes of its own — `nvidia/nemotron` is a model of
-                        // the `nvidia` provider, and a provider that names its
-                        // models `vendor/model` makes it `nvidia/nvidia/modelo`.
-                        // So this never takes the string apart to find a
-                        // provider: the provider is the session's, read from its
-                        // spec, and it is what `/provider` changes. Splitting on
-                        // the first slash here would read `nvidia` as a provider
-                        // the moment the model name had one.
-                        let provider = provider_of(service, &current);
-                        let Some(provider) = provider else {
-                            renderer.notice("the session has no provider yet");
+                        // the `nvidia` provider — so `pick_model` never takes it
+                        // apart to find a provider. The provider is the
+                        // session's, or the one `/provider` just moved to when
+                        // that switch left the model unset.
+                        let full_model = pick_model(service, &current, &model, renderer);
+                        let Some(full_model) = full_model else {
                             continue;
                         };
-                        let full_model = format!("{provider}/{model}");
                         renderer.model_name = Some(full_model.clone());
                         run_model(service, current, full_model, renderer).await;
                     } else {
@@ -733,12 +728,22 @@ pub(crate) async fn interactive_loop(
             }
             continue;
         }
+        // A provider was switched and no model has been chosen for it yet. There
+        // is nothing to send the message to — the session is still on its old
+        // model, and the new provider does not serve it — so the message is
+        // refused here rather than sent to a provider that would reject it.
+        if let Some(provider) = renderer.pending_provider.clone() {
+            renderer.said(&text);
+            renderer.failure(format!(
+                "no model set for `{provider}`; pick one with /model"
+            ));
+            continue;
+        }
         // The message is the conversation, so it goes to the transcript and the
         // frame draws it where the conversation is. Printed onto the terminal,
         // it landed on top of the input.
         renderer.said(&text);
-        renderer.mark_working();
-        // The first message of a session that has no title is what the title is
+        renderer.mark_working(); // The first message of a session that has no title is what the title is
         // made from, and it is asked for now so the request runs beside the turn
         // instead of in front of it. `renderer.title.is_none()` is the whole
         // condition: it is set the moment one arrives, so a session is asked
@@ -950,29 +955,20 @@ async fn handle_live_command(
         }
         ChatCommand::Model { model } => {
             if let Some(session) = current {
-                run_model(service, session.clone(), model, renderer).await;
+                let full_model = pick_model(service, session, &model, renderer);
+                if let Some(full_model) = full_model {
+                    renderer.model_name = Some(full_model.clone());
+                    run_model(service, session.clone(), full_model, renderer).await;
+                }
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
         }
-        // A provider switch is a model switch: the same request, with the
-        // provider replaced and the model name kept. During a turn it queues
-        // exactly as `/model` does — the refusal here was the odd one out, and
-        // it meant a person who wanted the next turn on another provider had to
-        // wait for the current one to end and then remember to ask again.
         ChatCommand::Provider { provider } => {
             if provider.is_empty() {
                 renderer.notice("wait until the current turn finishes, then /provider");
             } else if let Some(session) = current {
-                let model_name =
-                    model_name_of(service, session).unwrap_or_else(|| "default".to_owned());
-                run_model(
-                    service,
-                    session.clone(),
-                    format!("{provider}/{model_name}"),
-                    renderer,
-                )
-                .await;
+                switch_provider(service, session, &provider, renderer).await;
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
@@ -1388,6 +1384,125 @@ pub(crate) fn refresh_effort(
     }
 }
 
+/// The `provider/model` a `/model` names, given the half the person did not type.
+///
+/// The model is a string and nothing else: it may carry slashes of its own —
+/// `nvidia/nemotron` is a model of the `nvidia` provider — so this never takes
+/// the typed name apart to find a provider in it. The provider is the session's,
+/// or the one `/provider` just moved to when that switch left the model unset,
+/// which is what makes `/provider exa` then `/model x` land on `exa/x`.
+///
+/// Returns `None` when there is nowhere for the name to land: a session with no
+/// provider yet, which is the one case a person has to answer with `/provider`
+/// first.
+fn pick_model(
+    service: &Arc<Service>,
+    session: &SessionKey,
+    model: &str,
+    renderer: &mut Renderer,
+) -> Option<String> {
+    let provider = renderer
+        .pending_provider
+        .clone()
+        .or_else(|| provider_of(service, session));
+    let Some(provider) = provider else {
+        renderer.notice("the session has no provider yet; pick one with /provider");
+        return None;
+    };
+    Some(format!("{provider}/{model}"))
+}
+
+/// What a `/provider` asks for, once the catalogue has been asked about it.
+///
+/// The decision is a value and not a set of branches inside the command, so it
+/// can be checked without a service: the four outcomes are the whole of what a
+/// provider switch can be, and the command below is only the carrying-out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProviderSwitch {
+    /// The new provider serves the model already in play: switch to it.
+    Move(String),
+    /// The new provider does not serve it. The provider is held and the model
+    /// is left for the next `/model`.
+    Hold,
+    /// The session has no model to carry.
+    NoModel,
+    /// The catalogue does not list the provider.
+    Unknown,
+}
+
+/// What `/provider` should do, from the three facts the catalogue answers.
+///
+/// It takes booleans rather than the catalogue so the four cases are enumerated
+/// in one place instead of inferred from control flow at the call site.
+fn plan_provider_switch(known: bool, model: Option<&str>, serves: bool) -> ProviderSwitch {
+    if !known {
+        return ProviderSwitch::Unknown;
+    }
+    let Some(model) = model else {
+        return ProviderSwitch::NoModel;
+    };
+    if serves {
+        ProviderSwitch::Move(model.to_owned())
+    } else {
+        ProviderSwitch::Hold
+    }
+}
+
+/// Moves the session to `provider`, or leaves its model to be chosen.
+///
+/// The switch is one request when the model survives it — the same model id is
+/// served by the new provider too — and nothing is sent when it does not: a
+/// provider does not serve another's model, and `exa/river-model` is a request
+/// no provider would answer. Instead the provider is remembered and the model
+/// is left unset, so the next `/model` names one for it and a message sent in
+/// the meantime is refused rather than refused by the vendor.
+///
+/// That unset state is the client's own and never reaches the service: a
+/// session is not committed without a model, and closing here reopens on the
+/// model the session already had.
+async fn switch_provider(
+    service: &Arc<Service>,
+    session: &SessionKey,
+    provider: &str,
+    renderer: &mut Renderer,
+) {
+    let model_name = model_name_of(service, session);
+    let catalog = service.catalog();
+    let known = catalog.provider(provider).is_some();
+    let serves = model_name
+        .as_deref()
+        .is_some_and(|model| catalog.find(provider, model).is_some());
+    match plan_provider_switch(known, model_name.as_deref(), serves) {
+        ProviderSwitch::Unknown => {
+            let mut names: Vec<String> = catalog.providers().keys().cloned().collect();
+            names.sort();
+            renderer.failure(format!(
+                "unknown provider `{provider}`; pick one of: {}",
+                names.join(", ")
+            ));
+        }
+        ProviderSwitch::NoModel => {
+            renderer.notice("the session has no model yet; pick one with /model");
+        }
+        // A model the new provider does not serve is the case this exists for:
+        // the switch is held and the model is left to the next `/model`.
+        ProviderSwitch::Hold => {
+            renderer.pending_provider = Some(provider.to_owned());
+            renderer.model_name = Some(provider.to_owned());
+            renderer.notice(format!(
+                "`{provider}` does not serve `{}`; pick one with /model",
+                model_name.unwrap_or_default()
+            ));
+        }
+        ProviderSwitch::Move(model) => {
+            let full = format!("{provider}/{model}");
+            renderer.pending_provider = None;
+            renderer.model_name = Some(full.clone());
+            run_model(service, session.clone(), full, renderer).await;
+        }
+    }
+}
+
 async fn run_model(
     service: &Arc<Service>,
     session: SessionKey,
@@ -1403,6 +1518,9 @@ async fn run_model(
                 match event.kind {
                     ServerEventKind::ModelChanged { model } => {
                         reported = true;
+                        // The provider the switch was waiting on is settled once
+                        // the model is: from here a message has somewhere to go.
+                        renderer.pending_provider = None;
                         renderer.notice(format!("model set to {model}"));
                         // A new model can refuse the effort in force — the
                         // service downgrades it to one the model declares — so
@@ -1412,6 +1530,7 @@ async fn run_model(
                     }
                     ServerEventKind::ModelQueued { model } => {
                         reported = true;
+                        renderer.pending_provider = None;
                         renderer.notice(format!(
                             "model switch to {model} queued for the next turn boundary"
                         ));
@@ -2691,9 +2810,47 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::{
-        BudgetUnit, ChatCommand, JobListAction, McpAction, Reasoning, ReasoningScope, SignalGuard,
-        command_suggestion, parse_budget_limit, parse_chat_command,
+        BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
+        ReasoningScope, SignalGuard, command_suggestion, parse_budget_limit, parse_chat_command,
+        plan_provider_switch,
     };
+
+    #[test]
+    fn a_provider_switch_moves_only_when_the_model_survives_it() {
+        // The three cases the command has, as values: the model is served (move),
+        // it is not (hold the provider), and there is nothing to carry. Before
+        // this, `/provider` kept the model and sent the pair whatever the
+        // catalogue said, so a provider that does not serve another's model got
+        // a request it would refuse — and there was no way out of the state,
+        // because `/model` put the old provider back on.
+        assert_eq!(
+            plan_provider_switch(true, Some("shared-model"), true),
+            ProviderSwitch::Move("shared-model".to_owned())
+        );
+        assert_eq!(
+            plan_provider_switch(true, Some("other-providers-model"), false),
+            ProviderSwitch::Hold
+        );
+        assert_eq!(
+            plan_provider_switch(true, None, false),
+            ProviderSwitch::NoModel
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_is_decided_before_the_model_is_looked_at() {
+        // `serves` is a question about a provider that exists. Asking it about
+        // one the catalogue does not list would answer "no" and hold a switch to
+        // nowhere, which reads as the provider being real and the model wrong.
+        assert_eq!(
+            plan_provider_switch(false, Some("m"), false),
+            ProviderSwitch::Unknown
+        );
+        assert_eq!(
+            plan_provider_switch(false, None, false),
+            ProviderSwitch::Unknown
+        );
+    }
 
     /// The usage line the registry writes for a command.
     fn usage_of(name: &str) -> Option<String> {

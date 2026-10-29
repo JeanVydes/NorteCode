@@ -184,6 +184,19 @@ pub(crate) struct Renderer {
     /// The path a `write` or `read` is working on, by call, until it finishes.
     pending_paths: BTreeMap<String, String>,
     pub(crate) model_name: Option<String>,
+    /// The provider `/provider` moved to, when the model did not come with it.
+    ///
+    /// A provider switch that the current model cannot survive — `exa` does not
+    /// serve `river`'s model — leaves the session on its old model until one is
+    /// chosen for the new provider. This is the provider waiting for that
+    /// choice: while it is set, the session has no model, and a message that
+    /// would be sent is refused instead.
+    ///
+    /// It lives in the client and never reaches the service or the disk. A
+    /// session is never *committed* without a model — `models.json` is what a
+    /// session's row holds — so this is a state of the window and not of the
+    /// conversation: leaving with it set reopens on the model the session had.
+    pub(crate) pending_provider: Option<String>,
     /// The reasoning effort the session is actually using, as `/reasoning`
     /// names it. `None` until a turn has settled it, because before that the
     /// setting is whatever the next turn resolves.
@@ -342,6 +355,7 @@ impl Renderer {
             screen: None,
             pending_paths: BTreeMap::new(),
             model_name: None,
+            pending_provider: None,
             reasoning: None,
             waiting: None,
             waiting_since: None,
