@@ -20,6 +20,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `WireKind` is gone: `WireSchema` was already the same fact with another
+  name. `Chat` was `OpenAI`, `Messages` was `Anthropic` and `GenerateContent`
+  was `Google`, and the conversion between them could only ever be a bug — three
+  values with two names each, and a `From` impl to carry one to the other. The
+  two things the second type added, the Norte wire-family string and the prompt
+  cache mode, are now methods on `WireSchema` itself. `ModelSpec` carried the
+  wire *and* the schema beside each other; it carries the schema alone, and
+  which adapter speaks it, which credential header it carries and whether the
+  cache is explicit all follow from it.
+
 - A tool's streamed output shows its last four lines instead of its first four
   hundred. The box bounded itself by the screen and kept the head of the output,
   so a build that failed at the end showed the file names that worked and

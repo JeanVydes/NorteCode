@@ -19,40 +19,23 @@ use crate::schema::{
     Modality as DeclaredModality, Model, SupportedEffort, SupportedParams, WireSchema,
 };
 
-/// The wire family an engine speaks.
+/// The Norte wire family and cache mode a catalogue schema implies.
 ///
-/// It is derived from the catalogue's [`WireSchema`] and it names a wire of
-/// Norte's own: the crate that implements each one owns the string, and this
-/// type is what the rest of the host passes around instead of a string of its
-/// own that could drift from it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WireKind {
-    /// `OpenAI` chat completions, the surface every compatible vendor speaks.
-    Chat,
-    /// Anthropic Messages.
-    Messages,
-    /// Google `generateContent`.
-    GenerateContent,
-}
-
-impl From<WireSchema> for WireKind {
-    fn from(schema: WireSchema) -> Self {
-        match schema {
-            WireSchema::OpenAI => Self::Chat,
-            WireSchema::Anthropic => Self::Messages,
-            WireSchema::Google => Self::GenerateContent,
-        }
-    }
-}
-
-impl WireKind {
+/// They are inherent methods on the file's own enum rather than a second type
+/// that renames it. `WireKind` was that second type: `Chat` was `OpenAI`,
+/// `Messages` was `Anthropic` and `GenerateContent` was `Google`, so every value
+/// had two names and a conversion between them that could only be a bug.
+impl WireSchema {
     /// The Norte wire-family string.
+    ///
+    /// The crate that implements each wire owns the string, so it is read from
+    /// there rather than written out here where it could drift from it.
     #[must_use]
     pub fn family(self) -> &'static str {
         match self {
-            Self::Chat => norte::openai::WIRE_CHAT,
-            Self::Messages => norte::anthropic::WIRE_MESSAGES,
-            Self::GenerateContent => norte::gemini::WIRE_GENERATE,
+            Self::OpenAI => norte::openai::WIRE_CHAT,
+            Self::Anthropic => norte::anthropic::WIRE_MESSAGES,
+            Self::Google => norte::gemini::WIRE_GENERATE,
         }
     }
 
@@ -63,8 +46,8 @@ impl WireKind {
     #[must_use]
     pub fn cache_mode(self) -> CacheMode {
         match self {
-            Self::Messages => CacheMode::Explicit,
-            Self::Chat | Self::GenerateContent => CacheMode::Automatic,
+            Self::Anthropic => CacheMode::Explicit,
+            Self::OpenAI | Self::Google => CacheMode::Automatic,
         }
     }
 }
@@ -74,10 +57,10 @@ impl WireKind {
 /// A missing limit stays absent, which makes compaction refuse for that model
 /// with a visible warning instead of guessing at a window it does not know.
 #[must_use]
-pub fn capabilities(model: &Model, wire: WireKind) -> Capabilities {
+pub fn capabilities(model: &Model, schema: WireSchema) -> Capabilities {
     let mut builder = Capabilities::builder()
         .streaming(StreamingGranularity::Delta)
-        .cache(wire.cache_mode())
+        .cache(schema.cache_mode())
         .reasoning(reasoning(model));
 
     // An empty input list means the file said nothing, and an entry that says
@@ -251,37 +234,29 @@ mod tests {
     }
 
     #[test]
-    fn the_three_schemas_map_to_the_three_wire_families() {
-        assert_eq!(WireKind::from(WireSchema::OpenAI), WireKind::Chat);
-        assert_eq!(WireKind::from(WireSchema::Anthropic), WireKind::Messages);
+    fn the_three_schemas_name_the_three_wire_families() {
+        // The schema is what a person writes in `providers.json`, and the family
+        // is Norte's name for the wire it selects. There is one type and not two
+        // names for each value: `WireKind::Chat` and `WireSchema::OpenAI` were
+        // the same fact written twice.
+        assert_eq!(WireSchema::OpenAI.family(), norte::openai::WIRE_CHAT);
         assert_eq!(
-            WireKind::from(WireSchema::Google),
-            WireKind::GenerateContent
-        );
-        assert_eq!(
-            WireKind::from(WireSchema::OpenAI).family(),
-            norte::openai::WIRE_CHAT
-        );
-        assert_eq!(
-            WireKind::from(WireSchema::Anthropic).family(),
+            WireSchema::Anthropic.family(),
             norte::anthropic::WIRE_MESSAGES
         );
-        assert_eq!(
-            WireKind::from(WireSchema::Google).family(),
-            norte::gemini::WIRE_GENERATE
-        );
+        assert_eq!(WireSchema::Google.family(), norte::gemini::WIRE_GENERATE);
     }
 
     #[test]
     fn only_anthropic_caches_explicitly() {
-        assert_eq!(WireKind::Messages.cache_mode(), CacheMode::Explicit);
-        assert_eq!(WireKind::Chat.cache_mode(), CacheMode::Automatic);
-        assert_eq!(WireKind::GenerateContent.cache_mode(), CacheMode::Automatic);
+        assert_eq!(WireSchema::Anthropic.cache_mode(), CacheMode::Explicit);
+        assert_eq!(WireSchema::OpenAI.cache_mode(), CacheMode::Automatic);
+        assert_eq!(WireSchema::Google.cache_mode(), CacheMode::Automatic);
     }
 
     #[test]
     fn a_model_that_takes_tools_declares_the_function_tool_kind() {
-        let declared = capabilities(&model(), WireKind::Chat);
+        let declared = capabilities(&model(), WireSchema::OpenAI);
         assert!(declared.tool_kinds.contains(&ToolKind::Function));
         assert_eq!(declared.max_context, Some(128_000));
         assert_eq!(declared.max_output, Some(8_192));
@@ -296,7 +271,7 @@ mod tests {
         // what the provider declared.
         let mut bare = model();
         bare.supported_params.clear();
-        let declared = capabilities(&bare, WireKind::Chat);
+        let declared = capabilities(&bare, WireSchema::OpenAI);
         assert!(!declared.tool_kinds.contains(&ToolKind::Function));
     }
 
@@ -304,7 +279,7 @@ mod tests {
     fn structured_output_follows_the_parameter_list() {
         let mut sample = model();
         assert!(
-            capabilities(&sample, WireKind::Chat)
+            capabilities(&sample, WireSchema::OpenAI)
                 .structured_output
                 .is_empty()
         );
@@ -312,7 +287,7 @@ mod tests {
             .supported_params
             .push(SupportedParams::StructuredOutput);
         assert!(
-            capabilities(&sample, WireKind::Chat)
+            capabilities(&sample, WireSchema::OpenAI)
                 .structured_output
                 .contains(&StructuredOutputMode::JsonObject)
         );
@@ -323,7 +298,7 @@ mod tests {
         let mut bare = model();
         bare.modalities.input.clear();
         bare.modalities.output.clear();
-        let declared = capabilities(&bare, WireKind::Chat);
+        let declared = capabilities(&bare, WireSchema::OpenAI);
         assert!(declared.modalities.supports_input(Modality::Text));
         assert!(declared.modalities.supports_output(Modality::Text));
     }
@@ -384,7 +359,7 @@ mod tests {
         let mut sample = model();
         sample.supported_params.push(SupportedParams::ToolChoice);
         sample.supported_params.push(SupportedParams::Logprobs);
-        let declared = capabilities(&sample, WireKind::Chat);
+        let declared = capabilities(&sample, WireSchema::OpenAI);
         assert!(declared.features.contains(&Feature::ForcedToolChoice));
         assert!(declared.features.contains(&Feature::Logprobs));
     }
@@ -416,7 +391,7 @@ mod tests {
             SupportedParams::TopK,
             SupportedParams::Verbosity,
         ];
-        let declared = capabilities(&sample, WireKind::Chat);
+        let declared = capabilities(&sample, WireSchema::OpenAI);
         assert!(declared.tool_kinds.contains(&ToolKind::Function));
         assert!(
             declared

@@ -16,7 +16,7 @@ pub mod map;
 pub mod schema;
 pub mod source;
 
-pub use map::{WireKind, capabilities, modality_of, reasoning};
+pub use map::{capabilities, modality_of, reasoning};
 pub use schema::{
     Catalog, CatalogError, Limit, Modalities, Modality, Model, ModelEntry, ModelStatus, Models,
     Pricing, Provider, Providers, Reasoning, SupportedEffort, SupportedParams, Wire, WireSchema,

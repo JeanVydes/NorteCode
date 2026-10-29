@@ -17,7 +17,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::provider::Wire;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use norte::harness::{InMemoryBlobStore, InMemoryStore};
@@ -27,7 +26,7 @@ use norte::{
     ProviderId, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
     ToolContext, Usage,
 };
-use norte_code_catalog::WireKind;
+use norte_code_catalog::WireSchema;
 use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
 use norte_code_protocol::{
     Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
@@ -157,11 +156,10 @@ fn spec(model: &str) -> ModelSpec {
     ModelSpec {
         provider: "test".to_owned(),
         model: model.to_owned(),
-        wire: Wire::Chat,
         endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
         schema: norte_code_catalog::WireSchema::OpenAI,
-        capabilities: norte_code_catalog::capabilities(entry, WireKind::Chat),
+        capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
         headers: std::collections::BTreeMap::new(),
     }
 }

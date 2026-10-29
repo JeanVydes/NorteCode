@@ -7,7 +7,7 @@ use super::{
 use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use norte_code_catalog::{WireKind, WireSchema};
+use norte_code_catalog::WireSchema;
 use norte_code_config::{BudgetConfig, Config};
 use norte_code_cost::CostSummary;
 use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
@@ -754,11 +754,10 @@ async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
     let spec = ModelSpec {
         provider: "test".to_owned(),
         model: "scripted".to_owned(),
-        wire: WireKind::Chat,
         endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
         schema: WireSchema::OpenAI,
-        capabilities: norte_code_catalog::capabilities(entry, WireKind::Chat),
+        capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
         headers: BTreeMap::new(),
     };
     let reference = ModelRef::new(

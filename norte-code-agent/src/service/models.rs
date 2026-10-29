@@ -33,10 +33,7 @@ pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
             // models would be offering a choice that fails when taken.
             continue;
         };
-        let capabilities = norte_code_catalog::capabilities(
-            entry.model,
-            norte_code_catalog::WireKind::from(wire.schema),
-        );
+        let capabilities = norte_code_catalog::capabilities(entry.model, wire.schema);
         let mut efforts: Vec<String> = capabilities
             .reasoning
             .efforts

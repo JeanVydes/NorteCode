@@ -46,36 +46,6 @@ pub enum ServiceError {
     /// No running turn is waiting on that question.
     #[error("question `{0}` is not pending for this session")]
     UnknownQuestion(String),
-    /// A provider has no endpoint and no native preset.
-    #[error(
-        "provider `{provider}` speaks the {wire:?} wire but has no API URL; \
-         the catalogue supplies it, or set `providers.{provider}.endpoint`"
-    )]
-    MissingEndpoint {
-        /// The provider id.
-        provider: String,
-        /// The wire it speaks.
-        wire: crate::provider::Wire,
-    },
-    /// The catalogue's endpoint template names an unset environment variable.
-    #[error(
-        "provider `{provider}` needs the environment variable `{variable}` to build its API URL; \
-         set it or configure `providers.{provider}.endpoint`"
-    )]
-    MissingEndpointVariable {
-        /// The provider id.
-        provider: String,
-        /// The variable the template names.
-        variable: String,
-    },
-    /// The catalogue's endpoint template is malformed.
-    #[error("provider `{provider}` has an unusable endpoint template `{template}`")]
-    EndpointTemplate {
-        /// The provider id.
-        provider: String,
-        /// The template as the catalogue spells it.
-        template: String,
-    },
     /// A budget is malformed or cannot be measured.
     #[error("budget: {0}")]
     Budget(String),

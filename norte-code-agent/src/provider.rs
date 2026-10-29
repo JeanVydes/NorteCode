@@ -21,8 +21,7 @@ use norte::http::{AuthScheme, VendorProfile};
 use norte::openai::OpenAiChat;
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
-pub use norte_code_catalog::WireKind as Wire;
-/// The catalogue's own wire: an API surface with its URL and schema.
+/// A `providers.json` entry's wire: a base URL and the schema it speaks.
 pub use norte_code_catalog::schema::Wire as CatalogWire;
 use norte_code_catalog::{
     Catalog, CatalogError, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
@@ -40,16 +39,15 @@ pub struct ModelSpec {
     pub provider: String,
     /// The model id, as the vendor spells it.
     pub model: String,
-    /// The wire the provider speaks.
-    pub wire: Wire,
     /// The base URL the wire's requests go to, from the provider's own entry.
     pub endpoint: String,
     /// The API key. Its `Debug` output is redacted.
     pub api_key: ApiKey,
     /// The schema the provider serves for this model.
     ///
-    /// It is kept beside the wire because it is what a person selected and what
-    /// the UI shows; the wire is what the engine sends.
+    /// It is the whole of what the wire is: which adapter speaks it, which
+    /// credential header it carries and whether the prompt cache is explicit all
+    /// follow from it, so nothing here duplicates it.
     pub schema: WireSchema,
     /// The capability declaration the catalogue entry and config produce.
     pub capabilities: Capabilities,
@@ -100,11 +98,10 @@ impl ModelSpec {
         Ok(Self {
             provider: model.provider_id.clone(),
             model: model.id.clone(),
-            wire: Wire::from(wire.schema),
             endpoint: wire.api.clone(),
             api_key,
             schema: wire.schema,
-            capabilities: norte_code_catalog::capabilities(model, Wire::from(wire.schema)),
+            capabilities: norte_code_catalog::capabilities(model, wire.schema),
             headers: headers_for(&model.provider_id),
         })
     }
@@ -220,8 +217,8 @@ impl ModelFactory for VendorModels {
         // implies. There is no branch for a vendor this build has heard of,
         // because knowing the vendor is not what makes the request work — the
         // wire is.
-        let profile = profile(spec.wire, provider, &spec.endpoint, key, &spec.headers)?;
-        build_with_profile(spec.wire, reference, profile, capabilities.clone())
+        let profile = profile(spec.schema, provider, &spec.endpoint, key, &spec.headers)?;
+        build_with_profile(spec.schema, reference, profile, capabilities.clone())
     }
 }
 
@@ -237,22 +234,22 @@ fn with_headers(profile: VendorProfile, headers: &BTreeMap<String, String>) -> V
 /// Builds the vendor profile for a catalogue entry: wire family, base URL and
 /// the credential header the wire expects.
 fn profile(
-    wire: Wire,
+    schema: WireSchema,
     provider: ProviderId,
     endpoint: &str,
     key: String,
     headers: &BTreeMap<String, String>,
 ) -> Result<VendorProfile, ServiceError> {
-    let profile = VendorProfile::new(provider, WireFamily::new(wire.family())?, endpoint)?;
+    let profile = VendorProfile::new(provider, WireFamily::new(schema.family())?, endpoint)?;
     // The credential header follows from the wire and nothing else: it is part
     // of what the schema *is*, so a configuration able to change it could only
     // make the request wrong.
-    let profile = match wire {
-        Wire::Chat => profile.with_auth(AuthScheme::bearer(key)),
-        Wire::Messages => profile.with_auth(AuthScheme::header("x-api-key", key)),
-        Wire::GenerateContent => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
+    let profile = match schema {
+        WireSchema::OpenAI => profile.with_auth(AuthScheme::bearer(key)),
+        WireSchema::Anthropic => profile.with_auth(AuthScheme::header("x-api-key", key)),
+        WireSchema::Google => profile.with_auth(AuthScheme::header("x-goog-api-key", key)),
     };
-    let profile = if wire == Wire::Messages {
+    let profile = if schema == WireSchema::Anthropic {
         profile.with_header("anthropic-version", "2023-06-01")
     } else {
         profile
@@ -260,17 +257,19 @@ fn profile(
     Ok(with_headers(profile, headers))
 }
 
-/// Builds the adapter that speaks `wire` over `profile`.
+/// Builds the adapter that speaks `schema` over `profile`.
 fn build_with_profile(
-    wire: Wire,
+    schema: WireSchema,
     reference: ModelRef,
     profile: VendorProfile,
     capabilities: Capabilities,
 ) -> Result<Arc<dyn Model>, ServiceError> {
-    Ok(match wire {
-        Wire::Chat => Arc::new(OpenAiChat::new(reference, profile, capabilities)?),
-        Wire::Messages => Arc::new(AnthropicMessages::new(reference, profile, capabilities)?),
-        Wire::GenerateContent => Arc::new(GeminiGenerate::new(reference, profile, capabilities)?),
+    Ok(match schema {
+        WireSchema::OpenAI => Arc::new(OpenAiChat::new(reference, profile, capabilities)?),
+        WireSchema::Anthropic => {
+            Arc::new(AnthropicMessages::new(reference, profile, capabilities)?)
+        }
+        WireSchema::Google => Arc::new(GeminiGenerate::new(reference, profile, capabilities)?),
     })
 }
 
@@ -365,7 +364,6 @@ mod tests {
         )
         .expect("google");
         assert_eq!(google.schema, WireSchema::Google);
-        assert_eq!(google.wire, Wire::GenerateContent);
 
         let error = ModelSpec::from_entry(
             &Config::default(),
@@ -395,7 +393,6 @@ mod tests {
         let spec =
             ModelSpec::from_entry(&Config::default(), &provider, &model, None).expect("spec");
         assert_eq!(spec.schema, WireSchema::OpenAI);
-        assert_eq!(spec.wire, Wire::Chat);
     }
 
     #[test]

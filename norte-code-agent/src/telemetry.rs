@@ -250,7 +250,7 @@ impl RequestMetadata {
             params: serde_json::to_value(&request.params).unwrap_or(Value::Null),
             extensions: serde_json::to_value(&request.extensions).unwrap_or(Value::Null),
             metadata: json!({
-                "wire": format!("{:?}", spec.wire),
+                "wire": format!("{:?}", spec.schema),
                 // A count and an estimate, never the messages themselves.
                 "messages": request.messages.len(),
                 "tool_declarations": request.tools.len(),
@@ -533,7 +533,6 @@ mod tests {
         let spec = ModelSpec {
             provider: "test".to_owned(),
             model: "test".to_owned(),
-            wire: crate::provider::Wire::Chat,
             endpoint: "https://example.invalid/v1".to_owned(),
             schema: norte_code_catalog::WireSchema::OpenAI,
             api_key: norte_code_config::ApiKey::new("test"),
@@ -591,7 +590,6 @@ mod tests {
         let spec = ModelSpec {
             provider: "test".to_owned(),
             model: "test".to_owned(),
-            wire: crate::provider::Wire::Chat,
             endpoint: "https://example.invalid/v1".to_owned(),
             schema: norte_code_catalog::WireSchema::OpenAI,
             api_key: norte_code_config::ApiKey::new("test"),

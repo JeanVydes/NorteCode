@@ -130,7 +130,7 @@ pub(crate) fn report_start(
                 }
             ),
         ),
-        fact("wire", spec.wire.family()),
+        fact("wire", spec.schema.family()),
         fact("approval", approval_label(configuration.approval_mode)),
         fact("iterations", &max_iterations),
         fact(
@@ -228,7 +228,7 @@ pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>)
     }
     lines.push(fact(
         "wire",
-        format!("{} · provider {}", spec.wire.family(), spec.provider),
+        format!("{} · provider {}", spec.schema.family(), spec.provider),
     ));
     lines.push(fact("context", token_limit_label(capabilities.max_context)));
     lines.push(fact("output", token_limit_label(capabilities.max_output)));
