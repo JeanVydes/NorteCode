@@ -122,6 +122,23 @@ pub(crate) struct Completion {
     pub(crate) cursor: usize,
 }
 
+impl Completion {
+    /// The first row the menu draws, so the cursor is on screen.
+    ///
+    /// The window is [`COMPLETION_ROWS`] rows tall and it follows the cursor
+    /// rather than the head of the list: a cursor on the seventh row of a list
+    /// of twenty drew the first four, so the arrows walked the list with nothing
+    /// to show for it. The window stops at the last row that fits, which is what
+    /// keeps the list from scrolling under itself at the end.
+    #[must_use]
+    fn top(&self) -> usize {
+        let rows = self.rows.len();
+        // The last row the window may start at, so it ends at the list's end.
+        let last = rows.saturating_sub(COMPLETION_ROWS);
+        self.cursor.min(last)
+    }
+}
+
 /// The question on screen, waiting for an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Question {
@@ -1542,7 +1559,21 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     }
     // The completion sits under the draft, on the rows the block already has.
     if let Some(completion) = &state.completion {
-        for (index, row) in completion.rows.iter().take(COMPLETION_ROWS).enumerate() {
+        // It is a window and not the head of the list: the cursor walks every
+        // row — a list of a hundred models is walked the way a list of three is
+        // — and drawing the first rows whatever the cursor did left the choice
+        // below the window, moving with no highlight to show for it. The window
+        // follows the cursor, so the row Enter or Tab would take is always one
+        // of the rows on screen.
+        let top = completion.top();
+        for (offset, row) in completion
+            .rows
+            .iter()
+            .skip(top)
+            .take(COMPLETION_ROWS)
+            .enumerate()
+        {
+            let index = top + offset;
             let here = index == completion.cursor;
             let text = format!("    {row}");
             rows.push(if here {
@@ -1828,6 +1859,58 @@ mod tests {
             70,
             "and no character was lost: {rows_of_x:?}"
         );
+    }
+
+    /// A completion menu with `rows` rows and its cursor at `cursor`.
+    fn menu(rows: usize, cursor: usize) -> Completion {
+        Completion {
+            text: String::new(),
+            rows: (0..rows).map(|n| format!("model-{n}")).collect(),
+            cursor,
+        }
+    }
+
+    #[test]
+    fn the_completion_menu_follows_its_cursor_instead_of_its_head() {
+        // The menu drew the first four rows whatever the cursor did, so a list
+        // of ten walked from the fifth row on showed nothing: the arrows moved a
+        // choice that was below the window the whole way. The window follows the
+        // cursor now, and the row under it is the row Enter would take.
+        let mut state = State::new();
+        state.completion = Some(menu(10, 7));
+        let screen = screen_of(&state, 80, 24).join("\n");
+        assert!(
+            screen.contains("model-7"),
+            "the row under the cursor is on screen: {screen}"
+        );
+        assert!(
+            !screen.contains("model-0"),
+            "and the head of the list is not: the window moved: {screen}"
+        );
+
+        // It stops at the end rather than scrolling past it: the last row is on
+        // screen and the window is full, so the list never shows blank rows.
+        state.completion = Some(menu(10, 9));
+        let end = screen_of(&state, 80, 24).join("\n");
+        assert!(end.contains("model-9"), "the last row is shown: {end}");
+        assert!(end.contains("model-6"), "and the window is full: {end}");
+        assert!(
+            !end.contains("model-5"),
+            "starting at the list's end: {end}"
+        );
+    }
+
+    #[test]
+    fn a_menu_shorter_than_the_window_starts_at_its_first_row() {
+        // The window is `COMPLETION_ROWS` tall and a list of three fills three
+        // rows from the top: there is nowhere to scroll and the arithmetic that
+        // moves it must not cut the head off a list that fits.
+        let mut state = State::new();
+        state.completion = Some(menu(3, 2));
+        let screen = screen_of(&state, 80, 24).join("\n");
+        for row in ["model-0", "model-1", "model-2"] {
+            assert!(screen.contains(row), "`{row}` is shown: {screen}");
+        }
     }
 
     #[test]

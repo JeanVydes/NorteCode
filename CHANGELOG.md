@@ -99,6 +99,21 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   service refused the pair, and `/model` put the old provider back: neither half
   of the pair could be moved. Both paths now call the same carrying-out.
 
+### Fixed
+
+- The completion menu can be walked and taken. Three things were wrong at once,
+  and each one hid the others. Enter was never the menu's key: it sent the
+  half-typed word, so `/provider ri` and Enter was refused instead of completed
+  to `/provider river`. The arrows did move the choice but nobody asked for a
+  frame, so the highlight stayed where it was and the list read as one that could
+  not be walked at all. And the menu drew the first four rows whatever the cursor
+  did, so a list walked past its fourth row moved a choice that was below the
+  window the whole way: the window follows the cursor now, and the row Enter
+  would take is always one of the rows on screen.
+
+  A line offering a single candidate was the same bug in miniature: `Tab` wrote
+  four spaces, because the candidate was only looked up when there was a menu.
+
 ### Added
 
 - `/provider` and `/model` complete their argument from the catalogue. Both took

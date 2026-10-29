@@ -677,6 +677,11 @@ impl Pinned {
     /// It wraps, because a list of a handful of rows is walked with one key: a
     /// menu that stopped at its last row would need the other key to come back,
     /// and the arrow that does nothing reads as broken.
+    ///
+    /// It marks the frame dirty, which is the whole of what makes the key do
+    /// anything: the choice lives here and the menu is drawn from it, so a key
+    /// that moved the number without asking for a frame moved the highlight
+    /// nowhere a person could see. The arrows walked the list in silence.
     pub(crate) fn move_completion(&self, delta: isize, rows: usize) -> bool {
         if rows == 0 {
             return false;
@@ -686,6 +691,7 @@ impl Pinned {
         let moved = (isize::try_from(at).unwrap_or(0) + delta).rem_euclid(count);
         self.completion_pick
             .store(usize::try_from(moved).unwrap_or(0), Ordering::Relaxed);
+        self.dirty.store(true, Ordering::Relaxed);
         true
     }
 
@@ -1600,6 +1606,11 @@ mod unix {
                             // Every other key belongs to the line, which is what
                             // rebuilds the menu and puts the choice back on the
                             // first row.
+                            //
+                            // Enter is the menu's too, and it is taken below
+                            // where the line is handled: with a menu open the key
+                            // means the row under the cursor, and it means the
+                            // line only when there is no menu to choose from.
                             let rows = crate::interaction::completion_rows(
                                 &buffer.display(),
                                 buffer.cursor,
@@ -1679,7 +1690,12 @@ mod unix {
                                 // its cursor, resolved from the line as it is
                                 // now: the key about to be read may be the one
                                 // that changes it.
-                                let picked = if rows > 1 {
+                                // One row is a hint and Tab writes it; several
+                                // are a menu and Tab writes the row under the
+                                // cursor. Either way the text comes from the
+                                // candidates, and the four spaces are the last
+                                // resort of a line that offers nothing at all.
+                                let picked = if rows > 0 {
                                     crate::interaction::completion_text(
                                         &buffer.display(),
                                         buffer.cursor,
@@ -1923,6 +1939,17 @@ mod unix {
                 KeyOutcome::Continue
             }
             KeyCode::Enter => {
+                // The row the menu has under its cursor is what the key takes,
+                // the way Tab takes the completion: a list offered to be chosen
+                // from and finishable only with the key beside it is half a
+                // control. `/provider ri` and Enter is `/provider river`; without
+                // this the half-typed word was sent and refused, which is the
+                // one outcome a completion exists to avoid.
+                if let Some(completion) = completion {
+                    if !completion.is_empty() {
+                        buffer.insert_text(completion);
+                    }
+                }
                 let line = buffer.text();
                 if !line.trim().is_empty() {
                     if history.last() != Some(&line) {
@@ -2235,6 +2262,60 @@ mod unix {
         }
 
         #[test]
+        fn enter_takes_the_completion_the_menu_has_under_its_cursor() {
+            // Enter sent the line as it stood, so `/provider ri` went off
+            // half-typed and was refused: the key beside Tab is the one a person
+            // reaches to accept a choice, and with a menu open there is a choice.
+            let (sender, mut receiver) = mpsc::unbounded_channel();
+            let mut buffer = draft("/provider ri");
+            let mut history = Vec::new();
+            let mut position = None;
+            let mut draft = String::new();
+            let outcome = handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut position,
+                &mut draft,
+                &sender,
+                Some("ver"),
+            );
+            assert!(matches!(outcome, KeyOutcome::Continue));
+            // The line that left is the completion applied, and the draft is
+            // empty again: the menu was accepted and the command sent.
+            let sent = receiver.try_recv().expect("the line was sent");
+            match sent {
+                EditorEvent::Line(line, _) => assert_eq!(line, "/provider river"),
+                other => panic!("the line was expected, got {other:?}"),
+            }
+            assert!(buffer.is_empty(), "the draft was consumed");
+        }
+
+        #[test]
+        fn enter_with_no_completion_sends_the_line_as_it_is() {
+            // Nothing offered is not an error: the key still ends the line, and
+            // a message is a message.
+            let (sender, mut receiver) = mpsc::unbounded_channel();
+            let mut buffer = draft("hello");
+            let mut history = Vec::new();
+            let mut position = None;
+            let mut draft = String::new();
+            handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut buffer,
+                &mut history,
+                &mut position,
+                &mut draft,
+                &sender,
+                None,
+            );
+            match receiver.try_recv().expect("the line was sent") {
+                EditorEvent::Line(line, _) => assert_eq!(line, "hello"),
+                other => panic!("the line was expected, got {other:?}"),
+            }
+        }
+
+        #[test]
         fn a_selection_replaces_what_is_typed_over_it() {
             // The point of a selection in the editor: it is a range the next
             // keystroke replaces, which is what makes typing over a word work.
@@ -2454,6 +2535,34 @@ mod pinned_tests {
         // nothing to copy at all.
         assert_eq!(super::text_in(((2, 0), (2, 0)), &rows), "f");
         assert_eq!(super::text_in(((0, 9), (5, 9)), &rows), "");
+    }
+
+    #[test]
+    fn walking_the_completion_menu_is_a_change_to_draw() {
+        // The same bug the scroll had: the arrows moved the choice and nobody
+        // asked for a frame, so the highlight stayed where it was and the list
+        // read as one that could not be walked at all. Walking it is a change.
+        let pinned = Pinned::new();
+        pinned.take_dirty();
+        assert!(pinned.move_completion(1, 5), "there is a menu to move");
+        assert_eq!(pinned.completion_pick(), 1);
+        assert!(pinned.take_dirty(), "the new row has to be drawn");
+
+        // It wraps: the arrow that does nothing at the end reads as broken.
+        pinned.move_completion(-1, 5);
+        assert_eq!(pinned.completion_pick(), 0);
+        pinned.move_completion(-1, 5);
+        assert_eq!(
+            pinned.completion_pick(),
+            4,
+            "backwards past the first wraps"
+        );
+
+        // No menu is no move, and nothing to draw: the arrows belong to the
+        // draft when the line offers nothing.
+        pinned.take_dirty();
+        assert!(!pinned.move_completion(1, 0));
+        assert!(!pinned.take_dirty(), "nothing moved, nothing to draw");
     }
 
     #[test]
