@@ -7,7 +7,7 @@ use super::{
     ServerEventKind, Service, SessionKey, StreamExt, Style, VecDeque, mpsc, short,
 };
 use crate::approval::{ApprovalChoice, ApprovalOutcome, approval_request, ask_approval};
-use crate::input::{Attachment, EditorAction, EditorEvent, InteractiveInput};
+use crate::input::{Attachment, CompletionNames, EditorAction, EditorEvent, InteractiveInput};
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
@@ -350,10 +350,8 @@ pub(crate) struct CommandSuggestion {
 /// The keymap asks this to know whether the arrows belong to the menu: one row
 /// is a hint and not a list, and taking the arrows for a choice nobody has to
 /// make is how a menu ends up feeling broken.
-pub(crate) fn completion_rows(text: &str, cursor: usize) -> usize {
-    crate::commands_registry::shared()
-        .candidates(text, cursor)
-        .len()
+pub(crate) fn completion_rows(text: &str, cursor: usize, names: &CompletionNames) -> usize {
+    candidates(text, cursor, names).len()
 }
 
 /// What Tab inserts for the row at `pick`.
@@ -362,15 +360,132 @@ pub(crate) fn completion_rows(text: &str, cursor: usize) -> usize {
 /// the line it was chosen for may be gone: completing to a row that is no
 /// longer offered is worse than completing to the first one.
 #[must_use]
-pub(crate) fn completion_text(text: &str, cursor: usize, pick: usize) -> Option<String> {
-    let rows = crate::commands_registry::shared().candidates(text, cursor);
+pub(crate) fn completion_text(
+    text: &str,
+    cursor: usize,
+    pick: usize,
+    names: &CompletionNames,
+) -> Option<String> {
+    let rows = candidates(text, cursor, names);
     rows.get(pick.min(rows.len().saturating_sub(1)))
         .map(|row| row.completion.clone())
         .filter(|completion| !completion.is_empty())
 }
 
-pub(crate) fn command_suggestion(text: &str, cursor: usize) -> Option<CommandSuggestion> {
+/// Every candidate for the line: the registry's, and the catalogue's.
+///
+/// The registry answers for its own arguments — the efforts, the scopes, the
+/// actions. `/provider` and `/model` take a name only the catalogue holds, and
+/// the registry cannot carry it: it is built once at startup while the
+/// catalogue is read again by `/refresh`, and one does not know about the
+/// other. Those two are answered from the names the CLI pushed into
+/// [`crate::input::Pinned`], and everything else is the registry's answer.
+pub(crate) fn candidates(
+    text: &str,
+    cursor: usize,
+    names: &CompletionNames,
+) -> Vec<norte_code_commands::Candidate> {
     let rows = crate::commands_registry::shared().candidates(text, cursor);
+    if !rows.is_empty() {
+        return rows;
+    }
+    catalogue_candidates(text, cursor, names)
+}
+
+/// The names the two commands that take one from the catalogue offer.
+///
+/// The line is a command and one word being typed, which is the shape both
+/// take: `/provider ri` offers the provider ids and `/model deep` the models of
+/// the provider in play. The models are the bare ids, because `/model` takes a
+/// model and the provider comes from the session rather than from the line.
+fn catalogue_candidates(
+    text: &str,
+    cursor: usize,
+    names: &CompletionNames,
+) -> Vec<norte_code_commands::Candidate> {
+    if cursor != text.len() {
+        return Vec::new();
+    }
+    // A command with an argument already finished is not a line to complete:
+    // there is no second provider and no second model, and the registry says
+    // the same about its own arguments.
+    let Some(space) = text.find(char::is_whitespace) else {
+        return Vec::new();
+    };
+    let partial = text[space..].trim_start();
+    if partial.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let (values, note) = match &text[..space] {
+        "/provider" => (&names.providers, "provider"),
+        "/model" => (&names.models, "model"),
+        _ => return Vec::new(),
+    };
+    let prefix = partial.to_lowercase();
+    values
+        .iter()
+        .filter(|value| value.to_lowercase().starts_with(&prefix))
+        .map(|value| norte_code_commands::Candidate {
+            text: value.clone(),
+            // Skipping the characters already typed rather than slicing at a
+            // byte offset: a name is not guaranteed to be ASCII, and a byte
+            // offset in the middle of a character would panic on a keypress.
+            completion: value.chars().skip(prefix.chars().count()).collect(),
+            note: note.to_owned(),
+        })
+        .collect()
+}
+
+/// Records the names the completion offers for the provider in play.
+///
+/// The catalogue belongs to the service and the completion is answered on the
+/// threads that read keys and draw the frame, neither of which can reach it, so
+/// the names travel through the pinned handle. They are refreshed whenever the
+/// answer changes: at startup, after `/refresh` re-read the catalogue, and after
+/// a `/provider` or a `/model` moved the session.
+pub(crate) fn refresh_completions(
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    renderer: &mut Renderer,
+) {
+    let catalog = service.catalog();
+    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
+    providers.sort();
+    // The provider the next `/model` would land on, which is the one a `/model`
+    // line completes from: the held one when `/provider` just moved and the
+    // model did not come with it, and the session's own otherwise.
+    let provider = renderer
+        .pending_provider
+        .clone()
+        .or_else(|| session.and_then(|key| provider_of(service, key)))
+        // A process with no session yet completes from the model it would open
+        // on, which is the service's default: `/model` before the first message
+        // lists that provider's models rather than none.
+        .or_else(|| Some(service.default_spec().provider));
+    let mut models: Vec<String> = provider
+        .as_deref()
+        .map(|provider| {
+            catalog
+                .models_of(provider)
+                .map(|model| model.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    renderer.set_completion_names(CompletionNames { providers, models });
+}
+
+/// The one dimmed row shown above the input, for the line as it stands.
+///
+/// It is [`candidates`] reduced to what the editor draws: the first row's
+/// completion, for Tab, and a hint naming what the candidates are. One row is a
+/// hint and several are a list, which is why the hint is one name or many.
+pub(crate) fn command_suggestion(
+    text: &str,
+    cursor: usize,
+    names: &CompletionNames,
+) -> Option<CommandSuggestion> {
+    let rows = candidates(text, cursor, names);
     if rows.is_empty() {
         return None;
     }
@@ -486,7 +601,7 @@ pub(crate) async fn interactive_loop(
                         break;
                     }
                 }
-                ChatCommand::Refresh => report_refresh(service, renderer).await,
+                ChatCommand::Refresh => report_refresh(service, session.as_ref(), renderer).await,
                 ChatCommand::Rename { title } => match session.clone() {
                     Some(current) => {
                         rename_session(service, current, title, renderer).await;
@@ -913,7 +1028,7 @@ async fn handle_live_command(
         ChatCommand::Compact => {
             renderer.notice("wait until the current turn finishes, then /compact");
         }
-        ChatCommand::Refresh => report_refresh(service, renderer).await,
+        ChatCommand::Refresh => report_refresh(service, current, renderer).await,
         ChatCommand::Mcp { action } => {
             report_mcp(service, action, renderer).await;
         }
@@ -1491,6 +1606,10 @@ async fn switch_provider(
             run_model(service, session.clone(), full, renderer).await;
         }
     }
+    // The completion follows the session: a `/model` line now offers the models
+    // of the provider just moved to, which is the list the message above told
+    // the person to pick from.
+    refresh_completions(service, Some(session), renderer);
 }
 
 async fn run_model(
@@ -1517,6 +1636,9 @@ async fn run_model(
                         // the value the footer shows is recomputed rather than
                         // left describing the old model.
                         refresh_effort(service, &key, renderer);
+                        // The completion follows too: the model just changed, so a
+                        // `/model` line offers the models of the provider it is on.
+                        refresh_completions(service, Some(&key), renderer);
                     }
                     ServerEventKind::ModelQueued { model } => {
                         reported = true;
@@ -1876,7 +1998,11 @@ fn stream_error(events: &[ServerEvent]) -> Option<String> {
 /// are the three things that can change underneath a running agent, so one
 /// command covers them: what a person means by "refresh" is not one of the
 /// three, and asking them to remember which is which was the mistake.
-async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
+async fn report_refresh(
+    service: &Arc<Service>,
+    session: Option<&SessionKey>,
+    renderer: &mut Renderer,
+) {
     report_reload(service, renderer);
     let count = service.refresh_skills();
     renderer.notice(format!("skills refreshed: {count}"));
@@ -1893,6 +2019,9 @@ async fn report_refresh(service: &Arc<Service>, renderer: &mut Renderer) {
     }
     // The sidebar follows: it is a column of state, and the state just changed.
     renderer.set_mcp(mcp_rows(service));
+    // And so does the completion: `/refresh` is what re-reads the catalogue, so
+    // a model added to `models.json` is one the next `/model` offers.
+    refresh_completions(service, session, renderer);
 }
 
 /// Rebuilds the MCP connections and reports how many are up.
@@ -2807,9 +2936,10 @@ mod tests {
     use super::{
         BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
         ReasoningScope, SignalGuard, command_suggestion, interactive_loop, mpsc,
-        parse_budget_limit, parse_chat_command, plan_provider_switch,
+        parse_budget_limit, parse_chat_command, plan_provider_switch, refresh_completions,
+        switch_provider,
     };
-    use crate::input::{EditorEvent, InteractiveInput, Pinned};
+    use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
     use crate::render::{Format, Renderer, Verbosity};
     use crate::style::Style;
     use norte_code_catalog::WireSchema;
@@ -2852,6 +2982,80 @@ mod tests {
             plan_provider_switch(false, None, false),
             ProviderSwitch::Unknown
         );
+    }
+
+    /// The names a test offers: none, so the registry alone answers.
+    ///
+    /// The catalogue's own names are what `the_catalogue_names_complete` adds:
+    /// every other test is asking about the registry.
+    fn no_names() -> CompletionNames {
+        CompletionNames::default()
+    }
+
+    /// The names a test offers, as the CLI would push them: one provider, two
+    /// models of it.
+    fn catalogue() -> CompletionNames {
+        CompletionNames {
+            providers: vec!["exa".to_owned(), "river".to_owned()],
+            models: vec![
+                "deepseek-ai/DeepSeek-V4.1-Flash".to_owned(),
+                "deepseek-v4.1-flash-uncensored".to_owned(),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_catalogue_names_complete_for_the_two_commands_that_take_one() {
+        // `/provider` and `/model` take a name only the catalogue holds, and
+        // neither offered anything: the registry is built at startup and cannot
+        // read the catalogue, which `/refresh` re-reads. A person typed the id
+        // from memory or not at all.
+        let names = catalogue();
+        let providers = command_suggestion("/provider ri", "/provider ri".len(), &names)
+            .expect("the providers are offered");
+        assert_eq!(
+            providers.completion, "ver",
+            "Tab finishes `ri` into `river`"
+        );
+        assert!(providers.hint.contains("river"), "{providers:?}");
+
+        let models = command_suggestion("/model deep", "/model deep".len(), &names)
+            .expect("the models are offered");
+        assert!(
+            models.hint.contains("deepseek-ai/DeepSeek-V4.1-Flash"),
+            "a model id may carry slashes of its own: {models:?}"
+        );
+        // The completion appends only what was not typed, so a name with a
+        // slash in it is completed as it is rather than cut at the slash.
+        assert_eq!(models.completion, "seek-ai/DeepSeek-V4.1-Flash");
+    }
+
+    #[test]
+    fn a_catalogue_name_is_not_offered_where_the_registry_answers() {
+        // The catalogue is the fallback, not a second opinion: `/reasoning` and
+        // every other command complete from the registry, and a provider id
+        // typed after one is not a name it offers.
+        let names = catalogue();
+        let efforts = command_suggestion("/reasoning h", "/reasoning h".len(), &names)
+            .expect("the registry answers");
+        assert_eq!(efforts.completion, "igh");
+        // And with no names pushed — the state before the first catalogue read —
+        // the two commands offer nothing rather than an empty list.
+        assert!(command_suggestion("/provider r", "/provider r".len(), &no_names()).is_none());
+        assert!(command_suggestion("/model d", "/model d".len(), &no_names()).is_none());
+    }
+
+    #[test]
+    fn a_command_with_its_argument_already_given_offers_nothing_more() {
+        // There is one provider and one model on the line: offering a second
+        // would complete a word the parser then refuses.
+        let names = catalogue();
+        for line in ["/provider river ", "/model deepseek-v4.1-flash "] {
+            assert!(
+                command_suggestion(line, line.len(), &names).is_none(),
+                "`{line}` is finished"
+            );
+        }
     }
 
     /// The usage line the registry writes for a command.
@@ -3114,7 +3318,7 @@ mod tests {
         // The case the registry was built for: nobody should have to remember
         // that it is `xhigh` and not `x-high`, and Tab has to finish the word
         // rather than refuse it for being partial.
-        let typed = command_suggestion("/reasoning xh", "/reasoning xh".len())
+        let typed = command_suggestion("/reasoning xh", "/reasoning xh".len(), &no_names())
             .expect("the effort is offered");
         assert_eq!(typed.completion, "igh", "Tab finishes `xh` into `xhigh`");
         assert!(
@@ -3123,36 +3327,39 @@ mod tests {
         );
 
         // A single command with nothing typed past the slash still lists them.
-        let listed =
-            command_suggestion("/reasoning ", "/reasoning ".len()).expect("the values are offered");
+        let listed = command_suggestion("/reasoning ", "/reasoning ".len(), &no_names())
+            .expect("the values are offered");
         assert!(listed.hint.contains("budget:<tokens>"), "{listed:?}");
     }
 
     #[test]
     fn slash_commands_and_arguments_have_dimmed_suggestions() {
-        let commands = command_suggestion("/", 1).expect("command list");
+        let commands = command_suggestion("/", 1, &no_names()).expect("command list");
         assert_eq!(commands.completion, "help");
         assert!(commands.hint.contains("/reasoning"));
 
-        let prefix = command_suggestion("/rea", 4).expect("command prefix");
+        let prefix = command_suggestion("/rea", 4, &no_names()).expect("command prefix");
         assert_eq!(prefix.completion, "soning");
 
-        let settings = command_suggestion("/reasoning ", "/reasoning ".len()).expect("settings");
+        let settings =
+            command_suggestion("/reasoning ", "/reasoning ".len(), &no_names()).expect("settings");
         assert_eq!(settings.completion, "auto");
         assert!(settings.hint.contains("high"));
         assert!(settings.hint.contains("budget:<tokens>"));
 
-        let partial = command_suggestion("/reasoning h", "/reasoning h".len()).expect("effort");
+        let partial =
+            command_suggestion("/reasoning h", "/reasoning h".len(), &no_names()).expect("effort");
         assert_eq!(partial.completion, "igh");
 
-        let scope =
-            command_suggestion("/reasoning high ", "/reasoning high ".len()).expect("scope");
+        let scope = command_suggestion("/reasoning high ", "/reasoning high ".len(), &no_names())
+            .expect("scope");
         assert_eq!(scope.completion, "session");
 
-        let tool_scope = command_suggestion("/allow bash ", "/allow bash ".len()).expect("scope");
+        let tool_scope =
+            command_suggestion("/allow bash ", "/allow bash ".len(), &no_names()).expect("scope");
         assert_eq!(tool_scope.completion, "session");
 
-        assert!(command_suggestion("/steer", "/steer".len()).is_none());
+        assert!(command_suggestion("/steer", "/steer".len(), &no_names()).is_none());
     }
 
     #[test]
@@ -3372,6 +3579,140 @@ mod tests {
             Some("second/other".to_owned()),
             "both halves moved through the turn-boundary handler"
         );
+    }
+
+    /// The wiring the completion depends on, driven through the real loop.
+    ///
+    /// The names travel from the catalogue to the pinned handle, which is the
+    /// only channel the keyboard's thread and the frame share: a completion that
+    /// was answered from the catalogue but never pushed there would offer
+    /// nothing, and that is a bug no pure test of the candidate list can see.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn the_catalogue_reaches_the_pinned_handle_the_frame_completes_from() {
+        use std::collections::BTreeMap;
+
+        use norte::harness::{InMemoryBlobStore, InMemoryStore};
+        use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
+        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
+        use norte_code_catalog::Catalog;
+        use norte_code_config::{ApiKey, Config};
+        use norte_testing::ScriptedModel;
+
+        struct Factory(Arc<dyn Model>);
+        impl ModelFactory for Factory {
+            fn build(
+                &self,
+                _spec: &ModelSpec,
+                _capabilities: &Capabilities,
+            ) -> Result<Arc<dyn Model>, ServiceError> {
+                Ok(Arc::clone(&self.0))
+            }
+        }
+
+        let providers: norte_code_catalog::Providers = serde_json::from_str(
+            r#"{"providers":{
+                "exa":{"name":"Exa","environment_keys":["PATH"],
+                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]},
+                "river":{"name":"River","environment_keys":["PATH"],
+                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
+        )
+        .expect("providers");
+        let models: norte_code_catalog::Models = serde_json::from_str(
+            r#"{"models":[
+                {"id":"deepseek-v4.1-flash-uncensored","provider_id":"exa","name":"U",
+                    "supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}},
+                {"id":"deepseek-ai/DeepSeek-V4.1-Flash","provider_id":"river","name":"F",
+                    "supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}}]}"#,
+        )
+        .expect("models");
+        let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
+        let entry = catalog
+            .find("exa", "deepseek-v4.1-flash-uncensored")
+            .expect("model");
+        let spec = ModelSpec {
+            provider: "exa".to_owned(),
+            model: "deepseek-v4.1-flash-uncensored".to_owned(),
+            endpoint: "https://example.invalid/v1".to_owned(),
+            api_key: ApiKey::new("test"),
+            schema: norte_code_catalog::WireSchema::OpenAI,
+            auth: None,
+            capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
+            headers: BTreeMap::new(),
+        };
+        let reference = ModelRef::new(
+            ProviderId::new("exa").expect("provider"),
+            ModelId::new("deepseek-v4.1-flash-uncensored").expect("model"),
+        );
+        let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+        let service = Arc::new(
+            Service::new(
+                Config::default(),
+                catalog,
+                spec,
+                Arc::new(Factory(model)),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+
+        let pinned = Pinned::new();
+        let mut renderer = Renderer::new(
+            Format::Text,
+            Verbosity::Low,
+            false,
+            Style::plain(),
+            Arc::clone(&pinned),
+        );
+        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
+            .await
+            .expect("create session");
+        let session = events
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session key");
+
+        // A session on `exa`: the models offered are `exa`'s.
+        refresh_completions(&service, Some(&session), &mut renderer);
+        let names = pinned.completion_names();
+        assert_eq!(
+            names.providers,
+            ["exa", "river"],
+            "every provider is offered"
+        );
+        assert_eq!(
+            names.models,
+            ["deepseek-v4.1-flash-uncensored"],
+            "the session's own provider decides the models: {names:?}"
+        );
+
+        // `/provider river` holds the switch, because `river` does not serve the
+        // model the session is on, and the completion follows the held provider:
+        // the next `/model` line offers `river`'s models, which is the list the
+        // notice just told the person to pick from.
+        switch_provider(&service, &session, "river", &mut renderer).await;
+        assert_eq!(renderer.pending_provider.as_deref(), Some("river"));
+        let held = pinned.completion_names();
+        assert_eq!(
+            held.models,
+            ["deepseek-ai/DeepSeek-V4.1-Flash"],
+            "the held provider decides the models: {held:?}"
+        );
+        // And the frame, which is what draws the menu, offers it from the same
+        // names: the row reaches the frame and not only the test.
+        let suggestion = command_suggestion(
+            "/model deep",
+            "/model deep".len(),
+            &pinned.completion_names(),
+        )
+        .expect("the model is offered");
+        assert_eq!(suggestion.completion, "seek-ai/DeepSeek-V4.1-Flash");
     }
 
     #[tokio::test]

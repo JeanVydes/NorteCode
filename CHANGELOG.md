@@ -101,6 +101,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/provider` and `/model` complete their argument from the catalogue. Both took
+  an `Open` word, so neither offered anything while a person typed: a provider id
+  and a model id — the two names that are the catalogue's to know and nobody's to
+  remember — had to be spelled from memory. The completion was answered by the
+  command registry alone, which is built once at startup and cannot read the
+  catalogue, and the catalogue lives in the service, which neither the thread
+  that reads keys nor the one that draws the frame can reach. The CLI now pushes
+  the names through the handle the two already share: every provider id, and the
+  models of the provider in play — the session's own, or the one a held
+  `/provider` just moved to, which is the list the notice tells you to pick from.
+  The names are re-pushed at startup and by `/refresh`, so a model added to
+  `models.json` is one the next `/model` offers.
+
 - The catalogue's names are enums, so a typo is caught where the file is read and
   not silently read as "not supported": `SupportedParams`, `Modality`,
   `SupportedEffort`, `ModelStatus`, `WireSchema`. The error names the file, the

@@ -191,6 +191,24 @@ struct Snapshot {
     todos: Vec<TodoItem>,
 }
 
+/// The catalogue names the completion offers for `/provider` and `/model`.
+///
+/// The provider ids and the models of one provider, which are the two lists
+/// those commands take. It is a snapshot of the catalogue and not a handle to
+/// it: the catalogue lives in the service, which neither the keyboard's thread
+/// nor the frame's can reach, and a list of names is small enough to copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CompletionNames {
+    /// Every provider id, sorted.
+    pub(crate) providers: Vec<String>,
+    /// The models of one provider, as their own ids.
+    ///
+    /// Bare and not `provider/model`: `/model` takes the second half and the
+    /// provider comes from the session, which is why the field is filled from
+    /// the provider in play rather than from the whole catalogue.
+    pub(crate) models: Vec<String>,
+}
+
 /// The pinned text above the input line.
 ///
 /// The renderer owns the session totals; the input editor owns the terminal.
@@ -248,6 +266,13 @@ struct PinnedInner {
     asked: Option<Asked>,
     /// The connected MCP servers, as the sidebar draws them.
     mcp: Vec<McpRow>,
+    /// The provider ids and the `provider/model` names the catalogue holds.
+    ///
+    /// They are here because the completion is answered on two other threads —
+    /// the keyboard reads keys and the frame draws the menu — and neither holds
+    /// the service the catalogue lives in. The CLI pushes them whenever the
+    /// catalogue is read, which is startup and `/refresh`.
+    names: CompletionNames,
     /// What the mouse has selected, in cells of the frame.
     ///
     /// A cell is a column and a row of the terminal, and the range is the two
@@ -478,6 +503,20 @@ impl Pinned {
     /// The connected MCP servers, in configuration order.
     pub(crate) fn mcp(&self) -> Vec<McpRow> {
         self.lock().mcp.clone()
+    }
+
+    /// Replaces the catalogue names the completion offers.
+    pub(crate) fn set_completion_names(&self, names: CompletionNames) {
+        let mut inner = self.lock();
+        if inner.names != names {
+            inner.names = names;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The catalogue names the completion offers.
+    pub(crate) fn completion_names(&self) -> CompletionNames {
+        self.lock().names.clone()
     }
 
     /// Replaces the todo widget. An empty list clears it.
@@ -1564,6 +1603,7 @@ mod unix {
                             let rows = crate::interaction::completion_rows(
                                 &buffer.display(),
                                 buffer.cursor,
+                                &pinned.completion_names(),
                             );
                             if rows > 1 {
                                 match key.code {
@@ -1644,6 +1684,7 @@ mod unix {
                                         &buffer.display(),
                                         buffer.cursor,
                                         pinned.completion_pick(),
+                                        &pinned.completion_names(),
                                     )
                                 } else {
                                     None

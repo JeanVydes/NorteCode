@@ -736,6 +736,10 @@ pub(crate) async fn new_session(
     // and the totals are: nothing else on screen says it, and after a resume it
     // is not the flag that was passed but what the config and the model resolve.
     renderer.set_reasoning(reasoning_setting_label(&effective));
+    // The catalogue names the completion offers. A new session has no key yet,
+    // so only the provider list is offered until one exists: `/model` needs a
+    // session to know which provider's models to list.
+    crate::interaction::refresh_completions(&service, None, &mut renderer);
     // The terminal belongs to the renderer: it is what knows when something
     // changed, so it is what draws. A process with no terminal keeps the
     // plain-text path and draws nothing.
@@ -968,6 +972,10 @@ async fn resume_session(
     // configuration's answer, which is what a session with no override is on;
     // this is the session's, which is what the footer has to show.
     refresh_effort(&service, &session, &mut renderer);
+    // The catalogue names the completion offers: `/provider` and `/model` take
+    // one, and the list lives here rather than in the registry, which cannot
+    // read the catalogue and is built before this point.
+    crate::interaction::refresh_completions(&service, Some(&session), &mut renderer);
     let interactive = args.interactive;
     // The terminal belongs to the renderer, exactly as it does for a new
     // session: it is what knows when something changed, so it is what draws,

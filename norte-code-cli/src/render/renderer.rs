@@ -842,7 +842,7 @@ impl Renderer {
         let suggestion = if completion.is_some() {
             String::new()
         } else {
-            Self::suggestion_for(&input, cursor)
+            self.suggestion_for(&input, cursor)
         };
         crate::app::State {
             transcript: self.transcript.clone(),
@@ -890,7 +890,7 @@ impl Renderer {
     /// widget's to read: a widget that asked would need the command registry,
     /// and the frame would stop being a function of the state it was given.
     fn completion_for(&self, text: &str, cursor: usize) -> Option<crate::app::Completion> {
-        let rows = crate::commands_registry::shared().candidates(text, cursor);
+        let rows = crate::interaction::candidates(text, cursor, &self.pinned.completion_names());
         // One candidate is not a menu: the hint says what Tab would write, and
         // opening a list for a single row would take the arrow keys away from
         // the draft for a choice nobody has to make.
@@ -917,11 +917,22 @@ impl Renderer {
     ///
     /// Plain text: the ink is the widget's, and a hint carrying escape codes
     /// would show them as characters.
-    fn suggestion_for(text: &str, cursor: usize) -> String {
-        crate::interaction::command_suggestion(text, cursor)
+    fn suggestion_for(&self, text: &str, cursor: usize) -> String {
+        crate::interaction::command_suggestion(text, cursor, &self.pinned.completion_names())
             .map_or_else(String::new, |suggestion| {
                 crate::select::strip_style(&suggestion.hint)
             })
+    }
+
+    /// Records the catalogue names the completion offers.
+    ///
+    /// The catalogue is the service's and the completion is answered on the
+    /// threads that read keys and draw the frame, so the names travel through
+    /// the pinned handle the CLI already shares with both. `/provider` and
+    /// `/model` are the two commands that take a name from it, and neither could
+    /// offer one before this.
+    pub(crate) fn set_completion_names(&mut self, names: crate::input::CompletionNames) {
+        self.pinned.set_completion_names(names);
     }
 
     /// Records the connected MCP servers, so the sidebar can draw them.
