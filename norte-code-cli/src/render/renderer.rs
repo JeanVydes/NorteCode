@@ -450,9 +450,10 @@ impl Renderer {
                 entry.call_id = Some(call_id.clone());
                 self.transcript.push(entry);
             }
-            ServerEventKind::ToolOutput { text, .. } => {
-                self.transcript.append(Entry::ToolOutput, text);
-            }
+            // A `ToolOutput` chunk is deliberately not here: it belongs to the
+            // box `tool_event` builds, whose rows go to the conversation as one
+            // framed entry when the call closes. Appending the chunk raw as well
+            // drew every streamed line twice — once bare, once inside the box.
             ServerEventKind::ToolFinished {
                 tool,
                 call_id,
@@ -775,6 +776,15 @@ impl Renderer {
         self.pinned.take_dirty()
     }
 
+    /// Marks the frame dirty, so the next tick redraws it.
+    ///
+    /// A change to the renderer's own state — a reloaded threshold the status
+    /// dial is coloured from — has no pinned text to signal it, and without this
+    /// the new colour would wait for the next keystroke.
+    pub(crate) fn mark_dirty(&self) {
+        self.pinned.mark_dirty();
+    }
+
     pub(crate) fn draw(&mut self) -> Result<(), String> {
         if self.screen.is_none() {
             return Ok(());
@@ -860,10 +870,11 @@ impl Renderer {
                 taken: asked.taken.clone(),
                 typing: asked.typing,
             }),
-            // The status is built for a terminal that took escape codes, and
-            // the frame draws with spans: what reaches it is the text, and the
-            // ink is the widget's.
-            status: crate::select::strip_style(&self.session_status()),
+            // The status reaches the frame as spans it already styled, so the
+            // dial's colour and the effort bar's survive: a painted string would
+            // be stripped of its escapes and drawn in one colour, which is what
+            // hid the two warnings the row exists for.
+            status: self.status_line(),
             mcp: self.pinned.mcp(),
             todos: self.task_rows(),
             suggestion,
@@ -1048,13 +1059,20 @@ impl Renderer {
         }
     }
 
-    /// Repaints the pinned footer from the state the renderer holds.
+    /// Repaints the footer from the state the renderer holds.
+    ///
+    /// Two destinations and one call: the pinned text a caller reads, and the
+    /// frame's own dirty flag. The frame builds the row from the renderer's
+    /// state rather than from the pinned text, so a change here has to wake it
+    /// explicitly — otherwise an effort or a title would show up only on the
+    /// next keystroke.
     fn refresh_footer(&mut self) {
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
         let status = self.session_status();
         self.pinned.set_session(status);
+        self.pinned.mark_dirty();
     }
 
     /// Replaces the activity label and redraws the pinned footer.
@@ -1063,8 +1081,7 @@ impl Renderer {
             return;
         }
         self.activity = activity;
-        let status = self.session_status();
-        self.pinned.set_session(status);
+        self.refresh_footer();
     }
 
     /// Ends the current output line before a prompt or the final summary.
@@ -2137,10 +2154,11 @@ impl Renderer {
                 self.cache_reported = *cache_read_tokens > 0 || *cache_write_tokens > 0;
                 self.context_used = *context_used;
                 self.max_context = *context_window;
-                if self.verbosity.at_least(Verbosity::Medium) && matches!(self.format, Format::Text)
-                {
-                    let status = self.session_status();
-                    self.pinned.set_session(status);
+                // The dial's colour is read from the threshold and the window,
+                // and both just moved: repaint the footer so the frame shows the
+                // new colour rather than the one from before this request.
+                if matches!(self.format, Format::Text) {
+                    self.refresh_footer();
                 }
             }
             ServerEventKind::RequestReconstructed {
@@ -2173,11 +2191,12 @@ impl Renderer {
                 } else {
                     self.unpriced += 1;
                 }
-                if self.verbosity.at_least(Verbosity::Medium) && matches!(self.format, Format::Text)
-                {
-                    let status = self.session_status();
-                    self.pinned.set_session(status);
+                if matches!(self.format, Format::Text) {
+                    self.refresh_footer();
                 }
+                // `low` shows the answer alone: the footer and the summary are
+                // not part of it, and a line here would be the report a quiet
+                // run asked not to see.
                 if !self.verbosity.at_least(Verbosity::Medium) {
                     return;
                 }
@@ -2585,6 +2604,56 @@ impl Renderer {
     /// and `high` adds the counters that are for looking at rather than
     /// reading: requests, input and output totals, and the input:output ratio.
     pub(crate) fn session_status(&self) -> String {
+        let fields = self
+            .status_fields()
+            .into_iter()
+            .map(|(ink, text)| ink.paint(self.style, &text))
+            .collect::<Vec<_>>()
+            .join(&self.style.faint(" · "));
+        format!("{}{fields}", self.status_head())
+    }
+
+    /// The status row as the styled line a frame draws.
+    ///
+    /// It is the fields, each in its own ink, joined by the faint separator and
+    /// led by the head — the workdir and the running activity — in its own
+    /// faint ink. The plain-text footer paints the same fields through
+    /// [`session_status`]: one source of truth, so the log and the frame can
+    /// never show different rows.
+    ///
+    /// [`session_status`]: Renderer::session_status
+    pub(crate) fn status_line(&self) -> ratatui::text::Line<'static> {
+        use ratatui::text::Span;
+        let separator = self.style.faint(" · ");
+        let mut spans = Vec::new();
+        let head = self.status_head();
+        if !head.is_empty() {
+            spans.push(Span::styled(head, self.style.faint_span()));
+        }
+        let fields = self.status_fields();
+        let count = fields.len();
+        for (index, (ink, text)) in fields.into_iter().enumerate() {
+            spans.push(Span::styled(text, ink.span(self.style)));
+            if index + 1 < count {
+                spans.push(Span::styled(separator.clone(), self.style.faint_span()));
+            }
+        }
+        ratatui::text::Line::from(spans)
+    }
+
+    /// The status row as the fields it is made of, each with its own ink.
+    ///
+    /// It is the one place that decides what the row says. The plain-text path
+    /// joins the fields into a painted string; the frame turns the same fields
+    /// into styled spans. Neither computes the row itself, so the log and the
+    /// frame can never disagree about what it shows or what colour it is.
+    ///
+    /// What it holds depends on the verbosity, and the difference is the point:
+    /// `medium` is the line a person reads while working — the context, the
+    /// cache share, the cost, the effort — and `high` adds the counters that are
+    /// for looking at rather than reading.
+    pub(crate) fn status_fields(&self) -> Vec<(crate::render::dial::Ink, String)> {
+        use crate::render::dial::Ink;
         // The dial shows the live context against the model's window, so a turn
         // that is filling the window is visible before compaction hits. It is red
         // while a compaction is running.
@@ -2592,14 +2661,14 @@ impl Renderer {
             .activity
             .as_deref()
             .is_some_and(|activity| activity.starts_with("compacting"));
-        let mut parts = Vec::new();
+        let mut parts: Vec<(Ink, String)> = Vec::new();
         if self.verbosity.at_least(Verbosity::High) {
-            parts.push(self.style.cyan(format!("{} req", self.requests)));
-            parts.push(self.style.dim(format!("{} in", human_tokens(self.input))));
-            parts.push(self.style.dim(format!("{} out", human_tokens(self.output))));
+            parts.push((Ink::Cyan, format!("{} req", self.requests)));
+            parts.push((Ink::Dim, format!("{} in", human_tokens(self.input))));
+            parts.push((Ink::Dim, format!("{} out", human_tokens(self.output))));
         }
-        // The dial stays at both levels: it is the one number that changes
-        // while a turn runs, and the one that decides when compaction hits.
+        // The dial carries its own ink: how close the compaction is decides the
+        // colour, and that is the whole reason the row exists.
         parts.push(context_dial(
             self.style,
             self.context_used,
@@ -2608,30 +2677,33 @@ impl Renderer {
             compacting,
         ));
         if self.cache_reported && self.input > 0 {
-            parts.push(self.style.blue(format!(
-                "cache {}",
-                cache_percent_label(self.cache_read, self.input)
-            )));
+            parts.push((
+                Ink::Blue,
+                format!("cache {}", cache_percent_label(self.cache_read, self.input)),
+            ));
         }
         if self.verbosity.at_least(Verbosity::High) {
-            parts.push(
-                self.style
-                    .dim(format!("in:out {}", token_ratio(self.input, self.output))),
-            );
+            parts.push((
+                Ink::Dim,
+                format!("in:out {}", token_ratio(self.input, self.output)),
+            ));
         }
         if self.show_cost {
             if self.requests > 0 && self.unpriced == self.requests {
                 if !self.cost_silent {
-                    parts.push(self.style.yellow("cost not reported"));
+                    parts.push((Ink::Yellow, "cost not reported".to_owned()));
                 }
             } else {
-                parts.push(if self.cost > 0.0 {
-                    self.style.green(format!("${:.6}", self.cost))
-                } else {
-                    self.style.faint(format!("${:.6}", self.cost))
-                });
+                parts.push((
+                    if self.cost > 0.0 {
+                        Ink::Green
+                    } else {
+                        Ink::Faint
+                    },
+                    format!("${:.6}", self.cost),
+                ));
                 if self.unpriced > 0 && !self.cost_silent {
-                    parts.push(self.style.yellow(format!("{} not reported", self.unpriced)));
+                    parts.push((Ink::Yellow, format!("{} not reported", self.unpriced)));
                 }
             }
         }
@@ -2642,13 +2714,33 @@ impl Renderer {
         // mapped to an order in the reader's head, and the bar's colour says
         // which rung it is on at a glance, which is the thing that costs money.
         if let Some(effort) = &self.reasoning {
-            parts.push(reasoning_bar(self.style, effort));
+            parts.push(reasoning_bar(effort));
         }
-        // The line leads with where the work is happening and what the turn is
-        // doing. The directory is the one thing on it that never changes
-        // between sessions, and the one a person checks when a tool reads the
-        // wrong tree: it is named here rather than only in `--debug`, which is
-        // a report nobody reads while working.
+        // What names the session leads. The title comes first because it is what
+        // a person recognises the session by; the key follows in brackets,
+        // because the key is what `resume` is given and a title is not unique. A
+        // session with no title yet leads with the key alone.
+        if self.verbosity.at_least(Verbosity::Medium) {
+            if let Some(key) = &self.session {
+                let key = short(key).to_owned();
+                match self.title.as_deref().map(str::trim) {
+                    Some(title) if !title.is_empty() => {
+                        parts.insert(0, (Ink::Faint, format!("({key})")));
+                        parts.insert(0, (Ink::Cyan, title.to_owned()));
+                    }
+                    _ => parts.insert(0, (Ink::Faint, key)),
+                }
+            }
+        }
+        parts
+    }
+
+    /// The line a text-mode footer prints, before the running activity.
+    ///
+    /// It is the workdir and the activity, which the frame folds into its head
+    /// row: the plain-text path prints them here so the two destinations show
+    /// the same row.
+    pub(crate) fn status_head(&self) -> String {
         let prefix = self.activity.as_ref().map_or_else(
             || self.style.faint("session"),
             |activity| self.style.yellow(activity.clone()),
@@ -2660,24 +2752,7 @@ impl Renderer {
                 head.push_str(&self.style.faint(" · "));
             }
         }
-        // What names the session, in front of the totals. The title comes first
-        // because it is what a person recognises the session by; the key follows
-        // in brackets, because the key is what `resume` is given and a title is
-        // not unique. A session with no title yet leads with the key alone,
-        // which is what it had before one was asked for.
-        if self.verbosity.at_least(Verbosity::Medium) {
-            if let Some(key) = &self.session {
-                let short = short(key).to_owned();
-                match self.title.as_deref().map(str::trim) {
-                    Some(title) if !title.is_empty() => {
-                        parts.insert(0, self.style.faint(format!("({short})")));
-                        parts.insert(0, self.style.cyan(title.to_owned()));
-                    }
-                    _ => parts.insert(0, self.style.faint(short)),
-                }
-            }
-        }
-        format!("{head}{} {}", prefix, parts.join(&self.style.faint(" · ")))
+        format!("{head}{prefix} ")
     }
 
     /// Writes the run's cost and tool summary, if the run made any requests.

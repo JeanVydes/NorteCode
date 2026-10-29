@@ -333,6 +333,17 @@ impl Pinned {
         }
     }
 
+    /// Marks the frame dirty, so the next tick redraws it.
+    ///
+    /// It is the signal for a change that lives in the renderer's own state and
+    /// not in the pinned text: a reloaded threshold the status dial is coloured
+    /// from, or an effort a `/reasoning` moved. Without it the new colour would
+    /// wait for the next keystroke to appear, which is the one moment a person
+    /// who just ran `/refresh` is not typing.
+    pub(crate) fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
     /// Puts a question on screen, with the cursor on the first choice.
     ///
     /// It marks the footer dirty, which is what makes the editor repaint it: the

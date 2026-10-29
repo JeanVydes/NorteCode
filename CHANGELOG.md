@@ -72,6 +72,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A streamed command's output is drawn once, not twice. The chunk reached the
+  transcript through two paths: one appended it raw, the other built the box it
+  belongs to, so every streamed line appeared bare and again inside its box. Only
+  the second path writes it now.
+
+- The status row is coloured in the interactive client. The row was built as a
+  painted string and the frame stripped its escapes and drew the whole line in
+  one dim ink, so the two warnings it exists for — the context dial turning red
+  near the compaction threshold and the reasoning bar's rung — were invisible
+  where a person actually watches them. The row is styled spans now, from the
+  same fields the plain-text footer paints, so the dial and the effort bar keep
+  their colour and the log and the frame never disagree.
+
 - A held provider switch is taken at a turn boundary, not only mid-turn.
   `/provider` reaches its handler through two paths, and the hold added above was
   wired into the running-turn one alone. Between turns — which is nearly always —

@@ -252,6 +252,12 @@ impl Style {
         self.ratatui(MAGENTA, 141, "35")
     }
 
+    /// The widget style for tools, prompts and a session's title.
+    #[must_use]
+    pub(crate) fn cyan_span(self) -> ratatui::style::Style {
+        self.ratatui(CYAN, 44, "36")
+    }
+
     /// The widget style for a heading, which is the bold default ink.
     #[must_use]
     pub(crate) const fn bold_span() -> ratatui::style::Style {

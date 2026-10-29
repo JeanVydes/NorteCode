@@ -2065,6 +2065,11 @@ fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
             // that fills faster, and reading it from the startup spec would
             // leave the bar lying about how close the compaction is.
             renderer.max_context = service.default_spec().capabilities.max_context;
+            // The dial's colour and the effort bar are the renderer's own state,
+            // and no pinned text carries them: without this the new threshold
+            // would redraw its colour only on the next keystroke, which is the
+            // one moment a person who just ran `/refresh` is not typing.
+            renderer.mark_dirty();
             // The catalogue is re-read here too: a person who added a model to
             // `models.json` and typed `/refresh` expects the next `/model` to
             // find it, and the files are the only place a model comes from.

@@ -447,6 +447,58 @@ fn a_detached_call_is_not_drawn_as_a_failure() {
     assert_ne!(failed, done);
 }
 
+/// A streamed chunk reaches the conversation once.
+///
+/// `event` is the one path a server event takes: `record` turns it into an
+/// entry and `tool_event` builds the box the chunk belongs to. Both used to act
+/// on a `ToolOutput`, so a shell's output was appended raw by `record` and then
+/// drawn again inside the box — the same text twice. The tests that call
+/// `tool_event` directly never saw it, because they skip `record`.
+#[test]
+fn a_streamed_chunk_is_recorded_once() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolOutput {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                stream: "stdout".to_owned(),
+                text: "only once\n".to_owned(),
+                last: false,
+            },
+        })
+        .expect("event");
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolFinished {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                is_error: false,
+                error: None,
+                output: Some("only once\n".to_owned()),
+                truncated: false,
+                detached: false,
+                duration_ms: 3,
+            },
+        })
+        .expect("event");
+    let hits: usize = renderer
+        .transcript
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.lines.iter())
+        .filter(|line| line.text.contains("only once"))
+        .count();
+    assert_eq!(hits, 1, "the chunk is drawn once, not once per path");
+}
+
 #[test]
 fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
     // A shell's process can outlive its call, and its last chunk can arrive
@@ -719,18 +771,19 @@ fn the_bar_comes_back_after_a_tool() {
 fn the_context_dial_warns_as_the_window_fills() {
     let style = Style::plain();
     // A quarter full is neither near nor over the limit.
-    let low = context_dial(style, 25_000, Some(100_000), 0.8, false);
+    let (_, low) = context_dial(style, 25_000, Some(100_000), 0.8, false);
     assert!(low.contains("25%"), "{low}");
     assert!(!low.contains("compact"), "{low}");
     // Past the threshold the dial says so.
-    let over = context_dial(style, 90_000, Some(100_000), 0.8, false);
+    let (_, over) = context_dial(style, 90_000, Some(100_000), 0.8, false);
     assert!(over.contains("compact"), "{over}");
 }
 
 #[test]
 fn the_context_dial_without_a_window_shows_only_the_count() {
-    let dial = context_dial(Style::plain(), 12_000, None, 0.8, false);
+    let (ink, dial) = context_dial(Style::plain(), 12_000, None, 0.8, false);
     assert_eq!(dial, "ctx 12k");
+    assert_eq!(ink, crate::render::dial::Ink::Dim, "a quiet count");
 }
 
 #[test]
@@ -1224,10 +1277,9 @@ fn every_reasoning_level_draws_its_own_bar() {
     // anything, so the levels are checked to be distinct rather than merely
     // plausible -- and in the order the settings are ordered by, which is the
     // one thing a bar is for.
-    let style = Style::plain();
     let plain: Vec<String> = ["off", "low", "medium", "high", "xhigh", "max"]
         .iter()
-        .map(|level| crate::render::dial::reasoning_bar(style, level))
+        .map(|level| crate::render::dial::reasoning_bar(level).1)
         .collect();
     let mut seen = std::collections::BTreeSet::new();
     for (level, bar) in ["off", "low", "medium", "high", "xhigh", "max"]
@@ -1267,10 +1319,11 @@ fn a_setting_that_is_not_a_rung_draws_no_bar() {
     // `auto` and a token budget are settings of another kind. Drawing a bar for
     // them would claim an effort on a scale they are not on.
     let style = Style::plain();
-    let auto = crate::render::dial::reasoning_bar(style, "auto");
+    let _ = style;
+    let auto = crate::render::dial::reasoning_bar("auto").1;
     assert!(!auto.contains('\u{2588}'), "auto claims no rung: {auto}");
     assert!(auto.contains("auto"), "{auto}");
-    let budget = crate::render::dial::reasoning_bar(style, "budget 4096 tokens");
+    let budget = crate::render::dial::reasoning_bar("budget 4096 tokens").1;
     assert!(
         !budget.contains('\u{2588}'),
         "a budget claims no rung: {budget}"
@@ -1704,4 +1757,47 @@ fn an_answer_that_is_interleaved_with_thinking_is_not_split() {
         .filter(|entry| entry.kind == crate::transcript::Kind::Notice && texts(entry) == [""])
         .count();
     assert!(blanks > 0, "the blocks are still separated");
+}
+
+#[test]
+fn the_status_row_reaches_the_frame_in_colour() {
+    // The frame used to strip the escapes off the painted status and draw the
+    // whole row in one dim ink, so the two warnings the row exists for — a dial
+    // near the compaction limit and a high reasoning effort — were invisible in
+    // the interactive client, which draws the frame. The row is spans now, and
+    // this reads their colours the way the frame will.
+    let pinned = Pinned::new();
+    let mut renderer = Renderer::new(
+        Format::Text,
+        Verbosity::Medium,
+        true,
+        Style::for_tests(crate::style::Colors::True),
+        Arc::clone(&pinned),
+    );
+    renderer.max_context = Some(1_000);
+    renderer.compaction_threshold = 0.5;
+    // Past the threshold: the dial is red, and the effort is `max`, magenta.
+    renderer.context_used = 520;
+    renderer.set_reasoning("max".to_owned());
+
+    let line = renderer.status_line();
+    let colours: std::collections::BTreeSet<String> = line
+        .spans
+        .iter()
+        .map(|span| format!("{:?}", span.style.fg))
+        .collect();
+    assert!(
+        colours.len() > 1,
+        "the status carries more than one colour: {colours:?}"
+    );
+    // And the dial's own red is among them, so the warning survived.
+    let red = Style::for_tests(crate::style::Colors::True).red_span().fg;
+    assert!(
+        colours.contains(&format!("{red:?}")),
+        "the dial's red reaches the row: {colours:?}"
+    );
+    // The painted path and the span path name the same fields, so the log and
+    // the frame never disagree.
+    let text = renderer.session_status();
+    assert!(text.contains("compact"), "the warning is in the text too");
 }

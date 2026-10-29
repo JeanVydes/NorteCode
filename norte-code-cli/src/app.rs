@@ -36,7 +36,6 @@ use crate::input::{McpRow, McpState};
 use crate::style::Style;
 use crate::terminal::{self, Draw};
 use crate::transcript::{Ink, Kind, Transcript};
-
 /// What the interface is showing.
 ///
 /// It is the whole of the visible state, and it is deliberately flat: the chrome
@@ -62,7 +61,12 @@ pub(crate) struct State {
     /// The question the model asked, when it is waiting for an answer.
     pub(crate) question: Option<Question>,
     /// The status row: the model, the dial, the cost, the effort.
-    pub(crate) status: String,
+    ///
+    /// It is a styled line and not a string: the dial's colour says how close
+    /// the compaction is and the effort bar's says which rung costs most, and a
+    /// frame that stripped a painted string would lose both. The ink is chosen
+    /// where those fields are built, and a frame draws it as it is.
+    pub(crate) status: Line<'static>,
     /// The rows a plugin put beside the conversation, with their plugin's name.
     ///
     /// Empty when nothing was loaded, which is every ordinary run: the column
@@ -302,7 +306,7 @@ impl State {
             // The status closes the frame: it is what the session *is* — the
             // model, the dial, the cost, the effort — and the bottom row is
             // where a status is read from.
-            draw_row(frame, status, &self.status, style.dim_span());
+            draw_status(frame, status, self);
         }
         // What was painted, row by row, so a selection can be read back as
         // text. It is taken from the finished frame and not from the state
@@ -482,6 +486,60 @@ fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style:
     };
     let line = Line::from(vec![Span::raw("  "), Span::styled(shown, style)]);
     Paragraph::new(line).render(area, frame.buffer_mut());
+}
+
+/// Draws the status row: the head, then the fields in their own ink.
+///
+/// The row is spans the renderer already styled — the dial's colour and the
+/// effort bar's come from one scale read by both the log and the frame — so it
+/// is drawn as it is rather than stripped and repainted in one colour. Only the
+/// width is the frame's business: a row longer than the terminal is cut here,
+/// mid-field, the way the plain-text footer would let the terminal wrap it.
+fn draw_status(frame: &mut Draw<'_>, area: Rect, state: &State) {
+    if area.height == 0 {
+        return;
+    }
+    let room = usize::from(area.width).saturating_sub(2).max(1);
+    let mut line = state.status.clone();
+    // The two-space gutter every chrome row carries, then the row's own spans.
+    line.spans.insert(0, Span::raw("  "));
+    let line = truncate_line(line, room);
+    Paragraph::new(line).render(area, frame.buffer_mut());
+}
+
+/// Cuts a styled line to `room` columns, ending it with `…` when it went over.
+///
+/// The cut counts characters and keeps each span's ink, so a row that is too
+/// long loses its tail and not its colour.
+fn truncate_line(line: Line<'static>, room: usize) -> Line<'static> {
+    let total: usize = line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    if total <= room {
+        return line;
+    }
+    let mut left = room.saturating_sub(1);
+    let mut spans = Vec::with_capacity(line.spans.len());
+    for span in line.spans {
+        if left == 0 {
+            break;
+        }
+        let style = span.style;
+        let text = span.content.into_owned();
+        let count = text.chars().count();
+        if count <= left {
+            left -= count;
+            spans.push(Span::styled(text, style));
+        } else {
+            let cut: String = text.chars().take(left).collect();
+            spans.push(Span::styled(cut, style));
+            left = 0;
+        }
+    }
+    spans.push(Span::raw("…"));
+    Line::from(spans)
 }
 
 /// The bar in front of a row, which is what says who is talking.
