@@ -61,6 +61,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   the catalogue is the authority, and a fact about a model belongs in the file
   that describes models.
 
+### Fixed
+
+- A held provider switch is taken at a turn boundary, not only mid-turn.
+  `/provider` reaches its handler through two paths, and the hold added above was
+  wired into the running-turn one alone. Between turns — which is nearly always —
+  `/provider exa` still kept the old model and sent `exa/river-model`, the
+  service refused the pair, and `/model` put the old provider back: neither half
+  of the pair could be moved. Both paths now call the same carrying-out.
+
 ### Added
 
 - The catalogue's names are enums, so a typo is caught where the file is read and

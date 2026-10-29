@@ -528,14 +528,18 @@ pub(crate) async fn interactive_loop(
                 }
                 ChatCommand::Model { model } => {
                     if model.is_empty() {
-                        // List available models for the current provider. It is
-                        // the session's own provider, read from its spec: the
-                        // renderer's name is the model in flight, and guessing
-                        // `openai` when there is no session listed the wrong
-                        // catalogue under the right heading.
-                        let provider = session
-                            .as_ref()
-                            .and_then(|current| provider_of(service, current));
+                        // List available models for the provider in play. It is
+                        // the held provider when `/provider` just moved to one the
+                        // current model cannot survive — that is the whole reason
+                        // the list is being asked for — and the session's own
+                        // provider otherwise. The renderer's name is the model in
+                        // flight, and guessing `openai` when there is no session
+                        // listed the wrong catalogue under the right heading.
+                        let provider = renderer.pending_provider.clone().or_else(|| {
+                            session
+                                .as_ref()
+                                .and_then(|current| provider_of(service, current))
+                        });
                         let Some(provider) = provider else {
                             renderer.notice("there is no session yet; send a message first");
                             continue;
@@ -609,27 +613,13 @@ pub(crate) async fn interactive_loop(
                         }
                         renderer.open_modal("providers", lines);
                     } else if let Some(current) = session.clone() {
-                        // Switch provider while keeping the current model. The
-                        // model is the session's own, read from its spec: the
-                        // renderer's name is the one in flight, and taking the
-                        // old reference apart to find the model would break on a
-                        // model id that contains a slash.
-                        let model_name = model_name_of(service, &current)
-                            .unwrap_or_else(|| "default".to_owned());
-                        // The provider is explicit and the model is not: a switch
-                        // keeps the model the session was on even when the new
-                        // provider's catalogue does not list it. Say so, because
-                        // the next turn would be refused with a name the person
-                        // no longer recognises, and the fix is one `/model` away.
-                        let known = service.catalog().find(&provider, &model_name).is_some();
-                        if !known {
-                            renderer.notice(format!(
-                                "`{provider}` does not list `{model_name}`; switch it with /model"
-                            ));
-                        }
-                        let full = format!("{provider}/{model_name}");
-                        renderer.model_name = Some(full.clone());
-                        run_model(service, current, full, renderer).await;
+                        // The same carrying-out the live turn uses: a provider
+                        // switch the current model cannot survive is held and the
+                        // model is left to the next `/model`, instead of sending a
+                        // pair no provider lists. Left separate once, which is why
+                        // the held state never appeared at a turn boundary and
+                        // neither half could be moved.
+                        switch_provider(service, &current, &provider, renderer).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -2811,9 +2801,16 @@ mod tests {
 
     use super::{
         BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
-        ReasoningScope, SignalGuard, command_suggestion, parse_budget_limit, parse_chat_command,
-        plan_provider_switch,
+        ReasoningScope, SignalGuard, command_suggestion, interactive_loop, mpsc,
+        parse_budget_limit, parse_chat_command, plan_provider_switch,
     };
+    use crate::input::{EditorEvent, InteractiveInput, Pinned};
+    use crate::render::{Format, Renderer, Verbosity};
+    use crate::style::Style;
+    use norte_code_catalog::WireSchema;
+    use norte_code_protocol::ClientRequestKind;
+
+    use super::drain_request;
 
     #[test]
     fn a_provider_switch_moves_only_when_the_model_survives_it() {
@@ -3235,6 +3232,140 @@ mod tests {
         // It takes no argument, so one is the mistake it is elsewhere: a word
         // after the command is a word the command does not use.
         assert!(matches!(parse_chat_command("/menu now"), Some(Err(_))));
+    }
+
+    /// The routing that was missing. `/provider` and `/model` reach the
+    /// command through two handlers — one at a turn boundary and one mid-turn —
+    /// and the held-provider state was only wired into the second. At a turn
+    /// boundary (the idle case, which is nearly always) `/provider exa` kept the
+    /// old model, built `exa/river-model`, and sent it: the service refused a
+    /// pair no file lists, the switch never took, and `/model` put the old
+    /// provider back. Neither half could be moved.
+    ///
+    /// This drives the real loop — the same `interactive_loop` a person types
+    /// into — rather than the pure decision the unit test above already covers,
+    /// so it is the wiring, and not the policy, that fails if it regresses.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_held_provider_switch_is_taken_by_the_turn_boundary_handler() {
+        use std::collections::BTreeMap;
+
+        use norte::harness::{InMemoryBlobStore, InMemoryStore};
+        use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
+        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
+        use norte_code_catalog::Catalog;
+        use norte_code_config::{ApiKey, Config};
+        use norte_testing::ScriptedModel;
+
+        struct Factory(Arc<dyn Model>);
+        impl ModelFactory for Factory {
+            fn build(
+                &self,
+                _spec: &ModelSpec,
+                _capabilities: &Capabilities,
+            ) -> Result<Arc<dyn Model>, ServiceError> {
+                Ok(Arc::clone(&self.0))
+            }
+        }
+
+        let providers: norte_code_catalog::Providers = serde_json::from_str(
+            r#"{"providers":{
+                "first":{"name":"First","environment_keys":["PATH"],
+                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]},
+                "second":{"name":"Second","environment_keys":["PATH"],
+                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
+        )
+        .expect("providers");
+        // Only `first` lists `shared`. `second` lists a model of its own, so a
+        // switch to it cannot carry the model the session is on.
+        let models: norte_code_catalog::Models = serde_json::from_str(
+            r#"{"models":[
+                {"id":"shared","provider_id":"first","name":"Shared",
+                    "supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}},
+                {"id":"other","provider_id":"second","name":"Other",
+                    "supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}}]}"#,
+        )
+        .expect("models");
+        let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
+        let entry = catalog.find("first", "shared").expect("model");
+        let spec = ModelSpec {
+            provider: "first".to_owned(),
+            model: "shared".to_owned(),
+            endpoint: "https://example.invalid/v1".to_owned(),
+            api_key: ApiKey::new("test"),
+            schema: norte_code_catalog::WireSchema::OpenAI,
+            capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
+            headers: BTreeMap::new(),
+        };
+        let reference = ModelRef::new(
+            ProviderId::new("first").expect("provider"),
+            ModelId::new("shared").expect("model"),
+        );
+        let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+        let service = Arc::new(
+            Service::new(
+                Config::default(),
+                catalog,
+                spec,
+                Arc::new(Factory(model)),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+
+        let pinned = Pinned::new();
+        let mut renderer = Renderer::new(
+            Format::Text,
+            Verbosity::Low,
+            false,
+            Style::plain(),
+            Arc::clone(&pinned),
+        );
+
+        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
+            .await
+            .expect("create session");
+        let session = events
+            .iter()
+            .find_map(|event| event.session.clone())
+            .expect("session key");
+
+        // Drive the loop the way a person does: `/provider`, then `/model`, then
+        // `/exit`. There is no terminal in a test, so the lines come from a
+        // channel instead of the keyboard — the same path the real handler
+        // takes, which is the thing that was wired wrong.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut input = InteractiveInput::from_events(rx);
+        for line in ["/provider second", "/model other", "/exit"] {
+            tx.send(EditorEvent::Line(line.to_owned(), Vec::new()))
+                .expect("line");
+        }
+        drop(tx);
+
+        interactive_loop(
+            &service,
+            Some(session.clone()),
+            &mut renderer,
+            Style::plain(),
+            &mut input,
+            None,
+            None,
+        )
+        .await
+        .expect("loop");
+
+        assert_eq!(renderer.pending_provider, None, "the switch is settled");
+        assert_eq!(
+            service.session_spec(&session).map(|spec| spec.label()),
+            Some("second/other".to_owned()),
+            "both halves moved through the turn-boundary handler"
+        );
     }
 
     #[tokio::test]
