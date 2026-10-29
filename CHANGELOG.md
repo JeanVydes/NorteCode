@@ -85,6 +85,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   same fields the plain-text footer paints, so the dial and the effort bar keep
   their colour and the log and the frame never disagree.
 
+- The status row no longer shows its own escapes. The row's head and separator
+  arrived already painted — the SGR strings the plain-text footer writes — and a
+  frame draws text, so `\u{1b}` was drawn as a cell, the row was cut mid-field,
+  and a mouse selection copied the escape bytes with the text. The row is plain
+  text in styled spans now, and the untrusted parts of its head are escaped the
+  way the log escapes them.
+
 - A held provider switch is taken at a turn boundary, not only mid-turn.
   `/provider` reaches its handler through two paths, and the hold added above was
   wired into the running-turn one alone. Between turns — which is nearly always —

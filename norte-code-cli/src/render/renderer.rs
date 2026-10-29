@@ -2604,38 +2604,53 @@ impl Renderer {
     /// and `high` adds the counters that are for looking at rather than
     /// reading: requests, input and output totals, and the input:output ratio.
     pub(crate) fn session_status(&self) -> String {
+        let head = self
+            .head_fields()
+            .into_iter()
+            .map(|(ink, text)| ink.paint(self.style, &text))
+            .collect::<String>();
         let fields = self
             .status_fields()
             .into_iter()
             .map(|(ink, text)| ink.paint(self.style, &text))
             .collect::<Vec<_>>()
             .join(&self.style.faint(" · "));
-        format!("{}{fields}", self.status_head())
+        format!("{head} {fields}")
     }
 
     /// The status row as the styled line a frame draws.
     ///
-    /// It is the fields, each in its own ink, joined by the faint separator and
-    /// led by the head — the workdir and the running activity — in its own
-    /// faint ink. The plain-text footer paints the same fields through
-    /// [`session_status`]: one source of truth, so the log and the frame can
-    /// never show different rows.
+    /// It is the head and the fields, each as plain text in its own ink, joined
+    /// by the faint separator. The plain-text footer paints the same two lists
+    /// through [`session_status`]: one source of truth, so the log and the
+    /// frame can never show different rows.
     ///
     /// [`session_status`]: Renderer::session_status
     pub(crate) fn status_line(&self) -> ratatui::text::Line<'static> {
         use ratatui::text::Span;
-        let separator = self.style.faint(" · ");
+        // Every span is plain text painted here, never a string that already
+        // carries SGR. The row used to be handed the *painted* head and
+        // separator — the strings the plain-text footer writes — so the escapes
+        // were drawn as characters, counted as width and copied along with the
+        // text; the untrusted parts, a session title and a workdir, are escaped
+        // here the way the plain-text footer escapes them.
         let mut spans = Vec::new();
-        let head = self.status_head();
-        if !head.is_empty() {
-            spans.push(Span::styled(head, self.style.faint_span()));
+        for (ink, text) in self.head_fields() {
+            spans.push(Span::styled(
+                crate::text::terminal(&text).into_owned(),
+                ink.span(self.style),
+            ));
         }
+        spans.push(Span::raw(" "));
         let fields = self.status_fields();
         let count = fields.len();
         for (index, (ink, text)) in fields.into_iter().enumerate() {
-            spans.push(Span::styled(text, ink.span(self.style)));
+            spans.push(Span::styled(
+                crate::text::terminal(&text).into_owned(),
+                ink.span(self.style),
+            ));
             if index + 1 < count {
-                spans.push(Span::styled(separator.clone(), self.style.faint_span()));
+                spans.push(Span::styled(" · ".to_owned(), self.style.faint_span()));
             }
         }
         ratatui::text::Line::from(spans)
@@ -2735,24 +2750,27 @@ impl Renderer {
         parts
     }
 
-    /// The line a text-mode footer prints, before the running activity.
+    /// The head of the status row — the workdir and the running activity — as
+    /// the fields it is made of.
     ///
-    /// It is the workdir and the activity, which the frame folds into its head
-    /// row: the plain-text path prints them here so the two destinations show
-    /// the same row.
-    pub(crate) fn status_head(&self) -> String {
-        let prefix = self.activity.as_ref().map_or_else(
-            || self.style.faint("session"),
-            |activity| self.style.yellow(activity.clone()),
-        );
-        let mut head = String::new();
+    /// The head is the row's lead, before the fields proper: where the session
+    /// runs and what it is doing. It is fields and ink like the rest of the row,
+    /// so the plain-text footer and the frame build the same head from one place
+    /// and neither hands the other a painted string to paint again.
+    pub(crate) fn head_fields(&self) -> Vec<(crate::render::dial::Ink, String)> {
+        use crate::render::dial::Ink;
+        let mut head = Vec::new();
         if self.show_workdir {
             if let Ok(dir) = std::env::current_dir() {
-                head.push_str(&self.style.faint(short_path(&dir)));
-                head.push_str(&self.style.faint(" · "));
+                head.push((Ink::Faint, short_path(&dir)));
+                head.push((Ink::Faint, " · ".to_owned()));
             }
         }
-        format!("{head}{prefix} ")
+        head.push(match &self.activity {
+            Some(activity) => (Ink::Yellow, activity.clone()),
+            None => (Ink::Faint, "session".to_owned()),
+        });
+        head
     }
 
     /// Writes the run's cost and tool summary, if the run made any requests.

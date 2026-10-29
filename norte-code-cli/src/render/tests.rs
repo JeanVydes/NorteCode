@@ -1801,3 +1801,73 @@ fn the_status_row_reaches_the_frame_in_colour() {
     let text = renderer.session_status();
     assert!(text.contains("compact"), "the warning is in the text too");
 }
+
+#[test]
+fn no_span_of_the_status_row_carries_an_escape() {
+    // The row is spans the frame draws, and a frame draws text: a span carrying
+    // SGR codes has its `\u{1b}` drawn as a cell, counted as width and copied
+    // along with the text. The head and the separator used to arrive *painted* —
+    // the exact strings the plain-text footer writes — so the footer showed
+    // `\u{1b}[38;5;...m` on screen and the row was chopped mid-field. Every span
+    // is plain text now, ink included, and this holds that.
+    let pinned = Pinned::new();
+    let mut renderer = Renderer::new(
+        Format::Text,
+        Verbosity::Medium,
+        true,
+        Style::for_tests(crate::style::Colors::True),
+        Arc::clone(&pinned),
+    );
+    renderer.max_context = Some(1_000);
+    renderer.compaction_threshold = 0.5;
+    renderer.context_used = 520;
+    renderer.set_reasoning("max".to_owned());
+    let line = renderer.status_line();
+    for span in &line.spans {
+        assert!(
+            !span.content.contains('\u{1b}'),
+            "a span carries an escape: {:?}",
+            span.content
+        );
+    }
+}
+
+#[test]
+fn the_status_row_paints_without_escapes_on_screen() {
+    // The end of the same bug a person sees: the whole interface at a size and
+    // the bottom row read back. A painted string put `\u{1b}` cells on the row
+    // and, once selected, into the copied text; the row is plain text from the
+    // spans, so the screen holds no escape at all.
+    use crate::app::State;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("terminal");
+    let mut state = State::new();
+    let pinned = Pinned::new();
+    let style = Style::for_tests(crate::style::Colors::True);
+    let mut renderer = Renderer::new(
+        Format::Text,
+        Verbosity::Medium,
+        true,
+        style,
+        Arc::clone(&pinned),
+    );
+    renderer.max_context = Some(1_000);
+    renderer.compaction_threshold = 0.5;
+    renderer.context_used = 520;
+    renderer.set_reasoning("max".to_owned());
+    state.status = renderer.status_line();
+    terminal
+        .draw(|frame| state.paint(frame, style, &pinned))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let (w, h) = (80u16, 12u16);
+    let screen: String = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol().to_owned())
+        .collect();
+    assert!(
+        !screen.contains('\u{1b}'),
+        "the frame shows no escape: {screen:?}"
+    );
+}
