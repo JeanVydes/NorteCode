@@ -205,7 +205,6 @@ where
                 preprocessor,
             }),
         }),
-        approval: declaration.approval,
     }
 }
 
@@ -263,7 +262,9 @@ impl TurnInterceptor for ScreenshotInterceptor {
 
 /// The preprocessor a capture is bounded by, from the host's configuration.
 #[must_use]
-pub(super) fn preprocessor(config: &norte_code_config::ScreenshotConfig) -> ImagePreprocessor {
+pub(super) fn preprocessor(
+    config: &norte_code_protocol::config::ScreenshotConfig,
+) -> ImagePreprocessor {
     // PNG and not the default JPEG: a screenshot is mostly text, and JPEG
     // artifacts land exactly on the strokes a model has to read.
     let bytes = usize::try_from(config.max_bytes).unwrap_or(usize::MAX);
@@ -316,7 +317,7 @@ mod tests {
         Publisher {
             screenshots: Arc::clone(screenshots),
             blobs: Arc::new(InMemoryBlobStore::new()),
-            preprocessor: preprocessor(&norte_code_config::ScreenshotConfig::default()),
+            preprocessor: preprocessor(&norte_code_protocol::config::ScreenshotConfig::default()),
         }
     }
 
@@ -397,7 +398,7 @@ mod tests {
         // The bound is the host's and it reaches the preprocessor: a capture
         // larger than the configured longest side is downscaled rather than
         // sent whole. Without this the number in the config is decoration.
-        let small = preprocessor(&norte_code_config::ScreenshotConfig {
+        let small = preprocessor(&norte_code_protocol::config::ScreenshotConfig {
             enabled: true,
             max_dimension: 32,
             max_bytes: 1024,
@@ -421,7 +422,7 @@ mod tests {
         let publisher = Publisher {
             screenshots: Arc::clone(&screenshots),
             blobs: Arc::clone(&blobs) as Arc<dyn BlobStore>,
-            preprocessor: preprocessor(&norte_code_config::ScreenshotConfig::default()),
+            preprocessor: preprocessor(&norte_code_protocol::config::ScreenshotConfig::default()),
         };
         publisher.publish(session, &mut output).await;
 

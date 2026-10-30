@@ -20,7 +20,7 @@ use norte::{
     Continuation, Layer, LayerContext, ModelRequest, ModelStream, ReasoningRequest, StreamEvent,
     Usage,
 };
-use norte_code_store_sqlite::{RequestRecord, RequestStatus};
+use norte_code_protocol::sqlite::{RequestRecord, RequestStatus};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -534,9 +534,9 @@ mod tests {
             provider: "test".to_owned(),
             model: "test".to_owned(),
             endpoint: "https://example.invalid/v1".to_owned(),
-            schema: norte_code_catalog::WireSchema::OpenAI,
+            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
             auth: None,
-            api_key: norte_code_config::ApiKey::new("test"),
+            api_key: norte_code_protocol::config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };
@@ -586,15 +586,15 @@ mod tests {
 
     async fn cancelled_row(
         event: StreamEvent,
-    ) -> (norte_code_store_sqlite::RequestRecord, norte::SessionId) {
+    ) -> (norte_code_protocol::sqlite::RequestRecord, norte::SessionId) {
         let telemetry = Arc::new(Telemetry::default());
         let spec = ModelSpec {
             provider: "test".to_owned(),
             model: "test".to_owned(),
             endpoint: "https://example.invalid/v1".to_owned(),
-            schema: norte_code_catalog::WireSchema::OpenAI,
+            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
             auth: None,
-            api_key: norte_code_config::ApiKey::new("test"),
+            api_key: norte_code_protocol::config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),
             headers: std::collections::BTreeMap::new(),
         };

@@ -1,8 +1,6 @@
-//! Approval labels and the argument readers of the small tools.
+//! The argument readers of the small tools.
 
 use crate::input::{TodoItem, TodoStatus};
-
-use super::ApprovalMode;
 
 /// Reads the `todo` tool's arguments into the footer's list.
 ///
@@ -43,13 +41,5 @@ pub(crate) fn todo_item(info: &norte_code_protocol::TodoInfo) -> TodoItem {
     TodoItem {
         content: info.content.clone(),
         status,
-    }
-}
-
-pub(crate) fn approval_label(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::AutoEdit => "auto-edit",
-        ApprovalMode::Yolo => "yolo",
     }
 }

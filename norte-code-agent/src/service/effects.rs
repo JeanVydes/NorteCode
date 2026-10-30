@@ -3,9 +3,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use norte::harness::{Decision, Policy, PolicyView};
 use norte::{CallId, SessionId};
-use norte_code_store_sqlite::SessionDirectory;
+use norte_code_protocol::sqlite::SessionDirectory;
 
 use crate::ServiceError;
 
@@ -80,26 +79,63 @@ impl EffectJournal {
     }
 }
 
-/// Refuses to replay an effectful call a crashed process may have run.
-pub(super) struct EffectJournalPolicy {
-    pub(super) journal: Arc<EffectJournal>,
+/// Wraps a declaration so a call a crash may have run is refused.
+///
+/// The journal knows the call id, and the engine hands it to the executor in
+/// the context, so the gate belongs beside the call rather than in a rule the
+/// engine evaluates before it: a call that started before a restart is a fact
+/// about *this* call, not a property of the tool.
+pub(super) fn journalled<A>(
+    declaration: norte::ToolDeclaration<A>,
+    journal: Arc<EffectJournal>,
+) -> norte::ToolDeclaration<A>
+where
+    A: norte::ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
+{
+    let name = declaration.name;
+    norte::ToolDeclaration {
+        name,
+        description: declaration.description,
+        parameters: declaration.parameters,
+        executor: Arc::new(JournalledExecutor {
+            inner: declaration.executor,
+            journal,
+            name,
+        }),
+    }
 }
 
-impl Policy for EffectJournalPolicy {
-    fn name(&self) -> &'static str {
-        "effect-journal"
+/// A tool executor that refuses a call the journal doubts.
+struct JournalledExecutor<A> {
+    inner: Arc<dyn norte::FnExecutor<A, norte::ToolOutput>>,
+    journal: Arc<EffectJournal>,
+    name: &'static str,
+}
+
+#[async_trait::async_trait]
+impl<A> norte::FnExecutor<A, norte::ToolOutput> for JournalledExecutor<A>
+where
+    A: norte::ToolArgs,
+{
+    async fn call(&self, args: A) -> norte::Result<norte::ToolOutput> {
+        self.inner.call(args).await
     }
 
-    fn decide(&self, view: &PolicyView<'_>) -> Decision {
-        let tool = view.call.name.as_str();
-        if is_journaled(tool) && self.journal.is_suspect(view.session.id, view.call.call_id) {
-            return Decision::Deny(format!(
-                "`{tool}` call {} started before a restart and may already have taken effect, \
-                 so it is not run again. Inspect the workspace; to retry, ask in a new turn \
-                 so the model gets a fresh call.",
-                view.call.call_id
-            ));
+    async fn call_with_context(
+        &self,
+        context: &norte::ToolContext,
+        args: A,
+    ) -> norte::Result<norte::ToolOutput> {
+        if let (Some(session), Some(call_id)) = (context.session, context.call_id) {
+            if is_journaled(self.name) && self.journal.is_suspect(session, call_id) {
+                return Ok(norte::ToolOutput::error(format!(
+                    "`{}` call {call_id} started before a restart and may already have taken \
+                     effect, so it is not run again. Inspect the workspace; to retry, ask in a \
+                     new turn so the model gets a fresh call.",
+                    self.name
+                )));
+            }
         }
-        Decision::Allow
+        self.inner.call_with_context(context, args).await
     }
 }

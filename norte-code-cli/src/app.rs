@@ -71,7 +71,7 @@ pub(crate) struct State {
     ///
     /// Empty when nothing was loaded, which is every ordinary run: the column
     /// takes no space when there is nothing to put in it.
-    pub(crate) sidebar: Vec<(String, Vec<norte_code_plugins::SidebarRow>)>,
+    pub(crate) sidebar: Vec<(String, Vec<norte_code_protocol::plugins::SidebarRow>)>,
     /// The connected MCP servers, as the sidebar shows them.
     pub(crate) mcp: Vec<McpRow>,
     /// The model's task list, as the sidebar shows it.

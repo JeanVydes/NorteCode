@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use norte::{Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind};
-use norte_code_catalog::{Catalog, load_catalog_files};
+use norte_code_protocol::catalog::{Catalog, load_catalog_files};
 use norte_code_protocol::{
     Modality, ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo, ServerEvent,
     ServerEventKind, SessionKey,
@@ -33,7 +33,7 @@ pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
             // models would be offering a choice that fails when taken.
             continue;
         };
-        let capabilities = norte_code_catalog::capabilities(entry.model, wire.schema);
+        let capabilities = norte_code_protocol::catalog::capabilities(entry.model, wire.schema);
         let mut efforts: Vec<String> = capabilities
             .reasoning
             .efforts
@@ -72,20 +72,21 @@ pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
                 supports_budget: capabilities.reasoning.supports_budget,
                 max_budget: capabilities.reasoning.max_budget,
             },
-            deprecated: entry.model.status == Some(norte_code_catalog::ModelStatus::Deprecated),
+            deprecated: entry.model.status
+                == Some(norte_code_protocol::catalog::ModelStatus::Deprecated),
         });
     }
     models
 }
 
 /// The wire's name for a catalogue modality.
-fn modality_of(modality: norte_code_catalog::Modality) -> Modality {
+fn modality_of(modality: norte_code_protocol::catalog::Modality) -> Modality {
     match modality {
-        norte_code_catalog::Modality::Text => Modality::Text,
-        norte_code_catalog::Modality::Image => Modality::Image,
-        norte_code_catalog::Modality::Audio => Modality::Audio,
-        norte_code_catalog::Modality::Video => Modality::Video,
-        norte_code_catalog::Modality::File => Modality::File,
+        norte_code_protocol::catalog::Modality::Text => Modality::Text,
+        norte_code_protocol::catalog::Modality::Image => Modality::Image,
+        norte_code_protocol::catalog::Modality::Audio => Modality::Audio,
+        norte_code_protocol::catalog::Modality::Video => Modality::Video,
+        norte_code_protocol::catalog::Modality::File => Modality::File,
     }
 }
 

@@ -22,12 +22,12 @@ use norte::openai::OpenAiChat;
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
 /// A `providers.json` entry's wire: a base URL and the schema it speaks.
-pub use norte_code_catalog::schema::Wire as CatalogWire;
-use norte_code_catalog::{
+pub use norte_code_protocol::catalog::schema::Wire as CatalogWire;
+use norte_code_protocol::catalog::{
     AuthKind, Catalog, CatalogError, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
 };
 
-use norte_code_config::{ApiKey, Config};
+use norte_code_protocol::config::{ApiKey, Config};
 
 use crate::ServiceError;
 
@@ -110,7 +110,7 @@ impl ModelSpec {
             api_key,
             schema: wire.schema,
             auth: wire.auth,
-            capabilities: norte_code_catalog::capabilities(model, wire.schema),
+            capabilities: norte_code_protocol::catalog::capabilities(model, wire.schema),
             headers: headers_for(&model.provider_id),
         })
     }
@@ -321,9 +321,9 @@ mod tests {
             provider_id: provider_id.to_owned(),
             canonical_slug: format!("{provider_id}/{id}"),
             name: id.to_owned(),
-            modalities: norte_code_catalog::Modalities {
-                input: vec![norte_code_catalog::Modality::Text],
-                output: vec![norte_code_catalog::Modality::Text],
+            modalities: norte_code_protocol::catalog::Modalities {
+                input: vec![norte_code_protocol::catalog::Modality::Text],
+                output: vec![norte_code_protocol::catalog::Modality::Text],
             },
             ..CatalogModel::default()
         }

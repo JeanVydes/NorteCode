@@ -14,14 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 norte-code-agent = { path = "../norte-code-agent" }
-norte-code-catalog = { path = "../norte-code-catalog" }
-norte-code-commands = { path = "../norte-code-commands" }
-norte-code-config = { path = "../norte-code-config" }
-norte-code-cost = { path = "../norte-code-cost" }
-norte-code-plugins = { path = "../norte-code-plugins" }
 norte-code-protocol = { path = "../norte-code-protocol" }
-norte-code-skills = { path = "../norte-code-skills" }
-norte-code-store-sqlite = { path = "../norte-code-store-sqlite" }
 
 clap = { workspace = true }
 # The clipboard of a terminal is written through OSC 52, which carries the text

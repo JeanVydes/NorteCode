@@ -27,6 +27,27 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   held provider lives in the client and never on disk: closing with one held
   reopens on the model the session already had.
 
+- Eight crates are one. `norte-code-protocol` holds the wire, the catalogue,
+  the configuration, the commands, the costs, the plugins, the skills, the
+  tools and the SQLite store that were each their own crate —
+  `norte-code-config`, `-catalog`, `-commands`, `-cost`, `-plugins`,
+  `-skills`, `-store-sqlite` and `-tools`. They shared a version, a release
+  train and a boundary nobody enforced, so a type crossed it without the
+  compiler in the way. The paths change — `norte_code_config` is
+  `norte_code_protocol::config` — and nothing about the wire does.
+
+### Removed
+
+- Approvals are gone. `Phase::AwaitingApproval`, the `approvals` table,
+  `ClientRequestKind::{Approve, Deny, Revoke, ListGrants}`,
+  `ServerEventKind::{ApprovalRequested, ApprovalResolved, GrantRevoked,
+  GrantList}`, `GrantInfo`, `GrantScope`, `DenyScope`, `/approve` and
+  `ApprovalMode` were one way to ask a person whether a tool could run. A
+  rule in the configuration does the same judgement without a dialogue, so
+  the second mechanism was removed rather than kept beside it: two places
+  that both decide a host question is what made the decision
+  unpredictable. `/allow` and `/deny` write those rules now.
+
 ### Changed
 
 - `WireKind` is gone: `WireSchema` was already the same fact with another
@@ -71,6 +92,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   that describes models.
 
 ### Fixed
+
+- Deleting a session takes its conversation with it. The node tree is
+  reached by walking back from the head, the only handle a session has on
+  it, and the head was read one level too deep — from `session.head` in a
+  blob that keeps it at the root. The walk never started, every node
+  stayed, and the delete looked complete because a re-created session id
+  no longer collided with the orphaned rows.
 
 - A streamed command's output is drawn once, not twice. The chunk reached the
   transcript through two paths: one appended it raw, the other built the box it

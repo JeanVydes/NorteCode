@@ -37,8 +37,8 @@
 //! size — it is what keeps somebody else's code from being able to break the
 //! interface it draws into.
 
-use norte_code_commands::{ArgSpec, CommandSpec, Invocation};
-use norte_code_plugins::{Plugin, Plugins, SidebarRow};
+use norte_code_protocol::commands::{ArgSpec, CommandSpec, Invocation};
+use norte_code_protocol::plugins::{Plugin, Plugins, SidebarRow};
 
 /// A plugin that shows the shape of one.
 ///
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn the_example_answers_its_own_command_and_no_other() {
-        let mut registry = norte_code_commands::Registry::new();
+        let mut registry = norte_code_protocol::commands::Registry::new();
         registry.register(CommandSpec::new("/example", "example").arg(ArgSpec::rest("text")));
         registry.register(CommandSpec::new("/mine", "mine"));
         let mine = registry.parse("/mine").expect("a command").expect("parsed");

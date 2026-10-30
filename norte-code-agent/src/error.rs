@@ -1,6 +1,6 @@
 //! The service's error type.
 
-use norte_code_config::ConfigError;
+use norte_code_protocol::config::ConfigError;
 
 /// A failure in the service or in building its providers.
 #[derive(Debug, thiserror::Error)]
@@ -10,7 +10,7 @@ pub enum ServiceError {
     Config(#[from] ConfigError),
     /// The catalogue could not be loaded or written.
     #[error(transparent)]
-    Catalog(#[from] norte_code_catalog::CatalogError),
+    Catalog(#[from] norte_code_protocol::catalog::CatalogError),
     /// A model reference was not `provider/model`.
     #[error("`{0}` is not a `provider/model` reference")]
     ModelReference(String),

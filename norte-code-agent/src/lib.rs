@@ -15,8 +15,7 @@ pub mod telemetry;
 pub use error::ServiceError;
 pub use provider::{ModelFactory, ModelSpec, VendorModels};
 pub use service::{
-    EventStream, PromptSize, RuleScope, Service, ToolRule, ToolStatus, effective_reasoning,
-    model_list,
+    EventStream, PromptSize, RuleScope, Service, ToolStatus, effective_reasoning, model_list,
 };
 
 /// The default system prompt for the built-in host.

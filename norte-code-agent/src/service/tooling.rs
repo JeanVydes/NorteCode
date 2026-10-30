@@ -42,7 +42,7 @@ impl ToolActivity {
     pub(super) fn snapshot(&self, call_id: CallId, source: String) {
         const MAX_SNAPSHOTS: usize = 16;
         let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
-        // A denied or cancelled approval never reaches `ToolStarted`, so its
+        // A call refused by a rule never reaches `ToolStarted`, so its
         // snapshot is not removed by the renderer. Bound the map instead of
         // letting repeated denials retain megabytes of file text.
         if sources.len() >= MAX_SNAPSHOTS {
@@ -147,7 +147,6 @@ where
             inner: declaration.executor,
             activity,
         }),
-        approval: declaration.approval,
     }
 }
 

@@ -10,6 +10,15 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
+pub mod commands;
+pub mod config;
+pub mod costs;
+pub mod plugins;
+pub mod skills;
+pub mod sqlite;
+pub mod tools;
+
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -163,44 +172,6 @@ pub enum ClientRequestKind {
     },
     /// Continue a session that is parked or interrupted.
     Resume {
-        /// The session.
-        session: SessionKey,
-    },
-    /// Approve a parked tool call.
-    Approve {
-        /// The session.
-        session: SessionKey,
-        /// The approval record.
-        approval: String,
-        /// Replacement arguments, when the human edited the call.
-        arguments: Option<Value>,
-        /// How long the grant lasts.
-        scope: Option<GrantScope>,
-        /// Whether to remember the decision for the session.
-        remember: Option<bool>,
-    },
-    /// Deny a parked tool call.
-    Deny {
-        /// The session.
-        session: SessionKey,
-        /// The approval record.
-        approval: String,
-        /// Why.
-        reason: Option<String>,
-        /// How long the denial lasts.
-        scope: Option<DenyScope>,
-    },
-    /// Revoke a live grant.
-    Revoke {
-        /// The session.
-        session: SessionKey,
-        /// The approval record.
-        approval: String,
-        /// The grant to revoke.
-        grant: String,
-    },
-    /// List the approval grants held by a session.
-    ListGrants {
         /// The session.
         session: SessionKey,
     },
@@ -382,32 +353,6 @@ pub enum ServerEventKind {
         detached: bool,
         /// How long it ran, in milliseconds.
         duration_ms: u64,
-    },
-    /// A tool call is parked for a human decision.
-    ApprovalRequested {
-        /// The turn.
-        turn: u64,
-        /// The approval record.
-        approval: String,
-        /// The call awaiting a decision.
-        call_id: String,
-        /// The tool.
-        tool: String,
-        /// The arguments the tool would run with, when they can be recovered.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        arguments: Option<serde_json::Value>,
-        /// The OS sandbox that will wrap the call, when one will. The arguments
-        /// still describe the command the model asked for, not the sandbox
-        /// launcher.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sandbox: Option<String>,
-    },
-    /// A parked call was approved or denied.
-    ApprovalResolved {
-        /// The approval record.
-        approval: String,
-        /// Whether it was approved.
-        approved: bool,
     },
     /// A model request was reconstructed: its usage and reported cost.
     RequestReconstructed {
@@ -634,18 +579,6 @@ pub enum ServerEventKind {
         /// How many valid skills were found.
         skills: usize,
     },
-    /// An approval grant was revoked.
-    GrantRevoked {
-        /// The approval record.
-        approval: String,
-        /// The grant.
-        grant: String,
-    },
-    /// The approval grants held by a session.
-    GrantList {
-        /// One entry per grant, including revoked ones.
-        grants: Vec<GrantInfo>,
-    },
     /// The running turn needs an answer before it can continue.
     QuestionAsked {
         /// The turn.
@@ -766,24 +699,6 @@ pub enum TodoStatus {
     InProgress,
     /// Done.
     Completed,
-}
-
-/// One approval grant, as a client sees it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrantInfo {
-    /// The approval record that issued it.
-    pub approval: String,
-    /// The grant id to pass to [`ClientRequestKind::Revoke`].
-    pub grant: String,
-    /// The tool the approval covered.
-    pub tool: String,
-    /// How far the grant reaches.
-    pub scope: GrantScope,
-    /// When it was issued, as RFC 3339.
-    pub issued_at: String,
-    /// Whether it has already been revoked.
-    pub revoked: bool,
 }
 
 /// One kind of content a model accepts or produces.
@@ -944,8 +859,6 @@ pub enum Phase {
     Streaming,
     /// A tool call is authorised and about to run.
     AwaitingTool,
-    /// A tool call is parked for a human.
-    AwaitingApproval,
 }
 
 /// A stream delta.
@@ -1059,32 +972,6 @@ pub enum BudgetScope {
     Session,
     /// The day, across sessions.
     GlobalDaily,
-}
-
-/// How long an approval grant lasts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrantScope {
-    /// This call only.
-    Once,
-    /// This tool for the rest of this session.
-    Tool,
-    /// Every tool in this session.
-    Session,
-    /// Every session.
-    Always,
-}
-
-/// How long a denial lasts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DenyScope {
-    /// This call only.
-    Once,
-    /// This tool for the rest of this session.
-    ToolSession,
-    /// This tool in every session, stored in the user config.
-    ToolGlobal,
 }
 
 /// A reasoning setting.
@@ -1283,27 +1170,5 @@ mod tests {
                 attempt: 2
             }
         ));
-    }
-
-    #[test]
-    fn an_approval_without_arguments_still_deserializes() {
-        let json = r#"{
-            "request_id": 1,
-            "session": "s",
-            "kind": {
-                "event": "approval_requested",
-                "turn": 1,
-                "approval": "a",
-                "call_id": "c",
-                "tool": "write"
-            }
-        }"#;
-        let event: ServerEvent = serde_json::from_str(json).expect("deserialize");
-        match event.kind {
-            ServerEventKind::ApprovalRequested { arguments, .. } => {
-                assert!(arguments.is_none());
-            }
-            other => panic!("expected an approval, got {other:?}"),
-        }
     }
 }

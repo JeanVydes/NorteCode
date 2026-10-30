@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-use norte_code_catalog::{Catalog, Model};
+use norte_code_protocol::catalog::{Catalog, Model};
 
 use super::helpers::find_project_config;
 use super::names::{
@@ -22,9 +22,8 @@ use super::names::{
 };
 use crate::modal::{Action, Row};
 
-use super::approval_label;
-use super::{ApprovalMode, RuleScope, SessionKey, ToolRule};
 use super::{Config, ModelSpec, Path, Reasoning, Service, Style};
+use super::{RuleScope, SessionKey};
 
 /// The facts only the host knows, set once at startup.
 ///
@@ -131,7 +130,6 @@ pub(crate) fn report_start(
             ),
         ),
         fact("wire", spec.schema.family()),
-        fact("approval", approval_label(configuration.approval_mode)),
         fact("iterations", &max_iterations),
         fact(
             "compaction",
@@ -315,35 +313,28 @@ pub(crate) fn tools_panel(
     if statuses.is_empty() {
         return vec![Row::text(style.yellow("no tools are registered"))];
     }
-    let mut rows = vec![Row::heading(format!(
-        "approval mode: {}",
-        match service.config().approval_mode {
-            ApprovalMode::Ask => "ask (writes and commands are approved)",
-            ApprovalMode::AutoEdit => "auto-edit (commands are approved)",
-            ApprovalMode::Yolo => "yolo (nothing is approved)",
-        }
-    ))];
+    let mut rows = vec![Row::heading("tools: what a call to each may do")];
     let widest = statuses
         .iter()
         .map(|status| status.name.chars().count())
         .max()
         .unwrap_or(0);
     for status in &statuses {
-        let (word, action) = match status.rule {
-            // The key walks the rule through its three states, so the row's own
-            // word is what the next press does: an allow becomes a deny and a
-            // deny becomes an ask — the rule is forgotten and a call to it is
-            // decided by the mode again — and an ask becomes an allow. Setting
-            // and clearing both, from the panel, is why there are three: a rule
-            // a person set by hand is one they must be able to take back.
-            ToolRule::Allow => ("allow", Action::Deny(status.name.clone())),
-            ToolRule::Deny => ("deny", Action::Forget(status.name.clone())),
-            ToolRule::Ask => ("ask", Action::Allow(status.name.clone())),
+        // The key walks the rule through its three states, so the row's own
+        // word is what the next press does: a tool with no rule becomes allowed,
+        // an allowed one becomes denied, and a denied one is forgotten so a call
+        // to it runs again. Setting and clearing both, from the panel, is why
+        // there are three: a rule a person set by hand is one they must be able
+        // to take back.
+        let (word, action) = match status.scope {
+            RuleScope::Default => ("runs", Action::Allow(status.name.clone())),
+            _ if status.allowed => ("allow", Action::Deny(status.name.clone())),
+            _ => ("deny", Action::Forget(status.name.clone())),
         };
         let scope = match status.scope {
             RuleScope::Session => "this session",
             RuleScope::Global => "every session",
-            RuleScope::Mode => "by the mode",
+            RuleScope::Default => "by default",
         };
         rows.push(
             Row::actable(format!("{:<widest$}", status.name), action)

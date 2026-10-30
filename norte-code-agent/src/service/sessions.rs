@@ -242,7 +242,6 @@ impl Service {
             head: None,
             phase: norte::harness::Phase::Idle,
             turn: session.turn,
-            grants: session.grants.clone(),
             metadata: None,
         };
         match self.store.commit(commit).await {
@@ -284,7 +283,6 @@ impl Service {
                 );
                 match stored_phase.as_str() {
                     "awaiting_tool" => ProtocolPhase::AwaitingTool,
-                    "awaiting_approval" => ProtocolPhase::AwaitingApproval,
                     // `streaming` cannot survive a process; everything else
                     // starts idle.
                     _ => ProtocolPhase::Idle,
@@ -308,7 +306,6 @@ impl Service {
                 ProtocolPhase::Idle => "idle",
                 ProtocolPhase::Streaming => "streaming",
                 ProtocolPhase::AwaitingTool => "awaiting_tool",
-                ProtocolPhase::AwaitingApproval => "awaiting_approval",
             }
             .to_owned(),
             stats: serde_json::json!({

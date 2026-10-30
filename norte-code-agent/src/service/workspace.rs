@@ -1,27 +1,29 @@
-//! Workspace-root policy: re-root tool paths and refuse escapes.
+//! Workspace confinement: re-root tool paths and refuse escapes.
+//!
+//! The wrap is a gate on arguments, not a sandbox: a `shell` call can still
+//! reach outside the workspace. It stops the common mistake of a model reading
+//! `../../etc/passwd`, resolves symbolic links before comparing them with the
+//! root, and refuses FIFOs, sockets and devices so a tool cannot block forever.
+//!
+//! It is a wrapper around the declaration rather than a rule the engine
+//! evaluates, because the tool's own arguments are typed here — the wrapper
+//! knows which field is a path, which is the thing a rule over raw JSON has to
+//! be told.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use norte::harness::{Decision, Policy, PolicyView};
+use norte::{AnyFunction, Result as NorteResult, ToolContext, ToolOutput};
 
-/// Re-roots tool paths into the workspace and refuses an escape.
-///
-/// This is a gate on arguments, not a sandbox: a `command` can still reach
-/// outside the workspace. It stops the common mistake of a model reading
-/// `../../etc/passwd`, resolves symbolic links before comparing them with the
-/// root, and refuses FIFOs, sockets and devices so a tool cannot block forever.
-///
-/// The root check is what `tools.confinement.workspace_only` turns off. The
-/// special-file check stays either way: it protects the tool from blocking, not
-/// the filesystem from the model.
-pub(super) struct WorkspacePolicy {
-    pub(super) root: PathBuf,
-    /// Whether a path outside the workspace is refused.
-    ///
-    /// Configured by `tools.confinement.workspace_only`. Off, the path argument
-    /// is handed through as the caller wrote it, so a host working across
-    /// repositories can name any file.
-    pub(super) enforce_root: bool,
+/// One path argument a tool names, and what it is expected to be.
+#[derive(Clone)]
+pub(super) struct Confined {
+    /// The field to re-root and check.
+    pub(super) key: &'static str,
+    /// Whether a missing path becomes the root itself.
+    pub(super) default_to_root: bool,
+    /// What the path is expected to name when it already exists.
+    pub(super) kind: PathKind,
 }
 
 /// What a path argument is expected to name when it already exists.
@@ -35,44 +37,102 @@ pub(super) enum PathKind {
     FileOrDirectory,
 }
 
-impl Policy for WorkspacePolicy {
-    fn name(&self) -> &'static str {
-        "workspace-root"
-    }
+/// The confines a tool's arguments meet, in one place.
+#[derive(Clone)]
+pub(super) struct Workspace {
+    /// The root every path lands under.
+    pub(super) root: PathBuf,
+    /// Whether a path outside the workspace is refused.
+    ///
+    /// Configured by `tools.confinement.workspace_only`. Off, the path argument
+    /// is handed through as the caller wrote it, so a host working across
+    /// repositories can name any file. The special-file check stays either way:
+    /// it protects the tool from blocking, not the filesystem from the model.
+    pub(super) enforce_root: bool,
+    /// The path arguments this tool carries.
+    pub(super) fields: Vec<Confined>,
+}
 
-    fn decide(&self, view: &PolicyView<'_>) -> Decision {
-        let tool = view.call.name.as_str();
-        match tool {
-            "read" | "write" | "edit" => self.apply(view, "path", false, PathKind::File),
-            "grep" => self.apply(view, "path", true, PathKind::FileOrDirectory),
-            "shell" => self.apply(view, "cwd", false, PathKind::Directory),
-            _ => Decision::Allow,
+impl Workspace {
+    /// Applies every confine to one arguments object.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the reason the model reads when a path escapes or names
+    /// something that is not the kind of file the tool needs.
+    pub(super) fn apply(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let mut arguments = arguments.clone();
+        for field in &self.fields {
+            arguments = if self.enforce_root {
+                transform_path(&arguments, field.key, &self.root, field.default_to_root)?
+            } else {
+                arguments
+            };
+            check_path_kind(&arguments, field.key, field.kind)?;
         }
+        Ok(arguments)
     }
 }
 
-impl WorkspacePolicy {
-    /// Re-roots one path argument, then refuses a symlink escape or a special
-    /// file. The kind check is what keeps a FIFO from blocking `read` forever.
-    fn apply(
+/// Wraps a tool so every call's path arguments land in the workspace.
+///
+/// The wrap is on the erased view, not on the typed one, because the confinement
+/// is about the *raw* arguments: the path is rewritten before the tool's own
+/// deserialization sees it, and a refusal is an error the model reads like any
+/// other failed call.
+pub(super) fn confined(inner: Arc<dyn AnyFunction>, workspace: Workspace) -> Arc<dyn AnyFunction> {
+    Arc::new(ConfinedFunction { inner, workspace })
+}
+
+/// A tool whose path arguments are re-rooted and checked before it runs.
+struct ConfinedFunction {
+    inner: Arc<dyn AnyFunction>,
+    workspace: Workspace,
+}
+
+impl std::fmt::Debug for ConfinedFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfinedFunction")
+            .field("name", &self.inner.name())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl AnyFunction for ConfinedFunction {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> &schemars::Schema {
+        self.inner.parameters_schema()
+    }
+
+    fn kind(&self) -> norte::ToolKind {
+        self.inner.kind()
+    }
+
+    fn declaration(&self) -> Option<serde_json::Value> {
+        self.inner.declaration()
+    }
+
+    async fn execute(
         &self,
-        view: &PolicyView<'_>,
-        key: &str,
-        default_to_root: bool,
-        kind: PathKind,
-    ) -> Decision {
-        let arguments = if self.enforce_root {
-            match transform_path(&view.call.arguments, key, &self.root, default_to_root) {
-                Ok(arguments) => arguments,
-                Err(reason) => return Decision::Deny(reason),
-            }
-        } else {
-            view.call.arguments.clone()
-        };
-        match check_path_kind(&arguments, key, kind) {
-            Ok(()) => Decision::Transform(arguments),
-            Err(reason) => Decision::Deny(reason),
-        }
+        context: &ToolContext,
+        arguments: &serde_json::Value,
+    ) -> NorteResult<ToolOutput> {
+        let arguments = self
+            .workspace
+            .apply(arguments)
+            .map_err(norte::Error::InvalidInput)?;
+        self.inner.execute(context, &arguments).await
     }
 }
 

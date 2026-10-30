@@ -9,8 +9,27 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+norte = { workspace = true }
+
+async-trait = { workspace = true }
+chrono = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
+serde_ignored = { workspace = true }
 serde_json = { workspace = true }
+serde_norway = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+norte-testing = { workspace = true }
 
 [lints]
 workspace = true

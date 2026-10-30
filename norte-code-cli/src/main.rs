@@ -10,7 +10,6 @@
 //! tool calling or reasoning.
 
 mod app;
-mod approval;
 mod art;
 mod commands;
 mod commands_registry;
@@ -21,6 +20,7 @@ mod modal;
 mod models;
 mod plugin_loader;
 mod plugins;
+mod preview;
 mod prompt;
 mod render;
 mod select;
@@ -31,22 +31,19 @@ mod terminal;
 mod text;
 mod transcript;
 
-use approval::{clip_text, compact_json};
 use commands::{apply_extensions, database_path, duration_label, enter_workdir, run};
 use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, interactive_loop, refresh_effort};
 use models::{list_models, resolve_spec};
+use preview::{clip_text, compact_json};
 use render::{
-    Format, HostFacts, Renderer, Verbosity, approval_label, cache_percent_label,
-    find_project_config, human_tokens, parse_budget_action, parse_budget_unit,
-    parse_reasoning_setting, reasoning_label, reasoning_setting_label, select_system_prompt, short,
+    Format, HostFacts, Renderer, Verbosity, cache_percent_label, find_project_config, human_tokens,
+    parse_budget_action, parse_budget_unit, parse_reasoning_setting, reasoning_label,
+    reasoning_setting_label, select_system_prompt, short,
 };
 use startup::Open;
 
 #[cfg(test)]
-use approval::{
-    ApprovalChoice, PreviewLine, approval_request, argument_preview, parse_approval_choice,
-};
 #[cfg(test)]
 use commands::cost_summary;
 #[cfg(test)]
@@ -68,19 +65,18 @@ use norte::{
     ToolKind,
 };
 use norte_code_agent::{
-    EventStream, ModelSpec, RuleScope, Service, ToolRule, VendorModels, effective_reasoning,
-    model_list,
+    EventStream, ModelSpec, RuleScope, Service, VendorModels, effective_reasoning, model_list,
 };
-use norte_code_catalog::{Catalog, WireSchema};
-use norte_code_config::{ApprovalMode, Config, DiffStyle, user_config_path};
-use norte_code_cost::{CostSummary, by_day, by_session, by_turn, summarize};
+use norte_code_protocol::catalog::{Catalog, WireSchema};
+use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
+use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
+use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
+use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
-    DenyScope, ErrorCode, GrantInfo, GrantScope, JobInfo, ModelInfo, Phase, Reasoning,
-    ReasoningInfo, ReasoningScope, ServerEvent, ServerEventKind, SessionKey,
+    ErrorCode, JobInfo, ModelInfo, Phase, Reasoning, ReasoningInfo, ReasoningScope, ServerEvent,
+    ServerEventKind, SessionKey,
 };
-use norte_code_skills::{SkillRegistry, discovery_roots};
-use norte_code_store_sqlite::{RequestRecord, SessionDirectory, SqliteStore};
 use tokio::sync::mpsc;
 
 use crate::style::Style;
@@ -229,9 +225,6 @@ struct NewArgs {
     /// A reasoning setting: `auto`, `off`, or an effort such as `low`.
     #[arg(long, value_name = "SETTING")]
     reasoning: Option<String>,
-    /// What needs approval: `ask` (default), `auto-edit` or `yolo`.
-    #[arg(long, value_name = "MODE", value_parser = ["ask", "auto-edit", "yolo"])]
-    approval_mode: Option<String>,
     /// Stop after this many model iterations; unlimited by default.
     #[arg(long, value_name = "N")]
     max_iterations: Option<usize>,
@@ -307,7 +300,6 @@ impl NewArgs {
                 sandbox_network: None,
             },
             reasoning: None,
-            approval_mode: None,
             max_iterations: None,
             extension: Vec::new(),
         }
@@ -605,14 +597,6 @@ pub(crate) async fn new_session(
     let model_label = spec.label();
     let provider = spec.provider.clone();
     let mut config = config;
-    if let Some(mode) = args.approval_mode.as_deref() {
-        config.approval_mode = match mode {
-            "ask" => ApprovalMode::Ask,
-            "auto-edit" => ApprovalMode::AutoEdit,
-            "yolo" => ApprovalMode::Yolo,
-            other => return Err(format!("unknown approval mode `{other}`")),
-        };
-    }
     CommonOptions {
         max_iterations: args.max_iterations,
         compaction_threshold: args.compaction_threshold,
@@ -652,15 +636,11 @@ pub(crate) async fn new_session(
     let verbosity = Verbosity::parse(verbosity)?;
     if verbosity.at_least(Verbosity::Medium) {
         eprintln!(
-            "{} {} {} {} {}",
+            "{} {} {} {}",
             style.magenta("◆"),
             style.bold(spec.label()),
             style.dim("·"),
-            style.dim(format!("catalogue: {} models", catalog.model_count())),
-            style.dim(format!(
-                "· approval {}",
-                approval_label(config.approval_mode)
-            ))
+            style.dim(format!("catalogue: {} models", catalog.model_count()))
         );
     }
     let budget_is_usd = message_budget
@@ -728,8 +708,8 @@ pub(crate) async fn new_session(
     // came from. Set once here, like the model name and the context window.
     renderer.host_facts = Some(HostFacts {
         database: database.clone(),
-        providers_path: norte_code_catalog::providers_path().unwrap_or_default(),
-        models_path: norte_code_catalog::models_path().unwrap_or_default(),
+        providers_path: norte_code_protocol::catalog::providers_path().unwrap_or_default(),
+        models_path: norte_code_protocol::catalog::models_path().unwrap_or_default(),
         prompt_source: system_prompt_source,
     });
     // The effort the next turn will ask for, on the footer where the session
@@ -961,8 +941,8 @@ async fn resume_session(
     renderer.set_mcp(crate::interaction::mcp_rows(&service));
     renderer.host_facts = Some(HostFacts {
         database: database.clone(),
-        providers_path: norte_code_catalog::providers_path().unwrap_or_default(),
-        models_path: norte_code_catalog::models_path().unwrap_or_default(),
+        providers_path: norte_code_protocol::catalog::providers_path().unwrap_or_default(),
+        models_path: norte_code_protocol::catalog::models_path().unwrap_or_default(),
         prompt_source: system_prompt_source,
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));

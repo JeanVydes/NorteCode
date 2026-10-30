@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use norte_code_catalog::Catalog;
-use norte_code_config::Config;
 use norte_code_protocol::ServerEventKind;
-use norte_code_skills::SkillRegistry;
+use norte_code_protocol::catalog::Catalog;
+use norte_code_protocol::config::Config;
+use norte_code_protocol::skills::SkillRegistry;
 
 use super::mapping::single;
 use super::{EventStream, Service};
@@ -14,8 +14,11 @@ pub(super) fn discover_skills(config: &Config, workspace: &Path) -> SkillRegistr
     if !config.skills.enabled {
         return SkillRegistry::discover(&[], 1);
     }
-    let roots =
-        norte_code_skills::discovery_roots(workspace, &config.skills.paths, config.skills.interop);
+    let roots = norte_code_protocol::skills::discovery_roots(
+        workspace,
+        &config.skills.paths,
+        config.skills.interop,
+    );
     SkillRegistry::discover(&roots, config.skills.max_skills)
 }
 

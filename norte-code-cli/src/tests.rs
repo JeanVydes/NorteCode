@@ -1,17 +1,16 @@
 use super::{
-    ApprovalChoice, Cli, Command, DenyScope, GrantScope, McpCommand, PreviewLine, SandboxOptions,
-    Style, apply_extensions, approval_request, argument_preview, budget_label, budget_warning,
-    compose_selection, cost_summary, parse_approval_choice, parse_reasoning_setting,
-    select_system_prompt,
+    Cli, Command, McpCommand, SandboxOptions, Style, apply_extensions, budget_label,
+    budget_warning, compose_selection, cost_summary, parse_reasoning_setting, select_system_prompt,
 };
 use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table};
+use crate::preview::{PreviewLine, argument_preview};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use norte_code_catalog::WireSchema;
-use norte_code_config::{BudgetConfig, Config};
-use norte_code_cost::CostSummary;
-use norte_code_protocol::{Budget, BudgetAction, BudgetUnit, ClientRequestKind, SessionKey};
-use norte_code_store_sqlite::{RequestRecord, RequestStatus};
+use norte_code_protocol::catalog::WireSchema;
+use norte_code_protocol::config::{BudgetConfig, Config};
+use norte_code_protocol::costs::CostSummary;
+use norte_code_protocol::sqlite::{RequestRecord, RequestStatus};
+use norte_code_protocol::{Budget, BudgetAction, BudgetUnit};
 
 /// A request row for the telemetry tests.
 fn telemetry_record(
@@ -255,7 +254,7 @@ fn reasoning_names_are_parsed_and_unknown_ones_are_rejected() {
 
 #[test]
 fn vendor_extensions_are_parsed_into_the_config() {
-    let mut config = norte_code_config::Config::default();
+    let mut config = norte_code_protocol::config::Config::default();
     apply_extensions(
         &mut config,
         &[
@@ -352,67 +351,6 @@ fn chat_approval_commands_default_to_the_session_and_reject_bad_scopes() {
     );
     assert!(registry.parse("/other command").is_none());
     assert!(registry.parse("hello").is_none());
-}
-
-#[test]
-fn approval_answers_are_parsed_leniently() {
-    assert_eq!(parse_approval_choice("y"), Some(ApprovalChoice::Once));
-    assert_eq!(parse_approval_choice(" YES "), Some(ApprovalChoice::Once));
-    assert_eq!(
-        parse_approval_choice("s"),
-        Some(ApprovalChoice::ToolSession)
-    );
-    assert_eq!(parse_approval_choice("A"), Some(ApprovalChoice::ToolGlobal));
-    assert_eq!(
-        parse_approval_choice("always"),
-        Some(ApprovalChoice::ToolGlobal)
-    );
-    assert_eq!(
-        parse_approval_choice("n"),
-        Some(ApprovalChoice::DenyOnce(None))
-    );
-    assert_eq!(
-        parse_approval_choice(""),
-        Some(ApprovalChoice::DenyOnce(None))
-    );
-    assert_eq!(
-        parse_approval_choice("ns"),
-        Some(ApprovalChoice::DenySession(None))
-    );
-    assert_eq!(
-        parse_approval_choice("ng"),
-        Some(ApprovalChoice::DenyGlobal(None))
-    );
-    assert_eq!(parse_approval_choice("maybe"), None);
-}
-
-#[test]
-fn a_denial_can_carry_feedback_for_the_model() {
-    assert_eq!(
-        parse_approval_choice("n use the existing helper"),
-        Some(ApprovalChoice::DenyOnce(Some(
-            "use the existing helper".to_owned()
-        )))
-    );
-    assert_eq!(
-        parse_approval_choice("no this touches production"),
-        Some(ApprovalChoice::DenyOnce(Some(
-            "this touches production".to_owned()
-        )))
-    );
-    assert_eq!(
-        parse_approval_choice("ns use the helper"),
-        Some(ApprovalChoice::DenySession(Some(
-            "use the helper".to_owned()
-        )))
-    );
-    assert_eq!(
-        parse_approval_choice("ng not in this repo"),
-        Some(ApprovalChoice::DenyGlobal(Some(
-            "not in this repo".to_owned()
-        )))
-    );
-    assert_eq!(parse_approval_choice("f"), None);
 }
 
 #[test]
@@ -639,216 +577,6 @@ fn a_new_session_can_override_the_model_and_the_provider() {
     };
     assert_eq!(args.provider.as_deref(), Some("river"));
     assert_eq!(args.model.as_deref(), Some("deepseek"));
-}
-
-#[test]
-fn approval_scopes_are_explicit_in_the_request() {
-    let session = SessionKey::new("s");
-    let session_allow = approval_request(
-        session.clone(),
-        "approval".to_owned(),
-        ApprovalChoice::ToolSession,
-    );
-    match session_allow.kind {
-        ClientRequestKind::Approve {
-            scope, remember, ..
-        } => {
-            assert!(matches!(scope, Some(GrantScope::Tool)));
-            assert_eq!(remember, Some(true));
-        }
-        other => panic!("expected an approval, got {other:?}"),
-    }
-    let global_allow = approval_request(
-        session.clone(),
-        "approval".to_owned(),
-        ApprovalChoice::ToolGlobal,
-    );
-    match global_allow.kind {
-        ClientRequestKind::Approve { scope, .. } => {
-            assert!(matches!(scope, Some(GrantScope::Always)));
-        }
-        other => panic!("expected an approval, got {other:?}"),
-    }
-    let deny = approval_request(
-        session,
-        "approval".to_owned(),
-        ApprovalChoice::DenySession(Some("use the helper".to_owned())),
-    );
-    match deny.kind {
-        ClientRequestKind::Deny { reason, scope, .. } => {
-            assert_eq!(reason.as_deref(), Some("use the helper"));
-            assert_eq!(scope, Some(DenyScope::ToolSession));
-        }
-        other => panic!("expected a denial, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn approving_a_write_resumes_the_turn_instead_of_parking_it() {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    use futures_util::StreamExt;
-    use norte::harness::{InMemoryBlobStore, InMemoryStore};
-    use norte::{CallId, Capabilities, Model, ModelId, ModelRef, ProviderId};
-    use norte_code_agent::{EventStream, ModelFactory, ModelSpec, Service, ServiceError};
-    use norte_code_catalog::Catalog;
-    use norte_code_config::ApiKey;
-    use norte_code_protocol::{ClientRequest, ServerEventKind};
-    use norte_testing::ScriptedModel;
-    use tokio::sync::mpsc;
-
-    use crate::input::Pinned;
-    use crate::interaction::drive_turns;
-    use crate::render::{Format, Renderer, Verbosity};
-    use crate::style::Style;
-
-    struct ScriptedFactory {
-        model: Arc<dyn Model>,
-    }
-
-    impl ModelFactory for ScriptedFactory {
-        fn build(
-            &self,
-            _spec: &ModelSpec,
-            _capabilities: &Capabilities,
-        ) -> Result<Arc<dyn Model>, ServiceError> {
-            Ok(Arc::clone(&self.model))
-        }
-    }
-
-    let target = std::env::current_dir()
-        .expect("working directory")
-        .join("target")
-        .join(format!(
-            "norte-code-cli-approval-{}.txt",
-            std::process::id()
-        ));
-    let _ = std::fs::remove_file(&target);
-
-    let providers: norte_code_catalog::Providers = serde_json::from_str(
-        r#"{"providers":{"test":{"name":"Test","environment_keys":["PATH"],
-            "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
-    )
-    .expect("providers");
-    let models: norte_code_catalog::Models = serde_json::from_str(
-        r#"{"models":[{"id":"scripted","provider_id":"test","name":"Scripted",
-            "supported_params":["tools"],
-            "modalities":{"input":["text"],"output":["text"]},
-            "limit":{"context":1000,"output":100}}]}"#,
-    )
-    .expect("models");
-    let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
-    // A unique name, written atomically: a shared file could be read while
-    // another test truncated it, and the reader would see an empty key.
-    let key_file = std::env::temp_dir().join(format!(
-        "norte-code-cli-approval-{}-key",
-        std::process::id()
-    ));
-    let key_tmp = key_file.with_extension("tmp");
-    std::fs::write(&key_tmp, "sk-test\n").expect("key file");
-    std::fs::rename(&key_tmp, &key_file).expect("key file");
-    let config = Config::from_json("{}").expect("config").config;
-    let entry = catalog.find("test", "scripted").expect("model");
-    let spec = ModelSpec {
-        provider: "test".to_owned(),
-        model: "scripted".to_owned(),
-        endpoint: "https://example.invalid/v1".to_owned(),
-        api_key: ApiKey::new("test"),
-        schema: WireSchema::OpenAI,
-        auth: None,
-        capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
-        headers: BTreeMap::new(),
-    };
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(
-        ScriptedModel::new(reference)
-            .turn_tool_call(
-                CallId::new(),
-                "write",
-                &serde_json::json!({
-                    "path": target.display().to_string(),
-                    "content": "written after approval",
-                    "overwrite": true
-                }),
-            )
-            .turn_text("done"),
-    );
-    let service = Arc::new(
-        Service::new(
-            config,
-            catalog,
-            spec,
-            Arc::new(ScriptedFactory {
-                model: Arc::clone(&model) as Arc<dyn Model>,
-            }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-
-    let primary = service
-        .submit(ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::SendMessage {
-                session: None,
-                text: "write it".to_owned(),
-                attachments: Vec::new(),
-                budget: None,
-                reasoning: None,
-                replay: false,
-            },
-        })
-        .await
-        .expect("stream");
-
-    let (approval_tx, mut approval_rx) = mpsc::unbounded_channel();
-    let primary: EventStream = Box::pin(primary.inspect(move |event| {
-        if matches!(&event.kind, ServerEventKind::ApprovalRequested { .. }) {
-            let _ = approval_tx.send(());
-        }
-    }));
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let mut input = crate::input::InteractiveInput::from_events(input_rx);
-    let responder = tokio::spawn(async move {
-        approval_rx.recv().await.expect("approval event");
-        input_tx
-            .send(crate::input::EditorEvent::Line("y".to_owned(), Vec::new()))
-            .expect("approval input");
-    });
-
-    let mut renderer = Renderer::new(
-        Format::Text,
-        Verbosity::Low,
-        false,
-        Style::plain(),
-        Pinned::new(),
-    );
-    let outcome = drive_turns(
-        &service,
-        primary,
-        &mut renderer,
-        Style::plain(),
-        Some(&mut input),
-    )
-    .await
-    .expect("drive");
-    responder.await.expect("responder");
-
-    assert!(!outcome.parked, "an approved turn must not stay parked");
-    assert_eq!(model.remaining_turns(), 0, "the resumed turn must run");
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("written file"),
-        "written after approval"
-    );
-    let _ = std::fs::remove_file(&target);
-    let _ = std::fs::remove_file(&key_file);
 }
 
 #[test]

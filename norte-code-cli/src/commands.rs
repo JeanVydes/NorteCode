@@ -8,9 +8,11 @@ use super::{
     human_tokens, list_models, new_session, open_session, resume_named, short, summarize,
     user_config_path,
 };
-use norte_code_catalog::{models_path, providers_path};
-use norte_code_config::{add_user_mcp_server, remove_user_mcp_server, set_user_mcp_enabled};
-use norte_code_store_sqlite::RequestStatus;
+use norte_code_protocol::catalog::{models_path, providers_path};
+use norte_code_protocol::config::{
+    add_user_mcp_server, remove_user_mcp_server, set_user_mcp_enabled,
+};
+use norte_code_protocol::sqlite::RequestStatus;
 
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let config_path = cli.config.clone();

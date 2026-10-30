@@ -218,7 +218,7 @@ pub(crate) struct Renderer {
     /// Kept rather than asked for per row: the plugins are a value the host
     /// built, and a frame that reached for them would be a frame that could
     /// stall on somebody else's code.
-    pub(crate) sidebar: Vec<(String, Vec<norte_code_plugins::SidebarRow>)>,
+    pub(crate) sidebar: Vec<(String, Vec<norte_code_protocol::plugins::SidebarRow>)>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -2392,16 +2392,6 @@ impl Renderer {
                     self.failed = true;
                 }
             }
-            ServerEventKind::ApprovalResolved { approved, .. } => {
-                if self.verbosity.at_least(Verbosity::Medium) {
-                    self.end_blocks();
-                    if *approved {
-                        self.notice("✓ approval granted");
-                    } else {
-                        self.failure("✗ approval denied");
-                    }
-                }
-            }
             ServerEventKind::TurnFinished {
                 committed, phase, ..
             } => {
@@ -2434,13 +2424,9 @@ impl Renderer {
                         self.failure("the turn did not commit");
                         self.failed = true;
                     }
-                } else if *phase == Phase::AwaitingApproval
-                    && self.verbosity.at_least(Verbosity::Medium)
-                {
-                    self.failure("paused: waiting for approval");
                 }
-                let activity = if *phase == Phase::AwaitingApproval {
-                    Some("waiting for approval".to_owned())
+                let activity = if *phase == Phase::AwaitingTool {
+                    Some("waiting for a tool".to_owned())
                 } else {
                     None
                 };

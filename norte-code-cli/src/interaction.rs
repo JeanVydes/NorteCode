@@ -1,12 +1,11 @@
-//! The interactive turn loop: input, steering, approval handoff and
-//! cancellation.
+//! The interactive turn loop: input, steering, cancellation and the
+//! handoff of a turn's decisions.
 
 use super::{
-    Arc, Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, EventStream,
-    GrantInfo, GrantScope, JobInfo, Phase, Reasoning, ReasoningScope, Renderer, ServerEvent,
-    ServerEventKind, Service, SessionKey, StreamExt, Style, VecDeque, mpsc, short,
+    Arc, Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, EventStream, JobInfo,
+    Reasoning, ReasoningScope, Renderer, ServerEvent, ServerEventKind, Service, SessionKey,
+    StreamExt, Style, VecDeque, mpsc,
 };
-use crate::approval::{ApprovalChoice, ApprovalOutcome, approval_request, ask_approval};
 use crate::input::{Attachment, CompletionNames, EditorAction, EditorEvent, InteractiveInput};
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
@@ -15,7 +14,7 @@ use crate::render::{
     reasoning_setting_label, report_mcp as render_mcp, report_prompt, report_reasoning,
     report_start, report_tools, scope_name, tools_panel, unit_name,
 };
-use norte_code_commands::Invocation;
+use norte_code_protocol::commands::Invocation;
 /// How often a running turn redraws, in ms.
 ///
 /// It is the clock behind a call's counter and the spinner. Fast enough that a
@@ -99,8 +98,6 @@ pub(crate) enum ChatCommand {
         scope: ReasoningScope,
         reasoning: Reasoning,
     },
-    /// Revoke one grant, or list the grants when omitted.
-    Revoke { grant: Option<String> },
     /// Request a model switch.
     Model { model: String },
     /// Set the current provider.
@@ -130,7 +127,7 @@ pub(crate) enum ChatCommand {
     /// It arrives parsed and not as text: the registry that completed it is the
     /// same one that parsed it, so a plugin's command is a command like any
     /// other and the plugin is handed what it declared.
-    Plugin(norte_code_commands::Invocation),
+    Plugin(norte_code_protocol::commands::Invocation),
 }
 
 /// What `/jobs` was asked to do.
@@ -207,9 +204,6 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/reasoning" => match parse_reasoning(&invocation) {
             Ok(command) => command,
             Err(problem) => return Some(Err(problem)),
-        },
-        "/revoke" => ChatCommand::Revoke {
-            grant: invocation.arg("grant").map(str::to_owned),
         },
         "/model" => ChatCommand::Model {
             model: invocation.arg_or_empty("model").to_owned(),
@@ -384,7 +378,7 @@ pub(crate) fn candidates(
     text: &str,
     cursor: usize,
     names: &CompletionNames,
-) -> Vec<norte_code_commands::Candidate> {
+) -> Vec<norte_code_protocol::commands::Candidate> {
     let rows = crate::commands_registry::shared().candidates(text, cursor);
     if !rows.is_empty() {
         return rows;
@@ -402,7 +396,7 @@ fn catalogue_candidates(
     text: &str,
     cursor: usize,
     names: &CompletionNames,
-) -> Vec<norte_code_commands::Candidate> {
+) -> Vec<norte_code_protocol::commands::Candidate> {
     if cursor != text.len() {
         return Vec::new();
     }
@@ -425,7 +419,7 @@ fn catalogue_candidates(
     values
         .iter()
         .filter(|value| value.to_lowercase().starts_with(&prefix))
-        .map(|value| norte_code_commands::Candidate {
+        .map(|value| norte_code_protocol::commands::Candidate {
             text: value.clone(),
             // Skipping the characters already typed rather than slicing at a
             // byte offset: a name is not guaranteed to be ASCII, and a byte
@@ -735,13 +729,6 @@ pub(crate) async fn interactive_loop(
                         // the held state never appeared at a turn boundary and
                         // neither half could be moved.
                         switch_provider(service, &current, &provider, renderer).await;
-                    } else {
-                        renderer.notice("there is no session yet; send a message first");
-                    }
-                }
-                ChatCommand::Revoke { grant } => {
-                    if let Some(current) = session.clone() {
-                        run_revoke(service, current, grant, renderer).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -1078,13 +1065,6 @@ async fn handle_live_command(
                 renderer.notice("the session is not ready yet; try again");
             }
         }
-        ChatCommand::Revoke { grant } => {
-            if let Some(session) = current {
-                run_revoke(service, session.clone(), grant, renderer).await;
-            } else {
-                renderer.notice("the session is not ready yet; try again");
-            }
-        }
         ChatCommand::Jobs { action, id } => match current {
             Some(session) => {
                 report_jobs(service, session.clone(), action, id, renderer, style).await;
@@ -1274,13 +1254,13 @@ async fn report_telemetry(session: Option<&SessionKey>, renderer: &mut Renderer)
 }
 
 /// Every recorded request row, from the store the client already uses.
-async fn read_telemetry() -> Result<Vec<norte_code_store_sqlite::RequestRecord>, String> {
-    use norte_code_store_sqlite::SessionDirectory as _;
+async fn read_telemetry() -> Result<Vec<norte_code_protocol::sqlite::RequestRecord>, String> {
+    use norte_code_protocol::sqlite::SessionDirectory as _;
     let path = crate::commands::database_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let store = norte_code_store_sqlite::SqliteStore::open(&path)
+    let store = norte_code_protocol::sqlite::SqliteStore::open(&path)
         .map_err(|error| format!("could not open {}: {error}", path.display()))?;
     store
         .requests(None)
@@ -1662,95 +1642,6 @@ async fn run_model(
     }
 }
 
-async fn run_revoke(
-    service: &Arc<Service>,
-    session: SessionKey,
-    grant: Option<String>,
-    renderer: &mut Renderer,
-) {
-    let grants = match fetch_grants(service, session.clone()).await {
-        Ok(grants) => grants,
-        Err(error) => {
-            renderer.failure(format!("could not list grants: {error}"));
-            return;
-        }
-    };
-    let Some(choice) = grant else {
-        if grants.is_empty() {
-            renderer.notice("no approval grants");
-            return;
-        }
-        // The listing is a report: it is read and dismissed, and as lines of
-        // the conversation it would push the work away.
-        let mut lines = vec!["approval grants".to_owned()];
-        for grant in grants {
-            lines.push(format!(
-                "  {}{}  tool {}  {}  approval {}  issued {}",
-                crate::text::terminal(&grant.grant),
-                if grant.revoked { " (revoked)" } else { "" },
-                crate::text::terminal(&grant.tool),
-                grant_scope_label(grant.scope),
-                crate::text::terminal(&grant.approval),
-                crate::text::terminal(&grant.issued_at),
-            ));
-        }
-        renderer.open_modal("approval grants", lines);
-        return;
-    };
-    let matching: Vec<_> = grants
-        .iter()
-        .filter(|grant| !grant.revoked && (grant.grant == choice || grant.tool == choice))
-        .collect();
-    let found = match matching.as_slice() {
-        [grant] => *grant,
-        [] => {
-            renderer.notice(format!(
-                "no active grant matches `{choice}`; use /revoke to list grants"
-            ));
-            return;
-        }
-        _ => {
-            renderer.notice(format!(
-                "`{choice}` matches more than one grant; use the full grant id"
-            ));
-            return;
-        }
-    };
-    let approval = found.approval.clone();
-    let grant = found.grant.clone();
-    match drain_request(
-        service,
-        ClientRequestKind::Revoke {
-            session,
-            approval,
-            grant: grant.clone(),
-        },
-    )
-    .await
-    {
-        Ok(events) => match stream_error(&events) {
-            Some(message) => renderer.failure(format!("could not revoke: {message}")),
-            None => renderer.notice(format!("grant {grant} revoked")),
-        },
-        Err(error) => renderer.failure(format!("could not revoke: {error}")),
-    }
-}
-
-async fn fetch_grants(
-    service: &Arc<Service>,
-    session: SessionKey,
-) -> Result<Vec<GrantInfo>, String> {
-    let events = drain_request(service, ClientRequestKind::ListGrants { session }).await?;
-    for event in events {
-        match event.kind {
-            ServerEventKind::GrantList { grants } => return Ok(grants),
-            ServerEventKind::Error { message, .. } => return Err(message),
-            _ => {}
-        }
-    }
-    Err("the service did not return a grant list".to_owned())
-}
-
 /// Reports the session's background jobs: a listing, one job, or a stop.
 ///
 /// A job belongs to the session that started it, and the service is asked
@@ -1890,15 +1781,6 @@ async fn fetch_jobs(service: &Arc<Service>, session: SessionKey) -> Result<Vec<J
         }
     }
     Err("the service did not return a job list".to_owned())
-}
-
-fn grant_scope_label(scope: GrantScope) -> &'static str {
-    match scope {
-        GrantScope::Once => "once",
-        GrantScope::Tool => "tool/session",
-        GrantScope::Session => "session",
-        GrantScope::Always => "global",
-    }
 }
 
 /// A title request that is on its way back.
@@ -2050,7 +1932,7 @@ async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
 async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Renderer) {
     let path = service
         .config_path()
-        .or_else(norte_code_config::user_config_path);
+        .or_else(norte_code_protocol::config::user_config_path);
     match &action {
         McpAction::List => {}
         McpAction::Add {
@@ -2062,7 +1944,7 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
                 renderer.failure("no user config path; pass --config");
                 return;
             };
-            match norte_code_config::add_user_mcp_server(&path, name, command, args) {
+            match norte_code_protocol::config::add_user_mcp_server(&path, name, command, args) {
                 Ok(()) => {
                     renderer.notice(format!("added mcp server `{name}`"));
                     reload_mcp(service, renderer).await;
@@ -2076,7 +1958,7 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
                 renderer.failure("no user config path; pass --config");
                 return;
             };
-            match norte_code_config::remove_user_mcp_server(&path, name) {
+            match norte_code_protocol::config::remove_user_mcp_server(&path, name) {
                 Ok(()) => {
                     renderer.notice(format!("removed mcp server `{name}`"));
                     reload_mcp(service, renderer).await;
@@ -2091,7 +1973,9 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
             // the person needs to know, and switching the process alone would
             // say it worked when the next run would undo it.
             if let Some(path) = path {
-                if let Err(error) = norte_code_config::set_user_mcp_enabled(&path, name, enabled) {
+                if let Err(error) =
+                    norte_code_protocol::config::set_user_mcp_enabled(&path, name, enabled)
+                {
                     renderer.failure(format!("could not change `{name}`: {error}"));
                     return;
                 }
@@ -2149,9 +2033,9 @@ fn apply_mcp_action(
     // the key mean something beyond this session.
     if let Some(path) = service
         .config_path()
-        .or_else(norte_code_config::user_config_path)
+        .or_else(norte_code_protocol::config::user_config_path)
     {
-        if let Err(error) = norte_code_config::set_user_mcp_enabled(&path, name, active) {
+        if let Err(error) = norte_code_protocol::config::set_user_mcp_enabled(&path, name, active) {
             renderer.failure(format!("could not change `{name}`: {error}"));
             return;
         }
@@ -2239,7 +2123,7 @@ pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
     let usages: Vec<String> = registry
         .commands()
         .iter()
-        .map(norte_code_commands::CommandSpec::usage)
+        .map(norte_code_protocol::commands::CommandSpec::usage)
         .collect();
     let width = usages.iter().map(String::len).max().unwrap_or(0);
     for (spec, usage) in registry.commands().iter().zip(&usages) {
@@ -2473,7 +2357,6 @@ pub(crate) async fn drive_turns_titled(
 ) -> Result<DriveOutcome, String> {
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
-    let mut pending: VecDeque<(SessionKey, String, ApprovalChoice)> = VecDeque::new();
     let (interrupt_tx, mut interrupt_rx) = tokio::sync::mpsc::channel::<()>(4);
     let _signal = SignalGuard(tokio::spawn(async move {
         loop {
@@ -2724,11 +2607,9 @@ pub(crate) async fn drive_turns_titled(
                 match &event.kind {
                     ServerEventKind::TurnStarted { .. } => parked = false,
                     ServerEventKind::TurnFinished {
-                        phase,
-                        committed: done,
-                        ..
+                        committed: done, ..
                     } => {
-                        parked = *phase == Phase::AwaitingApproval;
+                        parked = false;
                         committed = *done;
                     }
                     ServerEventKind::SteerApplied { ids, messages } => {
@@ -2751,24 +2632,6 @@ pub(crate) async fn drive_turns_titled(
                         renderer.pinned.set_pending_steers(waiting);
                     }
                     _ => {}
-                }
-                match ask_approval(&event, style, input.as_deref_mut(), &mut interrupt_rx).await? {
-                    ApprovalOutcome::Decision(decision) => pending.push_back(decision),
-                    ApprovalOutcome::None => {
-                        if matches!(&event.kind, ServerEventKind::ApprovalRequested { .. }) {
-                            parked = true;
-                        }
-                    }
-                    ApprovalOutcome::Cancelled => {
-                        renderer.mark_cancelled();
-                        renderer.notice(
-                            "approval left pending; the session is saved and can be resumed",
-                        );
-                        return Ok(DriveOutcome {
-                            session: current,
-                            parked: true,
-                        });
-                    }
                 }
                 let pinned = Arc::clone(&renderer.pinned);
                 if answer_if_asked(
@@ -2862,24 +2725,6 @@ pub(crate) async fn drive_turns_titled(
                 }
             }
         }
-        while let Some((session, approval, choice)) = pending.pop_front() {
-            let request = approval_request(session, approval.clone(), choice);
-            match service.submit(request).await {
-                Ok(next) => streams.push_back(next),
-                Err(error) => {
-                    renderer.notice(format!(
-                        "warning: could not resolve approval {}: {error}",
-                        short(&approval)
-                    ));
-                }
-            }
-        }
-        // An approval submits a new stream that continues the parked turn.
-        // Drive it before deciding the loop is done, or the decision is lost
-        // and the caller sees a parked session that is already approved.
-        if !streams.is_empty() {
-            continue;
-        }
         // The human steered text while the turn was running. The service
         // applies it to the request in flight; what the turn never reached
         // waits for the next turn boundary, so that boundary has to start.
@@ -2919,8 +2764,8 @@ pub(crate) async fn drive_turns_titled(
     if !steered.is_empty() {
         renderer.pinned.set_pending_steers(Vec::new());
     }
-    // A turn can move both lists: an approval can write a session rule, and a
-    // server that dropped took its tools with it. The rows are rebuilt once
+    // A turn can move both lists: it can write a session rule, and a server
+    // that dropped took its tools with it. The rows are rebuilt once
     // here rather than after every event that might have moved either.
     Ok(DriveOutcome {
         session: current,
@@ -2942,8 +2787,8 @@ mod tests {
     use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
     use crate::render::{Format, Renderer, Verbosity};
     use crate::style::Style;
-    use norte_code_catalog::WireSchema;
     use norte_code_protocol::ClientRequestKind;
+    use norte_code_protocol::catalog::WireSchema;
 
     use super::drain_request;
 
@@ -3062,7 +2907,7 @@ mod tests {
     fn usage_of(name: &str) -> Option<String> {
         crate::commands_registry::shared()
             .get(name)
-            .map(norte_code_commands::CommandSpec::usage)
+            .map(norte_code_protocol::commands::CommandSpec::usage)
     }
 
     /// Whether the completion offers a name.
@@ -3202,20 +3047,6 @@ mod tests {
                 model: "deepseek".to_owned()
             }))
         );
-        assert_eq!(
-            parse_chat_command("/revoke"),
-            Some(Ok(ChatCommand::Revoke { grant: None }))
-        );
-        assert_eq!(
-            parse_chat_command("/revoke grant-1"),
-            Some(Ok(ChatCommand::Revoke {
-                grant: Some("grant-1".to_owned())
-            }))
-        );
-        assert!(matches!(
-            parse_chat_command("/revoke one two"),
-            Some(Err(_))
-        ));
         assert!(matches!(parse_chat_command("/steer hello"), Some(Err(_))));
     }
 
@@ -3465,8 +3296,8 @@ mod tests {
         use norte::harness::{InMemoryBlobStore, InMemoryStore};
         use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
         use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
-        use norte_code_catalog::Catalog;
-        use norte_code_config::{ApiKey, Config};
+        use norte_code_protocol::catalog::Catalog;
+        use norte_code_protocol::config::{ApiKey, Config};
         use norte_testing::ScriptedModel;
 
         struct Factory(Arc<dyn Model>);
@@ -3480,7 +3311,7 @@ mod tests {
             }
         }
 
-        let providers: norte_code_catalog::Providers = serde_json::from_str(
+        let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
             r#"{"providers":{
                 "first":{"name":"First","environment_keys":["PATH"],
                     "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]},
@@ -3490,7 +3321,7 @@ mod tests {
         .expect("providers");
         // Only `first` lists `shared`. `second` lists a model of its own, so a
         // switch to it cannot carry the model the session is on.
-        let models: norte_code_catalog::Models = serde_json::from_str(
+        let models: norte_code_protocol::catalog::Models = serde_json::from_str(
             r#"{"models":[
                 {"id":"shared","provider_id":"first","name":"Shared",
                     "supported_params":["tools"],
@@ -3509,9 +3340,9 @@ mod tests {
             model: "shared".to_owned(),
             endpoint: "https://example.invalid/v1".to_owned(),
             api_key: ApiKey::new("test"),
-            schema: norte_code_catalog::WireSchema::OpenAI,
+            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
             auth: None,
-            capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
+            capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
             headers: BTreeMap::new(),
         };
         let reference = ModelRef::new(
@@ -3595,8 +3426,8 @@ mod tests {
         use norte::harness::{InMemoryBlobStore, InMemoryStore};
         use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
         use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
-        use norte_code_catalog::Catalog;
-        use norte_code_config::{ApiKey, Config};
+        use norte_code_protocol::catalog::Catalog;
+        use norte_code_protocol::config::{ApiKey, Config};
         use norte_testing::ScriptedModel;
 
         struct Factory(Arc<dyn Model>);
@@ -3610,7 +3441,7 @@ mod tests {
             }
         }
 
-        let providers: norte_code_catalog::Providers = serde_json::from_str(
+        let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
             r#"{"providers":{
                 "exa":{"name":"Exa","environment_keys":["PATH"],
                     "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]},
@@ -3618,7 +3449,7 @@ mod tests {
                     "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
         )
         .expect("providers");
-        let models: norte_code_catalog::Models = serde_json::from_str(
+        let models: norte_code_protocol::catalog::Models = serde_json::from_str(
             r#"{"models":[
                 {"id":"deepseek-v4.1-flash-uncensored","provider_id":"exa","name":"U",
                     "supported_params":["tools"],
@@ -3639,9 +3470,9 @@ mod tests {
             model: "deepseek-v4.1-flash-uncensored".to_owned(),
             endpoint: "https://example.invalid/v1".to_owned(),
             api_key: ApiKey::new("test"),
-            schema: norte_code_catalog::WireSchema::OpenAI,
+            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
             auth: None,
-            capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
+            capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
             headers: BTreeMap::new(),
         };
         let reference = ModelRef::new(

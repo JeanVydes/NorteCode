@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use norte::AnyFunction;
-use norte_code_config::McpServerConfig;
+use norte_code_protocol::config::McpServerConfig;
 use norte_mcp::{
     ClientCapabilities, ClientOptions, Implementation, McpClient, RemoteTool, StdioTransport,
 };

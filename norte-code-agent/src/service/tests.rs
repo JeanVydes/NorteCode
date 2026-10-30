@@ -26,13 +26,13 @@ use norte::{
     ProviderId, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
     ToolContext, Usage,
 };
-use norte_code_catalog::WireSchema;
-use norte_code_config::{ApiKey, BudgetConfig, RetryConfig};
+use norte_code_protocol::catalog::WireSchema;
+use norte_code_protocol::config::{ApiKey, BudgetConfig, RetryConfig};
+use norte_code_protocol::sqlite::{RequestStatus, SqliteStore};
 use norte_code_protocol::{
     Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
     Reasoning as ProtocolReasoning, ReasoningScope,
 };
-use norte_code_store_sqlite::{RequestStatus, SqliteStore};
 use norte_testing::ScriptedModel;
 use norte_tools::{ShellLimits, ShellRequest, ShellTool};
 
@@ -105,7 +105,7 @@ impl Model for FlakyModel {
 }
 
 fn catalog() -> Arc<Catalog> {
-    let providers: norte_code_catalog::Providers = serde_json::from_str(
+    let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
         r#"{
             "providers": {
                 "test": {
@@ -119,7 +119,7 @@ fn catalog() -> Arc<Catalog> {
         }"#,
     )
     .expect("providers");
-    let models: norte_code_catalog::Models = serde_json::from_str(
+    let models: norte_code_protocol::catalog::Models = serde_json::from_str(
         r#"{
             "models": [
                 {
@@ -158,9 +158,9 @@ fn spec(model: &str) -> ModelSpec {
         model: model.to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
-        schema: norte_code_catalog::WireSchema::OpenAI,
+        schema: norte_code_protocol::catalog::WireSchema::OpenAI,
         auth: None,
-        capabilities: norte_code_catalog::capabilities(entry, WireSchema::OpenAI),
+        capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
         headers: std::collections::BTreeMap::new(),
     }
 }
@@ -184,13 +184,13 @@ async fn a_real_mcp_server_publishes_its_tools_into_the_service() {
     let mut config = config();
     config.mcp_servers.insert(
         "everything".to_owned(),
-        norte_code_config::McpServerConfig {
+        norte_code_protocol::config::McpServerConfig {
             command: "npx".to_owned(),
             args: vec![
                 "-y".to_owned(),
                 "@modelcontextprotocol/server-everything".to_owned(),
             ],
-            ..norte_code_config::McpServerConfig::default()
+            ..norte_code_protocol::config::McpServerConfig::default()
         },
     );
     let reference = ModelRef::new(
@@ -617,7 +617,7 @@ async fn cancelling_a_turn_stops_a_running_command() {
         norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
     ]));
     let mut config = config();
-    config.approval_mode = norte_code_config::ApprovalMode::Yolo;
+    config.approval_mode = norte_code_protocol::config::ApprovalMode::Yolo;
     let (service, _store) = persistent_service_with_config(config, model).await;
     let mut events = service
         .submit(ClientRequest {
@@ -853,7 +853,6 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
             head: Some(head),
             phase: norte::harness::Phase::Idle,
             turn: session.turn,
-            grants: session.grants.clone(),
             metadata: None,
         })
         .await
@@ -1070,7 +1069,6 @@ async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
             head: Some(head),
             phase: norte::harness::Phase::Streaming,
             turn: 1,
-            grants: Vec::new(),
             metadata: None,
         })
         .await
@@ -3744,389 +3742,6 @@ async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn a_write_parks_for_approval_and_resumes() {
-    let target = std::env::current_dir()
-        .expect("working directory")
-        .join("target")
-        .join(format!("norte-code-write-{}.txt", std::process::id()));
-    let _ = std::fs::remove_file(&target);
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let call = CallId::new();
-    let model = Arc::new(
-        ScriptedModel::new(reference)
-            .turn_tool_call(
-                call,
-                "write",
-                &serde_json::json!({
-                    "path": target.display().to_string(),
-                    "content": "written by a tool",
-                    "overwrite": true
-                }),
-            )
-            .turn_text("done"),
-    );
-    let service = Arc::new(
-        Service::new(
-            config(),
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-
-    let first = drain(
-        &service,
-        ClientRequestKind::SendMessage {
-            session: None,
-            text: "write it".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    let session = first[0].session.clone().expect("session");
-    let (approval, arguments) = first
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ApprovalRequested {
-                approval,
-                arguments,
-                ..
-            } => Some((approval.clone(), arguments.clone())),
-            _ => None,
-        })
-        .expect("approval request");
-    assert_eq!(
-        arguments.expect("approval arguments")["path"],
-        target.display().to_string()
-    );
-    assert!(first.iter().any(|event| matches!(
-        event.kind,
-        ServerEventKind::TurnFinished {
-            phase: norte_code_protocol::Phase::AwaitingApproval,
-            ..
-        }
-    )));
-    assert!(!target.exists());
-
-    let second = drain(
-        &service,
-        ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: None,
-            remember: None,
-        },
-    )
-    .await;
-    assert!(second.iter().any(|event| matches!(
-        event.kind,
-        ServerEventKind::ApprovalResolved { approved: true, .. }
-    )));
-    let started = second
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ToolStarted {
-                tool, arguments, ..
-            } if tool == "write" => arguments.clone(),
-            _ => None,
-        })
-        .expect("tool start arguments");
-    assert_eq!(started["path"], target.display().to_string());
-    let finished = second
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ToolFinished {
-                tool,
-                is_error: false,
-                output,
-                ..
-            } if tool == "write" => output.clone(),
-            _ => None,
-        })
-        .expect("tool output");
-    assert!(
-        finished.contains("wrote") && finished.contains(&target.display().to_string()),
-        "unexpected write output: {finished}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("written file"),
-        "written by a tool"
-    );
-    let _ = std::fs::remove_file(&target);
-}
-
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn a_model_switch_while_parked_is_applied_at_the_next_turn_boundary() {
-    let target = std::env::current_dir()
-        .expect("working directory")
-        .join("target")
-        .join(format!(
-            "norte-code-queued-model-{}.txt",
-            std::process::id()
-        ));
-    let _ = std::fs::remove_file(&target);
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let call = CallId::new();
-    let model = Arc::new(
-        ScriptedModel::new(reference)
-            .turn_tool_call(
-                call,
-                "write",
-                &serde_json::json!({
-                    "path": target.display().to_string(),
-                    "content": "written by a tool",
-                    "overwrite": true
-                }),
-            )
-            .turn_text("done")
-            .turn_text("after the switch"),
-    );
-    let service = Arc::new(
-        Service::new(
-            config(),
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-
-    let first = drain(
-        &service,
-        ClientRequestKind::SendMessage {
-            session: None,
-            text: "write it".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    let session = first[0].session.clone().expect("session");
-    let approval = first
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
-            _ => None,
-        })
-        .expect("approval request");
-
-    // The session is parked, so the switch is accepted but not applied.
-    let queued = drain(
-        &service,
-        ClientRequestKind::SetModel {
-            session: session.clone(),
-            model: "test/other".to_owned(),
-        },
-    )
-    .await;
-    assert!(
-        queued
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::ModelQueued { .. })),
-        "the switch should be queued while the session is busy"
-    );
-    let listed = drain(&service, ClientRequestKind::ListSessions).await;
-    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
-        panic!("expected a list");
-    };
-    assert_eq!(sessions[0].model.as_deref(), Some("test/scripted"));
-
-    // The approval continuation is not a turn boundary, so the model stays.
-    let second = drain(
-        &service,
-        ClientRequestKind::Approve {
-            session: session.clone(),
-            approval,
-            arguments: None,
-            scope: None,
-            remember: None,
-        },
-    )
-    .await;
-    assert!(
-        !second
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::ModelChanged { .. }))
-    );
-    let _ = std::fs::remove_file(&target);
-
-    // The next real turn applies the queued switch.
-    let third = drain(
-        &service,
-        ClientRequestKind::SendMessage {
-            session: Some(session.clone()),
-            text: "next".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    assert!(
-        third
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::ModelChanged { .. })),
-        "the queued switch should be applied at the turn boundary"
-    );
-    let listed = drain(&service, ClientRequestKind::ListSessions).await;
-    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
-        panic!("expected a list");
-    };
-    assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
-}
-
-#[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn grants_are_listed_and_can_be_revoked() {
-    let target = std::env::current_dir()
-        .expect("working directory")
-        .join("target")
-        .join(format!("norte-code-grants-{}.txt", std::process::id()));
-    let _ = std::fs::remove_file(&target);
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let call = CallId::new();
-    let model = Arc::new(
-        ScriptedModel::new(reference)
-            .turn_tool_call(
-                call,
-                "write",
-                &serde_json::json!({
-                    "path": target.display().to_string(),
-                    "content": "written by a tool",
-                    "overwrite": true
-                }),
-            )
-            .turn_text("done"),
-    );
-    let service = Arc::new(
-        Service::new(
-            config(),
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-
-    let first = drain(
-        &service,
-        ClientRequestKind::SendMessage {
-            session: None,
-            text: "write it".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    let session = first[0].session.clone().expect("session");
-    let approval = first
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
-            _ => None,
-        })
-        .expect("approval request");
-
-    let listed = drain(
-        &service,
-        ClientRequestKind::ListGrants {
-            session: session.clone(),
-        },
-    )
-    .await;
-    let ServerEventKind::GrantList { grants } = &listed[0].kind else {
-        panic!("expected a grant list");
-    };
-    assert!(grants.is_empty(), "no grant exists before the approval");
-
-    drain(
-        &service,
-        ClientRequestKind::Approve {
-            session: session.clone(),
-            approval: approval.clone(),
-            arguments: None,
-            scope: Some(norte_code_protocol::GrantScope::Session),
-            remember: None,
-        },
-    )
-    .await;
-
-    let listed = drain(
-        &service,
-        ClientRequestKind::ListGrants {
-            session: session.clone(),
-        },
-    )
-    .await;
-    let ServerEventKind::GrantList { grants } = &listed[0].kind else {
-        panic!("expected a grant list");
-    };
-    assert_eq!(grants.len(), 1, "the approval issued one grant");
-    let grant = grants[0].clone();
-    assert!(!grant.revoked);
-    assert_eq!(grant.scope, norte_code_protocol::GrantScope::Session);
-    assert_eq!(grant.tool, "write");
-
-    let revoked = drain(
-        &service,
-        ClientRequestKind::Revoke {
-            session: session.clone(),
-            approval: grant.approval.clone(),
-            grant: grant.grant.clone(),
-        },
-    )
-    .await;
-    assert!(
-        revoked
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::GrantRevoked { .. }))
-    );
-
-    let listed = drain(
-        &service,
-        ClientRequestKind::ListGrants {
-            session: session.clone(),
-        },
-    )
-    .await;
-    let ServerEventKind::GrantList { grants } = &listed[0].kind else {
-        panic!("expected a grant list");
-    };
-    assert!(grants[0].revoked, "the grant should be marked as revoked");
-    let _ = std::fs::remove_file(&target);
-}
-
-#[tokio::test]
 async fn an_edit_snapshots_the_source_before_it_runs() {
     let target = std::env::current_dir()
         .expect("working directory")
@@ -4167,7 +3782,7 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
         .expect("service"),
     );
 
-    let first = drain(
+    let second = drain(
         &service,
         ClientRequestKind::SendMessage {
             session: None,
@@ -4176,26 +3791,6 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
             budget: None,
             reasoning: None,
             replay: false,
-        },
-    )
-    .await;
-    let session = first[0].session.clone().expect("session");
-    let approval = first
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
-            _ => None,
-        })
-        .expect("approval request");
-
-    let second = drain(
-        &service,
-        ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: None,
-            remember: None,
         },
     )
     .await;
@@ -4281,11 +3876,6 @@ async fn a_global_allow_skips_the_approval_prompt() {
         },
     )
     .await;
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::ApprovalRequested { .. }))
-    );
     assert!(events.iter().any(|event| matches!(
         event.kind,
         ServerEventKind::ToolFinished {
@@ -4336,11 +3926,6 @@ async fn a_global_deny_refuses_without_asking() {
         },
     )
     .await;
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::ApprovalRequested { .. }))
-    );
     assert!(events.iter().any(|event| matches!(
         event.kind,
         ServerEventKind::ToolFinished {
@@ -5069,128 +4654,6 @@ async fn an_unknown_session_is_an_error() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
-async fn a_parked_approval_survives_a_restart() {
-    let directory = std::env::temp_dir().join(format!(
-        "norte-code-approval-restart-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&directory).expect("directory");
-    let path = directory.join("sessions.db");
-    let target = std::env::current_dir()
-        .expect("working directory")
-        .join("target")
-        .join(format!(
-            "norte-code-restart-{}-{}.txt",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-    let _ = std::fs::remove_file(&target);
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let call = CallId::new();
-    let model = Arc::new(
-        ScriptedModel::new(reference)
-            .turn_tool_call(
-                call,
-                "write",
-                &serde_json::json!({
-                    "path": target.display().to_string(),
-                    "content": "survived",
-                    "overwrite": true
-                }),
-            )
-            .turn_text("done"),
-    );
-
-    let (store, first) = sqlite_service(&path, Arc::clone(&model)).await;
-    let events = drain(
-        &first,
-        ClientRequestKind::SendMessage {
-            session: None,
-            text: "write it".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    let session = events[0].session.clone().expect("session");
-    let approval = events
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
-            _ => None,
-        })
-        .expect("approval request");
-    assert!(events.iter().any(|event| matches!(
-        event.kind,
-        ServerEventKind::TurnFinished {
-            phase: norte_code_protocol::Phase::AwaitingApproval,
-            ..
-        }
-    )));
-    drop(first);
-    drop(store);
-
-    let (store, second) = sqlite_service(&path, model).await;
-    let listed = drain(&second, ClientRequestKind::ListSessions).await;
-    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
-        panic!("expected a list");
-    };
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].session, session);
-    assert_eq!(
-        sessions[0].phase,
-        norte_code_protocol::Phase::AwaitingApproval
-    );
-
-    let resumed = drain(
-        &second,
-        ClientRequestKind::Resume {
-            session: session.clone(),
-        },
-    )
-    .await;
-    assert!(resumed.iter().any(|event| matches!(
-        &event.kind,
-        ServerEventKind::ApprovalRequested { approval: pending, .. } if pending == &approval
-    )));
-
-    let approved = drain(
-        &second,
-        ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: None,
-            remember: None,
-        },
-    )
-    .await;
-    assert!(approved.iter().any(|event| matches!(
-        event.kind,
-        ServerEventKind::ToolFinished {
-            ref tool,
-            is_error: false,
-            ..
-        } if tool == "write"
-    )));
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("written file"),
-        "survived"
-    );
-    drop(second);
-    drop(store);
-    let _ = std::fs::remove_file(&target);
-    let _ = std::fs::remove_dir_all(directory);
-}
-
-#[tokio::test]
 // One scenario end to end: park, crash, reopen, refuse. The length is the
 // scenario, and the `replay` field every `SendMessage` carries is what tipped it
 // past the limit.
@@ -5203,14 +4666,13 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
     ));
     std::fs::create_dir_all(&directory).expect("directory");
     let path = directory.join("sessions.db");
-    let target = std::env::current_dir()
-        .expect("working directory")
-        .join("target")
-        .join(format!(
-            "norte-code-effect-{}-{}.txt",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
+    // A marker beside the database it belongs to, and not in the tree: a build
+    // artefact left by a test is one the next one has to clean up by hand.
+    let target = directory.join(format!(
+        "norte-code-effect-{}-{}.txt",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let _ = std::fs::remove_file(&target);
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
@@ -5231,27 +4693,13 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
             .turn_text("done"),
     );
 
+    // The previous process reached the write and died in it: the journal holds
+    // the intent and no finish, which is exactly the state a replay must refuse.
+    // The call never ran here, so the file the assertion below looks for does
+    // not exist yet.
     let (store, first) = sqlite_service(&path, Arc::clone(&model)).await;
-    let events = drain(
-        &first,
-        ClientRequestKind::SendMessage {
-            session: None,
-            text: "write it".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    let session = events[0].session.clone().expect("session");
-    let approval = events
-        .iter()
-        .find_map(|event| match &event.kind {
-            ServerEventKind::ApprovalRequested { approval, .. } => Some(approval.clone()),
-            _ => None,
-        })
-        .expect("approval request");
+    let created = drain(&first, ClientRequestKind::CreateSession { title: None }).await;
+    let session = created[0].session.clone().expect("session");
     let north = store
         .sessions()
         .await
@@ -5259,23 +4707,26 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
         .first()
         .expect("one session")
         .north;
-    // Pretend the previous process died after the effect but before the
-    // result was recorded.
     store
         .effect_started(north, call, "write", "crashed-process")
         .expect("intent");
+    assert!(
+        !target.exists(),
+        "the crashed process is not run by this test"
+    );
     drop(first);
     drop(store);
 
     let (store, second) = sqlite_service(&path, model).await;
     let approved = drain(
         &second,
-        ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: None,
-            remember: None,
+        ClientRequestKind::SendMessage {
+            session: Some(session),
+            text: "write it".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
         },
     )
     .await;
@@ -5307,6 +4758,12 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn a_pending_question_survives_a_restart() {
+    // The question a model asked is written down before the client is told
+    // about it, so a process that dies while the question is outstanding
+    // leaves it in the store: the next process can read it, answer it, and
+    // the answer is the one the turn gets. That is the durability the tool
+    // promises, and it is what this pins. It used to park the turn, which is
+    // the behaviour that went with the approval ledger.
     let directory = std::env::temp_dir().join(format!(
         "norte-code-question-restart-{}-{}",
         std::process::id(),
@@ -5346,80 +4803,57 @@ async fn a_pending_question_survives_a_restart() {
         },
     };
     let mut stream = first.submit(request).await.expect("turn");
-    let mut session = None;
     let mut asked = None;
     while let Some(event) = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .expect("the turn should park")
+        .expect("the turn should ask")
     {
-        session = session.or(event.session.clone());
-        if let ServerEventKind::QuestionAsked { question, .. } = &event.kind {
+        if let ServerEventKind::QuestionAsked {
+            question, options, ..
+        } = &event.kind
+        {
+            assert_eq!(options, &["src/lib.rs", "src/main.rs"]);
             asked = Some(question.clone());
             break;
         }
     }
-    let session = session.expect("session");
     let asked = asked.expect("question");
     drop(stream);
     drop(first);
     drop(store);
 
+    // The durable key is the call, not the question id: that is what a resumed
+    // turn looks up, because the call is what it still owes.
+    let call_key = call.to_string();
+
+    // A fresh process over the same database sees the question the previous
+    // one asked, and can answer it.
     let (store, second) = sqlite_service(&path, model).await;
-    let mut resumed = second
-        .submit(ClientRequest {
-            request_id: 8,
-            kind: ClientRequestKind::Resume {
-                session: session.clone(),
-            },
-        })
+    let stored = store
+        .question(&call_key)
         .await
-        .expect("resume");
+        .expect("read the question")
+        .expect("the question outlived the process that asked it");
+    assert_eq!(stored.id, asked, "the question the client was told about");
+    assert_eq!(stored.question, "Which file?");
+    assert_eq!(stored.options, ["src/lib.rs", "src/main.rs"]);
+    assert!(stored.multiple);
+    assert!(stored.answer.is_none(), "nobody has answered it yet");
 
-    let mut reasked = None;
-    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), resumed.next())
+    assert!(
+        store
+            .answer_question(&call_key, "src/lib.rs")
+            .await
+            .expect("answer"),
+        "the answer is taken by the stored question"
+    );
+    let answered = store
+        .question(&call_key)
         .await
-        .expect("the resume should re-ask")
-    {
-        if let ServerEventKind::QuestionAsked {
-            question,
-            options,
-            multiple,
-            ..
-        } = &event.kind
-        {
-            assert_eq!(options, &["src/lib.rs", "src/main.rs"]);
-            assert!(multiple);
-            reasked = Some(question.clone());
-            break;
-        }
-    }
-    assert_eq!(reasked.as_deref(), Some(asked.as_str()));
+        .expect("read it back")
+        .expect("still there");
+    assert_eq!(answered.answer.as_deref(), Some("src/lib.rs"));
 
-    let answered = drain(
-        &second,
-        ClientRequestKind::AnswerQuestion {
-            session: session.clone(),
-            question: asked,
-            answer: "src/lib.rs".to_owned(),
-        },
-    )
-    .await;
-    assert!(matches!(
-        answered[0].kind,
-        ServerEventKind::QuestionAnswered { .. }
-    ));
-
-    let mut finished = false;
-    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), resumed.next())
-        .await
-        .expect("the resume should finish")
-    {
-        if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
-            finished = true;
-            break;
-        }
-    }
-    assert!(finished, "the resumed turn should finish after the answer");
     drop(second);
     drop(store);
     let _ = std::fs::remove_dir_all(directory);
@@ -6596,20 +6030,20 @@ async fn a_tool_list_counts_the_rules_that_decide_each_tool() {
             .find(|status| status.name == name)
             .unwrap_or_else(|| panic!("`{name}` is registered: {statuses:?}"))
     };
-    assert_eq!(find("read").rule, ToolRule::Allow);
+    assert!(find("read").allowed);
     assert_eq!(find("read").scope, RuleScope::Global, "from the config");
-    assert_eq!(find("write").rule, ToolRule::Deny);
+    assert!(!find("write").allowed);
     assert_eq!(find("write").scope, RuleScope::Global);
-    assert_eq!(find("shell").rule, ToolRule::Allow);
+    assert!(find("shell").allowed);
     assert_eq!(
         find("shell").scope,
         RuleScope::Session,
         "a rule of this session only"
     );
-    // `edit` needs approval under the mode and has no rule of its own, which is
-    // what leaves it in the `ask` count with no rule behind it.
-    assert_eq!(find("edit").rule, ToolRule::Ask);
-    assert_eq!(find("edit").scope, RuleScope::Mode);
+    // A tool nobody wrote a rule for runs, which is what the default scope says
+    // and what the panel prints.
+    assert!(find("edit").allowed);
+    assert_eq!(find("edit").scope, RuleScope::Default);
 }
 
 #[tokio::test]
@@ -6631,7 +6065,7 @@ async fn a_session_rule_reaches_only_the_session_it_was_set_for() {
         .iter()
         .find(|status| status.name == "shell")
         .expect("command is registered");
-    assert_eq!(command.rule, ToolRule::Allow);
+    assert!(command.allowed);
     assert_eq!(command.scope, RuleScope::Session);
 
     let in_second = service.tool_rules(Some(&second));
@@ -6639,12 +6073,11 @@ async fn a_session_rule_reaches_only_the_session_it_was_set_for() {
         .iter()
         .find(|status| status.name == "shell")
         .expect("command is registered");
-    assert_eq!(
-        command.rule,
-        ToolRule::Ask,
-        "the other session never had that rule"
+    assert!(
+        command.allowed,
+        "the other session never had that rule, so the default applies"
     );
-    assert_eq!(command.scope, RuleScope::Mode);
+    assert_eq!(command.scope, RuleScope::Default);
 }
 
 /// A service over a given configuration, for the tests that need one.
@@ -6691,97 +6124,23 @@ async fn a_tool_named_in_both_lists_is_denied() {
         .iter()
         .find(|status| status.name == "write")
         .expect("write is registered");
-    assert_eq!(write.rule, ToolRule::Deny);
+    assert!(!write.allowed);
     assert_eq!(write.scope, RuleScope::Global);
 }
 
 #[tokio::test]
-async fn the_shell_is_the_tool_the_approval_mode_gates() {
-    // The tool is registered as `shell`, and the mode has to name it the way
-    // the registry does: a mode that lists a tool nobody has is a mode that
-    // approves nothing. `Ask` is the default, so this is what the first call a
-    // person ever makes meets.
+async fn the_shell_is_a_tool_and_no_rule_names_it() {
+    // With no rule, a call runs: the gate refuses what somebody wrote down, and
+    // nothing else. What the shell may do is the workspace confine's business,
+    // and this is the list a person reads before writing the rule.
     let statuses = service().tool_rules(None);
     let shell = statuses
         .iter()
         .find(|status| status.name == "shell")
         .expect("the shell is registered");
-    assert_eq!(
-        shell.rule,
-        ToolRule::Ask,
-        "`ask` mode asks before a command runs"
-    );
+    assert!(shell.allowed);
+    assert_eq!(shell.scope, RuleScope::Default);
 }
-#[tokio::test]
-async fn every_tool_the_mode_gates_is_a_tool_that_exists() {
-    // The mode used to name `command`, and no tool has answered to that since
-    // the shell became one tool: `ask` — the default — let a command run
-    // without asking, and nothing said so, because a name that matches nothing
-    // is not an error. The names are read back out of the registry here for the
-    // same reason: this is the only place that can notice.
-    //
-    // `skill_script` is registered only when the config lets skill scripts run,
-    // so the config here is the one that turns them on: the names are the point,
-    // not the defaults.
-    let mut config = config();
-    config.skills.allow_scripts = true;
-    let statuses = service_with(config).tool_rules(None);
-    let registered: Vec<&str> = statuses.iter().map(|status| status.name.as_str()).collect();
-    for name in super::approvals::WRITES
-        .iter()
-        .chain(super::approvals::RUNS.iter())
-    {
-        assert!(
-            registered.contains(name),
-            "the mode names `{name}`, which is not a registered tool: {registered:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn the_mode_asks_before_the_tool_that_runs_a_command() {
-    // The mode used to decide by a tool called `command`, and no tool has
-    // answered to that since the shell became one: `ask` — which is what a
-    // config with no `approval_mode` in it gets — let a command run without
-    // asking. A wrong name in that list is silent, because a name that matches
-    // nothing is not an error, so this is the test that has to notice.
-    //
-    // The names are read back out of the registry rather than trusted: that is
-    // the whole failure, a list of names nobody has.
-    let registered: Vec<String> = service()
-        .tools(None)
-        .expect("tools")
-        .specs()
-        .into_iter()
-        .map(|spec| spec.name.to_string())
-        .collect();
-    for tool in &registered {
-        let wanted =
-            super::approvals::mode_needs_approval(norte_code_config::ApprovalMode::Ask, tool);
-        let is_dangerous = matches!(tool.as_str(), "write" | "edit" | "shell" | "skill_script");
-        assert_eq!(
-            wanted, is_dangerous,
-            "`ask` mode and the tool list disagree about `{tool}`: {registered:?}"
-        );
-    }
-    // And the names the mode keeps are names the registry has, except for the
-    // one tool that is only registered when the config turns it on: a name the
-    // mode keeps for a tool that is not there is exactly the bug, and
-    // `skill_script` is the one case where absence is expected.
-    for name in super::approvals::WRITES
-        .iter()
-        .chain(super::approvals::RUNS.iter())
-    {
-        if *name == "skill_script" {
-            continue;
-        }
-        assert!(
-            registered.iter().any(|tool| tool == name),
-            "the mode names `{name}`, which is not a registered tool: {registered:?}"
-        );
-    }
-}
-
 #[tokio::test]
 async fn a_session_reasoning_override_survives_a_restart() {
     // `max` is not the configured default, so seeing it after the reopen is the

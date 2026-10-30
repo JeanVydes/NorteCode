@@ -1,6 +1,6 @@
 //! The optional OS sandbox for the `shell` tool.
 //!
-//! The wrapper sits inside the tool executor, after policies, approvals and the
+//! The wrapper sits inside the tool executor, after the rules and the
 //! effect journal. A human approves and the audit records the original command;
 //! only the process invocation is rewritten.
 
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use norte::{FnExecutor, ToolContext, ToolDeclaration, ToolOutput};
-use norte_code_config::SandboxConfig;
+use norte_code_protocol::config::SandboxConfig;
 use norte_tools::ShellRequest;
 
 #[cfg(any(target_os = "macos", test))]
@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 
 /// Wraps the command tool's executor so the OS sandbox runs the same call.
 ///
-/// The wrapper is deliberately inside the executor, after policies, approvals
+/// The wrapper is deliberately inside the executor, after the rules
 /// and the effect journal: the human approves and the audit records the
 /// original command, while only the process invocation gains the sandbox.
 pub(super) fn sandboxed_command(
@@ -47,7 +47,6 @@ pub(super) fn sandboxed_command(
             network: config.network,
             writable,
         }),
-        approval: declaration.approval,
     }
 }
 
@@ -137,6 +136,7 @@ pub(super) fn sandboxed_arguments(
 }
 
 /// The display name of the platform sandbox.
+#[cfg(test)]
 pub(super) fn sandbox_name() -> &'static str {
     #[cfg(target_os = "linux")]
     {

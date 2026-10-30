@@ -36,26 +36,28 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, Rw
 use futures_core::Stream;
 use norte::harness::TurnInterceptor;
 use norte::harness::{
-    Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, InMemoryStore, PolicySet, Store,
+    Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, InMemoryStore, Store,
 };
 use norte::http::{HttpClient, HttpMedia};
 use norte::{
     AnyFunction, BlobStore, Layer, LayerStack, MediaAdapter, Model, ToolArgs, ToolDeclaration,
     ToolRegistry,
 };
-use norte_code_cost::{BudgetBook, CostRecord};
-use norte_code_skills::{
+use norte_code_protocol::costs::{BudgetBook, CostRecord};
+use norte_code_protocol::skills::{
     SkillRegistry, SkillResourceTool, SkillScriptConfig, SkillScriptTool, SkillTool,
 };
-use norte_code_store_sqlite::{InMemoryDirectory, SessionDirectory, StoredSession};
-use norte_code_tools::{AskUserTool, GrepTool, QuestionBroker, TodoState, TodoTool, WebFetchTool};
+use norte_code_protocol::sqlite::{InMemoryDirectory, SessionDirectory, StoredSession};
+use norte_code_protocol::tools::{
+    AskUserTool, GrepTool, QuestionBroker, TodoState, TodoTool, WebFetchTool,
+};
 use norte_tools::{
     BrowserTool, EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
 };
 use tokio::sync::Notify;
 
-use norte_code_catalog::Catalog;
-use norte_code_config::Config;
+use norte_code_protocol::catalog::Catalog;
+use norte_code_protocol::config::Config;
 use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::ServiceError;
@@ -65,11 +67,11 @@ use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 use self::screenshots::{ScreenshotInterceptor, Screenshots, publishing_tool};
 use self::sessions::SessionRecord;
 use self::steering::{Steered, Steering, SteeringInterceptor};
-use approvals::{ApprovalModePolicy, ApprovalRules};
+use approvals::{ApprovalRules, gated};
 use background::ShellCalls;
 use compaction::{CompactionGate, CompactionLayer};
 use detach::DetachRegistry;
-use effects::{EffectJournal, EffectJournalPolicy};
+use effects::{EffectJournal, journalled};
 use jobs::{JobRegistry, job_info};
 use manage::ManageJobs;
 use mapping::{BudgetLayer, single};
@@ -80,9 +82,9 @@ use questions::DirectoryQuestions;
 use sandbox::sandboxed_command;
 use skills::{collect_secrets, discover_skills};
 use tooling::{ToolActivity, edit_source, recording_tool};
-use workspace::WorkspacePolicy;
+use workspace::{Confined, PathKind, Workspace, confined};
 
-pub use approvals::{RuleScope, ToolRule, ToolStatus};
+pub use approvals::{RuleScope, ToolStatus};
 pub use models::{effective_reasoning, model_list};
 pub use prompt::PromptSize;
 
@@ -109,7 +111,7 @@ struct Stats {
     /// committed after that; a settle that runs in between keeps the telemetry
     /// here instead of dropping it, so the request that follows is measured
     /// with its own numbers.
-    pending: std::collections::VecDeque<norte_code_store_sqlite::RequestRecord>,
+    pending: std::collections::VecDeque<norte_code_protocol::sqlite::RequestRecord>,
 }
 
 /// One MCP server, as the startup block reports it.
@@ -366,7 +368,7 @@ impl Service {
             mcp_servers: RwLock::new(McpServers::none()),
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
-            config_path: Mutex::new(norte_code_config::user_config_path()),
+            config_path: Mutex::new(norte_code_protocol::config::user_config_path()),
             telemetry: Arc::new(Telemetry::default()),
         };
         // Fail at construction, not at the first message, when the model's
@@ -440,7 +442,6 @@ impl Service {
             .media_adapter(media)
             .model(model)
             .tools(self.tools(key)?)
-            .policies(self.policies())
             .config(HarnessConfig {
                 max_iterations: self.config().max_iterations.unwrap_or(usize::MAX),
                 ..HarnessConfig::default()
@@ -563,8 +564,51 @@ impl Service {
         if withheld(disabled, declaration.name) {
             return Ok(());
         }
-        tools.register_tool_declaration(recording_tool(declaration, Arc::clone(&self.activity)))?;
+        let name = declaration.name;
+        // Three gates, in the order that answers the cheapest question first:
+        // a rule a person wrote, then whether a crash may already have run the
+        // call, then the workspace confine. All three are wrappers rather than
+        // rules the engine evaluates, because all three are about what the
+        // *call* is — its name, its id, its arguments — and the wrapper is the
+        // last point where those are still known and nothing has run yet.
+        let declaration = gated(declaration, Arc::clone(&self.approval_rules));
+        let declaration = journalled(declaration, Arc::clone(&self.effects));
+        let recorded = recording_tool(declaration, Arc::clone(&self.activity));
+        let tool = confined(Arc::new(recorded), self.confine(name));
+        tools.register(tool)?;
         Ok(())
+    }
+
+    /// The path arguments a tool names, and what they are expected to be.
+    ///
+    /// A tool the host does not know gets no confine: a rule naming a path
+    /// field of a tool nobody here wrote would be a guess, and an MCP tool's
+    /// paths are its server's business.
+    fn confine(&self, tool: &str) -> Workspace {
+        let enforce_root = self.config().tools.confinement.workspace_only;
+        let fields = match tool {
+            "read" | "write" | "edit" => vec![Confined {
+                key: "path",
+                default_to_root: false,
+                kind: PathKind::File,
+            }],
+            "grep" => vec![Confined {
+                key: "path",
+                default_to_root: true,
+                kind: PathKind::FileOrDirectory,
+            }],
+            "shell" => vec![Confined {
+                key: "cwd",
+                default_to_root: false,
+                kind: PathKind::Directory,
+            }],
+            _ => Vec::new(),
+        };
+        Workspace {
+            root: self.workspace_root.clone(),
+            enforce_root,
+            fields,
+        }
     }
 
     /// The tools withheld from a session.
@@ -815,24 +859,6 @@ impl Service {
             .unwrap_or_default()
     }
 
-    fn policies(&self) -> PolicySet {
-        PolicySet::new(vec![
-            Arc::new(EffectJournalPolicy {
-                journal: Arc::clone(&self.effects),
-            }),
-            Arc::new(WorkspacePolicy {
-                root: self.workspace_root.clone(),
-                enforce_root: self.config().tools.confinement.workspace_only,
-            }),
-            Arc::new(ApprovalModePolicy {
-                mode: self.config().approval_mode,
-                skills: self.skills(),
-                honor_allowed_tools: self.config().skills.honor_allowed_tools,
-                rules: Arc::clone(&self.approval_rules),
-            }),
-        ])
-    }
-
     /// Selects the config file global approval rules are written to.
     ///
     /// The CLI calls this after loading `--config`, so "always" lands in the
@@ -857,6 +883,148 @@ impl Service {
             .clone()
     }
 
+    /// Every tool the model can reach, with how a call to it is decided.
+    ///
+    /// The registry is the list, so a tool that failed to register is absent
+    /// and one from an MCP server is present, which is what makes this the
+    /// answer to "what can the model do right now". Each entry carries whether
+    /// a call to it runs and where that rule comes from: `deny` before `allow`,
+    /// which is the order the gate applies, and asking the service rather than
+    /// reading the rules in the client is what keeps the two from disagreeing.
+    ///
+    /// A tool named only by a session rule is in the list when the session is
+    /// the one it was set for, and a rule naming a tool the registry does not
+    /// have is left out: a list of tools is not a list of names somebody typed.
+    pub fn tool_rules(&self, session: Option<&SessionKey>) -> Vec<ToolStatus> {
+        // A session that is not open has no session rules, and asking for them
+        // is not an error: the list is what the *next* call meets, and a session
+        // that was never opened has none.
+        let session_id =
+            session.and_then(|key| self.lock_sessions().get(key).map(|record| record.id));
+        let session_id = session_id.unwrap_or_default();
+        // The list a client is shown is the one the session it is on was made
+        // with, so `/tools` and the gate agree about what the model can reach.
+        let Ok(tools) = self.tools(session) else {
+            return Vec::new();
+        };
+        let mut statuses: Vec<ToolStatus> = tools
+            .specs()
+            .into_iter()
+            .map(|spec| {
+                let name = spec.name.to_string();
+                let (allowed, scope) = self.approval_rules.status(session_id, &name);
+                ToolStatus {
+                    name,
+                    allowed,
+                    scope,
+                }
+            })
+            .collect();
+        statuses.sort_by(|left, right| left.name.cmp(&right.name));
+        statuses
+    }
+
+    /// Sets one rule for a session or the user config.
+    ///
+    /// A session rule is stored with the logical session, so it survives a
+    /// restart. A global rule is written to the user config and replaces the
+    /// opposite rule for the same tool. Setting an allow rule is also how a
+    /// previous deny is revoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool name is empty, the session is unknown, a
+    /// session rule is requested without a session, or the config cannot be
+    /// written.
+    pub async fn set_approval_rule(
+        &self,
+        session: Option<&SessionKey>,
+        tool: &str,
+        allow: bool,
+        global: bool,
+    ) -> Result<(), ServiceError> {
+        let tool = tool.trim();
+        if tool.is_empty() {
+            return Err(ServiceError::Approval(
+                "the approval rule needs a tool name".to_owned(),
+            ));
+        }
+        if global {
+            self.remember_global_rule(tool, allow)?;
+            return Ok(());
+        }
+        let session = session.ok_or_else(|| {
+            ServiceError::Approval(
+                "a session rule needs an open session; send a message first".to_owned(),
+            )
+        })?;
+        let (nid, _, _) = self.require_record(session)?;
+        {
+            let mut records = self.lock_sessions();
+            let record = records
+                .get_mut(session)
+                .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
+            record.denied_tools.retain(|denied| denied != tool);
+            record.allowed_tools.retain(|allowed| allowed != tool);
+            if allow {
+                record.allowed_tools.push(tool.to_owned());
+            } else {
+                record.denied_tools.push(tool.to_owned());
+            }
+        }
+        if allow {
+            self.approval_rules.allow_session(nid, tool);
+        } else {
+            self.approval_rules.deny_session(nid, tool);
+        }
+        self.persist(session).await
+    }
+
+    /// Forgets a tool's rule.
+    ///
+    /// It is the third state a rule panel offers: a tool is allowed or denied,
+    /// and "no rule" is what is left when neither is written down. The rule is
+    /// removed from both sides — the live registry and the session or the
+    /// config file — because a rule forgotten in memory and kept on disk comes
+    /// back at the next restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Approval`] when the tool is unnamed or no
+    /// session is open and the rule was a session's.
+    pub async fn forget_approval_rule(
+        &self,
+        session: Option<&SessionKey>,
+        tool: &str,
+        global: bool,
+    ) -> Result<(), ServiceError> {
+        let tool = tool.trim();
+        if tool.is_empty() {
+            return Err(ServiceError::Approval(
+                "the approval rule needs a tool name".to_owned(),
+            ));
+        }
+        if global {
+            return self.forget_global_rule(tool);
+        }
+        let session = session.ok_or_else(|| {
+            ServiceError::Approval(
+                "a session rule needs an open session; send a message first".to_owned(),
+            )
+        })?;
+        let (nid, _, _) = self.require_record(session)?;
+        {
+            let mut records = self.lock_sessions();
+            let record = records
+                .get_mut(session)
+                .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
+            record.denied_tools.retain(|denied| denied != tool);
+            record.allowed_tools.retain(|allowed| allowed != tool);
+        }
+        self.approval_rules.forget_session(nid, tool);
+        self.persist(session).await
+    }
+
     /// Writes one tool-wide rule to the user config and applies it in memory.
     fn remember_global_rule(&self, tool: &str, allow: bool) -> Result<(), ServiceError> {
         let path = self
@@ -864,13 +1032,13 @@ impl Service {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .or_else(norte_code_config::user_config_path)
+            .or_else(norte_code_protocol::config::user_config_path)
             .ok_or_else(|| {
                 ServiceError::Approval(
                     "no user config path; set --config before choosing a global rule".to_owned(),
                 )
             })?;
-        norte_code_config::update_user_approval(&path, tool, allow)?;
+        norte_code_protocol::config::update_user_approval(&path, tool, allow)?;
         if allow {
             self.approval_rules.allow_global(tool);
         } else {
@@ -895,13 +1063,13 @@ impl Service {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-            .or_else(norte_code_config::user_config_path)
+            .or_else(norte_code_protocol::config::user_config_path)
             .ok_or_else(|| {
                 ServiceError::Approval(
                     "no user config path; set --config before choosing a global rule".to_owned(),
                 )
             })?;
-        norte_code_config::forget_user_approval(&path, tool)?;
+        norte_code_protocol::config::forget_user_approval(&path, tool)?;
         self.approval_rules.forget_global(tool);
         Ok(())
     }
@@ -1280,42 +1448,6 @@ impl Service {
             Kind::Resume { session } => Kind::Resume {
                 session: resolve(session)?,
             },
-            Kind::Approve {
-                session,
-                approval,
-                arguments,
-                scope,
-                remember,
-            } => Kind::Approve {
-                session: resolve(session)?,
-                approval,
-                arguments,
-                scope,
-                remember,
-            },
-            Kind::Deny {
-                session,
-                approval,
-                reason,
-                scope,
-            } => Kind::Deny {
-                session: resolve(session)?,
-                approval,
-                reason,
-                scope,
-            },
-            Kind::Revoke {
-                session,
-                approval,
-                grant,
-            } => Kind::Revoke {
-                session: resolve(session)?,
-                approval,
-                grant,
-            },
-            Kind::ListGrants { session } => Kind::ListGrants {
-                session: resolve(session)?,
-            },
             Kind::AnswerQuestion {
                 session,
                 question,
@@ -1531,31 +1663,6 @@ impl Service {
                 self.set_reasoning(request_id, session, scope, reasoning)
                     .await
             }
-            Kind::Approve {
-                session,
-                approval,
-                arguments,
-                scope,
-                remember,
-            } => {
-                self.approve(request_id, session, approval, arguments, scope, remember)
-                    .await
-            }
-            Kind::Deny {
-                session,
-                approval,
-                reason,
-                scope,
-            } => {
-                self.deny(request_id, session, approval, reason, scope)
-                    .await
-            }
-            Kind::Revoke {
-                session,
-                approval,
-                grant,
-            } => self.revoke(request_id, session, approval, grant).await,
-            Kind::ListGrants { session } => self.list_grants_event(request_id, session).await,
             Kind::AnswerQuestion {
                 session,
                 question,

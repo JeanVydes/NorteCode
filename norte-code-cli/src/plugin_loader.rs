@@ -31,7 +31,7 @@
 //! A plugin's own code runs where the host put it: [`crate::plugins`] is a
 //! crate of this workspace, and a host that wants more adds it there.
 
-use norte_code_plugins::Plugins;
+use norte_code_protocol::plugins::Plugins;
 
 /// Loads the plugins this client knows about.
 ///

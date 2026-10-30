@@ -16,7 +16,6 @@ mod renderer;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use argument::approval_label;
 pub(crate) use debug::reasoning_setting_label;
 pub(crate) use debug::{
     HostFacts, mcp_panel, report_mcp, report_prompt, report_reasoning, report_start, report_tools,
@@ -36,9 +35,9 @@ pub(crate) use renderer::{BudgetPrompt, Format, Renderer, Verbosity};
 // The shared names the submodules read through `super::`.
 
 use super::{
-    ApprovalMode, BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config,
-    Delta, DiffStyle, ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning,
-    ReasoningEffort, ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey,
-    StreamingGranularity, StructuredOutputMode, Style, ToolKind, ToolRule, clip_text, compact_json,
+    BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config, Delta, DiffStyle,
+    ErrorCode, Feature, Modality, ModelSpec, Path, Phase, Reasoning, ReasoningEffort,
+    ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey,
+    StreamingGranularity, StructuredOutputMode, Style, ToolKind, clip_text, compact_json,
     duration_label,
 };

@@ -12,8 +12,8 @@ use norte::{
     CallId, Continuation, Layer, LayerContext, ModelRef, ModelRequest, ModelStream,
     ProviderErrorKind, SessionId, ShortCircuitReason, StreamEvent, Usage,
 };
-use norte_code_config::{BudgetConfig, RetryConfig};
-use norte_code_cost::{BudgetBook, CostRecord};
+use norte_code_protocol::config::{BudgetConfig, RetryConfig};
+use norte_code_protocol::costs::{BudgetBook, CostRecord};
 use norte_code_protocol::{
     Budget, BudgetUnit, Delta, ErrorCode, ServerEvent, ServerEventKind, SessionKey,
 };
@@ -51,7 +51,9 @@ pub(super) struct RequestMetrics {
     pub(super) tools: Vec<String>,
 }
 
-pub(super) fn request_metrics(record: &norte_code_store_sqlite::RequestRecord) -> RequestMetrics {
+pub(super) fn request_metrics(
+    record: &norte_code_protocol::sqlite::RequestRecord,
+) -> RequestMetrics {
     RequestMetrics {
         duration_ms: record.duration_ms,
         first_token_ms: record.first_token_ms,
@@ -61,7 +63,9 @@ pub(super) fn request_metrics(record: &norte_code_store_sqlite::RequestRecord) -
     }
 }
 
-pub(super) fn tokens_per_second(record: &norte_code_store_sqlite::RequestRecord) -> Option<f64> {
+pub(super) fn tokens_per_second(
+    record: &norte_code_protocol::sqlite::RequestRecord,
+) -> Option<f64> {
     token_rate(
         record.output_tokens,
         record.duration_ms,
@@ -297,24 +301,14 @@ fn account_usage(
 /// The arguments a pending call would run with, for showing a human what they
 /// are approving.
 ///
-/// The approval record is authoritative: when a policy rewrote the arguments,
-/// it holds the rewritten object, while history still has what the model wrote.
-/// Older records predate that field, so history is the fallback. Missing
-/// history is not an error: the fields are optional.
+/// What the model wrote for a call, read back from the committed history.
+///
+/// Missing history is not an error: the fields that carry this are optional.
 pub(super) async fn call_arguments(
     engine: &Harness,
     session: SessionId,
     call_id: CallId,
 ) -> Option<serde_json::Value> {
-    if let Ok(records) = engine.pending_approvals(session).await {
-        if let Some(arguments) = records
-            .into_iter()
-            .find(|record| record.call_id == call_id)
-            .and_then(|record| record.arguments)
-        {
-            return Some(arguments);
-        }
-    }
     let history = engine.history(session).await.ok()?;
     history
         .iter()
@@ -327,7 +321,6 @@ pub(super) fn to_phase(phase: norte::harness::Phase) -> norte_code_protocol::Pha
     match phase {
         norte::harness::Phase::Streaming => norte_code_protocol::Phase::Streaming,
         norte::harness::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
-        norte::harness::Phase::AwaitingApproval => norte_code_protocol::Phase::AwaitingApproval,
         _ => norte_code_protocol::Phase::Idle,
     }
 }

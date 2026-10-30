@@ -6,11 +6,11 @@
 //! help list four commands that had been there for a while.
 //!
 //! What a command *does* is not here. The registry hands back an
-//! [`Invocation`](norte_code_commands::Invocation) naming the command, and
+//! [`Invocation`](norte_code_protocol::commands::Invocation) naming the command, and
 //! [`crate::interaction`] matches on that name; a registry a plugin can write
 //! into cannot be keyed by the binary's own enum.
 
-use norte_code_commands::{ArgSpec, CommandSpec, Registry};
+use norte_code_protocol::commands::{ArgSpec, CommandSpec, Registry};
 
 /// The efforts a model may declare, offered while typing `/reasoning`.
 ///
@@ -61,8 +61,8 @@ pub(crate) fn shared() -> &'static Registry {
 /// so a plugin is not a special case in it.
 ///
 /// `NORTE_CODE_PLUGINS` names a directory, and the command names a binary in it.
-fn plugins() -> norte_code_plugins::Plugins {
-    let mut plugins = norte_code_plugins::Plugins::new();
+fn plugins() -> norte_code_protocol::plugins::Plugins {
+    let mut plugins = norte_code_protocol::plugins::Plugins::new();
     crate::plugin_loader::load(&mut plugins);
     plugins
 }
@@ -219,7 +219,7 @@ mod tests {
         let usages: Vec<String> = registry
             .commands()
             .iter()
-            .map(norte_code_commands::CommandSpec::usage)
+            .map(norte_code_protocol::commands::CommandSpec::usage)
             .collect();
         let width = usages.iter().map(String::len).max().unwrap_or(0);
         for usage in &usages {

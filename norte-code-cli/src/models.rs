@@ -1,6 +1,6 @@
 //! Model selection and the `models` report.
 
-use norte_code_catalog::WireSchema;
+use norte_code_protocol::catalog::WireSchema;
 
 use super::{Catalog, Config, ModelInfo, ModelSpec, ModelsArgs, model_list, reasoning_label};
 
@@ -137,7 +137,7 @@ pub(crate) fn resolve_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norte_code_catalog::{Models, Providers};
+    use norte_code_protocol::catalog::{Models, Providers};
 
     /// A catalogue with one provider that serves one `OpenAI` wire.
     fn catalog() -> Catalog {

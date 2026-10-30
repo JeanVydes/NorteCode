@@ -23,9 +23,9 @@
 use std::io::IsTerminal as _;
 use std::path::Path;
 
-use norte_code_config::{Config, update_user_default};
+use norte_code_protocol::config::{Config, update_user_default};
+use norte_code_protocol::sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
 use norte_code_protocol::{Phase, SessionKey};
-use norte_code_store_sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
 
 use crate::select::{self, Item, Outcome};
 use crate::style::Style;
@@ -93,7 +93,7 @@ impl SessionRow {
             return Some("unfinished");
         }
         match self.phase {
-            Phase::AwaitingApproval | Phase::AwaitingTool => Some("waiting"),
+            Phase::AwaitingTool => Some("waiting"),
             Phase::Streaming => Some("interrupted"),
             Phase::Idle => None,
         }
@@ -131,14 +131,14 @@ fn row_of(session: StoredSession) -> SessionRow {
     let phase = match session.phase.as_str() {
         "streaming" => Phase::Streaming,
         "awaiting_tool" => Phase::AwaitingTool,
-        "awaiting_approval" => Phase::AwaitingApproval,
         _ => Phase::Idle,
     };
     SessionRow {
         // A phase a live turn writes is a phase that outlived it: no process is
-        // streaming a session it has just opened, and an approval nobody is
-        // waiting on is the same shape. Either one is work to continue.
-        unfinished: matches!(phase, Phase::Streaming | Phase::AwaitingApproval),
+        // streaming a session it has just opened, so it is work to continue. A
+        // tool that was about to run is not: nothing re-runs it yet, and calling
+        // that unfinished would offer a resume that finds nothing to do.
+        unfinished: matches!(phase, Phase::Streaming),
         key: session.key,
         title: session.title,
         model: session.model,
@@ -153,7 +153,7 @@ fn row_of(session: StoredSession) -> SessionRow {
 /// and the answer is written where the next run reads it.
 pub(crate) async fn startup(
     config: &mut Config,
-    catalog: &norte_code_catalog::Catalog,
+    catalog: &norte_code_protocol::catalog::Catalog,
     database: &Path,
     config_path: Option<&Path>,
     style: Style,
@@ -260,7 +260,7 @@ fn session_items(rows: &[SessionRow]) -> Vec<Item> {
 #[allow(clippy::too_many_lines)] // one arm per question, which is the dialogue.
 pub(crate) fn choose_model(
     config: &mut Config,
-    catalog: &norte_code_catalog::Catalog,
+    catalog: &norte_code_protocol::catalog::Catalog,
     config_path: Option<&Path>,
     style: Style,
 ) -> Result<String, String> {
@@ -385,7 +385,7 @@ fn remember(
     let reference = format!("{provider}/{model}");
     let path = config_path
         .map(Path::to_path_buf)
-        .or_else(norte_code_config::user_config_path);
+        .or_else(norte_code_protocol::config::user_config_path);
     let Some(path) = path else {
         eprintln!(
             "{}",
@@ -547,8 +547,6 @@ mod tests {
     fn a_session_with_something_to_continue_says_so() {
         let unfinished = row("aaaaaaaa", None, Phase::Streaming, true);
         assert_eq!(unfinished.state(), Some("unfinished"));
-        let waiting = row("aaaaaaaa", None, Phase::AwaitingApproval, true);
-        assert_eq!(waiting.state(), Some("unfinished"));
         let stale = row("aaaaaaaa", None, Phase::AwaitingTool, false);
         assert_eq!(stale.state(), Some("waiting"));
     }
@@ -557,10 +555,6 @@ mod tests {
     fn a_stored_phase_becomes_the_phase_the_client_shows() {
         assert_eq!(row_of(stored("streaming")).phase, Phase::Streaming);
         assert_eq!(row_of(stored("awaiting_tool")).phase, Phase::AwaitingTool);
-        assert_eq!(
-            row_of(stored("awaiting_approval")).phase,
-            Phase::AwaitingApproval
-        );
         // Anything else starts idle, which is what the service does with a phase
         // it does not recognise.
         assert_eq!(row_of(stored("idle")).phase, Phase::Idle);
@@ -568,7 +562,6 @@ mod tests {
         // A turn in flight outlived its process, so there is work to continue; a
         // tool that was about to run is not the same thing.
         assert!(row_of(stored("streaming")).unfinished);
-        assert!(row_of(stored("awaiting_approval")).unfinished);
         assert!(!row_of(stored("idle")).unfinished);
         assert!(!row_of(stored("awaiting_tool")).unfinished);
     }

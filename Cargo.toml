@@ -2,16 +2,8 @@
 resolver = "3"
 members = [
     "norte-code-agent",
-    "norte-code-catalog",
     "norte-code-cli",
-    "norte-code-commands",
-    "norte-code-config",
-    "norte-code-cost",
-    "norte-code-plugins",
     "norte-code-protocol",
-    "norte-code-skills",
-    "norte-code-store-sqlite",
-    "norte-code-tools",
 ]
 
 [workspace.package]

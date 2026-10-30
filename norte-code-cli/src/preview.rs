@@ -1,170 +1,14 @@
-//! Approval prompt: tool previews, decisions and their protocol requests.
+//! Tool previews: a call rendered as something a person can read.
+//!
+//! The rendering is exercised by the tests and kept for the transcript path
+//! that reads it; the module is private to the crate.
+#![allow(dead_code)]
+//!
+//! The panel that used to print these asked for a decision; it is gone with the
+//! approval it was deciding, and what is left is the rendering, which the
+//! transcript uses to show what a call is about to do.
 
-use crate::prompt::{PromptInput, prompt_input};
-
-use super::{
-    ClientRequest, ClientRequestKind, DenyScope, GrantScope, ServerEvent, ServerEventKind,
-    SessionKey, Style, mpsc, short,
-};
-
-/// What the human chose for a parked call.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ApprovalChoice {
-    /// Run this call once.
-    Once,
-    /// Run any call to this tool for the rest of the session.
-    ToolSession,
-    /// Run this tool in every session, stored in the user config.
-    ToolGlobal,
-    /// Refuse this call, with the reason the human typed, if any.
-    DenyOnce(Option<String>),
-    /// Refuse this tool for the rest of the session.
-    DenySession(Option<String>),
-    /// Refuse this tool in every session, stored in the user config.
-    DenyGlobal(Option<String>),
-}
-
-/// What happened at an approval panel.
-pub(crate) enum ApprovalOutcome {
-    /// A decision to submit once the stream is drained.
-    Decision((SessionKey, String, ApprovalChoice)),
-    /// No decision: no interactive client, or the event was not an approval.
-    None,
-    /// The human pressed Ctrl-C while the prompt waited for input.
-    Cancelled,
-}
-
-/// Prints an approval request and asks for a decision when stdin is a terminal.
-///
-/// Input is read by a background thread and selected against the Ctrl-C
-/// channel, so a parked approval cannot swallow the interrupt. A cancelled
-/// prompt leaves the decision pending and the session resumable.
-pub(crate) async fn ask_approval(
-    event: &ServerEvent,
-    style: Style,
-    input: Option<&mut crate::input::InteractiveInput>,
-    interrupts: &mut mpsc::Receiver<()>,
-) -> Result<ApprovalOutcome, String> {
-    let ServerEventKind::ApprovalRequested {
-        approval,
-        tool,
-        call_id,
-        arguments,
-        sandbox,
-        ..
-    } = &event.kind
-    else {
-        return Ok(ApprovalOutcome::None);
-    };
-    let Some(session) = event.session.clone() else {
-        return Ok(ApprovalOutcome::None);
-    };
-    eprintln!();
-    let rule = style.yellow("─".repeat(rule_width()));
-    eprintln!("{rule}");
-    eprintln!(
-        "{}  {}  {}",
-        style.yellow("approval required"),
-        style.tool(tool),
-        style.dim(format!("#{}", short(call_id)))
-    );
-    if let Some(sandbox) = sandbox {
-        eprintln!("  {}", style.green(format!("[{sandbox}] sandboxed")));
-    }
-    if let Some(arguments) = arguments {
-        for line in argument_preview(tool, arguments) {
-            match line {
-                PreviewLine::Field { key, value } => {
-                    eprintln!("  {} {}", style.dim(format!("{key:<10}")), value);
-                }
-                PreviewLine::Block { label, lines } => {
-                    eprintln!("  {}", style.dim(label));
-                    for line in lines {
-                        eprintln!("  {} {}", style.cyan("│"), line);
-                    }
-                }
-                PreviewLine::Note(note) => {
-                    eprintln!("  {}", style.dim(note));
-                }
-            }
-        }
-    }
-    eprintln!("{rule}");
-    let Some(input) = input else {
-        eprintln!(
-            "  {}",
-            style.dim(
-                "not an interactive terminal; the session stays parked. Use --approval-mode \
-                 auto-edit or yolo to run without asking."
-            )
-        );
-        return Ok(ApprovalOutcome::None);
-    };
-    loop {
-        eprintln!(
-            "  {}  {}  {}",
-            style.green("[y] allow once"),
-            style.cyan("[s] allow this tool for this session"),
-            style.cyan("[a] allow this tool always")
-        );
-        eprintln!(
-            "  {}  {}  {}",
-            style.red("[n] deny once"),
-            style.red("[ns] deny this tool for this session"),
-            style.red("[ng] deny this tool always")
-        );
-        match prompt_input("", input, interrupts).await? {
-            PromptInput::Line(line) => {
-                if let Some(choice) = parse_approval_choice(&line) {
-                    return Ok(ApprovalOutcome::Decision((
-                        session,
-                        approval.clone(),
-                        choice,
-                    )));
-                }
-            }
-            PromptInput::Eof => {
-                return Ok(ApprovalOutcome::Decision((
-                    session,
-                    approval.clone(),
-                    ApprovalChoice::DenyOnce(None),
-                )));
-            }
-            PromptInput::Cancelled => return Ok(ApprovalOutcome::Cancelled),
-        }
-        eprintln!(
-            "  {}",
-            style.dim("answer y, s, a, n, ns or ng; add a message after n to tell the model why")
-        );
-    }
-}
-
-/// Parses one line of the approval prompt. `None` means ask again.
-///
-/// `n <message>` is a denial that reaches the model, so "no, use the existing
-/// helper" is actionable feedback rather than a bare refusal. `ns` and `ng`
-/// make the denial last for the session or for every session; the same suffixes
-/// on `s` and `a` pick the matching allow scope.
-pub(crate) fn parse_approval_choice(line: &str) -> Option<ApprovalChoice> {
-    let line = line.trim();
-    let (command, reason) = line
-        .split_once(char::is_whitespace)
-        .map_or((line, ""), |(command, reason)| (command, reason.trim()));
-    let reason = (!reason.is_empty()).then(|| reason.to_owned());
-    match command.to_ascii_lowercase().as_str() {
-        "y" | "yes" | "1" if reason.is_none() => Some(ApprovalChoice::Once),
-        "s" | "session" | "2" if reason.is_none() => Some(ApprovalChoice::ToolSession),
-        "a" | "always" | "g" | "3" if reason.is_none() => Some(ApprovalChoice::ToolGlobal),
-        "n" | "no" | "4" if reason.is_none() => Some(ApprovalChoice::DenyOnce(None)),
-        "n" | "no" => Some(ApprovalChoice::DenyOnce(reason)),
-        "ns" | "5" => Some(ApprovalChoice::DenySession(reason)),
-        "ng" | "6" => Some(ApprovalChoice::DenyGlobal(reason)),
-        "" => Some(ApprovalChoice::DenyOnce(None)),
-        _ => None,
-    }
-}
-
-/// One line in the approval panel, already split from the raw JSON.
+/// One line of a tool preview, already split from the raw JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreviewLine {
     /// A named scalar: `path`, `cwd`, `pattern`.
@@ -177,9 +21,8 @@ pub(crate) enum PreviewLine {
 
 /// Renders a tool call as something a human can read at a glance.
 ///
-/// The approval prompt must never be a JSON dump: for the common tools the
-/// useful parts are the path, the command and a short excerpt of the text that
-/// will be written.
+/// A preview is never a JSON dump: for the common tools the useful parts are
+/// the path, the command and a short excerpt of the text that will be written.
 pub(crate) fn argument_preview(tool: &str, arguments: &serde_json::Value) -> Vec<PreviewLine> {
     let Some(object) = arguments.as_object() else {
         return vec![PreviewLine::Note(compact_json(arguments, 200))];
@@ -452,64 +295,4 @@ pub(crate) fn clip_text(text: &str, max: usize) -> (String, bool) {
     let mut shortened: String = text.chars().take(max).collect();
     shortened.push_str("\n… [truncated]");
     (shortened, true)
-}
-
-pub(crate) fn rule_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|columns| columns.parse::<usize>().ok())
-        .map_or(72, |columns| columns.saturating_sub(2).clamp(40, 100))
-}
-
-/// The protocol request that resolves a parked approval.
-pub(crate) fn approval_request(
-    session: SessionKey,
-    approval: String,
-    choice: ApprovalChoice,
-) -> ClientRequest {
-    let kind = match choice {
-        ApprovalChoice::Once => ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: None,
-            remember: None,
-        },
-        ApprovalChoice::ToolSession => ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: Some(GrantScope::Tool),
-            remember: Some(true),
-        },
-        ApprovalChoice::ToolGlobal => ClientRequestKind::Approve {
-            session,
-            approval,
-            arguments: None,
-            scope: Some(GrantScope::Always),
-            remember: Some(true),
-        },
-        ApprovalChoice::DenyOnce(reason) => ClientRequestKind::Deny {
-            session,
-            approval,
-            reason,
-            scope: Some(DenyScope::Once),
-        },
-        ApprovalChoice::DenySession(reason) => ClientRequestKind::Deny {
-            session,
-            approval,
-            reason,
-            scope: Some(DenyScope::ToolSession),
-        },
-        ApprovalChoice::DenyGlobal(reason) => ClientRequestKind::Deny {
-            session,
-            approval,
-            reason,
-            scope: Some(DenyScope::ToolGlobal),
-        },
-    };
-    ClientRequest {
-        request_id: 0,
-        kind,
-    }
 }

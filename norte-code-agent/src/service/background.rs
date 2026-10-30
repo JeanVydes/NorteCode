@@ -91,7 +91,6 @@ impl ShellCalls {
                 steering,
                 detaches,
             }),
-            approval: declaration.approval,
         }
     }
 }

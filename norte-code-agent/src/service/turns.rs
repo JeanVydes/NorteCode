@@ -16,13 +16,13 @@ use norte::{
     FinishReason, MediaKind, MediaPart, MediaSource, Message, MimeType, Part, ReasoningRequest,
     Role, SessionId, Usage,
 };
-use norte_code_cost::{BudgetBook, BudgetNotice, CostRecord};
+use norte_code_protocol::costs::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
     Attachment, Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind,
     SessionKey,
 };
 
-use norte_code_store_sqlite::{RequestStatus, SessionDirectory};
+use norte_code_protocol::sqlite::{RequestStatus, SessionDirectory};
 
 use crate::provider::ModelSpec;
 
@@ -35,7 +35,6 @@ use super::mapping::{
     tool_result_text,
 };
 use super::models::resolve_reasoning;
-use super::sandbox::sandbox_name;
 use super::tooling::output_text;
 use super::{EventStream, Service, ServiceError, Stats};
 
@@ -149,32 +148,6 @@ impl Service {
             self.clear_pending(&key, pending_reasoning.as_ref(), &[]);
             self.persist(&key).await?;
         }
-        // A resumable park: after a restart the engine will not re-emit the
-        // pending approvals, so surface them from the store before the turn.
-        let restored: Vec<ServerEvent> = if state.phase == norte::harness::Phase::AwaitingApproval {
-            let mut restored = Vec::new();
-            for record in engine.pending_approvals(nid).await? {
-                let arguments = call_arguments(&engine, nid, record.call_id).await;
-                let sandbox = (record.tool.as_str() == "shell"
-                    && self.config().tools.confinement.sandbox.enabled)
-                    .then(|| sandbox_name().to_owned());
-                restored.push(ServerEvent::new(
-                    request_id,
-                    Some(key.clone()),
-                    ServerEventKind::ApprovalRequested {
-                        turn,
-                        approval: record.id.to_string(),
-                        call_id: record.call_id.to_string(),
-                        tool: record.tool.to_string(),
-                        arguments,
-                        sandbox,
-                    },
-                ));
-            }
-            restored
-        } else {
-            Vec::new()
-        };
         // A client that starts blank cannot tell what the session holds, so it
         // asks for the transcript. It asks explicitly because the request's own
         // shape cannot answer it: a resume has no message and a message has one,
@@ -291,13 +264,11 @@ impl Service {
             this.lock_cancels().remove(&task_key);
         });
 
-        Ok(Box::pin(
-            futures_util::stream::iter(leading)
-                .chain(futures_util::stream::iter(restored))
-                .chain(futures_util::stream::unfold(rx, |mut rx| async move {
-                    rx.recv().await.map(|event| (event, rx))
-                })),
-        ))
+        Ok(Box::pin(futures_util::stream::iter(leading).chain(
+            futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }),
+        )))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -843,31 +814,6 @@ impl Service {
                     duration_ms: *duration_ms,
                 })
             }
-            EngineEvent::ApprovalRequested {
-                approval,
-                call_id,
-                tool,
-                ..
-            } => {
-                let arguments = call_arguments(engine, nid, *call_id).await;
-                let sandbox = (tool.as_str() == "shell"
-                    && self.config().tools.confinement.sandbox.enabled)
-                    .then(|| sandbox_name().to_owned());
-                Some(ServerEventKind::ApprovalRequested {
-                    turn: stats.turn,
-                    approval: approval.to_string(),
-                    call_id: call_id.to_string(),
-                    tool: tool.to_string(),
-                    arguments,
-                    sandbox,
-                })
-            }
-            EngineEvent::ApprovalGranted { approval, .. } => {
-                Some(ServerEventKind::ApprovalResolved {
-                    approval: approval.to_string(),
-                    approved: true,
-                })
-            }
             EngineEvent::CommitSucceeded { version, .. } => {
                 // The answer is committed, so the budget already knows what it
                 // cost: a crossing that happened there is reported now, not at
@@ -1027,7 +973,7 @@ impl Service {
         &self,
         key: &SessionKey,
         nid: SessionId,
-    ) -> Vec<norte_code_store_sqlite::RequestRecord> {
+    ) -> Vec<norte_code_protocol::sqlite::RequestRecord> {
         let mut records = self.telemetry.take(nid);
         records.sort_by_key(|record| record.started_at);
         for record in &mut records {
@@ -1039,7 +985,7 @@ impl Service {
     pub(super) async fn record_request(
         &self,
         key: &SessionKey,
-        record: &norte_code_store_sqlite::RequestRecord,
+        record: &norte_code_protocol::sqlite::RequestRecord,
     ) {
         if let Err(error) = self.directory.record_request(record).await {
             tracing::warn!(session = %key, %error, "could not record request telemetry");
@@ -1052,7 +998,7 @@ impl Service {
         nid: SessionId,
         turn: u64,
         usage: &Usage,
-    ) -> norte_code_store_sqlite::RequestRecord {
+    ) -> norte_code_protocol::sqlite::RequestRecord {
         // Both halves come from the session's own spec, which carries them
         // apart. They used to be recovered by splitting the label, which put an
         // empty provider on the row whenever a model id carried a slash of its
@@ -1061,7 +1007,7 @@ impl Service {
             || (String::new(), String::new()),
             |record| (record.spec.provider.clone(), record.spec.model.clone()),
         );
-        norte_code_store_sqlite::RequestRecord {
+        norte_code_protocol::sqlite::RequestRecord {
             id: uuid::Uuid::new_v4().to_string(),
             session: key.to_string(),
             north_session: nid.to_string(),
@@ -1191,10 +1137,10 @@ async fn compaction_ancestors(
 const REPLAY_MESSAGES: usize = 100;
 
 /// A task as the tool's own state holds it, from the wire's copy.
-fn to_todo_item(info: &norte_code_protocol::TodoInfo) -> norte_code_tools::TodoItem {
+fn to_todo_item(info: &norte_code_protocol::TodoInfo) -> norte_code_protocol::tools::TodoItem {
     use norte_code_protocol::TodoStatus as Wire;
-    use norte_code_tools::TodoStatus as Stored;
-    norte_code_tools::TodoItem {
+    use norte_code_protocol::tools::TodoStatus as Stored;
+    norte_code_protocol::tools::TodoItem {
         content: info.content.clone(),
         status: match info.status {
             Wire::Pending => Stored::Pending,

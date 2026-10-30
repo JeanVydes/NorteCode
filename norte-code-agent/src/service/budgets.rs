@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::Utc;
 
-use norte_code_cost::{BudgetBook, BudgetNotice, BudgetStatus, CostSummary, summarize};
+use norte_code_protocol::costs::{BudgetBook, BudgetNotice, BudgetStatus, CostSummary, summarize};
 use norte_code_protocol::{Budget, BudgetUnit, ServerEventKind, SessionKey};
 
 use super::mapping::configured_budget;
