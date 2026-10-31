@@ -230,7 +230,8 @@ impl Service {
         leading.extend(replay);
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
         let cancellation = CancellationToken::new();
-        self.lock_cancels().insert(key.clone(), cancellation.clone());
+        self.lock_cancels()
+            .insert(key.clone(), cancellation.clone());
 
         let this = Arc::clone(self);
         let task_key = key.clone();

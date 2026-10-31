@@ -157,25 +157,14 @@ pub(crate) fn built() -> Registry {
         "delete this session, with its cost and telemetry, and leave",
     ));
     registry.register(CommandSpec::new("/exit", "leave the chat").aliased(&["/quit"]));
+    registry.register(CommandSpec::new("/plugins list", "list installed plugins"));
     registry.register(
-        CommandSpec::new(
-            "/plugins list",
-            "list installed plugins",
-        )
+        CommandSpec::new("/plugins add", "install a plugin from a git URL")
+            .arg(ArgSpec::required("url")),
     );
     registry.register(
-        CommandSpec::new(
-            "/plugins add",
-            "install a plugin from a git URL",
-        )
-        .arg(ArgSpec::required("url"))
-    );
-    registry.register(
-        CommandSpec::new(
-            "/plugins rm",
-            "remove an installed plugin",
-        )
-        .arg(ArgSpec::required("name"))
+        CommandSpec::new("/plugins rm", "remove an installed plugin")
+            .arg(ArgSpec::required("name")),
     );
     // The plugins lead: a command of theirs that names one of the client's is
     // the one that wins, because the plugin was asked for by name and the

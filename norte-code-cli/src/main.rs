@@ -52,12 +52,12 @@ use prompt::compose_selection;
 #[cfg(test)]
 use render::budget_label;
 
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::any::Any;
 
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -72,9 +72,9 @@ use norte_code_agent::{
 use norte_code_protocol::catalog::{Catalog, WireSchema};
 use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
+use norte_code_protocol::plugins::PluginContext;
 use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
 use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore};
-use norte_code_protocol::plugins::PluginContext;
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
     ErrorCode, JobInfo, ModelInfo, Phase, Reasoning, ReasoningInfo, ReasoningScope, ServerEvent,
@@ -1019,7 +1019,16 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut(), Some(plugin_ctx.clone())).await?;
+        drive_turns(
+            &service,
+            stream,
+            &mut renderer,
+            style,
+            Some(session.clone()),
+            input.as_mut(),
+            Some(plugin_ctx.clone()),
+        )
+        .await?;
     }
     // The override goes through the same request the interactive `/model` sends,
     // so the session's own rules judge it and a model it refuses is reported.
@@ -1034,7 +1043,16 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut(), Some(plugin_ctx.clone())).await?;
+        drive_turns(
+            &service,
+            stream,
+            &mut renderer,
+            style,
+            Some(session.clone()),
+            input.as_mut(),
+            Some(plugin_ctx.clone()),
+        )
+        .await?;
     }
     renderer.mark_working();
     let stream = service
@@ -1046,7 +1064,16 @@ async fn resume_session(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let outcome = drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut(), Some(plugin_ctx.clone())).await?;
+    let outcome = drive_turns(
+        &service,
+        stream,
+        &mut renderer,
+        style,
+        Some(session.clone()),
+        input.as_mut(),
+        Some(plugin_ctx.clone()),
+    )
+    .await?;
     renderer.ensure_newline();
     if interactive && !outcome.parked && !renderer.budget_stopped {
         if let Some(receiver) = input.as_mut() {

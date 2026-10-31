@@ -604,18 +604,19 @@ pub(crate) async fn interactive_loop(
                     if plugins.is_empty() {
                         renderer.notice("no plugins installed");
                     } else {
-                        let lines: Vec<String> = plugins
-                            .iter()
-                            .map(|name| format!("  {name}"))
-                            .collect();
+                        let lines: Vec<String> =
+                            plugins.iter().map(|name| format!("  {name}")).collect();
                         renderer.open_modal("installed plugins".to_owned(), lines);
                     }
                 }
 
                 ChatCommand::PluginsAdd { url } => {
+                    renderer.notice("Installing...");
                     match crate::plugin_manager::install_plugin(&url) {
                         Ok(name) => renderer.notice(format!("plugin {name} installed")),
-                        Err(error) => renderer.failure(format!("could not install plugin: {error}")),
+                        Err(error) => {
+                            renderer.failure(format!("could not install plugin: {error}"))
+                        }
                     }
                 }
 
@@ -640,8 +641,16 @@ pub(crate) async fn interactive_loop(
                         .await
                         .map_err(|error| error.to_string())?;
                     request_id = request_id.saturating_add(1);
-                    let outcome =
-                        drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input), plugin_ctx.clone()).await?;
+                    let outcome = drive_turns(
+                        service,
+                        stream,
+                        renderer,
+                        style,
+                        session.clone(),
+                        Some(&mut *input),
+                        plugin_ctx.clone(),
+                    )
+                    .await?;
                     renderer.ensure_newline();
                     session = outcome.session.or(session);
                     if outcome.parked || renderer.budget_stopped {
@@ -891,7 +900,10 @@ pub(crate) async fn interactive_loop(
         renderer.mark_working();
         // A session keeps its key until it has a title; the title is the first
         // message truncated to 32 characters, set once and never asked again.
-        if session.as_ref().is_some_and(|key| renderer.title.is_none() && service.session_title(key).is_none()) {
+        if session
+            .as_ref()
+            .is_some_and(|key| renderer.title.is_none() && service.session_title(key).is_none())
+        {
             let title = text
                 .chars()
                 .take(32)
@@ -927,7 +939,16 @@ pub(crate) async fn interactive_loop(
             .await
             .map_err(|error| error.to_string())?;
         request_id = request_id.saturating_add(1);
-        let outcome = drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input), plugin_ctx.clone()).await?;
+        let outcome = drive_turns(
+            service,
+            stream,
+            renderer,
+            style,
+            session.clone(),
+            Some(&mut *input),
+            plugin_ctx.clone(),
+        )
+        .await?;
         renderer.ensure_newline();
         session = outcome.session.or(session);
         if outcome.parked || renderer.budget_stopped {
@@ -1074,27 +1095,23 @@ async fn handle_live_command(
             if plugins.is_empty() {
                 renderer.notice("no plugins installed");
             } else {
-                let lines: Vec<String> = plugins
-                    .iter()
-                    .map(|name| format!("  {name}"))
-                    .collect();
+                let lines: Vec<String> = plugins.iter().map(|name| format!("  {name}")).collect();
                 renderer.open_modal("installed plugins".to_owned(), lines);
             }
         }
 
         ChatCommand::PluginsAdd { url } => {
+            renderer.notice("Installing...");
             match crate::plugin_manager::install_plugin(&url) {
                 Ok(name) => renderer.notice(format!("plugin {name} installed")),
                 Err(error) => renderer.failure(format!("could not install plugin: {error}")),
             }
         }
 
-        ChatCommand::PluginsRm { name } => {
-            match crate::plugin_manager::remove_plugin(&name) {
-                Ok(()) => renderer.notice(format!("plugin {name} removed")),
-                Err(error) => renderer.failure(format!("could not remove plugin: {error}")),
-            }
-        }
+        ChatCommand::PluginsRm { name } => match crate::plugin_manager::remove_plugin(&name) {
+            Ok(()) => renderer.notice(format!("plugin {name} removed")),
+            Err(error) => renderer.failure(format!("could not remove plugin: {error}")),
+        },
 
         ChatCommand::Compact => {
             renderer.notice("wait until the current turn finishes, then /compact");

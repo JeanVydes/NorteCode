@@ -44,8 +44,8 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::commands::{CommandSpec, Invocation};
 use crate::SessionKey;
+use crate::commands::{CommandSpec, Invocation};
 
 /// What a plugin produces, in the places the host draws.
 ///

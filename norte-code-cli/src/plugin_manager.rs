@@ -2,8 +2,8 @@
 //! ~/.config/norte-code/plugins/.
 //!
 //! Installing a plugin clones a git repository, builds it as a cdylib, and
-//! copies the resulting shared library into the plugin directory. This
-//! requires `cargo` and `git` to be available on the system.
+//! copies the resulting shared library into the plugin directory.
+//! This requires `cargo` and `git` to be available on the system.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,8 +48,7 @@ pub(crate) fn remove_plugin(name: &str) -> Result<(), String> {
     for ext in ["so", "dll", "dylib"] {
         let path = plugin_dir.join(format!("{name}.{ext}"));
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("could not remove {name}: {e}"))?;
+            std::fs::remove_file(&path).map_err(|e| format!("could not remove {name}: {e}"))?;
             return Ok(());
         }
     }
@@ -58,9 +57,11 @@ pub(crate) fn remove_plugin(name: &str) -> Result<(), String> {
 
 /// Install a plugin from a git URL.
 ///
-/// Clones the repository into a temporary directory, builds it with
-/// `cargo build --release`, and copies the resulting shared library into
-/// the plugin directory.
+/// Clones the repository into a temporary directory, builds it as a cdylib, and
+/// copies the resulting shared library into the plugin directory.
+///
+/// Output from git and cargo is captured and only shown on failure; the user
+/// sees "Installing ..." while it works.
 pub(crate) fn install_plugin(url: &str) -> Result<String, String> {
     // Ensure git and cargo are available.
     if Command::new("git").arg("--version").output().is_err() {
@@ -70,18 +71,19 @@ pub(crate) fn install_plugin(url: &str) -> Result<String, String> {
         return Err("cargo is not installed".to_owned());
     }
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
     let tmp_dir = std::env::temp_dir().join(format!(
         "norte-code-plugin-{}-{}",
         std::process::id(),
-        timestamp
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
     ));
 
     // Clone the repository.
     let clone_status = Command::new("git")
         .args(["clone", "--depth", "1", url, tmp_dir.to_str().unwrap()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("failed to run git clone: {e}"))?;
     if !clone_status.success() {
@@ -92,6 +94,8 @@ pub(crate) fn install_plugin(url: &str) -> Result<String, String> {
     let build_status = Command::new("cargo")
         .args(["build", "--release"])
         .current_dir(&tmp_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("failed to run cargo build: {e}"))?;
     if !build_status.success() {
@@ -100,18 +104,16 @@ pub(crate) fn install_plugin(url: &str) -> Result<String, String> {
 
     // Find the resulting shared library in target/release/.
     let release_dir = tmp_dir.join("target/release");
-    let lib_name = find_shared_lib(&release_dir)
-        .ok_or_else(|| format!("no shared library found in {url}"))?;
+    let lib_name =
+        find_shared_lib(&release_dir).ok_or_else(|| format!("no shared library found in {url}"))?;
 
     // Ensure the plugin directory exists.
     let plugin_dir = plugin_dir();
-    std::fs::create_dir_all(&plugin_dir).map_err(|e| {
-        format!("could not create plugin directory: {e}")
-    })?;
+    std::fs::create_dir_all(&plugin_dir)
+        .map_err(|e| format!("could not create plugin directory: {e}"))?;
 
     let dest = plugin_dir.join(lib_name.file_name().unwrap());
-    std::fs::copy(&lib_name, &dest)
-        .map_err(|e| format!("could not copy plugin library: {e}"))?;
+    std::fs::copy(&lib_name, &dest).map_err(|e| format!("could not copy plugin library: {e}"))?;
 
     // Clean up the temporary directory.
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -119,7 +121,7 @@ pub(crate) fn install_plugin(url: &str) -> Result<String, String> {
     Ok(dest
         .file_stem()
         .and_then(|s| s.to_str())
-        .map_or_else(|| "plugin".to_owned(), String::from))
+        .map_or_else(|| "plugin".to_owned(), |s: &str| s.to_owned()))
 }
 
 /// Find the shared library produced by cargo build --release.

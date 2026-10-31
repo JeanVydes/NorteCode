@@ -34,10 +34,9 @@ pub(crate) fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
 
             match load_one_plugin(&path, ctx) {
                 Ok(plugin) => plugins.add(plugin),
-                Err(error) => eprintln!(
-                    "warning: could not load plugin {}: {error}",
-                    path.display()
-                ),
+                Err(error) => {
+                    eprintln!("warning: could not load plugin {}: {error}", path.display())
+                }
             }
         }
     }
@@ -52,7 +51,10 @@ pub(crate) fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
 /// must export a `create_plugin` symbol with the correct signature, and the
 /// plugin must be ABI-compatible with the host.
 #[allow(unsafe_code)]
-fn load_one_plugin(path: &std::path::Path, ctx: Option<&PluginContext>) -> Result<Box<dyn Plugin>, String> {
+fn load_one_plugin(
+    path: &std::path::Path,
+    ctx: Option<&PluginContext>,
+) -> Result<Box<dyn Plugin>, String> {
     let lib = unsafe { libloading::Library::new(path) }
         .map_err(|e| format!("could not load library: {e}"))?;
 
