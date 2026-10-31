@@ -532,6 +532,14 @@ pub(crate) async fn interactive_loop(
     // started.
     renderer.greet();
     renderer.draw()?;
+    // A session that already has a title shows it in the footer instead of its
+    // key, and titling does not run again for it. A session without one gets
+    // asked when the first message is sent.
+    if let Some(key) = &session {
+        if let Some(title) = service.session_title(key) {
+            renderer.set_title(title);
+        }
+    }
     loop {
         let Some((text, attachments)) =
             read_repl_line(service, session.as_ref(), input, renderer, style).await?
