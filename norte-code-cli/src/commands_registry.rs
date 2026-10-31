@@ -110,10 +110,6 @@ pub(crate) fn built() -> Registry {
         .arg(ArgSpec::optional("provider")),
     );
     registry.register(
-        CommandSpec::new("/revoke", "list the approval grants, or revoke one")
-            .arg(ArgSpec::optional("grant")),
-    );
-    registry.register(
         CommandSpec::new(
             "/refresh",
             "re-read the configuration, the skills and the MCP servers",
@@ -194,7 +190,6 @@ mod tests {
             "/reasoning",
             "/model",
             "/provider",
-            "/revoke",
             "/refresh",
             "/mcp",
             "/jobs",
@@ -282,7 +277,6 @@ mod tests {
         assert!(texts.contains(&"/refresh"), "{texts:?}");
         assert!(texts.contains(&"/reload"), "{texts:?}");
         assert!(texts.contains(&"/reasoning"), "{texts:?}");
-        assert!(texts.contains(&"/revoke"), "{texts:?}");
         assert!(texts.contains(&"/rename"), "{texts:?}");
     }
 

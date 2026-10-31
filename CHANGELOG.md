@@ -41,8 +41,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - Approvals are gone. `Phase::AwaitingApproval`, the `approvals` table,
   `ClientRequestKind::{Approve, Deny, Revoke, ListGrants}`,
   `ServerEventKind::{ApprovalRequested, ApprovalResolved, GrantRevoked,
-  GrantList}`, `GrantInfo`, `GrantScope`, `DenyScope`, `/approve` and
-  `ApprovalMode` were one way to ask a person whether a tool could run. A
+  GrantList}`, `GrantInfo`, `GrantScope`, `DenyScope`, `/approve`, `/revoke`
+  and `ApprovalMode` were one way to ask a person whether a tool could run. A
   rule in the configuration does the same judgement without a dialogue, so
   the second mechanism was removed rather than kept beside it: two places
   that both decide a host question is what made the decision
