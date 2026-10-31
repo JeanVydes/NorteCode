@@ -112,6 +112,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   could not read. Both shapes are read now, and the directory's head lookup
   reads through the envelope too.
 
+- The session title is the first user message truncated to 32 characters, set
+  once and never asked again. Until now the client re-ran the titling model on
+  every first message, which failed silently when the model had no credits and
+  left the session showing its key instead of a name.
+
 - Deleting a session takes its conversation with it. The node tree is
   reached by walking back from the head, the only handle a session has on
   it, and the head was read one level too deep — from `session.head` in a

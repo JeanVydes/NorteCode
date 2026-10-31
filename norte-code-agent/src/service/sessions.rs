@@ -463,7 +463,11 @@ impl Service {
     }
 
     /// Gives the session a new title.
-    pub(super) async fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::UnknownSession`] when the session key is not known.
+    pub async fn rename(&self, key: &SessionKey, title: &str) -> Result<(), ServiceError> {
         {
             let mut lock = self.lock_sessions();
             let record = lock
