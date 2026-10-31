@@ -588,7 +588,7 @@ pub(crate) async fn interactive_loop(
                         .map_err(|error| error.to_string())?;
                     request_id = request_id.saturating_add(1);
                     let outcome =
-                        drive_turns(service, stream, renderer, style, Some(&mut *input)).await?;
+                        drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input)).await?;
                     renderer.ensure_newline();
                     session = outcome.session.or(session);
                     if outcome.parked || renderer.budget_stopped {
@@ -870,7 +870,7 @@ pub(crate) async fn interactive_loop(
             .map_err(|error| error.to_string())?;
         request_id = request_id.saturating_add(1);
         let outcome =
-            drive_turns_titled(service, stream, renderer, style, Some(&mut *input), titling)
+            drive_turns_titled(service, stream, renderer, style, session.clone(), Some(&mut *input), titling)
                 .await?;
         renderer.ensure_newline();
         session = outcome.session.or(session);
@@ -2331,12 +2331,13 @@ pub(crate) async fn drive_turns(
     primary: EventStream,
     renderer: &mut Renderer,
     style: Style,
+    session: Option<SessionKey>,
     // The editor itself, not one of its channels: a turn needs the lines *and*
     // the actions, and asking for them through one handle is what keeps the
     // select below honest.
     input: Option<&mut crate::input::InteractiveInput>,
 ) -> Result<DriveOutcome, String> {
-    drive_turns_titled(service, primary, renderer, style, input, Titling::none()).await
+    drive_turns_titled(service, primary, renderer, style, session, input, Titling::none()).await
 }
 
 /// The same loop, with a title request running beside it.
@@ -2351,6 +2352,7 @@ pub(crate) async fn drive_turns_titled(
     primary: EventStream,
     renderer: &mut Renderer,
     style: Style,
+    session: Option<SessionKey>,
     mut input: Option<&mut crate::input::InteractiveInput>,
     mut titling: Titling,
 ) -> Result<DriveOutcome, String> {
@@ -2364,7 +2366,7 @@ pub(crate) async fn drive_turns_titled(
             }
         }
     }));
-    let mut current: Option<SessionKey> = None;
+    let mut current = session;
     let mut parked = false;
     let mut cancel_requested = false;
     // The steering messages the human sent while the turn was running, with

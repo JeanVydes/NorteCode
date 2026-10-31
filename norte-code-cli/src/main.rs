@@ -993,7 +993,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut()).await?;
     }
     // The override goes through the same request the interactive `/model` sends,
     // so the session's own rules judge it and a model it refuses is reported.
@@ -1008,7 +1008,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut()).await?;
     }
     renderer.mark_working();
     let stream = service
@@ -1020,7 +1020,7 @@ async fn resume_session(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let outcome = drive_turns(&service, stream, &mut renderer, style, input.as_mut()).await?;
+    let outcome = drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut()).await?;
     renderer.ensure_newline();
     if interactive && !outcome.parked && !renderer.budget_stopped {
         if let Some(receiver) = input.as_mut() {

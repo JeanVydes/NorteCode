@@ -54,7 +54,7 @@ use norte_code_protocol::tools::{
 use norte_tools::{
     BrowserTool, EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
 };
-use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use norte_code_protocol::catalog::{Catalog, load_catalog_files};
 use norte_code_protocol::config::Config;
@@ -158,7 +158,7 @@ pub struct Service {
     effects: Arc<EffectJournal>,
     activity: Arc<ToolActivity>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
-    cancels: Mutex<BTreeMap<SessionKey, Arc<Notify>>>,
+    cancels: Mutex<BTreeMap<SessionKey, CancellationToken>>,
     /// The steering messages the running turns have not reached.
     steering: Arc<Steering>,
     /// The browser screenshots waiting to be attached to the next request.
@@ -1617,8 +1617,8 @@ impl Service {
                 .await
             }
             Kind::CancelTurn { session } => {
-                if let Some(notify) = self.lock_cancels().get(&session).cloned() {
-                    notify.notify_one();
+                if let Some(token) = self.lock_cancels().get(&session).cloned() {
+                    token.cancel();
                 }
                 Ok(Box::pin(futures_util::stream::empty()))
             }
@@ -1775,7 +1775,7 @@ impl Service {
         Ok(Box::pin(futures_util::stream::empty()))
     }
 
-    fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, Arc<Notify>>> {
+    fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, CancellationToken>> {
         self.cancels.lock().unwrap_or_else(PoisonError::into_inner)
     }
 

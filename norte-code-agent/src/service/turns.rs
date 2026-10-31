@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use futures_util::StreamExt;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use norte::harness::EngineEvent;
 use norte::harness::Harness;
@@ -228,8 +229,8 @@ impl Service {
         ));
         leading.extend(replay);
         let (tx, rx) = mpsc::channel::<ServerEvent>(256);
-        let notify = Arc::new(Notify::new());
-        self.lock_cancels().insert(key.clone(), notify.clone());
+        let cancellation = CancellationToken::new();
+        self.lock_cancels().insert(key.clone(), cancellation.clone());
 
         let this = Arc::clone(self);
         let task_key = key.clone();
@@ -248,7 +249,7 @@ impl Service {
                     reasoning,
                     spec.capabilities.max_output,
                     &tx,
-                    &notify,
+                    &cancellation,
                 )
                 .await;
             if let Err(error) = result {
@@ -286,7 +287,7 @@ impl Service {
         reasoning: ReasoningRequest,
         max_output: Option<u64>,
         tx: &mpsc::Sender<ServerEvent>,
-        notify: &Notify,
+        cancellation: &CancellationToken,
     ) -> Result<(), ServiceError> {
         let mut current_nid = nid;
         let mut input = input;
@@ -336,9 +337,11 @@ impl Service {
             loop {
                 tokio::select! {
                     biased;
-                    () = notify.notified() => {
+                    () = cancellation.cancelled() => {
                         cancelled = true;
                         interrupted = true;
+                        stream.cancel();
+                        break;
                     }
                     question = questions.recv() => {
                         if let Ok(question) = question {
@@ -540,7 +543,7 @@ impl Service {
                         }
                         let waited = tokio::select! {
                             biased;
-                            () = notify.notified() => false,
+                            () = cancellation.cancelled() => false,
                             () = tokio::time::sleep(delay) => true,
                         };
                         if !waited {
