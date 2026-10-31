@@ -1102,9 +1102,12 @@ async fn handle_live_command(
 
         ChatCommand::PluginsAdd { url } => {
             renderer.notice("Installing...");
-            match crate::plugin_manager::install_plugin(&url) {
-                Ok(name) => renderer.notice(format!("plugin {name} installed")),
-                Err(error) => renderer.failure(format!("could not install plugin: {error}")),
+            match tokio::task::spawn_blocking(move || {
+                crate::plugin_manager::install_plugin(&url)
+            }).await {
+                Ok(Ok(name)) => renderer.notice(format!("plugin {name} installed")),
+                Ok(Err(error)) => renderer.failure(format!("could not install plugin: {error}")),
+                Err(e) => renderer.failure(format!("could not install plugin: {e}")),
             }
         }
 
