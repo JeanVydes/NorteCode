@@ -2,11 +2,11 @@
 
 use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, McpArgs,
-    McpCommand, Path, PathBuf, RequestRecord, ResumeArgs, SessionDirectory, SessionsArgs,
-    SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand, SqliteStore, Style, TelemetryArgs,
-    Utc, by_day, by_session, by_turn, cache_percent_label, discovery_roots, find_project_config,
-    human_tokens, list_models, new_session, open_session, resume_named, short, summarize,
-    user_config_path,
+    McpCommand, Path, PathBuf, PluginsArgs, PluginsCommand, RequestRecord, ResumeArgs,
+    SessionDirectory, SessionsArgs, SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand,
+    SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session, by_turn, cache_percent_label,
+    discovery_roots, find_project_config, human_tokens, list_models, new_session, open_session,
+    resume_named, short, summarize, user_config_path,
 };
 use norte_code_protocol::catalog::{models_path, providers_path};
 use norte_code_protocol::config::{
@@ -42,6 +42,7 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
         Command::Cost(args) => cost_command(&config, &args).await,
         Command::Telemetry(args) => telemetry_command(&args).await,
         Command::Mcp(args) => mcp_command(&config, user_config, &args),
+        Command::Plugins(args) => Ok(plugins_command(&args)),
         command => {
             // The catalogue is not optional. A session is opened on a model, a
             // model is in `models.json` and its provider is in `providers.json`,
@@ -76,7 +77,8 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
                 | Command::Sessions(_)
                 | Command::Cost(_)
                 | Command::Telemetry(_)
-                | Command::Mcp(_) => {
+                | Command::Mcp(_)
+                | Command::Plugins(_) => {
                     unreachable!("these commands do not need the catalogue")
                 }
             }
@@ -195,6 +197,67 @@ pub(crate) fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, S
                 Ok(1)
             }
         }
+    }
+}
+
+/// Lists, installs and removes the plugins.
+///
+/// The same three the chat offers, from a shell: a plugin is installed by
+/// cloning a repository and building it, which takes minutes, and a person
+/// running that from a terminal sees it happen instead of watching a footer
+/// say so.
+///
+/// The plugins are loaded when the client starts, so an installed one is used
+/// after a restart. The command says so rather than letting a person install
+/// a plugin and wonder why its command is not there.
+fn plugins_command(args: &PluginsArgs) -> u8 {
+    match &args.command {
+        PluginsCommand::List => {
+            let libraries = crate::plugin_manager::installed_libraries();
+            if libraries.is_empty() {
+                println!("no plugins installed");
+                return 0;
+            }
+            let mut failed = false;
+            for path in libraries {
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                match crate::plugin_loader::describe(&path) {
+                    Ok(name) => println!("{name}\t{file}"),
+                    Err(error) => {
+                        eprintln!("{file}: {error}");
+                        failed = true;
+                    }
+                }
+            }
+            u8::from(failed)
+        }
+        PluginsCommand::Add { url } => {
+            let name = crate::installs::plugin_name(url);
+            eprintln!("installing {name}…");
+            match crate::plugin_manager::install_plugin(url) {
+                Ok(name) => {
+                    println!("plugin {name} installed — restart norte-code to apply it");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("could not install plugin: {error}");
+                    1
+                }
+            }
+        }
+        PluginsCommand::Rm { name } => match crate::plugin_manager::remove_plugin(name) {
+            Ok(()) => {
+                println!("plugin {name} removed");
+                0
+            }
+            Err(error) => {
+                eprintln!("could not remove plugin: {error}");
+                1
+            }
+        },
     }
 }
 

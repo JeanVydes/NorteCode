@@ -82,6 +82,15 @@ fn load_one_plugin(path: &Path, ctx: Option<&PluginContext>) -> Result<Box<dyn P
     Ok(plugin)
 }
 
+/// The name a plugin library answers with, or why it cannot be loaded.
+///
+/// It loads the plugin for real: a library that cannot be loaded is one the
+/// client will skip, and a list that says a plugin is installed when the
+/// client cannot use it is a list nobody can act on.
+pub(crate) fn describe(path: &Path) -> Result<String, String> {
+    Ok(load_one_plugin(path, None)?.name().to_owned())
+}
+
 /// The library at `path`, loaded once.
 ///
 /// The library is kept for the life of the process because a plugin's vtable

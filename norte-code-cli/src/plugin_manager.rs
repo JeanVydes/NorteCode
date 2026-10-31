@@ -36,33 +36,60 @@ pub(crate) fn plugin_dir() -> PathBuf {
 /// List installed plugins. Each .so file in the plugin directory is a plugin;
 /// its file name (without extension) is the plugin name.
 pub(crate) fn list_plugins() -> Vec<String> {
+    installed_libraries()
+        .into_iter()
+        .filter_map(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The plugin libraries installed, in the order the directory holds them.
+///
+/// The paths and not the names: a name is what the file is called, and what a
+/// command needs is the file — to load it, or to say what it is called.
+pub(crate) fn installed_libraries() -> Vec<PathBuf> {
     let plugin_dir = plugin_dir();
-    let mut names = Vec::new();
+    let mut paths = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&plugin_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if is_library(&path) {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.push(stem.to_owned());
-                }
+                paths.push(path);
             }
         }
     }
-    names.sort();
-    names
+    paths.sort();
+    paths
 }
 
 /// Remove an installed plugin by name.
+///
+/// The name is either the one the plugin answers with or the one its file has:
+/// the list shows both, and a person removing a plugin types the one they
+/// read.
 pub(crate) fn remove_plugin(name: &str) -> Result<(), String> {
-    let plugin_dir = plugin_dir();
-    for ext in ["so", "dll", "dylib"] {
-        let path = plugin_dir.join(format!("{name}.{ext}"));
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| format!("could not remove {name}: {e}"))?;
-            return Ok(());
-        }
+    let path = library_named(name).ok_or_else(|| format!("plugin {name} not found"))?;
+    std::fs::remove_file(&path).map_err(|e| format!("could not remove {name}: {e}"))
+}
+
+/// The library a plugin is known by.
+///
+/// The file name first — it is what the plugin is on disk — and then the name
+/// the plugin answers with, which is the one a person read in the list.
+pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
+    let libraries = installed_libraries();
+    if let Some(path) = libraries
+        .iter()
+        .find(|path| path.file_stem().and_then(|stem| stem.to_str()) == Some(name))
+    {
+        return Some(path.clone());
     }
-    Err(format!("plugin {name} not found"))
+    libraries
+        .into_iter()
+        .find(|path| crate::plugin_loader::describe(path).is_ok_and(|plugin| plugin == name))
 }
 
 /// Install a plugin from a git URL.

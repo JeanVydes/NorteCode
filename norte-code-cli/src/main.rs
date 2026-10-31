@@ -136,6 +136,8 @@ enum Command {
     Telemetry(TelemetryArgs),
     /// Manage the MCP servers in the config file.
     Mcp(McpArgs),
+    /// Manage the installed plugins.
+    Plugins(PluginsArgs),
 }
 
 #[derive(Args)]
@@ -143,6 +145,37 @@ struct McpArgs {
     /// What to do with the configured MCP servers.
     #[command(subcommand)]
     command: McpCommand,
+}
+
+/// The flags that shape the plugin commands.
+#[derive(Args)]
+struct PluginsArgs {
+    /// What to do with the installed plugins.
+    #[command(subcommand)]
+    command: PluginsCommand,
+}
+
+/// What the plugin commands do.
+///
+/// The same three the chat offers — `/plugins list`, `/plugins add` and
+/// `/plugins rm` — so a plugin can be installed from a shell, where a build
+/// that takes minutes is something a person can watch, and not only from
+/// inside a session that is waiting for it.
+#[derive(Subcommand)]
+enum PluginsCommand {
+    /// List the installed plugins.
+    List,
+    /// Install a plugin from a git URL.
+    Add {
+        /// The git URL of the plugin's repository.
+        url: String,
+    },
+    /// Remove an installed plugin.
+    #[command(alias = "remove")]
+    Rm {
+        /// The name of the plugin, as `list` shows it.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

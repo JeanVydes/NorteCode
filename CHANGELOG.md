@@ -27,6 +27,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   build printed, which is the one thing worth reading. The client stays
   usable throughout: a person can keep working while a plugin is installed.
 
+- The plugin commands work from a shell. `norte-code plugins list`,
+  `norte-code plugins add <url>` and `norte-code plugins rm <name>` are the
+  same three the chat offers, and a build that takes minutes is something a
+  person can watch from a terminal instead of only from inside a session that
+  is waiting for it.
+
 ### Fixed
 
 - A plugin installed while the client runs says so. The plugins are loaded
@@ -38,6 +44,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   holds every dependency's shared library too, and picking one of those
   installed something that was not a plugin. Cargo now says which file it
   produced and that file is the one copied.
+
+- A plugin is removed by the name it answers with. The list shows that name
+  and the file it lives in, and `rm` took only the second one: a person who
+  read the list and typed what it said was told the plugin was not there.
 
 ### Changed
 
