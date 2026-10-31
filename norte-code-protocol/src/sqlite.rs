@@ -909,7 +909,17 @@ fn encode_session(session: &Session) -> std::result::Result<String, Fault> {
     encode(session, "session")
 }
 
+/// A session as stored: either a bare session or a legacy envelope from when
+/// grants were stored beside the session.
+#[derive(Deserialize)]
+struct SessionEnvelope {
+    session: Session,
+}
+
 fn decode_session(text: &str) -> std::result::Result<Session, Fault> {
+    if let Ok(envelope) = decode::<SessionEnvelope>(text, "session envelope") {
+        return Ok(envelope.session);
+    }
     decode::<Session>(text, "session")
 }
 
@@ -1268,6 +1278,7 @@ impl SessionDirectory for SqliteStore {
                             .and_then(|value| {
                                 value
                                     .get("head")
+                                    .or_else(|| value.get("session").and_then(|s| s.get("head")))
                                     .and_then(serde_json::Value::as_str)
                                     .map(str::to_owned)
                             })
@@ -2460,5 +2471,27 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].workdir, None, "no directory was ever recorded");
         assert_eq!(loaded[0].key, "older");
+    }
+
+    #[tokio::test]
+    async fn a_session_stored_in_a_legacy_grant_envelope_still_loads() {
+        let store = SqliteStore::in_memory().expect("open");
+        let id = SessionId::new();
+        let raw = format!(
+            r#"{{"session":{{"id":"{id}","phase":"idle","version":1,"turn":0,"created_at":"2026-10-30T00:00:00Z","updated_at":"2026-10-30T00:00:00Z"}},"grants":[]}}"#
+        );
+        store
+            .run(move |conn| {
+                conn.execute(
+                    "INSERT INTO sessions (id, version, data) VALUES (?1, 1, ?2)",
+                    params![id.to_string(), raw],
+                )
+                .map_err(Fault::from)
+            })
+            .await
+            .expect("insert");
+        let session = store.load(id).await.expect("load");
+        assert_eq!(session.id, id);
+        assert_eq!(session.version, 1);
     }
 }

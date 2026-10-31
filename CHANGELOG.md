@@ -93,6 +93,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A session saved before approvals were removed still opens. Its row carried the
+  session inside an envelope with the grants beside it, and the reader expected
+  the session at the top level: the load failed, and the client had a session it
+  could not read. Both shapes are read now, and the directory's head lookup
+  reads through the envelope too.
+
 - Deleting a session takes its conversation with it. The node tree is
   reached by walking back from the head, the only handle a session has on
   it, and the head was read one level too deep — from `session.head` in a
