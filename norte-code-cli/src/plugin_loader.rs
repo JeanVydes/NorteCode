@@ -31,7 +31,7 @@
 //! A plugin's own code runs where the host put it: [`crate::plugins`] is a
 //! crate of this workspace, and a host that wants more adds it there.
 
-use norte_code_protocol::plugins::Plugins;
+use norte_code_protocol::plugins::{PluginContext, Plugins};
 
 /// Loads the plugins this client knows about.
 ///
@@ -39,11 +39,17 @@ use norte_code_protocol::plugins::Plugins;
 /// names is added. A directory that cannot be read, or a plugin that cannot be
 /// built, is reported on stderr and skipped: the client starts either way.
 ///
+/// `ctx`, when present, is handed to every plugin loaded from the directory
+/// before it is returned.
+///
 /// Nothing here executes what it reads. What a plugin *is* for this client is
 /// the code the host compiled into [`crate::plugins`], and the directory says
 /// which of those to turn on — so a file somebody put there can, at worst, ask
 /// for a plugin that is not installed.
-pub(crate) fn load(plugins: &mut Plugins) {
+pub(crate) fn load_with_context(
+    plugins: &mut Plugins,
+    ctx: Option<&PluginContext>,
+) {
     for name in requested() {
         match crate::plugins::by_name(&name) {
             Some(plugin) => plugins.add(plugin),
@@ -54,6 +60,14 @@ pub(crate) fn load(plugins: &mut Plugins) {
             ),
         }
     }
+    if let Some(ctx) = ctx {
+        plugins.set_context_on_all(ctx);
+    }
+}
+
+/// Keeps the old signature for callers that do not yet have a context.
+pub(crate) fn load(plugins: &mut Plugins) {
+    load_with_context(plugins, None);
 }
 
 /// The plugin names asked for, in the order they were named.

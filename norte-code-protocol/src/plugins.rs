@@ -26,9 +26,12 @@
 //!
 //! # What it cannot
 //!
-//! Write to the terminal, block a frame, reach the service, read a file, or
-//! keep state the host did not hand it. A plugin that needs any of those is a
-//! host feature, and the answer is to write it here rather than to widen this.
+//! Write to the terminal or block a frame — those remain the host's job.
+//! Everything else is possible: a plugin can reach the service through the
+//! context the host hands it ([`PluginContext::service`]), read the current
+//! session key ([`PluginContext::session_key`]), and keep whatever state it
+//! wants in its own fields. The trait itself carries no state; a plugin that
+//! needs to remember something stores it in a field of its own type.
 //!
 //! # Extending it
 //!
@@ -37,9 +40,12 @@
 //! use the same `Plugin` trait a real plugin does. Nothing here knows what a
 //! plugin is for; that is the point.
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::commands::{CommandSpec, Invocation};
+use crate::SessionKey;
 
 /// What a plugin produces, in the places the host draws.
 ///
@@ -92,6 +98,36 @@ pub trait Plugin: Send + Sync {
     fn banner(&self) -> Option<String> {
         None
     }
+
+    /// Receives the host context before the host asks anything of the plugin.
+    ///
+    /// The host calls this once, before `commands`, `run`, `sidebar`, `status`
+    /// or `banner`. A plugin stores whatever it wants from the context in its
+    /// own fields — the trait does not keep a copy. The service is passed as
+    /// an erased `dyn Any + Send + Sync` so this crate never names a concrete
+    /// service type; the host downcasts when it builds the context.
+    ///
+    /// The default implementation ignores the context. A plugin that wants the
+    /// service, the session key, or both overrides this and keeps them.
+    fn set_context(&mut self, _ctx: PluginContext) {}
+}
+
+/// The host context handed to a plugin before the host asks anything of it.
+///
+/// All fields are optional: the host passes what it has at the moment, and a
+/// plugin that needs something absent simply does without it. The plugin may
+/// keep the context — or any part of it — in its own fields and use it later,
+/// when the host asks it to run a command or redraw.
+#[derive(Clone, Debug)]
+pub struct PluginContext {
+    /// The current logical session key, if a session exists.
+    pub session_key: Option<SessionKey>,
+    /// The host service, erased to `Arc<dyn Any + Send + Sync>`.
+    ///
+    /// The host that built the context knows the concrete type and can
+    /// downcast. A plugin that needs the service stores it and casts when it
+    /// runs a command or redraws.
+    pub service: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// One row of the sidebar a plugin asked for.
@@ -221,6 +257,16 @@ impl Plugins {
             .iter()
             .filter_map(|plugin| plugin.banner())
             .collect()
+    }
+
+    /// Give every loaded plugin the same host context.
+    ///
+    /// Called after the service and session exist, so plugins can reach them
+    /// when they run a command or redraw.
+    pub fn set_context_on_all(&mut self, ctx: &PluginContext) {
+        for plugin in &mut self.loaded {
+            plugin.set_context(ctx.clone());
+        }
     }
 }
 

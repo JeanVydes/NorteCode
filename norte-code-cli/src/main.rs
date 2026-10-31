@@ -56,6 +56,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::any::Any;
 
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -72,6 +73,7 @@ use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
 use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore};
+use norte_code_protocol::plugins::PluginContext;
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
     ErrorCode, JobInfo, ModelInfo, Phase, Reasoning, ReasoningInfo, ReasoningScope, ServerEvent,
@@ -695,7 +697,7 @@ pub(crate) async fn new_session(
     renderer.set_diff_style(diff_style);
     // What the plugins draw, asked for once: the columns and the status field
     // are theirs, and the frame draws what it was given.
-    renderer.sidebar = crate::plugins::all()
+    renderer.sidebar = crate::plugins::all(None)
         .sidebar()
         .into_iter()
         .map(|(name, rows)| (name.to_owned(), rows))
@@ -741,6 +743,17 @@ pub(crate) async fn new_session(
             style.faint(short(session.as_str()).to_owned())
         );
     }
+    // Hand the service and session to plugins so they can reach them when they
+    // run a command or redraw. Plugins that do not override set_context ignore it.
+    let plugin_ctx = PluginContext {
+        session_key: Some(session.clone()),
+        service: Some(Arc::clone(&service) as Arc<dyn Any + Send + Sync>),
+    };
+    renderer.sidebar = crate::plugins::all(Some(&plugin_ctx))
+        .sidebar()
+        .into_iter()
+        .map(|(name, rows)| (name.to_owned(), rows))
+        .collect();
     if let Some(receiver) = input.as_mut() {
         interactive_loop(
             &service,
@@ -750,6 +763,7 @@ pub(crate) async fn new_session(
             receiver,
             message_budget,
             reasoning,
+            Some(plugin_ctx),
         )
         .await?;
     }
@@ -928,7 +942,7 @@ async fn resume_session(
     renderer.set_diff_style(diff_style);
     // What the plugins draw, asked for once: the columns and the status field
     // are theirs, and the frame draws what it was given.
-    renderer.sidebar = crate::plugins::all()
+    renderer.sidebar = crate::plugins::all(None)
         .sidebar()
         .into_iter()
         .map(|(name, rows)| (name.to_owned(), rows))
@@ -947,6 +961,17 @@ async fn resume_session(
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));
     let session = SessionKey::new(session_key);
+    // Hand the service and session to plugins so they can reach them when they
+    // run a command or redraw. Plugins that do not override set_context ignore it.
+    let plugin_ctx = PluginContext {
+        session_key: Some(session.clone()),
+        service: Some(Arc::clone(&service) as Arc<dyn Any + Send + Sync>),
+    };
+    renderer.sidebar = crate::plugins::all(Some(&plugin_ctx))
+        .sidebar()
+        .into_iter()
+        .map(|(name, rows)| (name.to_owned(), rows))
+        .collect();
     // The session may carry a reasoning override of its own — `/reasoning max`
     // leaves one — and that is what the next turn sends. The line above is the
     // configuration's answer, which is what a session with no override is on;
@@ -993,7 +1018,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut()).await?;
+        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut(), Some(plugin_ctx.clone())).await?;
     }
     // The override goes through the same request the interactive `/model` sends,
     // so the session's own rules judge it and a model it refuses is reported.
@@ -1008,7 +1033,7 @@ async fn resume_session(
             })
             .await
             .map_err(|e| e.to_string())?;
-        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut()).await?;
+        drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut(), Some(plugin_ctx.clone())).await?;
     }
     renderer.mark_working();
     let stream = service
@@ -1020,7 +1045,7 @@ async fn resume_session(
         })
         .await
         .map_err(|e| e.to_string())?;
-    let outcome = drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut()).await?;
+    let outcome = drive_turns(&service, stream, &mut renderer, style, Some(session.clone()), input.as_mut(), Some(plugin_ctx.clone())).await?;
     renderer.ensure_newline();
     if interactive && !outcome.parked && !renderer.budget_stopped {
         if let Some(receiver) = input.as_mut() {
@@ -1032,6 +1057,7 @@ async fn resume_session(
                 receiver,
                 None,
                 None,
+                Some(plugin_ctx),
             )
             .await?;
         }

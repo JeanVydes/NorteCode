@@ -15,6 +15,7 @@ use crate::render::{
     report_start, report_tools, scope_name, tools_panel, unit_name,
 };
 use norte_code_protocol::commands::Invocation;
+use norte_code_protocol::plugins::PluginContext;
 /// How often a running turn redraws, in ms.
 ///
 /// It is the clock behind a call's counter and the spinner. Fast enough that a
@@ -519,6 +520,7 @@ pub(crate) async fn interactive_loop(
     input: &mut InteractiveInput,
     message_budget: Option<Budget>,
     reasoning: Option<Reasoning>,
+    plugin_ctx: Option<PluginContext>,
 ) -> Result<Option<SessionKey>, String> {
     // The interactive hint is on screen already: the tabs row and the footer
     // say what there is, and a line printed above them would be a second
@@ -571,7 +573,7 @@ pub(crate) async fn interactive_loop(
                 // does not know what the command is for and does not need to:
                 // what comes back is text.
                 ChatCommand::Plugin(invocation) => {
-                    let plugins = crate::plugins::all();
+                    let plugins = crate::plugins::all(plugin_ctx.as_ref());
                     match plugins.run(&invocation) {
                         Some(lines) => renderer.open_modal(invocation.command.clone(), lines),
                         None => renderer.failure(format!(
@@ -596,7 +598,7 @@ pub(crate) async fn interactive_loop(
                         .map_err(|error| error.to_string())?;
                     request_id = request_id.saturating_add(1);
                     let outcome =
-                        drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input)).await?;
+                        drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input), plugin_ctx.clone()).await?;
                     renderer.ensure_newline();
                     session = outcome.session.or(session);
                     if outcome.parked || renderer.budget_stopped {
@@ -882,7 +884,7 @@ pub(crate) async fn interactive_loop(
             .await
             .map_err(|error| error.to_string())?;
         request_id = request_id.saturating_add(1);
-        let outcome = drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input)).await?;
+        let outcome = drive_turns(service, stream, renderer, style, session.clone(), Some(&mut *input), plugin_ctx.clone()).await?;
         renderer.ensure_newline();
         session = outcome.session.or(session);
         if outcome.parked || renderer.budget_stopped {
@@ -992,6 +994,7 @@ async fn handle_live_command(
     current: Option<&SessionKey>,
     renderer: &mut Renderer,
     style: Style,
+    plugin_ctx: Option<PluginContext>,
 ) {
     match command {
         // The tab changes while the turn runs. There is a terminal -- this is
@@ -1013,7 +1016,7 @@ async fn handle_live_command(
         // does not know what the command is for and does not need to:
         // what comes back is text.
         ChatCommand::Plugin(invocation) => {
-            let plugins = crate::plugins::all();
+            let plugins = crate::plugins::all(plugin_ctx.as_ref());
             match plugins.run(&invocation) {
                 Some(lines) => renderer.open_modal(invocation.command.clone(), lines),
                 None => renderer.failure(format!(
@@ -2284,6 +2287,7 @@ pub(crate) async fn drive_turns(
     // the actions, and asking for them through one handle is what keeps the
     // select below honest.
     mut input: Option<&mut crate::input::InteractiveInput>,
+    plugin_ctx: Option<PluginContext>,
 ) -> Result<DriveOutcome, String> {
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
@@ -2471,6 +2475,7 @@ pub(crate) async fn drive_turns(
                                     current.as_ref(),
                                     renderer,
                                     style,
+                                    plugin_ctx.clone(),
                                 )
                                 .await;
                             }
@@ -3302,6 +3307,7 @@ mod tests {
             &mut renderer,
             Style::plain(),
             &mut input,
+            None,
             None,
             None,
         )

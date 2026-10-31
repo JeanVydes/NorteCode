@@ -38,7 +38,9 @@
 //! interface it draws into.
 
 use norte_code_protocol::commands::{ArgSpec, CommandSpec, Invocation};
-use norte_code_protocol::plugins::{Plugin, Plugins, SidebarRow};
+use norte_code_protocol::plugins::{Plugin, PluginContext, Plugins, SidebarRow};
+
+use crate::plugin_loader;
 
 /// A plugin that shows the shape of one.
 ///
@@ -88,6 +90,30 @@ impl Plugin for Example {
 /// is only in a test is a plugin nobody notices has stopped working.
 const ALL: &[&dyn Plugin] = &[&Example];
 
+/// Every plugin, ready to register.
+///
+/// `ctx`, when present, is handed to every plugin before it is used: the
+/// service, the current session key, or both. Plugins that do not override
+/// [`Plugin::set_context`] ignore it.
+///
+/// Plugins named by `NORTE_CODE_PLUGINS` are loaded too: `plugin_loader` reads
+/// the variable and asks `by_name` for each, so anything in `ALL` can be turned
+/// on from the environment without rebuilding.
+#[must_use]
+pub(crate) fn all(ctx: Option<&PluginContext>) -> Plugins {
+    let mut plugins = Plugins::new();
+    for plugin_factory in ALL {
+        if let Some(mut plugin) = by_name(plugin_factory.name()) {
+            if let Some(ctx) = ctx {
+                plugin.set_context((*ctx).clone());
+            }
+            plugins.add(plugin);
+        }
+    }
+    plugin_loader::load_with_context(&mut plugins, ctx);
+    plugins
+}
+
 /// The plugin with a name, when this client has it.
 ///
 /// The name is the one [`Plugin::name`] gives, compared as written: a plugin
@@ -99,22 +125,6 @@ pub(crate) fn by_name(name: &str) -> Option<Box<dyn Plugin>> {
         "example" => Some(Box::new(Example)),
         _ => None,
     }
-}
-
-/// Every plugin, ready to register.
-///
-/// It is what a host that wants them all calls, and what the loader does not:
-/// the loader adds the ones that were asked for.
-#[must_use]
-#[allow(dead_code)]
-pub(crate) fn all() -> Plugins {
-    let mut plugins = Plugins::new();
-    for plugin in ALL {
-        if let Some(plugin) = by_name(plugin.name()) {
-            plugins.add(plugin);
-        }
-    }
-    plugins
 }
 
 #[cfg(test)]
@@ -173,7 +183,7 @@ mod tests {
 
     #[test]
     fn every_plugin_loaded_together_has_a_name() {
-        let plugins = all();
+        let plugins = all(None);
         assert_eq!(plugins.len(), ALL.len());
         for name in plugins.names() {
             assert!(!name.is_empty(), "a plugin with no name cannot be reported");
