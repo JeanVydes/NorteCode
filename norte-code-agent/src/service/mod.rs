@@ -56,7 +56,7 @@ use norte_tools::{
 };
 use tokio::sync::Notify;
 
-use norte_code_protocol::catalog::Catalog;
+use norte_code_protocol::catalog::{Catalog, load_catalog_files};
 use norte_code_protocol::config::Config;
 use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
@@ -1259,17 +1259,45 @@ impl Service {
             .ancestors()
             .map(|dir| dir.join(".norte-code").join("config.json"))
             .find(|candidate| candidate.exists());
-        let loaded = Config::load(path.as_deref(), project.as_deref())?;
+        let mut loaded = Config::load(path.as_deref(), project.as_deref())?;
         let next = loaded.config;
 
         // Everything that can fail happens before the live service is touched.
-        let catalog = self.catalog();
+        // The catalogue is re-read from disk, so a provider or a model added to
+        // providers.json / models.json is visible at once: /reload picks up new
+        // providers and models without restarting the application.
+        let catalog = match load_catalog_files() {
+            Ok(catalog) => {
+                *self.lock_catalog_write() = Arc::new(catalog);
+                self.catalog()
+            }
+            // A malformed catalogue file must not abort the whole reload:
+            // the catalogue already in memory stays in force.
+            Err(error) => {
+                loaded
+                    .warnings
+                    .push(format!("catalogue did not reload: {error}"));
+                self.catalog()
+            }
+        };
         // The provider and the model are two config keys and never a split
         // reference: joined here only because the resolver takes the pair as
         // `provider/model` and the model keeps every slash it has.
         let spec = match (&next.default_provider, &next.default_model) {
             (Some(provider), Some(model)) => {
-                Self::default_spec_for(&next, &catalog, &format!("{provider}/{model}"))?
+                match Self::default_spec_for(&next, &catalog, &format!("{provider}/{model}")) {
+                    Ok(spec) => spec,
+                    // A default provider that the catalogue no longer carries must
+                    // not abort the whole reload: the spec already in force stays,
+                    // and a new session will report its own error when it tries to
+                    // open on the missing provider.
+                    Err(error) => {
+                        loaded
+                            .warnings
+                            .push(format!("default provider/model not in catalogue: {error}"));
+                        self.default_spec()
+                    }
+                }
             }
             // No default: keep the one in force rather than fail, since a config
             // that only changes unrelated settings must still reload.

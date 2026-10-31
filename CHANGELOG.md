@@ -99,6 +99,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `/reload` re-reads the catalogue from `providers.json` and `models.json`.
+  Until now it only re-read `config.json`, so a provider or a model added to the
+  catalogue files did not show up in `/model` or in command completion until the
+  application was restarted. The catalogue in memory is replaced at once; a
+  malformed catalogue file leaves the previous one in force and reports a
+  warning instead of aborting the reload.
+
 - A session saved before approvals were removed still opens. Its row carried the
   session inside an envelope with the grants beside it, and the reader expected
   the session at the top level: the load failed, and the client had a session it

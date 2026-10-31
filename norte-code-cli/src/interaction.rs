@@ -2083,13 +2083,12 @@ fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
             // would redraw its colour only on the next keystroke, which is the
             // one moment a person who just ran `/refresh` is not typing.
             renderer.mark_dirty();
-            // The catalogue is re-read here too: a person who added a model to
-            // `models.json` and typed `/refresh` expects the next `/model` to
-            // find it, and the files are the only place a model comes from.
-            let catalog_note = match crate::commands::load_catalogue() {
-                Ok(catalog) => format!(", {} models", catalog.model_count()),
-                Err(error) => format!("; the catalogue did not reload: {error}"),
-            };
+            // The catalogue was re-read from disk by reload_config: a person who
+            // added a model to models.json and typed /reload expects the next
+            // /model to find it, and the files are the only place a model comes
+            // from. Warnings from a malformed catalogue file are already in
+            // reloaded.warnings.
+            let catalog_note = format!(", {} models", service.catalog().model_count());
             renderer.notice(format!("configuration reloaded{catalog_note}"));
             for warning in &reloaded.warnings {
                 renderer.notice(format!(
