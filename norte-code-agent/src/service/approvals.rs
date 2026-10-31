@@ -7,15 +7,18 @@
 //! and therefore no grant to issue either: what a person allows is written down
 //! as a rule, and a rule outlives the turn that asked for it.
 //!
-//! The gate is a wrapper around the declaration, applied in the one place every
-//! tool passes through, so a rule and the list a client draws cannot disagree:
-//! both read the same [`ApprovalRules`].
+//! The gate is an interceptor the engine consults immediately before a call
+//! runs, which is the one place every tool passes through, so a rule and the
+//! list a client draws cannot disagree: both read the same [`ApprovalRules`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use norte::{FnExecutor, Result, SessionId, ToolArgs, ToolContext, ToolDeclaration, ToolOutput};
+use norte::harness::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
+use norte::{Result, SessionId};
 use norte_code_protocol::config::ApprovalsConfig;
+
+use super::tooling::ToolActivity;
 
 /// Where a rule comes from.
 ///
@@ -264,59 +267,40 @@ impl ApprovalRules {
     }
 }
 
-/// Wraps a declaration so its calls meet the rules before they run.
-///
-/// The gate is here rather than in an interceptor because the question is about
-/// one tool's name and one session's rules, and this is the last point where
-/// both are known before the call does anything.
-pub(super) fn gated<A>(
-    declaration: ToolDeclaration<A>,
+/// An interceptor that consults approval rules before any tool call runs.
+#[derive(Debug)]
+pub(super) struct ToolRuleInterceptor {
     rules: Arc<ApprovalRules>,
-) -> ToolDeclaration<A>
-where
-    A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
-{
-    let name = declaration.name;
-    ToolDeclaration {
-        name,
-        description: declaration.description,
-        parameters: declaration.parameters,
-        executor: Arc::new(GatedExecutor {
-            inner: declaration.executor,
-            rules,
-            name,
-        }),
-    }
+    activity: Arc<ToolActivity>,
 }
 
-/// A tool executor that refuses a call a rule denies.
-struct GatedExecutor<A> {
-    inner: Arc<dyn FnExecutor<A, ToolOutput>>,
-    rules: Arc<ApprovalRules>,
-    name: &'static str,
+impl ToolRuleInterceptor {
+    pub(super) fn new(rules: Arc<ApprovalRules>, activity: Arc<ToolActivity>) -> Self {
+        Self { rules, activity }
+    }
 }
 
 #[async_trait::async_trait]
-impl<A> FnExecutor<A, ToolOutput> for GatedExecutor<A>
-where
-    A: ToolArgs,
-{
-    async fn call(&self, args: A) -> Result<ToolOutput> {
-        self.inner.call(args).await
+impl TurnInterceptor for ToolRuleInterceptor {
+    fn name(&self) -> &'static str {
+        "rules"
     }
 
-    async fn call_with_context(&self, context: &ToolContext, args: A) -> Result<ToolOutput> {
-        // A call with no session cannot be matched against a session's rules,
-        // and a global deny is the one rule that does not need one.
-        let session = context.session.unwrap_or_default();
-        if self.rules.denies(session, self.name) {
-            // An error, not a quiet pass: the model is told why, in the same
-            // shape it reads a failed call, and it can adapt.
-            return Ok(ToolOutput::error(format!(
+    async fn intercept(&self, context: &InterceptionContext<'_>) -> Result<Interception> {
+        let ConsultationPoint::ToolCall { call } = &context.point else {
+            return Ok(Interception::Continue);
+        };
+        if self.rules.denies(context.session, &call.name) {
+            let reason = format!(
                 "`{}` is denied by the approval rules; change the rule before calling it",
-                self.name
-            )));
+                call.name
+            );
+            // The engine reports the call finished as a failure, and this is
+            // the text that failure carries: no executor ran, so nothing else
+            // records it.
+            self.activity.refused(call.call_id, &reason);
+            return Ok(Interception::RefuseCall { reason });
         }
-        self.inner.call_with_context(context, args).await
+        Ok(Interception::Continue)
     }
 }

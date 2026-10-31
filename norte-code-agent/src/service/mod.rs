@@ -67,7 +67,7 @@ use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 use self::screenshots::{ScreenshotInterceptor, Screenshots, publishing_tool};
 use self::sessions::SessionRecord;
 use self::steering::{Steered, Steering, SteeringInterceptor};
-use approvals::{ApprovalRules, gated};
+use approvals::{ApprovalRules, ToolRuleInterceptor};
 use background::ShellCalls;
 use compaction::{CompactionGate, CompactionLayer};
 use detach::DetachRegistry;
@@ -476,6 +476,12 @@ impl Service {
                 let mut interceptors: Vec<Arc<dyn TurnInterceptor>> = vec![Arc::new(
                     SteeringInterceptor::new(Arc::clone(&self.steering)),
                 )];
+                // A rule refuses the call before it runs, and the reason it
+                // gives is what the model reads.
+                interceptors.push(Arc::new(ToolRuleInterceptor::new(
+                    Arc::clone(&self.approval_rules),
+                    Arc::clone(&self.activity),
+                )));
                 // Read from the spec the engine was built with — never
                 // rebuilt, so the check the interceptor makes and the
                 // capabilities the model is handed are the same ones.
@@ -565,13 +571,9 @@ impl Service {
             return Ok(());
         }
         let name = declaration.name;
-        // Three gates, in the order that answers the cheapest question first:
-        // a rule a person wrote, then whether a crash may already have run the
-        // call, then the workspace confine. All three are wrappers rather than
-        // rules the engine evaluates, because all three are about what the
-        // *call* is — its name, its id, its arguments — and the wrapper is the
-        // last point where those are still known and nothing has run yet.
-        let declaration = gated(declaration, Arc::clone(&self.approval_rules));
+        // Two gates: whether a crash may already have run the call, then the
+        // workspace confine. Approval rules are evaluated before calls run by
+        // the engine's `ToolRuleInterceptor`.
         let declaration = journalled(declaration, Arc::clone(&self.effects));
         let recorded = recording_tool(declaration, Arc::clone(&self.activity));
         let tool = confined(Arc::new(recorded), self.confine(name));

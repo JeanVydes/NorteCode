@@ -16,7 +16,7 @@ const EDIT_MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Norte's engine events carry no output, and a result is not in history until
 /// the turn commits, so the host records both sides around the executor. The
 /// renderer gets the effective arguments and the text the model will see.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct ToolActivity {
     pub(super) arguments: Mutex<BTreeMap<CallId, serde_json::Value>>,
     /// Files captured immediately before an `edit` runs, for the CLI preview.
@@ -40,17 +40,24 @@ impl ToolActivity {
     }
 
     pub(super) fn snapshot(&self, call_id: CallId, source: String) {
-        const MAX_SNAPSHOTS: usize = 16;
-        let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
-        // A call refused by a rule never reaches `ToolStarted`, so its
-        // snapshot is not removed by the renderer. Bound the map instead of
-        // letting repeated denials retain megabytes of file text.
-        if sources.len() >= MAX_SNAPSHOTS {
-            if let Some(oldest) = sources.keys().next().copied() {
-                sources.remove(&oldest);
-            }
-        }
-        sources.insert(call_id, source);
+        self.sources
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(call_id, source);
+    }
+
+    /// Records the reason a rule refused a call.
+    ///
+    /// A refused call never reaches an executor, so nothing else writes its
+    /// error down; without this the failure a renderer is told about would
+    /// arrive without the reason the visitor needs. The engine reports the
+    /// call as finished right after the interceptor returns, and that event is
+    /// where this is read.
+    pub(super) fn refused(&self, call_id: CallId, reason: &str) {
+        self.outputs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(call_id, ToolOutput::error(reason.to_owned()));
     }
 
     pub(super) fn finished(&self, call_id: &CallId) -> Option<ToolOutput> {

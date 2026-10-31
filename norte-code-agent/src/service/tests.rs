@@ -3931,8 +3931,100 @@ async fn a_global_deny_refuses_without_asking() {
         ServerEventKind::ToolFinished {
             ref tool,
             is_error: true,
+            ref error,
             ..
         } if tool == "write"
+            && error.as_deref().is_some_and(|error| error.contains("denied"))
+    )));
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn a_session_deny_refuses_only_the_session_it_names() {
+    let target = std::env::current_dir()
+        .expect("working directory")
+        .join("target")
+        .join(format!(
+            "norte-code-session-deny-{}.txt",
+            std::process::id()
+        ));
+    let _ = std::fs::remove_file(&target);
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let arguments = serde_json::json!({
+        "path": target.display().to_string(),
+        "content": "rules",
+        "overwrite": true
+    });
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            spec("scripted"),
+            Arc::new(ScriptedFactory {
+                model: Arc::new(
+                    ScriptedModel::new(reference)
+                        .turn_tool_call(CallId::new(), "write", &arguments)
+                        .turn_text("first")
+                        .turn_tool_call(CallId::new(), "write", &arguments)
+                        .turn_text("second"),
+                ),
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "write it".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    assert!(target.exists(), "the first call runs before any rule");
+
+    service
+        .set_approval_rule(Some(&key), "write", false, false)
+        .await
+        .expect("deny");
+    let _ = std::fs::remove_file(&target);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "write it again".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    // The interceptor is asked with the session the engine runs, which is the
+    // id the rule was written under: a rule keyed by anything else would never
+    // fire.
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        ServerEventKind::ToolFinished {
+            ref tool,
+            is_error: true,
+            ref error,
+            ..
+        } if tool == "write"
+            && error.as_deref().is_some_and(|error| error.contains("denied"))
     )));
     assert!(!target.exists());
 }

@@ -50,6 +50,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A tool call refused by a rule reads as the failed call it is. The rule decides
+  before anything runs, and the call now opens and closes in the conversation
+  with the rule's reason on it, instead of the model asking for a tool and the
+  client showing nothing at all until the next answer. Nothing about what the
+  model receives changed: it still gets a result it can read and adapt to.
+
 - `WireKind` is gone: `WireSchema` was already the same fact with another
   name. `Chat` was `OpenAI`, `Messages` was `Anthropic` and `GenerateContent`
   was `Google`, and the conversion between them could only ever be a bug — three

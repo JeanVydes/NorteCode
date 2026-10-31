@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use norte::harness::{Interception, InterceptionContext, TurnInterceptor};
+use norte::harness::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
 use norte::{Message, Result, SessionId};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -134,6 +134,12 @@ impl TurnInterceptor for SteeringInterceptor {
     }
 
     async fn intercept(&self, context: &InterceptionContext<'_>) -> Result<Interception> {
+        // The engine asks about one call at `ToolCall`, and a message injected
+        // there is dropped — the queue it came from loses it. Waiting for the
+        // request that follows is what a steering message does anyway.
+        if matches!(context.point, ConsultationPoint::ToolCall { .. }) {
+            return Ok(Interception::Continue);
+        }
         let messages: Vec<Message> = self
             .steering
             .take(context.session)

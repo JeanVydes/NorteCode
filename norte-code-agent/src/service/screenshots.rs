@@ -36,7 +36,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use base64::Engine as _;
-use norte::harness::{Interception, InterceptionContext, TurnInterceptor};
+use norte::harness::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
 use norte::media::{ImageOutput, ImagePreprocessor};
 use norte::{
     BlobStore, Capabilities, FnExecutor, MediaKind, MediaPart, MediaPayload, MediaPreprocessor,
@@ -232,6 +232,9 @@ impl TurnInterceptor for ScreenshotInterceptor {
     }
 
     async fn intercept(&self, context: &InterceptionContext<'_>) -> Result<Interception> {
+        if context.point != ConsultationPoint::PreflightRequest {
+            return Ok(Interception::Continue);
+        }
         let captures = self.screenshots.take(context.session);
         if captures.is_empty() {
             return Ok(Interception::Continue);
@@ -433,10 +436,10 @@ mod tests {
         let interceptor = ScreenshotInterceptor::new(Arc::clone(&screenshots), &with_image);
         let sink = SilentSink;
         let context = InterceptionContext {
+            point: ConsultationPoint::PreflightRequest,
             session,
             turn: 1,
             head: None,
-            phase: norte::harness::Phase::Idle,
             messages: &[],
             events: &sink,
         };
@@ -499,10 +502,10 @@ mod tests {
         let interceptor = ScreenshotInterceptor::new(Arc::clone(&screenshots), &text_only);
         let sink = SilentSink;
         let context = InterceptionContext {
+            point: ConsultationPoint::PreflightRequest,
             session,
             turn: 1,
             head: None,
-            phase: norte::harness::Phase::Idle,
             messages: &[],
             events: &sink,
         };
