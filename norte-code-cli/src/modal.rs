@@ -582,7 +582,7 @@ impl Modal {
                 self.scope.word()
             );
         } else {
-            hint.push_str("· ↑↓ scroll · esc close ");
+            hint.push_str("· ↑↓ scroll · ^c copy · esc close ");
         }
         format!("{hint:─^width$}").chars().take(width).collect()
     }

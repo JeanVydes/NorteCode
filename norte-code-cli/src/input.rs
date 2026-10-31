@@ -1540,7 +1540,12 @@ mod unix {
                                     KeyCode::Char('[') => Some(crate::modal::Key::PrevRange),
                                     KeyCode::Char('r') => Some(crate::modal::Key::NextMetric),
                                     KeyCode::Char('R') => Some(crate::modal::Key::PrevMetric),
-                                    KeyCode::Char('c') => Some(crate::modal::Key::Copy),
+                                    // Copy the report's text to the clipboard.
+                                    KeyCode::Char('c')
+                                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                    {
+                                        Some(crate::modal::Key::Copy)
+                                    }
                                     _ => None,
                                 };
                                 if let Some(press) = key_for_panel {
@@ -1573,7 +1578,9 @@ mod unix {
                                 }
                             }
                             // Copy the report's text to the clipboard.
-                            if key.code == KeyCode::Char('c') {
+                            if key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
                                 if sender
                                     .send(EditorEvent::Action(EditorAction::Panel(
                                         crate::modal::Key::Copy,

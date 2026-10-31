@@ -316,6 +316,11 @@ pub struct Reasoning {
     pub supported_efforts: Vec<SupportedEffort>,
     /// Whether the provider takes a token budget instead of, or beside, an
     /// effort.
+    ///
+    /// The file may name it `budget_supported` or `supports_budget`: both were
+    /// written by hand, and a name that silently meant nothing turned a model
+    /// that takes a budget into one that reasons never.
+    #[serde(alias = "supports_budget")]
     pub budget_supported: bool,
 }
 
