@@ -15,7 +15,6 @@ use crate::render::{
     report_start, report_tools, scope_name, tools_panel, unit_name,
 };
 use norte_code_protocol::commands::Invocation;
-use norte_code_protocol::plugins::PluginContext;
 /// How often a running turn redraws, in ms.
 ///
 /// It is the clock behind a call's counter and the spinner. Fast enough that a
@@ -536,7 +535,6 @@ pub(crate) async fn interactive_loop(
     input: &mut InteractiveInput,
     message_budget: Option<Budget>,
     reasoning: Option<Reasoning>,
-    plugin_ctx: Option<PluginContext>,
 ) -> Result<Option<SessionKey>, String> {
     // The interactive hint is on screen already: the tabs row and the footer
     // say what there is, and a line printed above them would be a second
@@ -589,7 +587,7 @@ pub(crate) async fn interactive_loop(
                 // does not know what the command is for and does not need to:
                 // what comes back is text.
                 ChatCommand::Plugin(invocation) => {
-                    let plugins = crate::plugins::all(plugin_ctx.as_ref());
+                    let plugins = crate::plugins::loaded();
                     match plugins.run(&invocation) {
                         Some(lines) => renderer.open_modal(invocation.command.clone(), lines),
                         None => renderer.failure(format!(
@@ -611,13 +609,14 @@ pub(crate) async fn interactive_loop(
                 }
 
                 ChatCommand::PluginsAdd { url } => {
-                    renderer.notice("Installing...");
-                    match crate::plugin_manager::install_plugin(&url) {
-                        Ok(name) => renderer.notice(format!("plugin {name} installed")),
-                        Err(error) => {
-                            renderer.failure(format!("could not install plugin: {error}"))
-                        }
-                    }
+                    // The clone and the build take minutes, so they run on
+                    // their own thread and the interface stays alive: a person
+                    // can keep working while a plugin is installed, and the
+                    // screen says what is being waited for.
+                    let name = crate::installs::plugin_name(&url);
+                    renderer.notice(format!("installing {name}…"));
+                    renderer.mark_dirty();
+                    crate::installs::start(url, Arc::clone(&renderer.pinned));
                 }
 
                 ChatCommand::PluginsRm { name } => {
@@ -648,7 +647,6 @@ pub(crate) async fn interactive_loop(
                         style,
                         session.clone(),
                         Some(&mut *input),
-                        plugin_ctx.clone(),
                     )
                     .await?;
                     renderer.ensure_newline();
@@ -946,7 +944,6 @@ pub(crate) async fn interactive_loop(
             style,
             session.clone(),
             Some(&mut *input),
-            plugin_ctx.clone(),
         )
         .await?;
         renderer.ensure_newline();
@@ -1058,7 +1055,6 @@ async fn handle_live_command(
     current: Option<&SessionKey>,
     renderer: &mut Renderer,
     style: Style,
-    plugin_ctx: Option<PluginContext>,
 ) {
     match command {
         // The tab changes while the turn runs. There is a terminal -- this is
@@ -1080,7 +1076,7 @@ async fn handle_live_command(
         // does not know what the command is for and does not need to:
         // what comes back is text.
         ChatCommand::Plugin(invocation) => {
-            let plugins = crate::plugins::all(plugin_ctx.as_ref());
+            let plugins = crate::plugins::loaded();
             match plugins.run(&invocation) {
                 Some(lines) => renderer.open_modal(invocation.command.clone(), lines),
                 None => renderer.failure(format!(
@@ -1101,14 +1097,12 @@ async fn handle_live_command(
         }
 
         ChatCommand::PluginsAdd { url } => {
-            renderer.notice("Installing...");
-            match tokio::task::spawn_blocking(move || {
-                crate::plugin_manager::install_plugin(&url)
-            }).await {
-                Ok(Ok(name)) => renderer.notice(format!("plugin {name} installed")),
-                Ok(Err(error)) => renderer.failure(format!("could not install plugin: {error}")),
-                Err(e) => renderer.failure(format!("could not install plugin: {e}")),
-            }
+            // The same as at the prompt: the build runs on its own thread and
+            // the turn keeps going.
+            let name = crate::installs::plugin_name(&url);
+            renderer.notice(format!("installing {name}…"));
+            renderer.mark_dirty();
+            crate::installs::start(url, Arc::clone(&renderer.pinned));
         }
 
         ChatCommand::PluginsRm { name } => match crate::plugin_manager::remove_plugin(&name) {
@@ -2219,6 +2213,10 @@ pub(crate) async fn read_repl_line(
             // hide/show pair sixteen times a second and a core burned to draw
             // the screen it had just drawn.
             _ = tick.tick() => {
+                // What the installs that finished did, before the frame is
+                // drawn: the outcome belongs in the conversation, and the
+                // conversation is drawn by the frame.
+                report_installs(renderer);
                 if renderer.animating() {
                     renderer.tick_modal();
                 }
@@ -2278,6 +2276,32 @@ pub(crate) async fn read_repl_line(
         }
         return Ok(Some((line.to_owned(), attachments)));
     }
+}
+
+/// Says what the plugin installs that finished did.
+///
+/// The installs run on a task of their own and the frame cannot be reached
+/// from there, so the outcome waits in the shared state until a tick picks it
+/// up and says it in the conversation.
+///
+/// An installed plugin is not one the client can use yet: the plugins are
+/// loaded at startup, and a library loaded into a running process would have
+/// to share the address space it was already given. The client says so
+/// instead of letting a person wonder why their command is not there.
+fn report_installs(renderer: &mut Renderer) {
+    let reports = renderer.pinned.take_install_reports();
+    if reports.is_empty() {
+        return;
+    }
+    for report in reports {
+        match report.result {
+            Ok(name) => renderer.notice(format!(
+                "plugin {name} installed — restart norte-code to apply it"
+            )),
+            Err(error) => renderer.failure(format!("could not install plugin: {error}")),
+        }
+    }
+    renderer.mark_dirty();
 }
 
 /// Puts a selection on the terminal's clipboard and says what went there.
@@ -2377,7 +2401,6 @@ pub(crate) async fn drive_turns(
     // the actions, and asking for them through one handle is what keeps the
     // select below honest.
     mut input: Option<&mut crate::input::InteractiveInput>,
-    plugin_ctx: Option<PluginContext>,
 ) -> Result<DriveOutcome, String> {
     let mut streams: VecDeque<EventStream> = VecDeque::new();
     streams.push_back(primary);
@@ -2443,6 +2466,10 @@ pub(crate) async fn drive_turns(
                     // keeps a running call's counter moving and the spinner
                     // turning while the provider is silent.
                     Wake::Tick => {
+                        // The clock: a frame, and nothing was decided. It is what
+                        // keeps a running call's counter moving and the spinner
+                        // turning while the provider is silent.
+                        report_installs(renderer);
                         if renderer.animating() || renderer.take_dirty() {
                             renderer.draw()?;
                         }
@@ -2565,7 +2592,6 @@ pub(crate) async fn drive_turns(
                                     current.as_ref(),
                                     renderer,
                                     style,
-                                    plugin_ctx.clone(),
                                 )
                                 .await;
                             }
@@ -3397,7 +3423,6 @@ mod tests {
             &mut renderer,
             Style::plain(),
             &mut input,
-            None,
             None,
             None,
         )

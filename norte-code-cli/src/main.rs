@@ -14,6 +14,7 @@ mod art;
 mod commands;
 mod commands_registry;
 mod input;
+mod installs;
 mod interaction;
 mod markdown;
 mod modal;
@@ -52,7 +53,6 @@ use prompt::compose_selection;
 #[cfg(test)]
 use render::budget_label;
 
-use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -72,7 +72,6 @@ use norte_code_agent::{
 use norte_code_protocol::catalog::{Catalog, WireSchema};
 use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
-use norte_code_protocol::plugins::PluginContext;
 use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
 use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore};
 use norte_code_protocol::{
@@ -696,13 +695,6 @@ pub(crate) async fn new_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
-    // What the plugins draw, asked for once: the columns and the status field
-    // are theirs, and the frame draws what it was given.
-    renderer.sidebar = crate::plugins::all(None)
-        .sidebar()
-        .into_iter()
-        .map(|(name, rows)| (name.to_owned(), rows))
-        .collect();
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
@@ -745,12 +737,11 @@ pub(crate) async fn new_session(
         );
     }
     // Hand the service and session to plugins so they can reach them when they
-    // run a command or redraw. Plugins that do not override set_context ignore it.
-    let plugin_ctx = PluginContext {
-        session_key: Some(session.clone()),
-        service: Some(Arc::clone(&service) as Arc<dyn Any + Send + Sync>),
-    };
-    renderer.sidebar = crate::plugins::all(Some(&plugin_ctx))
+    // run a command or redraw. The plugins are loaded here, once: they are
+    // shared libraries loaded into this process, and the ones this run uses are
+    // the ones it started with.
+    let plugin_ctx = crate::plugins::context(&service, Some(session.clone()));
+    renderer.sidebar = crate::plugins::init(&plugin_ctx)
         .sidebar()
         .into_iter()
         .map(|(name, rows)| (name.to_owned(), rows))
@@ -764,7 +755,6 @@ pub(crate) async fn new_session(
             receiver,
             message_budget,
             reasoning,
-            Some(plugin_ctx),
         )
         .await?;
     }
@@ -941,13 +931,6 @@ async fn resume_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
-    // What the plugins draw, asked for once: the columns and the status field
-    // are theirs, and the frame draws what it was given.
-    renderer.sidebar = crate::plugins::all(None)
-        .sidebar()
-        .into_iter()
-        .map(|(name, rows)| (name.to_owned(), rows))
-        .collect();
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
@@ -963,12 +946,11 @@ async fn resume_session(
     renderer.set_reasoning(reasoning_setting_label(&effective));
     let session = SessionKey::new(session_key);
     // Hand the service and session to plugins so they can reach them when they
-    // run a command or redraw. Plugins that do not override set_context ignore it.
-    let plugin_ctx = PluginContext {
-        session_key: Some(session.clone()),
-        service: Some(Arc::clone(&service) as Arc<dyn Any + Send + Sync>),
-    };
-    renderer.sidebar = crate::plugins::all(Some(&plugin_ctx))
+    // run a command or redraw. The plugins are loaded here, once: they are
+    // shared libraries loaded into this process, and the ones this run uses are
+    // the ones it started with.
+    let plugin_ctx = crate::plugins::context(&service, Some(session.clone()));
+    renderer.sidebar = crate::plugins::init(&plugin_ctx)
         .sidebar()
         .into_iter()
         .map(|(name, rows)| (name.to_owned(), rows))
@@ -1026,7 +1008,6 @@ async fn resume_session(
             style,
             Some(session.clone()),
             input.as_mut(),
-            Some(plugin_ctx.clone()),
         )
         .await?;
     }
@@ -1050,7 +1031,6 @@ async fn resume_session(
             style,
             Some(session.clone()),
             input.as_mut(),
-            Some(plugin_ctx.clone()),
         )
         .await?;
     }
@@ -1071,7 +1051,6 @@ async fn resume_session(
         style,
         Some(session.clone()),
         input.as_mut(),
-        Some(plugin_ctx.clone()),
     )
     .await?;
     renderer.ensure_newline();
@@ -1085,7 +1064,6 @@ async fn resume_session(
                 receiver,
                 None,
                 None,
-                Some(plugin_ctx),
             )
             .await?;
         }

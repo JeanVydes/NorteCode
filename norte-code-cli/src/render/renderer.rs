@@ -2775,6 +2775,18 @@ impl Renderer {
                 head.push((Ink::Faint, " · ".to_owned()));
             }
         }
+        // What is being installed, when something is. A clone and a build take
+        // minutes, and the screen has to say that is what it is waiting for:
+        // a client that says nothing while it works reads as one that stopped
+        // answering.
+        let installing = self.pinned.installing();
+        if !installing.is_empty() {
+            head.push((
+                Ink::Yellow,
+                format!("installing {}…", installing.join(", ")),
+            ));
+            head.push((Ink::Faint, " · ".to_owned()));
+        }
         head.push(match &self.activity {
             Some(activity) => (Ink::Yellow, activity.clone()),
             None => (Ink::Faint, "session".to_owned()),

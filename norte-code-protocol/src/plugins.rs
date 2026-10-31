@@ -27,11 +27,12 @@
 //! # What it cannot
 //!
 //! Write to the terminal or block a frame — those remain the host's job.
-//! Everything else is possible: a plugin can reach the service through the
-//! context the host hands it ([`PluginContext::service`]), read the current
-//! session key ([`PluginContext::session_key`]), and keep whatever state it
-//! wants in its own fields. The trait itself carries no state; a plugin that
-//! needs to remember something stores it in a field of its own type.
+//! Everything else is possible: a plugin can ask the host about the session
+//! through the context the host hands it ([`PluginContext::host`]), read the
+//! current session key ([`PluginContext::session_key`]), and keep whatever
+//! state it wants in its own fields. The trait itself carries no state; a
+//! plugin that needs to remember something stores it in a field of its own
+//! type.
 //!
 //! # Extending it
 //!
@@ -40,12 +41,31 @@
 //! use the same `Plugin` trait a real plugin does. Nothing here knows what a
 //! plugin is for; that is the point.
 
-use std::any::Any;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::SessionKey;
 use crate::commands::{CommandSpec, Invocation};
+
+/// The version of the plugin interface a plugin was built against.
+///
+/// A plugin is a shared library loaded into a process that is already running,
+/// and the two sides have to agree on the shape of what they pass to each
+/// other. They cannot agree at compile time — the plugin is built on its own,
+/// against its own copy of this crate — so the version is a number both sides
+/// carry and the host refuses a plugin whose number is not its own.
+///
+/// Bump it when the layout of [`PluginContext`], [`Plugin`] or [`PluginHost`]
+/// changes in a way an old plugin would not survive.
+pub const PLUGIN_ABI_VERSION: u32 = 1;
+
+/// The symbol a plugin exports to say which version it was built against.
+///
+/// The name is part of the interface: the host looks it up by this exact
+/// spelling, and a plugin that does not export it is refused rather than
+/// loaded on a guess.
+pub const PLUGIN_ABI_SYMBOL: &[u8] = b"norte_plugin_abi_version\0";
 
 /// What a plugin produces, in the places the host draws.
 ///
@@ -103,13 +123,40 @@ pub trait Plugin: Send + Sync {
     ///
     /// The host calls this once, before `commands`, `run`, `sidebar`, `status`
     /// or `banner`. A plugin stores whatever it wants from the context in its
-    /// own fields — the trait does not keep a copy. The service is passed as
-    /// an erased `dyn Any + Send + Sync` so this crate never names a concrete
-    /// service type; the host downcasts when it builds the context.
+    /// own fields — the trait does not keep a copy. The host is passed as a
+    /// [`PluginHost`] so this crate never names a concrete service type; the
+    /// host that built the context implements it.
     ///
     /// The default implementation ignores the context. A plugin that wants the
-    /// service, the session key, or both overrides this and keeps them.
+    /// session key, the host, or both overrides this and keeps them.
     fn set_context(&mut self, _ctx: PluginContext) {}
+}
+
+/// What a plugin may ask the host about the session it is running in.
+///
+/// The host implements it and the plugin calls it, and that is the whole
+/// reason it is a trait and not a cast.
+///
+/// A plugin is a shared library with its **own copy** of this crate and of
+/// everything it depends on, so the two sides do not share a single type: a
+/// `TypeId` is only the same on both sides when the type comes from the same
+/// compilation, and it does not. Casting the host's service to a concrete type
+/// therefore fails every time, and the plugin is left holding nothing — which
+/// is what "the service is not available" was, every time it was said.
+///
+/// A trait object crosses that line, because the call goes through the vtable
+/// the *host* built. The plugin never names the host's types and never needs
+/// to compile against them, which is also what lets a plugin depend on this
+/// crate alone.
+pub trait PluginHost: Send + Sync {
+    /// The model the session runs on, when it has one.
+    fn session_model(&self, session: &SessionKey) -> Option<String>;
+
+    /// The provider serving it, when it has one.
+    fn session_provider(&self, session: &SessionKey) -> Option<String>;
+
+    /// The title of the session, when it has one.
+    fn session_title(&self, session: &SessionKey) -> Option<String>;
 }
 
 /// The host context handed to a plugin before the host asks anything of it.
@@ -118,16 +165,28 @@ pub trait Plugin: Send + Sync {
 /// plugin that needs something absent simply does without it. The plugin may
 /// keep the context — or any part of it — in its own fields and use it later,
 /// when the host asks it to run a command or redraw.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PluginContext {
     /// The current logical session key, if a session exists.
     pub session_key: Option<SessionKey>,
-    /// The host service, erased to `Arc<dyn Any + Send + Sync>`.
+    /// The host, which answers what the plugin may ask about the session.
     ///
-    /// The host that built the context knows the concrete type and can
-    /// downcast. A plugin that needs the service stores it and casts when it
-    /// runs a command or redraws.
-    pub service: Option<Arc<dyn Any + Send + Sync>>,
+    /// The host that built the context implements it and hands the plugin a
+    /// handle to it. A plugin that wants the model, the provider or the title
+    /// asks the host when it needs them.
+    pub host: Option<Arc<dyn PluginHost>>,
+}
+
+impl fmt::Debug for PluginContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The host is a trait object and says nothing about itself, so what is
+        // written is what a reader can act on: there is a session, or there is
+        // not, and there is a host to ask.
+        f.debug_struct("PluginContext")
+            .field("session_key", &self.session_key)
+            .field("host", &self.host.as_ref().map(|_| "yes"))
+            .finish()
+    }
 }
 
 /// One row of the sidebar a plugin asked for.
@@ -278,8 +337,6 @@ impl fmt::Debug for Plugins {
     }
 }
 
-use std::fmt;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +486,78 @@ mod tests {
         plugins.add(Box::new(Same));
         assert_eq!(plugins.names(), ["everything", "everything"]);
         assert_eq!(plugins.len(), 2);
+    }
+
+    /// A host that answers for one session, so the plugin has something to ask.
+    struct Answering;
+
+    impl PluginHost for Answering {
+        fn session_model(&self, _session: &SessionKey) -> Option<String> {
+            Some("nvidia/nemotron".to_owned())
+        }
+
+        fn session_provider(&self, _session: &SessionKey) -> Option<String> {
+            Some("nvidia".to_owned())
+        }
+
+        fn session_title(&self, _session: &SessionKey) -> Option<String> {
+            Some("a session".to_owned())
+        }
+    }
+
+    /// A plugin that asks the host what it may not know.
+    struct Asking {
+        host: Option<Arc<dyn PluginHost>>,
+    }
+
+    impl Plugin for Asking {
+        fn name(&self) -> &'static str {
+            "asking"
+        }
+
+        fn set_context(&mut self, ctx: PluginContext) {
+            self.host = ctx.host;
+        }
+
+        fn run(&self, _command: &Invocation) -> Option<Vec<String>> {
+            let host = self.host.as_ref()?;
+            let session = SessionKey::new("s");
+            Some(vec![
+                host.session_model(&session).unwrap_or_default(),
+                host.session_provider(&session).unwrap_or_default(),
+            ])
+        }
+    }
+
+    #[test]
+    fn a_plugin_asks_the_host_and_the_host_answers() {
+        // The whole reason the host is a trait and not a cast: the plugin
+        // reaches the session through a call, and the call lands on the code
+        // the host wrote.
+        let mut plugins = Plugins::new();
+        plugins.add(Box::new(Asking { host: None }));
+        plugins.set_context_on_all(&PluginContext {
+            session_key: Some(SessionKey::new("s")),
+            host: Some(Arc::new(Answering)),
+        });
+        let lines = plugins
+            .run(&Invocation {
+                command: "/asking".to_owned(),
+                args: BTreeMap::new(),
+            })
+            .expect("an answer");
+        assert_eq!(lines, ["nvidia/nemotron", "nvidia"]);
+    }
+
+    #[test]
+    fn a_context_without_a_host_is_not_an_error() {
+        // The host passes what it has. A plugin that needs a host and has none
+        // says nothing, and the client falls through to its own commands.
+        let context = PluginContext {
+            session_key: None,
+            host: None,
+        };
+        assert!(context.session_key.is_none());
+        assert!(context.host.is_none());
     }
 }

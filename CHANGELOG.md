@@ -8,6 +8,39 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A plugin reaches the host through a trait instead of a cast. `PluginContext`
+  carries a `PluginHost` — the model, the provider and the title of the
+  session — and the plugin calls it. A plugin is a shared library with its own
+  copy of every crate, so the two sides never shared a single type: the cast
+  the old context asked for failed every time, and every plugin that wanted
+  the session was told the service was not available. The call goes through the
+  vtable the host built, and a plugin now needs `norte-code-protocol` alone.
+
+- A plugin says which version of the interface it was built against. The
+  plugin exports `norte_plugin_abi_version` and the host refuses one whose
+  number is not its own: the two sides pass each other structures whose layout
+  has to match, and they cannot agree on that at compile time.
+
+- `/plugins add` installs without freezing the interface. The clone and the
+  build run on a thread of their own, the footer says what is being installed
+  while it runs, and the outcome is said when it is done — the error a failed
+  build printed, which is the one thing worth reading. The client stays
+  usable throughout: a person can keep working while a plugin is installed.
+
+### Fixed
+
+- A plugin installed while the client runs says so. The plugins are loaded
+  once, at startup, and an installed one is used after a restart: the client
+  says `restart norte-code to apply it` rather than leaving a person to wonder
+  why their command is not there.
+
+- The library cargo built is the one that is installed. The build directory
+  holds every dependency's shared library too, and picking one of those
+  installed something that was not a plugin. Cargo now says which file it
+  produced and that file is the one copied.
+
+### Changed
+
 - A wire may name the credential header it carries. `providers.json` gains an
   optional `auth` on each wire — `bearer`, `x_api_key`, `x_goog_api_key` or
   `disabled` — for a gateway that serves another vendor's shape over its own

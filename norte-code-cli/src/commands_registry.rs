@@ -53,18 +53,19 @@ pub(crate) fn shared() -> &'static Registry {
     REGISTRY.get_or_init(built)
 }
 
-/// Loads the plugins this client ships and adds their commands.
+/// The plugins this client loaded, and the commands they add.
 ///
 /// A plugin's command is a command: it parses, completes and lists exactly like
 /// the client's own, and whoever types it cannot tell the difference. That is
 /// what the registry was made for — it knows nothing about what a command does,
 /// so a plugin is not a special case in it.
 ///
-/// `NORTE_CODE_PLUGINS` names a directory, and the command names a binary in it.
-fn plugins() -> norte_code_protocol::plugins::Plugins {
-    let mut plugins = norte_code_protocol::plugins::Plugins::new();
-    crate::plugin_loader::load_plugins(&mut plugins, None);
-    plugins
+/// The commands come from the registry the client loaded at startup, not from
+/// the directory: a plugin installed while the client runs is not one the
+/// client can use, and a registry that offered a command nothing answered
+/// would be a lie.
+fn plugin_commands() -> Vec<norte_code_protocol::commands::CommandSpec> {
+    crate::plugins::loaded().commands()
 }
 
 /// Every command the client answers to, in the order `/help` lists them.
@@ -170,7 +171,7 @@ pub(crate) fn built() -> Registry {
     // the one that wins, because the plugin was asked for by name and the
     // client was not.
     #[allow(clippy::too_many_lines)]
-    for plugin in plugins().commands() {
+    for plugin in plugin_commands() {
         registry.register(plugin);
     }
     registry

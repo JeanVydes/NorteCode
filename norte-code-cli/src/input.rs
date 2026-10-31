@@ -24,6 +24,19 @@ pub(crate) struct Attachment {
     pub(crate) name: String,
 }
 
+/// What one plugin install ended with.
+///
+/// It is left here by the task that ran the build, because the task cannot
+/// reach the frame: the outcome is picked up by the loop and said in the
+/// conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InstallReport {
+    /// The plugin that was being installed.
+    pub(crate) name: String,
+    /// The library that was installed, or why the install failed.
+    pub(crate) result: Result<String, String>,
+}
+
 /// One MCP server, as the sidebar renders it.
 ///
 /// It is a configured entry and not a connection: a server that is off, or that
@@ -280,6 +293,19 @@ struct PinnedInner {
     selection: Option<((u16, u16), (u16, u16))>,
     /// The rows the last frame painted, so a selection can be turned into text.
     painted: Vec<String>,
+    /// The plugin installs running now, by the name they are installing.
+    ///
+    /// A build takes minutes and the interface has to say so: a screen that
+    /// says nothing while a clone and a compile run reads as a client that
+    /// stopped answering, and the person has no way to tell it apart from one
+    /// that is broken.
+    installing: Vec<String>,
+    /// The plugin installs that finished, waiting to be reported.
+    ///
+    /// The install runs on a task of its own and the frame cannot be reached
+    /// from there, so the outcome waits here until a tick picks it up and says
+    /// it in the conversation.
+    installs_done: Vec<InstallReport>,
     /// The draft as the key reader last had it.
     ///
     /// It is a copy and not the buffer itself: the reader owns the buffer and
@@ -367,6 +393,42 @@ impl Pinned {
     /// who just ran `/refresh` is not typing.
     pub(crate) fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Records that a plugin install started.
+    ///
+    /// The name is what the footer shows while the build runs, so a person
+    /// reading the screen knows that the wait is a build and not a client that
+    /// stopped answering.
+    pub(crate) fn set_installing(&self, name: String) {
+        let mut inner = self.lock();
+        if !inner.installing.contains(&name) {
+            inner.installing.push(name);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Records that a plugin install ended, and what it ended with.
+    ///
+    /// The report waits here for the loop to pick it up: the task that ran the
+    /// build cannot reach the frame, and the frame is what says it in the
+    /// conversation.
+    pub(crate) fn finish_install(&self, report: InstallReport) {
+        let mut inner = self.lock();
+        inner.installing.retain(|name| name != &report.name);
+        inner.installs_done.push(report);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// The plugin installs running right now.
+    pub(crate) fn installing(&self) -> Vec<String> {
+        self.lock().installing.clone()
+    }
+
+    /// Takes the install reports nobody has said yet.
+    pub(crate) fn take_install_reports(&self) -> Vec<InstallReport> {
+        let mut inner = self.lock();
+        std::mem::take(&mut inner.installs_done)
     }
 
     /// Puts a question on screen, with the cursor on the first choice.
