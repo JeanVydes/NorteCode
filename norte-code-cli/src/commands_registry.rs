@@ -63,7 +63,7 @@ pub(crate) fn shared() -> &'static Registry {
 /// `NORTE_CODE_PLUGINS` names a directory, and the command names a binary in it.
 fn plugins() -> norte_code_protocol::plugins::Plugins {
     let mut plugins = norte_code_protocol::plugins::Plugins::new();
-    crate::plugin_loader::load(&mut plugins);
+    crate::plugin_loader::load_plugins(&mut plugins, None);
     plugins
 }
 

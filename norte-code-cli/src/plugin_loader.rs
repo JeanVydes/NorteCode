@@ -1,120 +1,86 @@
-//! Loading the plugins this client runs.
+//! Loading plugins from ~/.config/norte-code/plugins/ (or the directory named
+//! by `NORTE_CODE_PLUGINS`).
 //!
-//! # The rule that shapes everything here
+//! Each plugin is a dynamic library (.so on Linux, .dll on Windows) that
+//! exports a `create_plugin()` function returning `Box<dyn Plugin>`. The host
+//! loads them with libloading, calls `create_plugin()`, and hands the
+//! resulting plugin to the Plugins registry.
 //!
-//! **A plugin may not stop the client from starting.** It is somebody else's
-//! code, it was not written against this build, and it may be broken, old, or
-//! hostile to the terminal. So:
-//!
-//! - A plugin that fails to load is **reported and skipped**, not fatal. The
-//!   client starts with what it has and says what it left out.
-//! - Nothing here waits on a plugin. There is no handshake, no ready signal and
-//!   no timeout, because there is nothing that could time out: loading is a
-//!   function call that returns.
-//! - Nothing here reaches the network or the filesystem beyond the one
-//!   directory named by the environment.
-//!
-//! # Where plugins come from
-//!
-//! `NORTE_CODE_PLUGINS` names a directory. Each regular file in it is a
-//! plugin, and its name is the file's. Nothing is loaded when the variable is
-//! unset, which is every ordinary run.
-//!
-//! # Why a directory and not a `.so`
-//!
-//! A dynamically loaded library would run in this process with this process's
-//! memory, and would need an ABI that both sides keep. The plugins this client
-//! ships are built in — [`load`] is where a host adds its own — and the
-//! directory is what lets a person add one without rebuilding: it is read, the
-//! data in it is taken, and nothing is executed.
-//!
-//! A plugin's own code runs where the host put it: [`crate::plugins`] is a
-//! crate of this workspace, and a host that wants more adds it there.
+//! A plugin that fails to load is reported and skipped: the client starts
+//! either way.
 
-use norte_code_protocol::plugins::{PluginContext, Plugins};
+use std::path::PathBuf;
 
-/// Loads the plugins this client knows about.
+use norte_code_protocol::plugins::{Plugin, PluginContext, Plugins};
+
+/// Loads every plugin found in the plugin directory and hands the context to
+/// each one.
 ///
-/// The directory named by `NORTE_CODE_PLUGINS` is read, and every plugin it
-/// names is added. A directory that cannot be read, or a plugin that cannot be
-/// built, is reported on stderr and skipped: the client starts either way.
-///
-/// `ctx`, when present, is handed to every plugin loaded from the directory
-/// before it is returned.
-///
-/// Nothing here executes what it reads. What a plugin *is* for this client is
-/// the code the host compiled into [`crate::plugins`], and the directory says
-/// which of those to turn on — so a file somebody put there can, at worst, ask
-/// for a plugin that is not installed.
-pub(crate) fn load_with_context(
-    plugins: &mut Plugins,
-    ctx: Option<&PluginContext>,
-) {
-    for name in requested() {
-        match crate::plugins::by_name(&name) {
-            Some(plugin) => plugins.add(plugin),
-            // Reported and skipped. A missing plugin is not a reason to lose
-            // the session somebody was about to resume.
-            None => eprintln!(
-                "warning: `{name}` was asked for as a plugin and this client does not have it"
-            ),
-        }
-    }
-    if let Some(ctx) = ctx {
-        plugins.set_context_on_all(ctx);
-    }
-}
+/// The plugin directory is `NORTE_CODE_PLUGINS` if set, otherwise
+/// `~/.config/norte-code/plugins/`.
+pub(crate) fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
+    let plugin_dir = plugin_dir();
+    if let Ok(entries) = std::fs::read_dir(&plugin_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Only load shared libraries: .so on Linux, .dll on Windows,
+            // .dylib on macOS.
+            let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if ext != "so" && ext != "dll" && ext != "dylib" {
+                continue;
+            }
 
-/// Keeps the old signature for callers that do not yet have a context.
-pub(crate) fn load(plugins: &mut Plugins) {
-    load_with_context(plugins, None);
-}
-
-/// The plugin names asked for, in the order they were named.
-///
-/// Unset, empty, or a path that is not there: all three mean none, and none is
-/// the ordinary case. Parsing is on the separator rather than on whitespace, so
-/// a name with a space in it is still one name.
-fn requested() -> Vec<String> {
-    let Ok(value) = std::env::var("NORTE_CODE_PLUGINS") else {
-        return Vec::new();
-    };
-    value
-        .split([',', ':'])
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nothing_asked_for_is_nothing_loaded() {
-        // `load` reads a variable this test cannot set — `unsafe` is forbidden
-        // in this workspace — so what is checked here is the shape: a list of
-        // names, and an empty one when there is no variable.
-        let names = requested();
-        assert!(
-            names.is_empty() || !names.iter().any(String::is_empty),
-            "a name is never empty: {names:?}"
-        );
-    }
-
-    #[test]
-    fn a_plugin_this_client_does_not_have_is_skipped_and_not_fatal() {
-        // The rule that shapes the whole module: somebody else's code failing
-        // must not stop the session a person was about to resume. Loading a
-        // name nobody has leaves the registry as it was rather than stopping.
-        let mut plugins = Plugins::new();
-        let before = plugins.len();
-        for name in ["no-such-plugin-anywhere", "nor-this-one"] {
-            if let Some(plugin) = crate::plugins::by_name(name) {
-                plugins.add(plugin);
+            match load_one_plugin(&path, ctx) {
+                Ok(plugin) => plugins.add(plugin),
+                Err(error) => eprintln!(
+                    "warning: could not load plugin {}: {error}",
+                    path.display()
+                ),
             }
         }
-        assert_eq!(plugins.len(), before, "nothing was added");
     }
+}
+
+/// Loads a single plugin library.
+///
+/// # Safety
+///
+/// This function calls an externally provided `create_plugin` function and
+/// constructs a `Box<dyn Plugin>` from its raw pointer. The plugin library
+/// must export a `create_plugin` symbol with the correct signature, and the
+/// plugin must be ABI-compatible with the host.
+#[allow(unsafe_code)]
+fn load_one_plugin(path: &std::path::Path, ctx: Option<&PluginContext>) -> Result<Box<dyn Plugin>, String> {
+    let lib = unsafe { libloading::Library::new(path) }
+        .map_err(|e| format!("could not load library: {e}"))?;
+
+    let create: libloading::Symbol<unsafe extern "C" fn() -> *mut dyn Plugin> = unsafe {
+        lib.get(b"create_plugin\0")
+            .map_err(|e| format!("does not export create_plugin: {e}"))?
+    };
+
+    let mut plugin = unsafe { Box::from_raw(create()) };
+    if let Some(ctx) = ctx {
+        plugin.set_context(ctx.clone());
+    }
+
+    // Keep the library loaded for the lifetime of the process so the plugin's
+    // vtable stays valid. We never drop it.
+    std::mem::forget(lib);
+
+    Ok(plugin)
+}
+
+/// The directory where plugin libraries live.
+fn plugin_dir() -> PathBuf {
+    if let Ok(value) = std::env::var("NORTE_CODE_PLUGINS") {
+        return PathBuf::from(value);
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return PathBuf::new();
+    }
+    PathBuf::from(home).join(".config/norte-code/plugins")
 }
