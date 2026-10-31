@@ -13,10 +13,15 @@
 //! not picked up until it restarts, which is what the client says when one is
 //! installed.
 //!
+//! The plugins are loaded **before** the catalogue is read, because a plugin
+//! may offer providers and models of its own: what a plugin offers is in the
+//! catalogue for this run, and the files a person owns are not written.
+//!
 //! The host the plugins ask about the session is a handle that outlives the
-//! moment it was made: the service and the session come after the plugins are
-//! loaded, so a plugin is handed a handle that answers "nothing yet" until the
-//! session exists and answers properly afterwards.
+//! moment it was made: the service and the session come after the catalogue,
+//! and the catalogue comes after the plugins, so a plugin is handed a handle
+//! that answers "nothing yet" until the session exists and answers properly
+//! afterwards.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -36,9 +41,10 @@ static HOST: OnceLock<Arc<HostHandle>> = OnceLock::new();
 
 /// Loads the plugins and hands them the host.
 ///
-/// Called once, after the service and the session exist: a plugin that asks
-/// the host about the session needs them to be there. Calling it again is
-/// harmless — the first call is the one that loads.
+/// Called once, before the catalogue is read: a plugin that serves a model of
+/// its own has to be known before the catalogue is built, or the model would
+/// not be in it. Calling it again is harmless — the first call is the one
+/// that loads.
 pub(crate) fn init() -> &'static Plugins {
     LOADED.get_or_init(|| {
         let mut plugins = Plugins::new();

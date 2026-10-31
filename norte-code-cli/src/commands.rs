@@ -1125,6 +1125,10 @@ pub(crate) fn apply_extensions(config: &mut Config, values: &[String]) -> Result
 /// a missing file produces says which path and what to put in it, because the
 /// first run of a new install is exactly where this is reached.
 ///
+/// A plugin may offer providers and models of its own, and what it offers is
+/// added to the catalogue in memory: the files are not written, and what is
+/// there stays what the person chose.
+///
 /// # Errors
 ///
 /// Returns the catalogue's own message when a file is missing, unreadable, too
@@ -1135,6 +1139,12 @@ pub(crate) fn load_catalogue() -> Result<Catalog, String> {
     let mut catalog = Catalog::load(&providers, &models).map_err(|error| error.to_string())?;
     for warning in catalog.validate() {
         eprintln!("warning: {}", crate::text::terminal(&warning));
+    }
+    // The plugins are loaded before the catalogue is read, because what they
+    // offer belongs in it.
+    let offered = crate::plugins::init().catalogue();
+    for skipped in catalog.extend(offered.providers, offered.models) {
+        eprintln!("warning: {}", crate::text::terminal(&skipped));
     }
     Ok(catalog)
 }

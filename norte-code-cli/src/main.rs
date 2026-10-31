@@ -770,8 +770,9 @@ pub(crate) async fn new_session(
         );
     }
     // Hand the service and session to the plugins so they can reach them when
-    // they run a command or redraw. The handle they were loaded with is the
-    // one they keep, and it now knows where to look.
+    // they run a command or redraw. The plugins were loaded before the
+    // catalogue, because what they offer belongs in it; the handle they were
+    // given is the same one, and it now knows where to look.
     crate::plugins::attach(&service, Some(session.clone()));
     crate::interaction::refresh_plugin_sidebar(&mut renderer);
     if let Some(receiver) = input.as_mut() {
@@ -974,8 +975,9 @@ async fn resume_session(
     renderer.set_reasoning(reasoning_setting_label(&effective));
     let session = SessionKey::new(session_key);
     // Hand the service and session to the plugins so they can reach them when
-    // they run a command or redraw. The handle they were loaded with is the
-    // one they keep, and it now knows where to look.
+    // they run a command or redraw. The plugins were loaded before the
+    // catalogue, because what they offer belongs in it; the handle they were
+    // given is the same one, and it now knows where to look.
     crate::plugins::attach(&service, Some(session.clone()));
     crate::interaction::refresh_plugin_sidebar(&mut renderer);
     // The session may carry a reasoning override of its own — `/reasoning max`

@@ -8,6 +8,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A plugin may offer providers and models of its own. `Plugin::catalogue`
+  returns the same two shapes `providers.json` and `models.json` carry, and the
+  client adds them to the catalogue for the run: the files a person owns are
+  not written and do not have to be. The plugins are loaded before the
+  catalogue is read, because what they offer belongs in it, and what was left
+  out is reported — a model that silently did not arrive is a model somebody
+  will look for in the list and not find.
+
 - A plugin asks the host about the session and the host answers. `PluginHost`
   carries the session, the model, the provider, the title and the context the
   session is using, and the plugin asks when it needs them. The session is

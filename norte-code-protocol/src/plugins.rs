@@ -28,10 +28,11 @@
 //!
 //! Write to the terminal or block a frame — those remain the host's job.
 //! Everything else is possible: a plugin can ask the host about the session
-//! through the context the host hands it ([`PluginContext::host`]) and keep
-//! whatever state it wants in its own fields. The trait itself carries no
-//! state; a plugin that needs to remember something stores it in a field of its
-//! own type.
+//! through the context the host hands it ([`PluginContext::host`]), keep
+//! whatever state it wants in its own fields, and offer providers and models
+//! of its own to the catalogue ([`Plugin::catalogue`]). The trait itself
+//! carries no state; a plugin that needs to remember something stores it in a
+//! field of its own type.
 //!
 //! # Extending it
 //!
@@ -45,6 +46,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::SessionKey;
+use crate::catalog::{Model, Provider};
 use crate::commands::{CommandSpec, Invocation};
 
 /// The version of the plugin interface a plugin was built against.
@@ -60,8 +62,12 @@ use crate::commands::{CommandSpec, Invocation};
 ///
 /// Version 2 is the host that answers about the session by itself: version 1
 /// asked for the session key with every question, and a plugin built against
-/// it would call methods this host no longer has.
-pub const PLUGIN_ABI_VERSION: u32 = 2;
+/// it would call methods this host no longer have.
+///
+/// Version 3 is the plugin that offers providers and models: version 2 knew
+/// nothing about a catalogue, and a plugin built against it has no method to
+/// answer with.
+pub const PLUGIN_ABI_VERSION: u32 = 3;
 
 /// The symbol a plugin exports to say which version it was built against.
 ///
@@ -133,6 +139,31 @@ pub trait Plugin: Send + Sync {
     /// The default implementation ignores the context. A plugin that wants the
     /// host overrides this and keeps it.
     fn set_context(&mut self, _ctx: PluginContext) {}
+
+    /// The providers and models this plugin offers the catalogue.
+    ///
+    /// A plugin that serves a model the catalogue does not know offers it
+    /// here, and it is in the catalogue for this run: the files a person owns
+    /// are not written and do not have to be. The shapes are the ones the two
+    /// files carry, so a plugin that has the JSON hands it over as it is.
+    fn catalogue(&self) -> Catalogue {
+        Catalogue::default()
+    }
+}
+
+/// What a plugin offers the catalogue.
+///
+/// The same two shapes `providers.json` and `models.json` carry, so a plugin
+/// that has them as JSON deserializes them and hands them over: the format a
+/// person writes is the format a plugin speaks.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Catalogue {
+    /// The providers, by id.
+    #[serde(default)]
+    pub providers: BTreeMap<String, Provider>,
+    /// The models, in the order the plugin listed them.
+    #[serde(default)]
+    pub models: Vec<Model>,
 }
 
 /// How much of a model's context a session is using.
@@ -366,6 +397,32 @@ impl Plugins {
         for plugin in &mut self.loaded {
             plugin.set_context(ctx.clone());
         }
+    }
+
+    /// What every loaded plugin offers the catalogue, merged.
+    ///
+    /// A provider two plugins offer is one provider and a model two plugins
+    /// offer is one model: the first one wins and the second is left out,
+    /// because two entries with the same id would leave the catalogue saying
+    /// one thing and meaning another.
+    #[must_use]
+    pub fn catalogue(&self) -> Catalogue {
+        let mut catalogue = Catalogue::default();
+        let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for plugin in &self.loaded {
+            let offered = plugin.catalogue();
+            for (id, provider) in offered.providers {
+                catalogue.providers.entry(id).or_insert(provider);
+            }
+            for model in offered.models {
+                let key = model.key();
+                if !keys.insert(key) {
+                    continue;
+                }
+                catalogue.models.push(model);
+            }
+        }
+        catalogue
     }
 }
 
@@ -627,5 +684,58 @@ mod tests {
             window: None,
         };
         assert_eq!(usage.share(), None);
+    }
+
+    /// A plugin that offers a provider and a model of its own.
+    struct Offering;
+
+    impl Plugin for Offering {
+        fn name(&self) -> &'static str {
+            "offering"
+        }
+
+        fn catalogue(&self) -> Catalogue {
+            let provider = Provider {
+                name: "demo".to_owned(),
+                doc: None,
+                environment_keys: vec!["DEMO_API_KEY".to_owned()],
+                wires: Vec::new(),
+            };
+            let mut model = Model {
+                provider_id: "demo".to_owned(),
+                id: "demo-model".to_owned(),
+                ..Model::default()
+            };
+            model.name = "Demo model".to_owned();
+            Catalogue {
+                providers: BTreeMap::from([("demo".to_owned(), provider)]),
+                models: vec![model],
+            }
+        }
+    }
+
+    #[test]
+    fn a_plugin_offers_its_own_providers_and_models() {
+        // The catalogue is the sole authority on a model, and a plugin that
+        // serves one has to be able to say so without the person writing a
+        // file for it.
+        let mut plugins = Plugins::new();
+        plugins.add(Box::new(Offering));
+        let catalogue = plugins.catalogue();
+        assert_eq!(catalogue.providers.len(), 1);
+        assert_eq!(catalogue.models.len(), 1);
+        assert_eq!(catalogue.models[0].key(), "demo/demo-model");
+    }
+
+    #[test]
+    fn two_plugins_offering_the_same_provider_leave_one() {
+        // Two entries with the same id would leave the catalogue saying one
+        // thing and meaning another.
+        let mut plugins = Plugins::new();
+        plugins.add(Box::new(Offering));
+        plugins.add(Box::new(Offering));
+        let catalogue = plugins.catalogue();
+        assert_eq!(catalogue.providers.len(), 1);
+        assert_eq!(catalogue.models.len(), 1, "the model is one as well");
     }
 }

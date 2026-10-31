@@ -576,6 +576,54 @@ impl Catalog {
         Ok(catalog)
     }
 
+    /// Adds the providers and models a plugin offered.
+    ///
+    /// What is added lives for this run: the files a person owns are not
+    /// written and do not have to be. A provider the files already carry is
+    /// left as it is — the file is what the person chose — and so is a model
+    /// whose key is taken.
+    ///
+    /// What was left out is returned, and it says why: a model that silently
+    /// did not arrive is a model somebody will look for in the list and not
+    /// find.
+    pub fn extend(
+        &mut self,
+        providers: std::collections::BTreeMap<String, Provider>,
+        models: Vec<Model>,
+    ) -> Vec<String> {
+        let mut skipped = Vec::new();
+        for (id, provider) in providers {
+            if self.providers.contains_key(&id) {
+                skipped.push(format!("provider {id}: the catalogue already carries one"));
+                continue;
+            }
+            self.providers.insert(id, provider);
+        }
+        for mut model in models {
+            if !self.providers.contains_key(&model.provider_id) {
+                skipped.push(format!(
+                    "model {}: no provider named `{}`",
+                    model.id, model.provider_id
+                ));
+                continue;
+            }
+            let key = model.key();
+            if self.index.contains_key(&key) {
+                skipped.push(format!("model {key}: the catalogue already carries one"));
+                continue;
+            }
+            if model.name.trim().is_empty() {
+                model.name.clone_from(&model.id);
+            }
+            if model.canonical_slug.trim().is_empty() {
+                model.canonical_slug.clone_from(&key);
+            }
+            self.index.insert(key, self.models.len());
+            self.models.push(model);
+        }
+        skipped
+    }
+
     /// Fills in the names a file left empty and indexes the models.
     fn normalize(&mut self) -> Result<(), CatalogError> {
         for (id, provider) in &mut self.providers {
@@ -996,5 +1044,46 @@ mod tests {
         )
         .expect_err("typo");
         assert!(error.to_string().contains("temperatur"), "{error}");
+    }
+
+    #[test]
+    fn what_a_plugin_offers_joins_the_catalogue() {
+        // The files a person owns stay what they are, and what a plugin serves
+        // is in the catalogue for this run.
+        let mut catalog = catalog();
+        let skipped = catalog.extend(
+            BTreeMap::from([("demo".to_owned(), provider("demo"))]),
+            vec![model("demo-1", "demo")],
+        );
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(catalog.model_count(), 3);
+        assert!(
+            catalog.find("demo", "demo-1").is_some(),
+            "the plugin's model is in the catalogue"
+        );
+    }
+
+    #[test]
+    fn what_the_files_already_carry_is_not_replaced() {
+        // The person chose what the files say, and a plugin that offers the
+        // same thing does not overwrite it: what was left out is reported.
+        let mut catalog = catalog();
+        let skipped = catalog.extend(
+            BTreeMap::from([("openai".to_owned(), provider("other"))]),
+            vec![model("gpt-4o", "openai")],
+        );
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert_eq!(catalog.model_count(), 2);
+    }
+
+    #[test]
+    fn a_model_naming_a_provider_nobody_offers_is_left_out() {
+        // A model with no provider is a model nobody can call, and it is
+        // reported rather than carried.
+        let mut catalog = catalog();
+        let skipped = catalog.extend(BTreeMap::new(), vec![model("orphan", "nowhere")]);
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].contains("nowhere"), "{skipped:?}");
+        assert_eq!(catalog.model_count(), 2);
     }
 }
