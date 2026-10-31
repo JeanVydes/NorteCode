@@ -1,10 +1,10 @@
 # Architecture
 
 Norte Code is a host around the Norte agent engine. Norte owns the durable
-session, the turn state machine, streaming, tool dispatch, policies and the
-commit point. Norte Code owns the agent loop that decides when to call the
-engine again, the model catalogue, approvals, compaction, budgets, telemetry,
-the sandbox and the user interfaces.
+session, the turn state machine, streaming, tool dispatch and the commit point.
+Norte Code owns the agent loop that decides when to call the engine again, the
+model catalogue, approval rules, compaction, budgets, telemetry, the sandbox and
+the user interfaces.
 
 The dependency rule is one-way: Norte Code depends on Norte and never vendors,
 forks or patches it. If a change belongs in Norte, it is reported upstream
@@ -14,13 +14,8 @@ instead of worked around here.
 
 | Crate | Responsibility |
 | --- | --- |
-| `norte-code-protocol` | Versioned serde types for `ClientRequest` and `ServerEvent`. No Norte type appears on this wire. |
-| `norte-code-agent` | `Service`: sessions, engines, agent loop, compaction, retries, approvals, sandbox, telemetry, skills. |
-| `norte-code-config` | Typed config, merge, validation, approval-rule updates and secret resolution. |
-| `norte-code-catalog` | The catalogue's schema — providers, models, wires — read from two local files, plus the mapping to Norte capabilities. |
-| `norte-code-cost` | Cost ledger and budget evaluation. Provider-reported amounts only. |
-| `norte-code-tools` | Host tools: `grep`, `todo`, `ask_user`, `web_fetch`. |
-| `norte-code-store-sqlite` | Norte `Store` + `BlobStore`, logical sessions, approvals, questions, effects, costs and request telemetry. |
+| `norte-code-protocol` | Versioned serde types for `ClientRequest` and `ServerEvent`, plus the configuration, the catalogue, the host tools, the cost ledger and the SQLite store. No Norte type appears on this wire. |
+| `norte-code-agent` | `Service`: sessions, engines, agent loop, compaction, retries, approval rules, sandbox, telemetry, skills. |
 | `norte-code-cli` | The `norte-code` command and its interactive prompt. |
 
 
@@ -38,7 +33,7 @@ Service ────────────────► Catalogue (providers
    │                    ModelSpec / capabilities
    ▼
 Norte Engine (one model, one Norte session)
-   ├─ policies: workspace root, approval mode, budgets
+   ├─ interceptors: steering, approval rules, screenshots
    ├─ tools: read/write/edit/command + host tools + skills
    ├─ layers: budget, compaction, telemetry
    └─ observers: telemetry counters
@@ -47,7 +42,7 @@ Norte Engine (one model, one Norte session)
 SQLite store
    ├─ Norte sessions and nodes (Norte's own schema)
    ├─ logical_sessions (client key → Norte session, stats, rules)
-   ├─ approvals / questions / effects
+   ├─ questions / effects
    ├─ costs (one row per billed request)
    └─ requests (one row per provider attempt)
 ```
@@ -70,8 +65,9 @@ The host loop is:
 2. Drain engine events. Text and reasoning deltas are forwarded; tool calls are
    announced and their results are read from `engine.history()` after the tool
    finishes.
-3. If the turn parks for an approval, persist the parked state and let the
-   client approve or deny. The decision resumes the same turn.
+3. A tool call the approval rules refuse is answered with the rule's reason: the
+   model reads it as a failed call and the turn goes on. Nothing waits for a
+   person, so there is no parked state and no decision to resume.
 4. If the turn ends with tool calls and the model needs another iteration, call
    the engine again with the same session. Iterations are unlimited unless
    `max_iterations` is set.
@@ -89,9 +85,9 @@ versioned shape. Clients never receive Norte IDs or Norte event types: the
 service maps them once. New optional fields use `#[serde(default,
 skip_serializing_if = "Option::is_none")]` so older clients keep working.
 
-The CLI is a normal client of the same protocol. Approvals and questions are
-durable protocol objects, not terminal-only state. A non-interactive client
-leaves the session parked instead of guessing a decision.
+The CLI is a normal client of the same protocol. A question a tool asks is a
+durable protocol object, not terminal-only state, so a client that reconnects
+can still answer it.
 
 ## System prompt
 
@@ -135,7 +131,7 @@ Safety invariants:
 
 - A suffix never starts with a tool result whose tool call was dropped.
 - Eager compaction runs only at a safe model-request boundary, after a complete
-  tool result, never while an approval is pending, and at most once per turn.
+  tool result, and at most once per turn.
 - A failed summary leaves the old history, the active session id and the phase
   unchanged.
 - The new session id is shown to the client. The summary's reported cost enters
@@ -145,32 +141,38 @@ Safety invariants:
 `/compact` uses the same path on demand. `compaction.trigger` selects `idle`
 (default, at a turn boundary) or `eager` (first safe boundary inside a turn).
 
-## Approvals and rules
+## Approval rules
 
-The approval policy is consulted before any effectful tool runs. Tool names can
-be allowed or denied at two scopes:
+A rule is consulted immediately before a tool call runs. It is not a prompt and
+does not park the turn: a denied call is answered with the rule's reason, which
+the model reads like a failed call and adapts to. Tool names can be allowed or
+denied at two scopes:
 
 - Global rules live in the user config (`approvals.allow` / `approvals.deny`).
 - Session rules live in the logical session and are persisted with it.
 
 Denial wins over allow, and a global deny wins over a session allow. The
-interactive prompt also has one-shot and tool-wide choices. Session choices
-become Norte grants; session rules are the durable host-level form. The
-interactive commands `/allow <tool> [session|global]` and `/deny <tool>
-[session|global]` edit the same rules; an allow rule replaces an existing deny
-for that tool, which is how a deny is revoked. `/refresh` re-scans skill roots
-and rebuilds the tool registry for the next turn.
+interactive commands `/allow <tool> [session|global]`
+and `/deny <tool> [session|global]` edit the same rules; an allow rule replaces
+an existing deny for that tool, which is how a deny is revoked. `/refresh`
+re-scans skill roots and rebuilds the tool registry for the next turn.
 
-An approval panel always shows the tool and the arguments the model requested.
-The OS sandbox is applied later, at execution time, so the human approves the
+The rule is evaluated by a Norte `TurnInterceptor` at `ToolCall`, which is the
+point where the call's name, id and arguments are known and nothing has run.
+That is also why a refused call still opens and closes in the conversation: the
+engine reports it started and finished as a failure, and the host records the
+reason so the client can show it.
+
+The tool call always shows the name and arguments the model requested. The OS
+sandbox is applied later, at execution time, so what a person reads is the
 original command, not a rewritten launcher.
 
 ## Command sandbox
 
 The sandbox is an executor wrapper around Norte's `CommandTool`, not a policy.
 The tool keeps its name, schema and arguments; only the process invocation is
-rewritten. This keeps approvals, history, the effect journal and telemetry
-honest.
+rewritten. This keeps the approval rules, history, the effect journal and
+telemetry honest.
 
 Linux uses bubblewrap:
 

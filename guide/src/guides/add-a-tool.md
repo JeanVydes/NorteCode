@@ -68,17 +68,17 @@ self.register_tool(&mut tools, WordCount.into_declaration())?;
 `register_tool` wraps the executor so the renderer can recover the effective
 arguments and the text the model will see.
 
-## 3. Decide the policy
+## 3. Decide the rules
 
-Read-only tools normally need no approval. Effectful tools need more:
+Read-only tools normally need no rule. Effectful tools need more:
 
 - Add the tool name to `JOURNALED_TOOLS` in `service/effects.rs` if a crash could
   repeat a side effect.
-- Make sure the approval policy asks for it, or document why it is safe to run
-  unattended.
 - Resolve paths through the workspace policy; do not pass raw model paths to the
   filesystem.
 - Register any secrets with `with_secrets` if the tool can print them.
+
+A tool named in `approvals.deny` is refused before it runs, whatever its safety.
 
 ## 4. Test it
 

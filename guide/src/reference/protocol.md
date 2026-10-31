@@ -37,10 +37,6 @@ Code's stable id, not a Norte `SessionId`.
 | `Steer { session, text, id }` | Steer a message into the running turn. The name is optional. |
 | `CancelTurn { session }` | Ask the running turn to stop. |
 | `Resume { session }` | Continue a parked or interrupted session. |
-| `Approve { session, approval, arguments, scope, remember }` | Approve a parked call. |
-| `Deny { session, approval, reason, scope }` | Deny a parked call. |
-| `Revoke { session, approval, grant }` | Revoke a live grant. |
-| `ListGrants { session }` | List the approval grants a session holds. |
 | `AnswerQuestion { session, question, answer }` | Answer a parked question. |
 | `SetModel { session, model }` | Switch the model at a turn boundary. |
 | `SetReasoning { session, scope, reasoning }` | Set reasoning for the session or one message. |
@@ -62,8 +58,7 @@ acknowledgement.
 `SetModel` applies the switch right away when the session is idle and answers
 with `ModelChanged`. When the session is busy it is accepted, persisted and
 applied at the next turn boundary; the answer is `ModelQueued` and the switch
-emits `ModelChanged` when it is applied. An approval or question continuation
-is not a turn boundary.
+emits `ModelChanged` when it is applied.
 
 `Steer` reaches the request the session is already making. The message is
 persisted and the engine appends it to the history before the next request of
@@ -84,7 +79,6 @@ committing and the client reads it as a decision, not as a failure.
 | `TurnStarted` | A turn started. |
 | `Delta { turn, delta }` | Text, reasoning or refusal delta. |
 | `ToolStarted`, `ToolFinished` | Tool activity, arguments, output, error and duration. |
-| `ApprovalRequested`, `ApprovalResolved` | A parked decision and its outcome. |
 | `RequestReconstructed` | Usage, reported cost, timing, cache, truncation and tools for one request. |
 | `Committed` | A commit landed at `version`. |
 | `CompactionStarted`, `CompactionFinished` | Compaction progress and the new Norte session id. |
@@ -95,8 +89,6 @@ committing and the client reads it as a decision, not as a failure.
 | `TurnStopped` | The host ended the turn on purpose, with a reason. |
 | `CatalogUpdated`, `ModelList` | Catalogue refresh and model list. |
 | `SkillList`, `SkillsUpdated` | Skill discovery and refresh. |
-| `GrantRevoked` | A grant was revoked. |
-| `GrantList` | The approval grants a session holds, with their id, tool, scope and state. |
 | `QuestionAsked`, `QuestionAnswered` | A parked question and its answer. |
 | `RetryScheduled` | A transient failure will be retried on the same session. |
 | `TurnFinished` | The turn ended with a phase and a `committed` flag. |

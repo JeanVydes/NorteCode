@@ -25,10 +25,9 @@ The useful terminal frames are:
 | --- | --- |
 | `turn_finished` | The turn ended. `committed` says whether an assistant message landed. |
 | `error` | The request failed terminally. |
-| `approval_requested` | The turn is parked until a client decides. |
 | `question_asked` | The turn is parked until a client answers. |
 
-A script that only reads stdout cannot approve a tool. If stdin is not a
+A script that only reads stdout cannot influence a tool call. If stdin is not a
 terminal, the CLI leaves the session parked rather than guessing. Use the
 `Service` API directly for a fully programmatic client.
 

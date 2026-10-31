@@ -1,21 +1,21 @@
-# Tools and approvals
+# Tools and rules
 
 ## The tool set
 
 Every engine gets the same configured registry:
 
-| Tool | What it does | Approval |
-| --- | --- | --- |
-| `read` | Read a file. | No |
-| `write` | Write a file. | Yes in `ask` and `auto-edit` |
-| `edit` | Replace exact text in a file. | Yes in `ask` and `auto-edit` |
-| `shell` | Run a shell script, with a cleared environment. | Yes in every mode except `yolo` |
-| `grep` | Search file contents, with a glob to narrow the files. | No |
-| `todo` | Maintain the session's todo list. | No |
-| `ask_user` | Park the turn and ask the human. | No |
-| `web_fetch` | Fetch a URL; opt-in. | No |
-| `skill` / `skill_resource` | Load a discovered Agent Skill or one of its resources. | No |
-| `skill_script` | Run a skill script; opt-in and outside the command sandbox. | Yes |
+| Tool | What it does |
+| --- | --- |
+| `read` | Read a file. |
+| `write` | Write a file. |
+| `edit` | Replace exact text in a file. |
+| `shell` | Run a shell script, with a cleared environment. |
+| `grep` | Search file contents, with a glob to narrow the files. |
+| `todo` | Maintain the session's todo list. |
+| `ask_user` | Park the turn and ask the human. |
+| `web_fetch` | Fetch a URL; opt-in. |
+| `skill` / `skill_resource` | Load a discovered Agent Skill or one of its resources. |
+| `skill_script` | Run a skill script; opt-in and outside the command sandbox. |
 
 Tool output is bounded before it crosses the wire. Failed tools return an error
 text the model can read; they do not abort the engine.
@@ -43,22 +43,11 @@ re-bill every message in it. Editing the list changes what the next session
 gets; it does not reach back into one that already exists, and a resumed session
 keeps the tools it was made with even if the file has moved on.
 
-## Approval modes
-
-`approval_mode` selects the baseline:
-
-| Mode | Behaviour |
-| --- | --- |
-| `ask` (default) | `write`, `edit`, `shell` and `skill_script` ask first. |
-| `auto-edit` | Edits run; `shell` and `skill_script` still ask. |
-| `yolo` | Every tool runs without asking. |
-
-The mode is a host policy, not a promise about the model. A deny rule wins even
-in `yolo`.
-
 ## Rules and scopes
 
-Rules are tool-wide and live at two scopes:
+A rule names a tool and says whether calls to it run. Denial wins over allow,
+and a global deny wins over a session allow. Rules are tool-wide and live at two
+scopes:
 
 - **Global** rules in the user config's `approvals.allow` and `approvals.deny`.
 - **Session** rules stored with the logical session.
@@ -78,35 +67,16 @@ The scope defaults to `session`. The name is the one the model calls the tool
 by, which is what `/tools` prints beside each rule: a rule that names a tool
 nobody has does nothing, and does not say so.
 
-## The approval panel
+## What a denied call looks like
 
-When a call parks, the client shows the tool, a semantic preview of its arguments
-and, for commands, whether a sandbox will wrap it. The terminal choices are:
+The engine consults the rule immediately before a tool call runs, when the
+call's name, id and arguments are known and nothing has happened. A denied call
+is answered right away: the model reads the rule's reason like a failed call
+and adapts. Nothing waits on stdin, no turn parks, and the engine reports the
+call started and finished as a failure so the live view shows what never ran.
 
-| Key | Meaning |
-| --- | --- |
-| `y` | Allow this call once. |
-| `s` | Allow this tool for the session. |
-| `a` | Allow this tool always (global). |
-| `n` | Deny this call once. |
-| `ns` | Deny this tool for the session. |
-| `ng` | Deny this tool always (global). |
-
-A message after a denial (`n <message>`, `ns <message>`, `ng <message>`) is sent
-to the model as human feedback instead of a bare refusal.
-
-Approval resumes the same turn. Input comes from the terminal, never from the
-model. With no interactive terminal the session stays parked, which is what a
-JSONL script expects.
-
-## Grants and durable denials
-
-A session allow becomes a Norte grant, so the engine does not ask again for the
-same scope. Session denials are persisted with the logical session and survive a
-restart. Global rules are written to the user config.
-
-A one-shot approval is not revocable through a command today; session and global
-allow rules can be changed with `/allow` and `/deny`.
+A denied call still opens in the transcript: its result is committed with the
+tool results, so a replay sees what the model saw.
 
 ## Questions
 

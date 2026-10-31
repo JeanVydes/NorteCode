@@ -23,22 +23,21 @@ the old one as `compacted_from`.
 
 ## Phases
 
-The protocol exposes four phases:
+The protocol exposes three phases:
 
 | Phase | Meaning |
 | --- | --- |
 | `Idle` | Nothing is in flight. A new message may start a turn. |
 | `Streaming` | A turn is running. |
 | `AwaitingTool` | A tool call is authorised and about to run. |
-| `AwaitingApproval` | A tool call is parked until a human decides. |
 
 Questions are delivered as `QuestionAsked` while the turn is parked on the
 question broker; they do not add a fifth public phase.
 
 A process that dies while a session is `Streaming` leaves a stale row. On the
 next load the service sees that no process can be streaming a session it just
-read and repairs the Norte store to `Idle`. Parked approvals and questions are
-not repaired away: they are durable and resumable.
+read and repairs the Norte store to `Idle`. Parked questions are not repaired
+away: they are durable and resumable.
 
 ## A turn
 
@@ -48,8 +47,7 @@ what happened". The host loop is:
 1. Build an engine for the session's current model.
 2. Start or resume the Norte turn.
 3. Drain engine events and map them to protocol events.
-4. If a tool needs approval, persist the parked state and wait for the client.
-5. If the model asks for another iteration, call the engine again with the same
+4. If the model asks for another iteration, call the engine again with the same
    session and the tool results in history.
 6. Settle usage, cost, telemetry, budget notices and the session phase.
 

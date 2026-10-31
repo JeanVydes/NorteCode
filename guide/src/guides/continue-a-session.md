@@ -20,8 +20,8 @@ norte-code resume <key>
 `--session` reuses the existing history and approval rules. Without it, `run`
 starts a new session.
 
-If the session is parked, stopped by a budget or interrupted, `run --session`
-does not bypass the park; use `resume`.
+If the session is stopped by a budget or interrupted, `run --session`
+does not bypass the stop; use `resume`.
 
 ## Resume
 
@@ -31,9 +31,9 @@ norte-code resume <key> --budget 50000 --budget-unit tokens
 norte-code resume <key> --interactive
 ```
 
-`resume` continues a parked approval, a pending question, a budget stop or a
-Ctrl-C interruption. It re-emits approvals that are still waiting and replays a
-pending question so an answer given after a restart reaches the parked tool.
+`resume` continues a stopped session, a pending question, a budget stop or a
+Ctrl-C interruption. It replays a pending question so an answer given after a
+restart reaches the parked tool.
 
 `resume --budget` replaces the session budget before continuing. That is how a
 session stopped by `action = "stop"` is allowed to proceed.
@@ -65,7 +65,6 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | `/reasoning <setting> [session\|message]` | Set the reasoning effort. |
 | `/allow <tool> [session\|global]` | Allow a tool without asking. |
 | `/deny <tool> [session\|global]` | Refuse a tool without asking. |
-| `/revoke [grant-or-tool]` | List or revoke an approval grant. |
 | `/tab [name\|number]` | Switch tab (chat, todo). Bare lists them; during a turn it cycles. |
 | `/mcp [list\|enable\|disable] [server]` | List the MCP servers, or switch one. |
 | `/jobs [list\|check\|stop] [id]` | List the background jobs, read one, or stop one. |
@@ -76,7 +75,7 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | `/exit`, `/quit` | Leave. |
 
 Ctrl-D or Ctrl-C at the prompt also leaves. Commands with no argument at all —
-`/tab`, `/model`, `/provider`, `/mcp`, `/revoke`, `/jobs` — list what they can
+`/tab`, `/model`, `/provider`, `/mcp`, `/jobs` — list what they can
 act on instead of erroring, so asking is never a mistake.
 
 A question from the model is answered the same way the startup menu is: the
@@ -98,8 +97,8 @@ Ctrl-C during a turn cancels it: the running tool is asked to stop and the turn
 finishes uncommitted. A second Ctrl-C within five seconds only repeats "still
 cancelling"; after five seconds it force-exits. The session stays resumable.
 
-Ctrl-C at an approval panel or question prompt does **not** submit a decision.
-The approval or question stays pending and the command prints how to resume.
+Ctrl-C at a question prompt does **not** submit an answer.
+The question stays pending and the command prints how to resume.
 
 ## Compaction changes the engine, not the key
 

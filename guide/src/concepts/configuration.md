@@ -42,7 +42,6 @@ command tool.
 | `retry` | Bounded retries for transient provider failures. |
 | `reasoning` | The default reasoning setting. |
 | `system_prompt` | A replacement base prompt; `AGENTS.md` is appended after it. |
-| `approval_mode` | `ask`, `auto-edit` or `yolo`. |
 | `approvals` | Global allow/deny tool rules. |
 | `max_iterations` | Model iterations per turn; `null` is unlimited. |
 | `extensions` | Vendor-specific request fields. |
@@ -62,7 +61,7 @@ long-form version.
 If the workspace root contains a regular `AGENTS.md`, the service appends it to
 the base prompt. It is untrusted input: the read is capped at 64 KiB, only a
 regular file is accepted, and the instructions do not override the user's
-request, approvals or budgets.
+request, approval rules or budgets.
 
 `--system-prompt` overrides the base prompt for one run. `system_prompt` in the
 config overrides it by default. `--debug` prints where the effective prompt came
@@ -95,7 +94,6 @@ with `--extension 'openai.chat:provider.order=["deepinfra"]'`.
 
 ## Defaults that matter
 
-- `approval_mode`: `ask`.
 - `compaction.enabled`: `true`, threshold `0.90`, trigger `idle`, keep `6`.
 - `retry.max_attempts`: `2`, backoff `1000 ms`, max delay `30000 ms`.
 - `skills.enabled`: `true`, scripts and allowed-tools off.

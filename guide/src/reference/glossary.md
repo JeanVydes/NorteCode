@@ -4,9 +4,6 @@
 a tool result. Norte owns one engine turn; Norte Code owns the iterations around
 it.
 
-**Approval** — A durable decision that lets or refuses a parked tool call. It is
-bound to the call and its arguments.
-
 **Budget** — A message, session or daily limit in USD, tokens or requests. `warn`
 continues, `stop` ends the turn uncommitted, `ask` currently behaves like a stop.
 
@@ -26,8 +23,8 @@ sandbox declaration, both built per turn.
 **Effect journal** — Intent/finish records for effectful tools. A call still at
 intent on startup is refused rather than replayed.
 
-**Engine** — Norte's durable turn machine: one model, one session, policies,
-tools and a commit point.
+**Engine** — Norte's durable turn machine: one model, one session, tools and a
+commit point.
 
 **Title** — A session's name, written once from the first message the person
 sent. It is asked for in a scratch session of its own — one instruction, no
@@ -37,9 +34,6 @@ demand.
 
 **Event** — A `ServerEvent` on the client wire. It answers a `request_id` and may
 carry a logical session key.
-
-**Grant** — A live approval held by Norte for a scope (once, tool, session or
-always).
 
 **Logical session** — Norte Code's stable `SessionKey`. It survives model
 switches and compaction.

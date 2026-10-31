@@ -9,12 +9,12 @@ code aspires to.
 - The in-process service with logical sessions, streaming, cancellation,
   model switching (immediate when idle, queued for the next turn boundary when
   busy), session and one-message reasoning overrides, steering into the running
-  turn, compaction, retries, approvals, questions, budgets, telemetry and the
+  turn, compaction, retries, approval rules, budgets, telemetry and the
   SQLite directory.
 - The CLI: `run`, `resume`, `models`, `skills`, `sessions`, `cost`, `telemetry`,
-  interactive mode, JSONL, approvals, budgets and sandbox flags.
+  interactive mode, JSONL, approval rules, budgets and sandbox flags.
 - The interactive commands `/help`, `/compact`, `/allow`, `/deny`,
-  `/reasoning`, `/model`, `/revoke`, `/refresh` and `/exit`, with dimmed
+  `/reasoning`, `/model`, `/refresh` and `/exit`, with dimmed
   suggestions for the command and its arguments. Text typed while a turn runs
   is steered into that turn and reaches the request it is about to make.
 - The host tools, Agent Skills discovery, workspace policy and the command
@@ -27,9 +27,9 @@ code aspires to.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 - `cargo test --workspace` passes all workspace suites in parallel.
 - Hermetic service tests cover the agent loop, compaction rollback, costs and
-  budgets, retries, approvals, session rules, the effect journal and protocol
+  budgets, retries, approval rules, session rules, the effect journal and protocol
   mapping.
-- CLI tests cover command parsing, approval parsing, the todo footer widget,
+- CLI tests cover command parsing, the todo footer widget,
   footer rendering and the command suggestion engine.
 - Linux bubblewrap 0.13.0 was exercised: writes outside the workspace failed,
   `/tmp` was private and the network was loopback-only by default.

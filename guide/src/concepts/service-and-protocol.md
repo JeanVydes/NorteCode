@@ -81,7 +81,7 @@ The important categories are:
 | --- | --- |
 | Session lifecycle | `SessionCreated`, `SessionList`, `SessionForked`, `SessionDeleted` |
 | A turn | `TurnStarted`, `Delta`, `Committed`, `TurnFinished` |
-| Tool activity | `ToolStarted`, `ToolFinished`, `ApprovalRequested`, `ApprovalResolved` |
+| Tool activity | `ToolStarted`, `ToolFinished` |
 | Questions | `QuestionAsked`, `QuestionAnswered` |
 | Accounting | `RequestReconstructed`, `CostUpdated`, `BudgetWarning`, `BudgetExceeded` |
 | Control | `ModelChanged`, `RetryScheduled`, `Error` |

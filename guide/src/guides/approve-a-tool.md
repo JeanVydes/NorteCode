@@ -1,39 +1,13 @@
 # Approve a tool
 
-## What parks
+## What a rule decides
 
-In `ask` (the default), `write`, `edit`, `shell` and `skill_script` park before
-running. In `auto-edit`, writes and edits run; commands and skill scripts still
-park. `yolo` runs everything. A global or session deny wins over the mode.
+A rule names a tool and says whether calls to it run. Denial wins over allow,
+and a global deny wins over a session allow. A rule that names a tool nobody has
+does nothing, and says nothing about having done it.
 
 The names are the ones the model calls the tools by, and they are what
-`/tools` prints: a rule that names a tool nobody has does nothing, and says
-nothing about having done it.
-
-When a call parks, the turn is durable. You can answer now, or exit and resume
-later.
-
-## The prompt
-
-The terminal shows the tool, a semantic preview of the arguments and, for a
-command, the sandbox badge. The options are:
-
-```text
-y    allow once
-s    allow this tool for the session
-a    allow this tool always
-n    deny once
-ns   deny this tool for the session
-ng   deny this tool always
-```
-
-A message after a denial reaches the model as feedback:
-
-```text
-n use the existing helper instead
-```
-
-`y`, `s` and `a` do not accept a message.
+`/tools` prints.
 
 ## Rules without a pending call
 
@@ -46,9 +20,8 @@ In the interactive prompt:
 ```
 
 `/tools` lists every tool with the state of its rule — `allow`, `deny` or `ask`
-— and whether the rule is this session's, every session's, or the approval
-mode's. It is the fastest way to check that a rule you wrote names a tool that
-exists.
+— and whether the rule is this session's or every session's. It is the fastest
+way to check that a rule you wrote names a tool that exists.
 
 The scope defaults to `session`. Global rules are written to the user config's
 `approvals.allow` / `approvals.deny`; session rules are stored with the logical
@@ -68,30 +41,22 @@ The same rules can be written directly:
 ## Deny is sticky
 
 Denial wins over allow when both name a tool. A global deny wins over a session
-allow. A deny rule is not a suggestion: the engine does not execute the call.
+allow. A deny rule is not a suggestion: the engine does not execute the call,
+and the model reads the rule's reason like a failed call and adapts.
 
-## Non-interactive clients
+## What is gone
 
-With no terminal, a parked approval stays parked. A JSONL script
-should read `ApprovalRequested` and submit `Approve` or `Deny` through the
-protocol. Guessing a decision on the user's behalf is deliberately not the
-default.
+The old approval panel — a parked turn that waited on a human to press `y`,
+`s`, `a`, `n`, `ns` or `ng` — is removed. There is no parked state and nothing
+waits on stdin. A rule decides before anything runs; a denied call is answered
+immediately, and the turn carries on.
 
-## One-shot grants
+`/revoke` is gone with the grants it listed: a deny is revoked by writing an
+allow rule for the same tool.
 
-One-shot approvals are Norte grants. `/revoke` lists the grants a session holds
-and revokes one of them:
+## Questions
 
-```text
-/revoke
-/revoke <grant-id>
-/revoke <tool>
-```
-
-Without an argument the command lists every grant with its id, its tool, its
-scope and whether it is still active. With an argument it revokes the grant
-whose id matches, or the only active grant for that tool. Session and global
-allow rules can be changed with `/allow` and `/deny`.
-
-The protocol exposes the same list through `ListGrants` and `GrantList`, so a
-client that is not the CLI can find the ids too.
+`ask_user` is a tool, but its result is a human answer rather than a command
+decision. The model may offer an `options` list and set `multiple: true`; the
+terminal appends an "answer something else" entry so free-form input is always
+possible. The answer resumes the parked turn through `AnswerQuestion`.

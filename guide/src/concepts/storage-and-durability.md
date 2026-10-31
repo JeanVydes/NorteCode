@@ -20,7 +20,6 @@ and the audit trail.
 | `sessions`, `nodes` | Norte's own session and commit tree. |
 | `blobs` | Norte blobs, including media. |
 | `logical_sessions` | Client key, current Norte session, title, model, phase, stats, rules and compaction link. |
-| `approvals` | Durable parked approvals and their grants. |
 | `questions` | Pending questions, their options and answers. |
 | `effects` | Intent/finish journal for effectful tools. |
 | `costs` | One row per billed request and the provider-reported amount. |
@@ -51,14 +50,14 @@ The journal covers `write`, `edit`, `shell` and `skill_script`.
 
 A session left in `Streaming` by a hard kill is not actually streaming anymore.
 On the next load the service puts the Norte store back to `Idle` and rewrites
-the directory row. Approvals and questions are left parked; they are decisions
-for the human, not stale locks.
+the directory row. Questions are left parked; they are decisions for the human,
+not stale locks.
 
 ## Resume
 
-A parked session can be resumed in a new process because approvals, grants,
-questions and effects are in SQLite. `norte-code sessions` lists the keys and
-phases; `norte-code resume <key>` continues. A session stopped by a budget or by
+A parked session can be resumed in a new process because questions and effects
+are in SQLite. `norte-code sessions` lists the keys and phases;
+`norte-code resume <key>` continues. A session stopped by a budget or by
 Ctrl-C is resumable in the same way.
 
 ## Deletion

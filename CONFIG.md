@@ -41,7 +41,6 @@ that names the field; it is never silently replaced.
     "default": "auto"
   },
   "system_prompt": null,
-  "approval_mode": "ask",
   "approvals": {
     "allow": [],
     "deny": []
@@ -116,7 +115,6 @@ that names the field; it is never silently replaced.
 | `retry` | object | see below | Bounded retries for transient provider failures. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
 | `system_prompt` | string or `null` | `null` | Replaces the built-in base prompt. `AGENTS.md` is appended after it. |
-| `approval_mode` | `"ask"`, `"auto-edit"` or `"yolo"` | `"ask"` | When tools need approval. |
 | `approvals` | object | `{"allow":[],"deny":[]}` | Tool-wide rules that outlive a session. |
 | `max_iterations` | integer or `null` | `null` | Model iterations per turn; `null` is unlimited. |
 | `extensions` | object | `{}` | Vendor request fields keyed `<wire-family>:<dotted.path>`. |
@@ -153,8 +151,7 @@ never enter a model event, a log or a child process.
 | `model` | string or `null` | `null` | Model used for the summary; `null` uses the session model. |
 | `reasoning` | string | `"lowest"` | Reasoning effort for the summary request: `lowest`, `off`, or an effort such as `low`, `xhigh` or `max`. |
 
-Eager compaction never splits a tool call from its result, never runs while an
-approval is pending, and runs at most once per turn. `/compact` triggers the
+Eager compaction never splits a tool call from its result, and runs at most once per turn. `/compact` triggers the
 same path on demand. A failed summary leaves the old history and session id
 unchanged.
 
@@ -178,20 +175,20 @@ appended twice.
 resume. The value is checked against the selected model before the turn starts,
 so `xhigh` and `max` are accepted only where the model declares them.
 
-## `approval_mode` and `approvals`
-
-| Value | Behaviour |
-| --- | --- |
-| `ask` | `write`, `edit`, `command` and `skill_script` ask first. |
-| `auto-edit` | Edits run; `command` and `skill_script` still ask. |
-| `yolo` | Every tool runs without asking. |
+## `approvals`
 
 `approvals.allow` and `approvals.deny` contain tool names. A denied tool is
-refused before the mode is consulted; an allowed tool runs without asking.
-Denial wins when both lists name the same tool. These rules apply to every
-session. In the interactive prompt, `/allow <tool> [session|global]` and
-`/deny <tool> [session|global]` edit the same rules; `session` is the default
-and `global` writes this file.
+refused before it runs; an allowed tool runs without asking. Denial wins when
+both lists name the same tool. These rules apply to every session. In the
+interactive prompt, `/allow <tool> [session|global]` and `/deny <tool>
+[session|global]` edit the same rules; `session` is the default and `global`
+writes this file.
+
+A rule outlives the turn it was written in. A session rule is kept with the
+session and survives a restart; a global rule lives in this file. The engine
+consults the rule immediately before a tool call runs: nothing pauses for a
+person, and a denied call reaches the model as a result it reads like a failure
+and can adapt to.
 
 ## `budgets`
 

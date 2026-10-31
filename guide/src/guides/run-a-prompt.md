@@ -47,18 +47,14 @@ norte-code new --endpoint https://openrouter.ai/api/v1
 workspace is appended after it. `--endpoint` overrides the provider endpoint
 without editing the config.
 
-## Reasoning and approvals
+## Reasoning
 
 ```sh
 norte-code new --reasoning high
-norte-code new --approval-mode auto-edit
-norte-code new --approval-mode yolo
 ```
 
 The reasoning setting is validated against the selected model before the turn
-starts. `auto-edit` lets edits run but still asks for commands; `yolo` runs
-everything. Deny rules still win in `yolo`. Both are also at `/reasoning` and
-`/allow`, `/deny` once the session is open.
+starts. It is also at `/reasoning` once the session is open.
 
 ## Limits and extensions
 
@@ -96,4 +92,4 @@ read the events speaks the protocol instead; see
 
 `0` means the session ended normally. A failed turn exits with `1`. A
 command-line or configuration error exits with `2`. A turn that parks for
-approval or a question is not an error; the session is left in a resumable phase.
+a question is not an error; the session is left in a resumable phase.

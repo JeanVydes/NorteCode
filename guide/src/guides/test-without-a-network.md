@@ -37,7 +37,7 @@ assert_eq!(model.request_count(), 2);
 ## In-memory stores
 
 Use `InMemoryStore` and `InMemoryBlobStore` for turn logic. Use a temporary
-SQLite file when the test is about durability, sessions, approvals, effects or
+SQLite file when the test is about durability, sessions, effects or
 telemetry; `SqliteStore::in_memory` is enough for most of those.
 
 ## What to assert
@@ -46,9 +46,8 @@ telemetry; `SqliteStore::in_memory` is enough for most of those.
   `TurnFinished`.
 - The final text, concatenated from `Delta` events.
 - Usage and reported cost: missing cost must stay missing, not become zero.
-- Approval parks and resumes, including a denial with feedback.
-- Compaction rollback: a failed summary leaves the old session active.
 - Budget stop: the turn ends uncommitted and the session is resumable.
+- Compaction rollback: a failed summary leaves the old session active.
 
 ## Live tests
 

@@ -4,8 +4,8 @@ A terminal-based agentic coding tool, in Rust.
 
 Norte Code is a host that sits on top of [Norte](https://github.com/JeanVydes/Norte),
 the provider-agnostic agent engine. Norte owns the session, the turn, streaming,
-tool dispatch, policies and durability; Norte Code owns the agent loop, the
-model catalogue, approvals, compaction, cost tracking and the user interface.
+tool dispatch and durability; Norte Code owns the agent loop, the model
+catalogue, approval rules, compaction, cost tracking and the user interface.
 Norte Code never forks Norte.
 
 > Status: under construction. The workspace skeleton is in place; the service,
@@ -15,13 +15,8 @@ Norte Code never forks Norte.
 
 | Crate | What it is |
 | --- | --- |
-| `norte-code-protocol` | The versioned serde types on the client wire. No Norte types. |
-| `norte-code-agent` | The service library: engines, agent loop, policies, sessions, compaction. |
-| `norte-code-config` | `config.json` loading, validation, merging and secrets. |
-| `norte-code-catalog` | The catalogue's schema — providers, models, wires — and the mapping to Norte capabilities. |
-| `norte-code-cost` | The cost ledger and budget evaluation. Provider-reported cost only. |
-| `norte-code-tools` | The tools Norte does not ship: `grep`, `todo`, `ask_user`, `web_fetch`. |
-| `norte-code-store-sqlite` | A Norte `Store` + `BlobStore` over SQLite, plus Norte Code's own tables. |
+| `norte-code-protocol` | The versioned serde types on the client wire, and behind it the configuration, the catalogue, the host tools, the cost ledger and the SQLite store. No Norte types. |
+| `norte-code-agent` | The service library: engines, agent loop, sessions, compaction, approval rules. |
 | `norte-code-cli` | The `norte-code` command and its interactive prompt. |
 
 
@@ -34,13 +29,13 @@ CLI
 norte-code-protocol          versioned serde wire; no Norte types
    ▼
 norte-code-agent (Service)
-   ├─ config, catalogue, cost, skills, approvals, sandbox
-   ├─ Norte Engine ── one model, one Norte session, policies, tools
-   └─ agent loop ──── iterations, approvals, compaction, retries
+   ├─ config, catalogue, cost, skills, approval rules, sandbox
+   ├─ Norte Engine ── one model, one Norte session, interceptors, tools
+   └─ agent loop ──── iterations, compaction, retries
    ▼
-norte-code-store-sqlite
+SQLite store
    ├─ Norte sessions and nodes
-   ├─ logical sessions, rules, approvals, questions, effects
+   ├─ logical sessions, rules, questions, effects
    ├─ costs (one row per billed request)
    └─ requests (one row per provider attempt)
 ```
@@ -116,7 +111,7 @@ read. The footer leads with that directory and the session's title, with the key
 in brackets behind it, because the title is what a person recognises a session
 by and the key is what `resume` is given.
 
-`--debug` prints the session id, model, wire, approval mode, iteration limit,
+`--debug` prints the session id, model, wire, iteration limit,
 compaction threshold and trigger, sandbox state and network access, workspace,
 config and database paths, and the configured extension keys. It also prints the selected model's modalities, context and
 output limits, tool kinds, reasoning controls, streaming, cache, features,
@@ -144,7 +139,8 @@ resume with `--compaction-threshold FRACTION`. The system prompt comes from
 otherwise from the built-in prompt. An `AGENTS.md` in the workspace root is
 appended to whichever prompt is used, as project instructions. It is untrusted
 input: only a regular file is read, the read is capped at 64 KiB, and the
-instructions never override the user's request, the approvals or the budgets.
+instructions never override the user's request, the approval rules or the
+budgets.
 
 An `edit` call is drawn as a diff. `ui.diff_style` picks the shape: `unified`
 (the default) writes it the way a patch reads — one column, `-` for what left
@@ -167,13 +163,13 @@ sent together as the next message, even after a failed or cancelled turn.
 `/help` lists the commands; `/compact` summarises the conversation on demand,
 `/refresh` re-scans the skill roots and their tools, and
 `/allow <tool> [session|global]` or `/deny <tool> [session|global]` set an
-approval rule without waiting for a pending call. The scope defaults to the
+approval rule. The scope defaults to the
 current session; `global` writes the user config. Setting an allow rule is also
 how a previous deny is revoked. `/exit`, `quit`, Ctrl-D or Ctrl-C at that prompt
 leave. A bare `norte-code`, `new` and `resume` all open this prompt, so a
 session is read rather than handed a message on the command line. It needs a
-terminal. The prompt shares stdin with approvals and questions, so lines typed
-ahead are consumed in order by the next prompt that needs them.
+terminal. The prompt shares stdin with questions, so lines typed ahead are consumed in
+order by the next prompt that needs them.
 
 Vendor-specific request fields use Norte's extension mechanism: a key is
 `<wire-family>:<field>`, and the value is JSON. The config has the same shape
@@ -194,8 +190,8 @@ crosses `compaction.threshold` (default `0.90` of the model's context window).
 boundary and also checks before the next turn when a session is resumed or
 switched to a smaller model; `eager` checks at the first safe model-request
 boundary inside a turn, after a complete tool result and before the next
-request. Eager still never splits a tool call from its results, never runs
-while an approval is pending, and runs at most once per turn. It also runs on
+request. Eager still never splits a tool call from its results and runs at most once per
+turn. It also runs on
 `/compact`. The summary is built from the old transcript and the new session is
 seeded with the summary, the current todo list and the last `keep_recent`
 messages (default `6`). A suffix never starts with a tool result whose call was
@@ -219,22 +215,19 @@ retries.
 Sessions live in a SQLite database under the platform data directory
 (`$XDG_DATA_HOME/norte-code/sessions.db`, or
 `~/.local/share/norte-code/sessions.db`). A run creates a new session unless
-`--session` names an existing key. Parked approvals and pending questions are
-in that database, so a session can be resumed after a restart. Effectful tool
+`--session` names an existing key. A pending question is in that database, so a
+session can be resumed after a restart. Effectful tool
 calls are journaled: if a process dies after a write or command may have run,
 the next process refuses to run that same call again rather than repeat it.
 
-When a tool needs approval, the session prints the call and its arguments
-and offers six choices on stdin: allow once (`y`), allow this tool for the
-session (`s`), allow this tool always (`a`), deny once (`n`), deny this tool for
-the session (`ns`) or deny this tool always (`ng`). `n <message>` (and the
-session/global forms) sends human feedback to the model instead of a bare
-refusal. Session allows become Norte grants; session denials are stored with the
-session; “always” rules are written to `approvals.allow` / `approvals.deny` in
-the user config, so they survive a restart. A global deny wins over a global
-allow. Approving resumes the same turn; input is read from the terminal, never
-from the model. With no interactive terminal the session stays parked, which is
-what a protocol client expects. Reasoning streams in dim italic
+A rule refuses a tool before it runs: the model asked for `write` and `write`
+is denied, so the model reads the rule's reason exactly like a failed call —
+nothing waits on stdin, and the turn carries on. `/allow <tool> [session|global]`
+or `/deny <tool> [session|global]` writes the rule; an allow rule replaces an
+existing deny, which is how a deny is revoked. “always” rules go into
+`approvals.allow` / `approvals.deny` in the user config, so they survive a
+restart; session rules live with the session. A global deny wins over a global
+allow. Reasoning streams in dim italic
 and tool, usage and turn summaries are colourised only when the output is a
 terminal; `NO_COLOR`, `TERM=dumb` and pipes keep it plain. With `--quiet`,
 reasoning is redacted to one `thinking…` marker per turn instead of disappearing
@@ -267,11 +260,10 @@ invented answer.
 sandbox: bubblewrap on Linux, `sandbox-exec` on macOS. The workspace is
 writable, the rest of the filesystem is read-only, `/tmp` is a private tmpfs,
 and the network is off unless `tools.sandbox.network` is `true`. Extra writable
-directories go in `tools.sandbox.writable`. The approval panel still shows the
-command the model asked for, with a `[bwrap]` or `[seatbelt]` badge; the sandbox
-flags are internal and never replace the approved arguments. The wrapper sits
-inside the command tool's executor, after policies, approvals and the effect
-journal.
+directories go in `tools.sandbox.writable`. The rule sees the command the model
+asked for; the sandbox flags are internal and never replace the arguments a rule
+approved. The wrapper sits inside the command tool's executor, after the
+approval rules and the effect journal.
 
 On `run` and `resume`, `--sandbox` and `--no-sandbox` override
 `tools.sandbox.enabled` for that invocation, and `--sandbox-network on|off`

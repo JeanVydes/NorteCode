@@ -128,7 +128,7 @@ provider tests are ignored and key-gated. See
 
 ## Where data lives
 
-Sessions, approvals, pending questions, effect intents, costs and request
+Sessions, pending questions, effect intents, costs and request
 telemetry live in SQLite under the platform data directory, normally
 `$XDG_DATA_HOME/norte-code/sessions.db` or
 `~/.local/share/norte-code/sessions.db`. Deleting that file deletes the local

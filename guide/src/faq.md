@@ -31,9 +31,9 @@ treating them as free.
 
 ## Why did a session stop?
 
-It may be parked for an approval (`AwaitingApproval`), waiting on a question,
-stopped by a budget, or interrupted by Ctrl-C. `norte-code sessions` shows the
-phase; `norte-code resume <key>` continues a parked or stopped session.
+It may be waiting on a question, stopped by a budget, or interrupted by Ctrl-C.
+`norte-code sessions` shows the phase; `norte-code resume <key>` continues a
+parked or stopped session.
 
 ## Is my code sent anywhere else?
 

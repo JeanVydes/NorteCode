@@ -58,8 +58,8 @@ workspace itself is always writable.
 - Host files remain readable. The sandbox contains writes, process namespaces,
   IPC/UTS/cgroup namespaces and (unless enabled) the network.
 - `/tmp` is a private tmpfs on Linux.
-- An approval shows the original command plus a sandbox badge; the human
-  approves what the model asked for, not the launcher.
+- The rule sees the command the model asked for, plus whether a sandbox will
+  wrap it; the human approves what the model asked for, not the launcher.
 
 ## Check the effective state
 

@@ -3,7 +3,7 @@
 **A terminal-based agentic coding tool in Rust.** Norte Code is a host around
 [Norte](https://github.com/JeanVydes/Norte): Norte owns the durable session, the
 turn, streaming, tool dispatch and the commit point; Norte Code owns the agent
-loop, the model catalogue, approvals, compaction, budgets and the terminal
+loop, the model catalogue, approval rules, compaction, budgets and the terminal
 experience.
 
 Nothing in this repository forks Norte. If a change belongs in the engine, it is
@@ -24,7 +24,7 @@ Five ideas hold the host together.
   trip and one commit. The host decides when to call the engine again after a
   tool call, when to ask a human, when to compact and when a retry is safe.
 - **Effects are governed and journaled.** Tools see only the configured
-  workspace, effectful calls pass an approval policy, and an intent is written
+  workspace, effectful calls pass an approval rule, and an intent is written
   before a write or command runs so a crash cannot silently repeat it.
 - **Cost is what the provider reported.** Norte Code never derives a dollar
   amount from a catalogue list price. An unreported cost is `NULL`, not zero.
