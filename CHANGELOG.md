@@ -8,6 +8,13 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A plugin asks the host about the session and the host answers. `PluginHost`
+  carries the session, the model, the provider, the title and the context the
+  session is using, and the plugin asks when it needs them. The session is
+  asked for and not handed over because it moves: a compaction opens another
+  one, and a plugin that was told the old key would keep reporting the old
+  model.
+
 - A plugin reaches the host through a trait instead of a cast. `PluginContext`
   carries a `PluginHost` — the model, the provider and the title of the
   session — and the plugin calls it. A plugin is a shared library with its own
@@ -34,6 +41,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   is waiting for it.
 
 ### Fixed
+
+- The context a session is using is the context the last request carried. The
+  whole conversation is sent again every time, so the input tokens of the last
+  request are what the context holds and not the sum of what the session
+  spent. A plugin asking the host about the context is told this, and the
+  window it is a share of is the one the catalogue says the model has.
 
 - A plugin installed while the client runs says so. The plugins are loaded
   once, at startup, and an installed one is used after a restart: the client

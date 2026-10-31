@@ -58,6 +58,7 @@ use tokio_util::sync::CancellationToken;
 
 use norte_code_protocol::catalog::{Catalog, load_catalog_files};
 use norte_code_protocol::config::Config;
+use norte_code_protocol::plugins::ContextUsage;
 use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::ServiceError;
@@ -104,6 +105,12 @@ struct Stats {
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_write_tokens: u64,
+    /// The input tokens of the last request, which is the context.
+    ///
+    /// The whole conversation is sent again every time, so the last request's
+    /// input tokens are what the context holds — not the sum, which is what
+    /// was spent.
+    context_used: u64,
     /// The request telemetry that has not been matched to a committed message
     /// yet.
     ///
@@ -1187,6 +1194,22 @@ impl Service {
         self.lock_sessions()
             .get(session)
             .map(|record| record.spec.clone())
+    }
+
+    /// How much of its model's context a session is using.
+    ///
+    /// The used part is what the last request carried — the whole
+    /// conversation goes again every time — and the window is what the
+    /// catalogue says the model holds. A session that has made no request yet
+    /// has used nothing.
+    #[must_use]
+    pub fn session_context(&self, session: &SessionKey) -> ContextUsage {
+        self.lock_sessions()
+            .get(session)
+            .map_or_else(ContextUsage::default, |record| ContextUsage {
+                used: record.context_used,
+                window: record.spec.capabilities.max_context,
+            })
     }
 
     /// The reasoning override a session carries, if it has one.

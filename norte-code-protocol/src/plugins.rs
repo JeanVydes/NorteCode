@@ -28,11 +28,10 @@
 //!
 //! Write to the terminal or block a frame — those remain the host's job.
 //! Everything else is possible: a plugin can ask the host about the session
-//! through the context the host hands it ([`PluginContext::host`]), read the
-//! current session key ([`PluginContext::session_key`]), and keep whatever
-//! state it wants in its own fields. The trait itself carries no state; a
-//! plugin that needs to remember something stores it in a field of its own
-//! type.
+//! through the context the host hands it ([`PluginContext::host`]) and keep
+//! whatever state it wants in its own fields. The trait itself carries no
+//! state; a plugin that needs to remember something stores it in a field of its
+//! own type.
 //!
 //! # Extending it
 //!
@@ -58,7 +57,11 @@ use crate::commands::{CommandSpec, Invocation};
 ///
 /// Bump it when the layout of [`PluginContext`], [`Plugin`] or [`PluginHost`]
 /// changes in a way an old plugin would not survive.
-pub const PLUGIN_ABI_VERSION: u32 = 1;
+///
+/// Version 2 is the host that answers about the session by itself: version 1
+/// asked for the session key with every question, and a plugin built against
+/// it would call methods this host no longer has.
+pub const PLUGIN_ABI_VERSION: u32 = 2;
 
 /// The symbol a plugin exports to say which version it was built against.
 ///
@@ -128,8 +131,38 @@ pub trait Plugin: Send + Sync {
     /// host that built the context implements it.
     ///
     /// The default implementation ignores the context. A plugin that wants the
-    /// session key, the host, or both overrides this and keeps them.
+    /// host overrides this and keeps it.
     fn set_context(&mut self, _ctx: PluginContext) {}
+}
+
+/// How much of a model's context a session is using.
+///
+/// The context is what the last request carried: the whole conversation is
+/// sent again every time, so the input tokens of the last request are the
+/// context, and the window is what the catalogue says the model holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// The tokens the last request carried.
+    pub used: u64,
+    /// The model's context window, when the catalogue knows it.
+    pub window: Option<u64>,
+}
+
+impl ContextUsage {
+    /// The share of the window in use, from 0 to 1, when the window is known.
+    ///
+    /// The share is a thousandth of the window computed in whole numbers: a
+    /// token count is 64 bits wide and a float holds 52, and the difference is
+    /// a rounding nobody can see in a number that is a percentage. A session
+    /// that holds more than the window holds reports a full window, because
+    /// that is what a full window looks like.
+    #[must_use]
+    pub fn share(&self) -> Option<f64> {
+        let window = self.window.filter(|window| *window > 0)?;
+        let thousandths = (u128::from(self.used) * 1_000) / u128::from(window);
+        let thousandths = u32::try_from(thousandths).unwrap_or(1_000);
+        Some(f64::from(thousandths) / 1_000.0)
+    }
 }
 
 /// What a plugin may ask the host about the session it is running in.
@@ -149,41 +182,48 @@ pub trait Plugin: Send + Sync {
 /// to compile against them, which is also what lets a plugin depend on this
 /// crate alone.
 pub trait PluginHost: Send + Sync {
-    /// The model the session runs on, when it has one.
-    fn session_model(&self, session: &SessionKey) -> Option<String>;
+    /// The session the client is in, if there is one.
+    ///
+    /// It is asked for rather than handed over because the session moves: a
+    /// compaction opens another one, and a plugin that was told the old key
+    /// would keep reporting the old model.
+    fn session(&self) -> Option<SessionKey>;
 
-    /// The provider serving it, when it has one.
-    fn session_provider(&self, session: &SessionKey) -> Option<String>;
+    /// The model that session runs on.
+    fn session_model(&self) -> Option<String>;
+
+    /// The provider serving it.
+    fn session_provider(&self) -> Option<String>;
 
     /// The title of the session, when it has one.
-    fn session_title(&self, session: &SessionKey) -> Option<String>;
+    fn session_title(&self) -> Option<String>;
+
+    /// How much of the model's context the session is using.
+    fn session_context(&self) -> ContextUsage;
 }
 
 /// The host context handed to a plugin before the host asks anything of it.
 ///
-/// All fields are optional: the host passes what it has at the moment, and a
+/// The host is optional: the host passes what it has at the moment, and a
 /// plugin that needs something absent simply does without it. The plugin may
 /// keep the context — or any part of it — in its own fields and use it later,
 /// when the host asks it to run a command or redraw.
 #[derive(Clone)]
 pub struct PluginContext {
-    /// The current logical session key, if a session exists.
-    pub session_key: Option<SessionKey>,
     /// The host, which answers what the plugin may ask about the session.
     ///
     /// The host that built the context implements it and hands the plugin a
-    /// handle to it. A plugin that wants the model, the provider or the title
-    /// asks the host when it needs them.
+    /// handle to it. A plugin that wants the model, the provider, the title or
+    /// the context asks the host when it needs them.
     pub host: Option<Arc<dyn PluginHost>>,
 }
 
 impl fmt::Debug for PluginContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The host is a trait object and says nothing about itself, so what is
-        // written is what a reader can act on: there is a session, or there is
-        // not, and there is a host to ask.
+        // written is what a reader can act on: there is a host to ask, or
+        // there is not.
         f.debug_struct("PluginContext")
-            .field("session_key", &self.session_key)
             .field("host", &self.host.as_ref().map(|_| "yes"))
             .finish()
     }
@@ -492,16 +532,27 @@ mod tests {
     struct Answering;
 
     impl PluginHost for Answering {
-        fn session_model(&self, _session: &SessionKey) -> Option<String> {
+        fn session(&self) -> Option<SessionKey> {
+            Some(SessionKey::new("s"))
+        }
+
+        fn session_model(&self) -> Option<String> {
             Some("nvidia/nemotron".to_owned())
         }
 
-        fn session_provider(&self, _session: &SessionKey) -> Option<String> {
+        fn session_provider(&self) -> Option<String> {
             Some("nvidia".to_owned())
         }
 
-        fn session_title(&self, _session: &SessionKey) -> Option<String> {
+        fn session_title(&self) -> Option<String> {
             Some("a session".to_owned())
+        }
+
+        fn session_context(&self) -> ContextUsage {
+            ContextUsage {
+                used: 4_096,
+                window: Some(128_000),
+            }
         }
     }
 
@@ -521,10 +572,10 @@ mod tests {
 
         fn run(&self, _command: &Invocation) -> Option<Vec<String>> {
             let host = self.host.as_ref()?;
-            let session = SessionKey::new("s");
             Some(vec![
-                host.session_model(&session).unwrap_or_default(),
-                host.session_provider(&session).unwrap_or_default(),
+                host.session_model().unwrap_or_default(),
+                host.session_provider().unwrap_or_default(),
+                host.session_context().used.to_string(),
             ])
         }
     }
@@ -537,7 +588,6 @@ mod tests {
         let mut plugins = Plugins::new();
         plugins.add(Box::new(Asking { host: None }));
         plugins.set_context_on_all(&PluginContext {
-            session_key: Some(SessionKey::new("s")),
             host: Some(Arc::new(Answering)),
         });
         let lines = plugins
@@ -546,18 +596,36 @@ mod tests {
                 args: BTreeMap::new(),
             })
             .expect("an answer");
-        assert_eq!(lines, ["nvidia/nemotron", "nvidia"]);
+        assert_eq!(lines, ["nvidia/nemotron", "nvidia", "4096"]);
     }
 
     #[test]
     fn a_context_without_a_host_is_not_an_error() {
         // The host passes what it has. A plugin that needs a host and has none
         // says nothing, and the client falls through to its own commands.
-        let context = PluginContext {
-            session_key: None,
-            host: None,
-        };
-        assert!(context.session_key.is_none());
+        let context = PluginContext { host: None };
         assert!(context.host.is_none());
+    }
+
+    #[test]
+    fn the_context_share_is_the_used_part_of_the_window() {
+        // What a plugin draws next to the conversation: how much of the model's
+        // context the session holds.
+        let usage = ContextUsage {
+            used: 32_000,
+            window: Some(128_000),
+        };
+        assert_eq!(usage.share(), Some(0.25));
+    }
+
+    #[test]
+    fn a_session_without_a_window_has_no_share() {
+        // A model the catalogue does not describe has no window, and a share
+        // of nothing is not a number anybody can act on.
+        let usage = ContextUsage {
+            used: 1_000,
+            window: None,
+        };
+        assert_eq!(usage.share(), None);
     }
 }

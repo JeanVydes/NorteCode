@@ -321,6 +321,81 @@ async fn a_session_reports_the_model_reference_it_is_on() {
 }
 
 #[tokio::test]
+async fn a_session_reports_the_context_the_last_request_carried() {
+    // The context is what the last request carried and not what the session
+    // spent: the whole conversation goes again every time, so the input
+    // tokens of the last request are what the context holds. A plugin asking
+    // the host about the context is asking this.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(100, 10, None)),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "first answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(400, 10, None)),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "second answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ]),
+    );
+    let (service, _store) = persistent_service_with_config(config(), model).await;
+    let first = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "first question".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+
+    let context = service.session_context(&key);
+    assert_eq!(context.used, 100, "the request carried this many tokens");
+    assert_eq!(context.window, Some(1000), "the window is the model's own");
+
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "second question".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let context = service.session_context(&key);
+    assert_eq!(
+        context.used, 400,
+        "the context is the last request, not the sum of the two"
+    );
+    assert_eq!(
+        context.share(),
+        Some(0.4),
+        "and the share is over the model's own window"
+    );
+}
+
+#[tokio::test]
 async fn a_reload_rebuilds_an_open_sessions_spec_from_the_new_provider_settings() {
     // A provider's settings are baked into a session's spec when it is resolved:
     // the endpoint, the wire, whether the prompt cache key is sent. So a config

@@ -42,6 +42,12 @@ pub(super) struct SessionRecord {
     pub(super) unpriced: u64,
     /// Input tokens, summed over reported requests.
     pub(super) input_tokens: u64,
+    /// The input tokens of the last request: the context the session holds.
+    ///
+    /// The sum above is what was spent; this is what the last request carried,
+    /// and the whole conversation is in it. It is what the footer's dial shows
+    /// and what a plugin asking about the context is told.
+    pub(super) context_used: u64,
     /// Output tokens, summed over reported requests.
     pub(super) output_tokens: u64,
     /// Prompt tokens the provider served from its cache, summed.
@@ -104,6 +110,9 @@ fn record_from(
             .unwrap_or(0.0),
         unpriced: number("unpriced").unwrap_or(0),
         input_tokens: number("input_tokens").unwrap_or(0),
+        // A session stored before the context was kept has none, and the
+        // footer falls back to what it can measure on its own.
+        context_used: number("context_used").unwrap_or(0),
         output_tokens: number("output_tokens").unwrap_or(0),
         cache_read_tokens: number("cache_read_tokens").unwrap_or(0),
         cache_write_tokens: number("cache_write_tokens").unwrap_or(0),
@@ -314,6 +323,7 @@ impl Service {
                 "cost": record.cost,
                 "unpriced": record.unpriced,
                 "input_tokens": record.input_tokens,
+                "context_used": record.context_used,
                 "output_tokens": record.output_tokens,
                 "cache_read_tokens": record.cache_read_tokens,
                 "cache_write_tokens": record.cache_write_tokens,
@@ -370,6 +380,7 @@ impl Service {
             cost: 0.0,
             unpriced: 0,
             input_tokens: 0,
+            context_used: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
@@ -421,6 +432,7 @@ impl Service {
             cost: 0.0,
             unpriced: 0,
             input_tokens: 0,
+            context_used: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
@@ -592,6 +604,7 @@ impl Service {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                context_used: 0,
                 pending: std::collections::VecDeque::new(),
             },
             |record| Stats {
@@ -604,6 +617,7 @@ impl Service {
                 output_tokens: record.output_tokens,
                 cache_read_tokens: record.cache_read_tokens,
                 cache_write_tokens: record.cache_write_tokens,
+                context_used: record.context_used,
                 pending: std::collections::VecDeque::new(),
             },
         )
@@ -625,6 +639,9 @@ impl Service {
             // for a session whose prompts had almost all been served cached.
             record.cache_read_tokens = stats.cache_read_tokens;
             record.cache_write_tokens = stats.cache_write_tokens;
+            // The context is what the last request carried, not what the
+            // session spent: a long conversation is sent whole every time.
+            record.context_used = stats.context_used;
         }
         if let Err(error) = self.persist(key).await {
             tracing::warn!(session = %key, %error, "could not persist session counters");

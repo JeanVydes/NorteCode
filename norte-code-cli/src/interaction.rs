@@ -446,6 +446,21 @@ fn catalogue_candidates(
         .collect()
 }
 
+/// The rows the plugins ask for, asked again.
+///
+/// The sidebar is read at startup and after every turn: a plugin that shows a
+/// number wants it to move, and the frame never reaches for a plugin itself.
+/// A frame that could stall on somebody else's code is a frame that can freeze
+/// the client, so the asking happens here, where a slow plugin costs one
+/// redraw and not the whole interface.
+pub(crate) fn refresh_plugin_sidebar(renderer: &mut Renderer) {
+    renderer.sidebar = crate::plugins::loaded()
+        .sidebar()
+        .into_iter()
+        .map(|(name, rows)| (name.to_owned(), rows))
+        .collect();
+}
+
 /// Records the names the completion offers for the provider in play.
 ///
 /// The catalogue belongs to the service and the completion is answered on the
@@ -948,6 +963,11 @@ pub(crate) async fn interactive_loop(
         .await?;
         renderer.ensure_newline();
         session = outcome.session.or(session);
+        // The session may have moved — a compaction opens another one — and the
+        // plugins ask the host about the session in play, so the handle is
+        // pointed at the one that is now.
+        crate::plugins::attach(service, session.clone());
+        refresh_plugin_sidebar(renderer);
         if outcome.parked || renderer.budget_stopped {
             break;
         }

@@ -917,6 +917,12 @@ impl Service {
             stats.output_tokens += origin.usage.output_tokens.unwrap_or(0);
             stats.cache_read_tokens += origin.usage.cache_read_tokens.unwrap_or(0);
             stats.cache_write_tokens += origin.usage.cache_write_tokens.unwrap_or(0);
+            // The last request's input tokens are the context: the whole
+            // conversation goes again every time, so what it carried is what
+            // the session holds.
+            if let Some(input) = origin.usage.input_tokens {
+                stats.context_used = input;
+            }
             let record = CostRecord {
                 session: key.to_string(),
                 turn: stats.turn,

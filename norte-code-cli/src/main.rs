@@ -769,16 +769,11 @@ pub(crate) async fn new_session(
             style.faint(short(session.as_str()).to_owned())
         );
     }
-    // Hand the service and session to plugins so they can reach them when they
-    // run a command or redraw. The plugins are loaded here, once: they are
-    // shared libraries loaded into this process, and the ones this run uses are
-    // the ones it started with.
-    let plugin_ctx = crate::plugins::context(&service, Some(session.clone()));
-    renderer.sidebar = crate::plugins::init(&plugin_ctx)
-        .sidebar()
-        .into_iter()
-        .map(|(name, rows)| (name.to_owned(), rows))
-        .collect();
+    // Hand the service and session to the plugins so they can reach them when
+    // they run a command or redraw. The handle they were loaded with is the
+    // one they keep, and it now knows where to look.
+    crate::plugins::attach(&service, Some(session.clone()));
+    crate::interaction::refresh_plugin_sidebar(&mut renderer);
     if let Some(receiver) = input.as_mut() {
         interactive_loop(
             &service,
@@ -978,16 +973,11 @@ async fn resume_session(
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));
     let session = SessionKey::new(session_key);
-    // Hand the service and session to plugins so they can reach them when they
-    // run a command or redraw. The plugins are loaded here, once: they are
-    // shared libraries loaded into this process, and the ones this run uses are
-    // the ones it started with.
-    let plugin_ctx = crate::plugins::context(&service, Some(session.clone()));
-    renderer.sidebar = crate::plugins::init(&plugin_ctx)
-        .sidebar()
-        .into_iter()
-        .map(|(name, rows)| (name.to_owned(), rows))
-        .collect();
+    // Hand the service and session to the plugins so they can reach them when
+    // they run a command or redraw. The handle they were loaded with is the
+    // one they keep, and it now knows where to look.
+    crate::plugins::attach(&service, Some(session.clone()));
+    crate::interaction::refresh_plugin_sidebar(&mut renderer);
     // The session may carry a reasoning override of its own — `/reasoning max`
     // leaves one — and that is what the next turn sends. The line above is the
     // configuration's answer, which is what a session with no override is on;

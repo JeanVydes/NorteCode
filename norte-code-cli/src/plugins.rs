@@ -12,12 +12,17 @@
 //! next. It also means that a plugin installed while the client is running is
 //! not picked up until it restarts, which is what the client says when one is
 //! installed.
+//!
+//! The host the plugins ask about the session is a handle that outlives the
+//! moment it was made: the service and the session come after the plugins are
+//! loaded, so a plugin is handed a handle that answers "nothing yet" until the
+//! session exists and answers properly afterwards.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use norte_code_agent::Service;
 use norte_code_protocol::SessionKey;
-use norte_code_protocol::plugins::{PluginContext, PluginHost, Plugins};
+use norte_code_protocol::plugins::{ContextUsage, PluginContext, PluginHost, Plugins};
 
 /// The plugins this client loaded.
 ///
@@ -26,57 +31,116 @@ use norte_code_protocol::plugins::{PluginContext, PluginHost, Plugins};
 /// was copied would be a copy that lost whatever the plugins kept.
 static LOADED: OnceLock<Plugins> = OnceLock::new();
 
+/// The handle the plugins ask about the session.
+static HOST: OnceLock<Arc<HostHandle>> = OnceLock::new();
+
 /// Loads the plugins and hands them the host.
 ///
 /// Called once, after the service and the session exist: a plugin that asks
 /// the host about the session needs them to be there. Calling it again is
 /// harmless — the first call is the one that loads.
-pub(crate) fn init(ctx: &PluginContext) -> &'static Plugins {
+pub(crate) fn init() -> &'static Plugins {
     LOADED.get_or_init(|| {
         let mut plugins = Plugins::new();
-        crate::plugin_loader::load_plugins(&mut plugins, Some(ctx));
+        // The handle is the plugin's window into the host: it is asked, and
+        // it answers, so a plugin never names the host's types.
+        let handle = Arc::clone(host());
+        let host: Arc<dyn PluginHost> = handle;
+        let ctx = PluginContext { host: Some(host) };
+        crate::plugin_loader::load_plugins(&mut plugins, Some(&ctx));
         plugins
     })
 }
 
 /// The plugins this client loaded.
 ///
-/// Empty when nothing was loaded: a client with no plugins is a client that
-/// works, and the registry is not an error.
+/// The first call loads them and every later one reads the same registry: a
+/// plugin is a stateful object, and a registry that was copied would be a copy
+/// that lost whatever the plugins kept.
 pub(crate) fn loaded() -> &'static Plugins {
-    LOADED.get_or_init(Plugins::new)
+    init()
 }
 
-/// The context the plugins are handed.
+/// The handle the plugins ask about the session.
 ///
-/// The host is the service behind a trait the plugin can call: a plugin is a
-/// separate shared library with its own copy of every crate, so it cannot cast
-/// the host's types — the two sides do not share a single one — but it can
-/// call them.
-pub(crate) fn context(service: &Arc<Service>, session: Option<SessionKey>) -> PluginContext {
-    PluginContext {
-        session_key: session,
-        host: Some(Arc::new(ServiceHost {
-            service: Arc::clone(service),
-        })),
+/// Created once and filled in later: the plugins are loaded before the
+/// service exists, and the handle is what makes that order possible.
+fn host() -> &'static Arc<HostHandle> {
+    HOST.get_or_init(|| Arc::new(HostHandle::default()))
+}
+
+/// Hands the host the service and the session, once they exist.
+///
+/// The plugins were handed the same handle before, so there is nothing to
+/// give them again: what they ask is answered by the handle, and the handle
+/// now knows where to look.
+pub(crate) fn attach(service: &Arc<Service>, session: Option<SessionKey>) {
+    host().set(Arc::clone(service), session);
+}
+
+/// What the plugins ask the host about the session.
+///
+/// The service and the session arrive after this is made, so both are behind
+/// a lock and both are optional: a plugin that asks before the session exists
+/// is told that there is none, which is the truth.
+#[derive(Default)]
+struct HostHandle {
+    service: RwLock<Option<Arc<Service>>>,
+    session: RwLock<Option<SessionKey>>,
+}
+
+impl HostHandle {
+    /// Remembers the service and the session.
+    fn set(&self, service: Arc<Service>, session: Option<SessionKey>) {
+        if let Ok(mut slot) = self.service.write() {
+            *slot = Some(service);
+        }
+        if let Ok(mut slot) = self.session.write() {
+            *slot = session;
+        }
+    }
+
+    /// The service, when it exists.
+    fn current_service(&self) -> Option<Arc<Service>> {
+        self.service.read().ok().and_then(|slot| slot.clone())
+    }
+
+    /// The session, when it exists.
+    fn current_session(&self) -> Option<SessionKey> {
+        self.session.read().ok().and_then(|slot| slot.clone())
     }
 }
 
-/// The host the plugins ask about the session.
-struct ServiceHost {
-    service: Arc<Service>,
-}
-
-impl PluginHost for ServiceHost {
-    fn session_model(&self, session: &SessionKey) -> Option<String> {
-        self.service.session_model(session)
+impl PluginHost for HostHandle {
+    fn session(&self) -> Option<SessionKey> {
+        self.current_session()
     }
 
-    fn session_provider(&self, session: &SessionKey) -> Option<String> {
-        self.service.session_spec(session).map(|spec| spec.provider)
+    fn session_model(&self) -> Option<String> {
+        let service = self.current_service()?;
+        let session = self.current_session()?;
+        service.session_model(&session)
     }
 
-    fn session_title(&self, session: &SessionKey) -> Option<String> {
-        self.service.session_title(session)
+    fn session_provider(&self) -> Option<String> {
+        let service = self.current_service()?;
+        let session = self.current_session()?;
+        service.session_spec(&session).map(|spec| spec.provider)
+    }
+
+    fn session_title(&self) -> Option<String> {
+        let service = self.current_service()?;
+        let session = self.current_session()?;
+        service.session_title(&session)
+    }
+
+    fn session_context(&self) -> ContextUsage {
+        let Some(service) = self.current_service() else {
+            return ContextUsage::default();
+        };
+        let Some(session) = self.current_session() else {
+            return ContextUsage::default();
+        };
+        service.session_context(&session)
     }
 }
