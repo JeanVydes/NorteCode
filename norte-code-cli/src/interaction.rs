@@ -119,6 +119,15 @@ pub(crate) enum ChatCommand {
     /// Delete this session and leave the chat.
     Delete,
 
+    /// List installed plugins.
+    PluginsList,
+
+    /// Install a plugin from a git URL.
+    PluginsAdd { url: String },
+
+    /// Remove an installed plugin.
+    PluginsRm { name: String },
+
     /// Report what the process knows about itself: the model, its
     /// capabilities, the tools, the servers, the paths. Built when it is asked
     /// for, not captured at startup, so the tools are the ones registered now.
@@ -180,6 +189,13 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/restart" => ChatCommand::Restart,
         "/menu" => ChatCommand::Menu,
         "/delete" => ChatCommand::Delete,
+        "/plugins list" => ChatCommand::PluginsList,
+        "/plugins add" => ChatCommand::PluginsAdd {
+            url: invocation.arg_or_empty("url").to_owned(),
+        },
+        "/plugins rm" => ChatCommand::PluginsRm {
+            name: invocation.arg("name").unwrap_or_default().to_owned(),
+        },
         "/debug" => ChatCommand::Debug,
         "/telemetry" => ChatCommand::Telemetry,
         "/tools" => ChatCommand::Tools,
@@ -580,6 +596,33 @@ pub(crate) async fn interactive_loop(
                             "`{}` was declared by a plugin and nothing answered it",
                             invocation.command
                         )),
+                    }
+                }
+
+                ChatCommand::PluginsList => {
+                    let plugins = crate::plugin_manager::list_plugins();
+                    if plugins.is_empty() {
+                        renderer.notice("no plugins installed");
+                    } else {
+                        let lines: Vec<String> = plugins
+                            .iter()
+                            .map(|name| format!("  {name}"))
+                            .collect();
+                        renderer.open_modal("installed plugins".to_owned(), lines);
+                    }
+                }
+
+                ChatCommand::PluginsAdd { url } => {
+                    match crate::plugin_manager::install_plugin(&url) {
+                        Ok(name) => renderer.notice(format!("plugin {name} installed")),
+                        Err(error) => renderer.failure(format!("could not install plugin: {error}")),
+                    }
+                }
+
+                ChatCommand::PluginsRm { name } => {
+                    match crate::plugin_manager::remove_plugin(&name) {
+                        Ok(()) => renderer.notice(format!("plugin {name} removed")),
+                        Err(error) => renderer.failure(format!("could not remove plugin: {error}")),
                     }
                 }
 
@@ -1023,6 +1066,33 @@ async fn handle_live_command(
                     "`{}` was declared by a plugin and nothing answered it",
                     invocation.command
                 )),
+            }
+        }
+
+        ChatCommand::PluginsList => {
+            let plugins = crate::plugin_manager::list_plugins();
+            if plugins.is_empty() {
+                renderer.notice("no plugins installed");
+            } else {
+                let lines: Vec<String> = plugins
+                    .iter()
+                    .map(|name| format!("  {name}"))
+                    .collect();
+                renderer.open_modal("installed plugins".to_owned(), lines);
+            }
+        }
+
+        ChatCommand::PluginsAdd { url } => {
+            match crate::plugin_manager::install_plugin(&url) {
+                Ok(name) => renderer.notice(format!("plugin {name} installed")),
+                Err(error) => renderer.failure(format!("could not install plugin: {error}")),
+            }
+        }
+
+        ChatCommand::PluginsRm { name } => {
+            match crate::plugin_manager::remove_plugin(&name) {
+                Ok(()) => renderer.notice(format!("plugin {name} removed")),
+                Err(error) => renderer.failure(format!("could not remove plugin: {error}")),
             }
         }
 

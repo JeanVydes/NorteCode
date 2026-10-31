@@ -19,6 +19,7 @@ mod markdown;
 mod modal;
 mod models;
 mod plugin_loader;
+mod plugin_manager;
 mod plugins;
 mod preview;
 mod prompt;
