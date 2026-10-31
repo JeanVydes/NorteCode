@@ -114,6 +114,8 @@ pub(crate) enum Choice {
         /// Whether it applies to every session or only to this one.
         scope: Scope,
     },
+    /// Copy the panel's text to the clipboard.
+    Copied,
 }
 
 /// What acting on a row means.
@@ -191,6 +193,8 @@ pub(crate) enum Key {
     PrevMetric,
     /// Leave.
     Escape,
+    /// Copy the panel's text to the terminal clipboard.
+    Copy,
 }
 
 /// A panel of rows over the interface.
@@ -329,6 +333,17 @@ impl Modal {
         self.rows.is_empty()
     }
 
+    /// The full text of the panel, joined by newlines, for copying to the
+    /// clipboard. Escape codes are stripped so what is copied is what is read.
+    #[must_use]
+    pub(crate) fn text(&self) -> String {
+        self.rows
+            .iter()
+            .map(|row| crate::select::strip_style(&row.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Moves the cursor by rows, holding at both ends and skipping headings.
     ///
     /// A heading is drawn and never landed on: acting on one is nothing, and a
@@ -452,6 +467,7 @@ impl Modal {
                 }
                 Choice::None
             }
+            Key::Copy => Choice::Copied,
         }
     }
 

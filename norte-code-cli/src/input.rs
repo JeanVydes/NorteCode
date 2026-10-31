@@ -1540,6 +1540,7 @@ mod unix {
                                     KeyCode::Char('[') => Some(crate::modal::Key::PrevRange),
                                     KeyCode::Char('r') => Some(crate::modal::Key::NextMetric),
                                     KeyCode::Char('R') => Some(crate::modal::Key::PrevMetric),
+                                    KeyCode::Char('c') => Some(crate::modal::Key::Copy),
                                     _ => None,
                                 };
                                 if let Some(press) = key_for_panel {
@@ -1570,6 +1571,18 @@ mod unix {
                                 } else if pinned.scroll_modal(delta) {
                                     continue;
                                 }
+                            }
+                            // Copy the report's text to the clipboard.
+                            if key.code == KeyCode::Char('c') {
+                                if sender
+                                    .send(EditorEvent::Action(EditorAction::Panel(
+                                        crate::modal::Key::Copy,
+                                    )))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
                             }
                             // The page keys belong to the conversation, and to
                             // nothing else: they are the only way to read what

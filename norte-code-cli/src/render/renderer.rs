@@ -694,6 +694,18 @@ impl Renderer {
                 self.close_modal();
                 None
             }
+            crate::modal::Choice::Copied => {
+                let text = modal.text();
+                match crate::terminal::copy(&text) {
+                    Ok(()) => {
+                        let lines = text.lines().count();
+                        let chars = text.chars().count();
+                        self.notice(format!("copied {chars} character(s), {lines} line(s)"));
+                    }
+                    Err(error) => self.failure(format!("could not copy the selection: {error}")),
+                }
+                None
+            }
             crate::modal::Choice::Act { action, scope } => Some((action, scope)),
         }
     }
