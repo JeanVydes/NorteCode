@@ -56,13 +56,13 @@ pub(crate) fn shell_preview(
     if let Some(cwd) = object.get("cwd").and_then(serde_json::Value::as_str) {
         lines.push(field("cwd", cwd));
     }
-    if let Some(env) = object.get("env").and_then(serde_json::Value::as_object) {
-        if !env.is_empty() {
-            lines.push(PreviewLine::Note(format!(
-                "{} environment variable(s)",
-                env.len()
-            )));
-        }
+    if let Some(env) = object.get("env").and_then(serde_json::Value::as_object)
+        && !env.is_empty()
+    {
+        lines.push(PreviewLine::Note(format!(
+            "{} environment variable(s)",
+            env.len()
+        )));
     }
     if let Some(stdin) = object.get("stdin").and_then(serde_json::Value::as_str) {
         lines.push(block("stdin", stdin, 6));

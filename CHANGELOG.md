@@ -72,6 +72,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Rust 1.88 is the floor. The code already used what 1.88 added — let-chains
+  among them — and `rust-version` still said 1.85, so a build on the version
+  the manifest promised was refused by the compiler instead. `rust-toolchain.toml`
+  pins the stable channel with `clippy` and `rustfmt`, so a checkout builds
+  with the tools it is linted by.
+
 - A wire may name the credential header it carries. `providers.json` gains an
   optional `auth` on each wire — `bearer`, `x_api_key`, `x_goog_api_key` or
   `disabled` — for a gateway that serves another vendor's shape over its own

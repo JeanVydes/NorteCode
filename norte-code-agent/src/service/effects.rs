@@ -126,15 +126,16 @@ where
         context: &norte::ToolContext,
         args: A,
     ) -> norte::Result<norte::ToolOutput> {
-        if let (Some(session), Some(call_id)) = (context.session, context.call_id) {
-            if is_journaled(self.name) && self.journal.is_suspect(session, call_id) {
-                return Ok(norte::ToolOutput::error(format!(
-                    "`{}` call {call_id} started before a restart and may already have taken \
-                     effect, so it is not run again. Inspect the workspace; to retry, ask in a \
-                     new turn so the model gets a fresh call.",
-                    self.name
-                )));
-            }
+        if let (Some(session), Some(call_id)) = (context.session, context.call_id)
+            && is_journaled(self.name)
+            && self.journal.is_suspect(session, call_id)
+        {
+            return Ok(norte::ToolOutput::error(format!(
+                "`{}` call {call_id} started before a restart and may already have taken \
+                 effect, so it is not run again. Inspect the workspace; to retry, ask in a \
+                 new turn so the model gets a fresh call.",
+                self.name
+            )));
         }
         self.inner.call_with_context(context, args).await
     }

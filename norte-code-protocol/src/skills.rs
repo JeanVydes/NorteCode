@@ -58,10 +58,10 @@ pub fn discovery_roots(workspace: &Path, extra: &[PathBuf], interop: bool) -> Ve
     let mut roots = Vec::new();
     // Bundled examples ship next to the executable; they are the lowest
     // precedence root and are skipped when the directory is absent.
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            roots.push(directory.join("assets").join("skills"));
-        }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        roots.push(directory.join("assets").join("skills"));
     }
     let config_base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -69,10 +69,8 @@ pub fn discovery_roots(workspace: &Path, extra: &[PathBuf], interop: bool) -> Ve
     if let Some(base) = config_base {
         roots.push(base.join("norte-code").join("skills"));
     }
-    if interop {
-        if let Some(home) = std::env::var_os("HOME") {
-            roots.push(PathBuf::from(home).join(".agents").join("skills"));
-        }
+    if interop && let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join(".agents").join("skills"));
     }
     for path in extra {
         roots.push(if path.is_absolute() {
@@ -396,10 +394,10 @@ impl SkillRegistry {
 
     /// Marks a skill inactive for a session. Unknown names are harmless.
     pub fn deactivate(&self, session: Option<SessionId>, name: &str) {
-        if let Some(session) = session {
-            if let Some(active) = self.lock_active().get_mut(&session) {
-                active.remove(name);
-            }
+        if let Some(session) = session
+            && let Some(active) = self.lock_active().get_mut(&session)
+        {
+            active.remove(name);
         }
     }
 
@@ -547,15 +545,15 @@ pub fn parse_skill(text: &str, directory_name: &str) -> std::result::Result<Skil
         .map_err(|error| format!("invalid YAML frontmatter: {error}"))?;
     validate_name(&frontmatter.name, Some(directory_name))?;
     validate_description(&frontmatter.description)?;
-    if let Some(license) = &frontmatter.license {
-        if license.trim().is_empty() {
-            return Err("`license` must not be empty when present".to_owned());
-        }
+    if let Some(license) = &frontmatter.license
+        && license.trim().is_empty()
+    {
+        return Err("`license` must not be empty when present".to_owned());
     }
-    if let Some(compatibility) = &frontmatter.compatibility {
-        if compatibility.chars().count() > 500 {
-            return Err("`compatibility` is longer than 500 characters".to_owned());
-        }
+    if let Some(compatibility) = &frontmatter.compatibility
+        && compatibility.chars().count() > 500
+    {
+        return Err("`compatibility` is longer than 500 characters".to_owned());
     }
     let allowed_tools = frontmatter
         .allowed_tools
@@ -628,12 +626,12 @@ pub fn validate_name(name: &str, directory: Option<&str>) -> std::result::Result
     if name.contains("--") {
         return Err("`name` must not contain consecutive hyphens".to_owned());
     }
-    if let Some(directory) = directory {
-        if name != directory {
-            return Err(format!(
-                "`name` must match the directory name (`{directory}`)"
-            ));
-        }
+    if let Some(directory) = directory
+        && name != directory
+    {
+        return Err(format!(
+            "`name` must match the directory name (`{directory}`)"
+        ));
     }
     Ok(())
 }

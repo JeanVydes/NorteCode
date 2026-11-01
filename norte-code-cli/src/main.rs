@@ -654,10 +654,10 @@ pub(crate) async fn new_session(
         &spec.capabilities.reasoning,
     )
     .map_err(|error| error.to_string())?;
-    if let Some(limit) = args.budget {
-        if !limit.is_finite() || limit <= 0.0 {
-            return Err(format!("--budget must be a positive number, got {limit}"));
-        }
+    if let Some(limit) = args.budget
+        && (!limit.is_finite() || limit <= 0.0)
+    {
+        return Err(format!("--budget must be a positive number, got {limit}"));
     }
     let message_budget = match args.budget {
         Some(limit) => Some(Budget {
@@ -681,10 +681,10 @@ pub(crate) async fn new_session(
     let budget_is_usd = message_budget
         .as_ref()
         .is_some_and(|budget| budget.unit == BudgetUnit::Usd);
-    if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
-        if verbosity.at_least(Verbosity::Medium) {
-            eprintln!("{}", style.red(warning));
-        }
+    if let Some(warning) = budget_warning(&provider, &config, budget_is_usd)
+        && verbosity.at_least(Verbosity::Medium)
+    {
+        eprintln!("{}", style.red(warning));
     }
     let show_cost = config.cost.show;
     // The footer's context dial needs the window and the compaction threshold
@@ -910,10 +910,11 @@ async fn resume_session(
         );
     }
     let budget_is_usd = args.budget.is_some() && args.budget_unit.eq_ignore_ascii_case("usd");
-    if let Some(warning) = budget_warning(&provider, &config, budget_is_usd) {
-        if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
-            eprintln!("{}", style.red(warning));
-        }
+    if let Some(warning) = budget_warning(&provider, &config, budget_is_usd)
+        && verbosity.at_least(Verbosity::Medium)
+        && !args.jsonl
+    {
+        eprintln!("{}", style.red(warning));
     }
     let show_cost = config.cost.show;
     // The footer's context dial needs the window and the compaction threshold
@@ -1079,19 +1080,21 @@ async fn resume_session(
     )
     .await?;
     renderer.ensure_newline();
-    if interactive && !outcome.parked && !renderer.budget_stopped {
-        if let Some(receiver) = input.as_mut() {
-            interactive_loop(
-                &service,
-                Some(session),
-                &mut renderer,
-                style,
-                receiver,
-                None,
-                None,
-            )
-            .await?;
-        }
+    if interactive
+        && !outcome.parked
+        && !renderer.budget_stopped
+        && let Some(receiver) = input.as_mut()
+    {
+        interactive_loop(
+            &service,
+            Some(session),
+            &mut renderer,
+            style,
+            receiver,
+            None,
+            None,
+        )
+        .await?;
     }
     renderer.ensure_newline();
     renderer.summary();

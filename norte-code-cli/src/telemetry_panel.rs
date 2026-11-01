@@ -665,10 +665,10 @@ impl Panel {
             .providers_by(self.metric)
             .get(self.cursor)
             .map(|(provider, _)| (*provider).to_owned());
-        if let Some(provider) = name {
-            if !self.open.remove(&provider) {
-                self.open.insert(provider);
-            }
+        if let Some(provider) = name
+            && !self.open.remove(&provider)
+        {
+            self.open.insert(provider);
         }
     }
 

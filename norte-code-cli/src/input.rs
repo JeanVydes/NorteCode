@@ -2027,10 +2027,10 @@ mod unix {
                 // control. `/provider ri` and Enter is `/provider river`; without
                 // this the half-typed word was sent and refused, which is the
                 // one outcome a completion exists to avoid.
-                if let Some(completion) = completion {
-                    if !completion.is_empty() {
-                        buffer.insert_text(completion);
-                    }
+                if let Some(completion) = completion
+                    && !completion.is_empty()
+                {
+                    buffer.insert_text(completion);
                 }
                 let line = buffer.text();
                 if !line.trim().is_empty() {

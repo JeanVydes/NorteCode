@@ -566,10 +566,10 @@ pub(crate) async fn interactive_loop(
     // A session that already has a title shows it in the footer instead of its
     // key, and titling does not run again for it. A session without one gets
     // asked when the first message is sent.
-    if let Some(key) = &session {
-        if let Some(title) = service.session_title(key) {
-            renderer.set_title(title);
-        }
+    if let Some(key) = &session
+        && let Some(title) = service.session_title(key)
+    {
+        renderer.set_title(title);
     }
     loop {
         let Some((text, attachments)) =
@@ -2029,13 +2029,12 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
             // The switch is written first: a file that cannot be written is what
             // the person needs to know, and switching the process alone would
             // say it worked when the next run would undo it.
-            if let Some(path) = path {
-                if let Err(error) =
+            if let Some(path) = path
+                && let Err(error) =
                     norte_code_protocol::config::set_user_mcp_enabled(&path, name, enabled)
-                {
-                    renderer.failure(format!("could not change `{name}`: {error}"));
-                    return;
-                }
+            {
+                renderer.failure(format!("could not change `{name}`: {error}"));
+                return;
             }
             let word = if enabled { "enabled" } else { "disabled" };
             renderer.notice(format!("mcp server `{name}` {word}"));
@@ -2091,11 +2090,10 @@ fn apply_mcp_action(
     if let Some(path) = service
         .config_path()
         .or_else(norte_code_protocol::config::user_config_path)
+        && let Err(error) = norte_code_protocol::config::set_user_mcp_enabled(&path, name, active)
     {
-        if let Err(error) = norte_code_protocol::config::set_user_mcp_enabled(&path, name, active) {
-            renderer.failure(format!("could not change `{name}`: {error}"));
-            return;
-        }
+        renderer.failure(format!("could not change `{name}`: {error}"));
+        return;
     }
     match service.set_mcp_active(name, active) {
         Some(state) => {
@@ -2708,63 +2706,57 @@ pub(crate) async fn drive_turns(
                         committed: false,
                         ..
                     }
-                ) {
-                    if let Some(prompt) = renderer.take_budget_prompt() {
-                        if renderer.can_prompt() {
-                            if let (Some(receiver), Some(session)) =
-                                (input.as_deref_mut(), current.clone())
+                ) && let Some(prompt) = renderer.take_budget_prompt()
+                    && renderer.can_prompt()
+                    && let (Some(receiver), Some(session)) = (input.as_deref_mut(), current.clone())
+                    && let Some(limit) = prompt_budget_limit(
+                        service,
+                        &session,
+                        receiver,
+                        &mut interrupt_rx,
+                        renderer,
+                        prompt,
+                    )
+                    .await?
+                {
+                    let budget = Budget {
+                        unit: prompt.unit,
+                        limit,
+                        action: BudgetAction::Ask,
+                    };
+                    let set = service
+                        .submit(ClientRequest {
+                            request_id: 0,
+                            kind: ClientRequestKind::SetBudget {
+                                session: session.clone(),
+                                budget,
+                            },
+                        })
+                        .await;
+                    match set {
+                        Ok(next) => {
+                            streams.push_back(next);
+                            match service
+                                .submit(ClientRequest {
+                                    request_id: 0,
+                                    kind: ClientRequestKind::Resume {
+                                        session: session.clone(),
+                                    },
+                                })
+                                .await
                             {
-                                if let Some(limit) = prompt_budget_limit(
-                                    service,
-                                    &session,
-                                    receiver,
-                                    &mut interrupt_rx,
-                                    renderer,
-                                    prompt,
-                                )
-                                .await?
-                                {
-                                    let budget = Budget {
-                                        unit: prompt.unit,
-                                        limit,
-                                        action: BudgetAction::Ask,
-                                    };
-                                    let set = service
-                                        .submit(ClientRequest {
-                                            request_id: 0,
-                                            kind: ClientRequestKind::SetBudget {
-                                                session: session.clone(),
-                                                budget,
-                                            },
-                                        })
-                                        .await;
-                                    match set {
-                                        Ok(next) => {
-                                            streams.push_back(next);
-                                            match service
-                                            .submit(ClientRequest {
-                                                request_id: 0,
-                                                kind: ClientRequestKind::Resume {
-                                                    session: session.clone(),
-                                                },
-                                            })
-                                            .await
-                                        {
-                                            Ok(next) => {
-                                                renderer.mark_working();
-                                                streams.push_back(next);
-                                            }
-                                            Err(error) => renderer.notice(format!(
-                                                "warning: budget raised but the session was not resumed: {error}"
-                                            )),
-                                        }
-                                        }
-                                        Err(error) => renderer.notice(format!(
-                                            "warning: could not raise the budget: {error}"
-                                        )),
-                                    }
+                                Ok(next) => {
+                                    renderer.mark_working();
+                                    streams.push_back(next);
                                 }
+                                Err(error) => renderer.notice(format!(
+                                    "warning: budget raised but the session was not resumed: {error}"
+                                )),
                             }
+                        }
+                        Err(error) => {
+                            renderer
+                                .notice(format!("warning: could not raise the budget: {error}"));
                         }
                     }
                 }

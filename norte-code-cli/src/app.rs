@@ -1391,13 +1391,13 @@ fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     let take = usize::from(area.height).min(rows.len());
     let hidden = rows.len().saturating_sub(take);
     let mut shown = rows[..take].to_vec();
-    if hidden > 0 {
-        if let Some(last) = shown.last_mut() {
-            *last = Line::from(Span::styled(
-                format!("… {hidden} more"),
-                style.yellow_span(),
-            ));
-        }
+    if hidden > 0
+        && let Some(last) = shown.last_mut()
+    {
+        *last = Line::from(Span::styled(
+            format!("… {hidden} more"),
+            style.yellow_span(),
+        ));
     }
     Paragraph::new(shown).render(area, frame.buffer_mut());
 }

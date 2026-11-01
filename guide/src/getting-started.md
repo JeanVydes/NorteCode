@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust 1.85 or newer.
+- Rust 1.88 or newer.
 - Linux or macOS for the supported command sandbox. The rest of the host builds
   on other platforms, but the sandbox fails closed when its platform binary is
   missing.

@@ -345,8 +345,9 @@ impl Service {
                         break;
                     }
                     question = questions.recv() => {
-                        if let Ok(question) = question {
-                            if question.session == Some(current_nid) {
+                        if let Ok(question) = question
+                            && question.session == Some(current_nid)
+                        {
                                 if !emit(
                                     tx,
                                     ServerEvent::new(
@@ -366,7 +367,6 @@ impl Service {
                                     return Ok(());
                                 }
                                 self.set_phase(key, norte_code_protocol::Phase::AwaitingTool).await;
-                            }
                         }
                     }
                     next = stream.next() => {
@@ -517,82 +517,81 @@ impl Service {
             // A transient failure is retried by resuming the same session with
             // no new input, so the user's message is never appended twice. The
             // engine left the session streaming from that message.
-            if !cancelled && !interrupted {
-                if let Err(error) = &outcome {
-                    if let Some((delay, reason)) = retry_plan(error, &self.config().retry, retries)
-                    {
-                        if let Ok(session) = engine.session(current_nid).await {
-                            self.set_phase(key, to_phase(session.phase)).await;
-                        }
-                        let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
-                        if !emit(
-                            tx,
-                            ServerEvent::new(
-                                request_id,
-                                Some(key.clone()),
-                                ServerEventKind::RetryScheduled {
-                                    turn,
-                                    attempt: retries + 1,
-                                    delay_ms,
-                                    reason,
-                                },
-                            ),
-                        )
-                        .await
-                        {
-                            return Ok(());
-                        }
-                        let waited = tokio::select! {
-                            biased;
-                            () = cancellation.cancelled() => false,
-                            () = tokio::time::sleep(delay) => true,
-                        };
-                        if !waited {
-                            // Cancelled while waiting to retry: the failure that
-                            // scheduled this retry already left the session
-                            // `Streaming`, and this turn is not coming back to
-                            // lower it.
-                            self.settle_streaming_to_idle(current_nid).await;
-                            let phase = engine
-                                .session(current_nid)
-                                .await
-                                .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
-                            self.set_phase(key, phase).await;
-                            emit(
-                                tx,
-                                ServerEvent::new(
-                                    request_id,
-                                    Some(key.clone()),
-                                    ServerEventKind::TurnFinished {
-                                        turn,
-                                        phase,
-                                        committed: false,
-                                    },
-                                ),
-                            )
-                            .await;
-                            return Ok(());
-                        }
-                        retries += 1;
-                        if !emit(
-                            tx,
-                            ServerEvent::new(
-                                request_id,
-                                Some(key.clone()),
-                                ServerEventKind::RetryStarted {
-                                    turn,
-                                    attempt: retries,
-                                },
-                            ),
-                        )
-                        .await
-                        {
-                            return Ok(());
-                        }
-                        input = None;
-                        continue;
-                    }
+            if !cancelled
+                && !interrupted
+                && let Err(error) = &outcome
+                && let Some((delay, reason)) = retry_plan(error, &self.config().retry, retries)
+            {
+                if let Ok(session) = engine.session(current_nid).await {
+                    self.set_phase(key, to_phase(session.phase)).await;
                 }
+                let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                if !emit(
+                    tx,
+                    ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::RetryScheduled {
+                            turn,
+                            attempt: retries + 1,
+                            delay_ms,
+                            reason,
+                        },
+                    ),
+                )
+                .await
+                {
+                    return Ok(());
+                }
+                let waited = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => false,
+                    () = tokio::time::sleep(delay) => true,
+                };
+                if !waited {
+                    // Cancelled while waiting to retry: the failure that
+                    // scheduled this retry already left the session
+                    // `Streaming`, and this turn is not coming back to
+                    // lower it.
+                    self.settle_streaming_to_idle(current_nid).await;
+                    let phase = engine
+                        .session(current_nid)
+                        .await
+                        .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
+                    self.set_phase(key, phase).await;
+                    emit(
+                        tx,
+                        ServerEvent::new(
+                            request_id,
+                            Some(key.clone()),
+                            ServerEventKind::TurnFinished {
+                                turn,
+                                phase,
+                                committed: false,
+                            },
+                        ),
+                    )
+                    .await;
+                    return Ok(());
+                }
+                retries += 1;
+                if !emit(
+                    tx,
+                    ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::RetryStarted {
+                            turn,
+                            attempt: retries,
+                        },
+                    ),
+                )
+                .await
+                {
+                    return Ok(());
+                }
+                input = None;
+                continue;
             }
 
             match outcome {
@@ -629,34 +628,31 @@ impl Service {
                         && !interrupted
                         && outcome.session.phase == norte::harness::Phase::Idle
                         && self.budget_stopped(key).is_none()
+                        && let Ok((current, spec, _)) = self.require_record(key)
+                        && self
+                            .compaction_due(key, &spec, current)
+                            .await
+                            .unwrap_or(false)
                     {
-                        if let Ok((current, spec, _)) = self.require_record(key) {
-                            if self
-                                .compaction_due(key, &spec, current)
-                                .await
-                                .unwrap_or(false)
-                            {
-                                match self.perform_compaction(request_id, key, "threshold").await {
-                                    Ok(events) => {
-                                        for event in events {
-                                            if !emit(tx, event).await {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        let _ = emit(
-                                            tx,
-                                            ServerEvent::error(
-                                                request_id,
-                                                Some(key.clone()),
-                                                ErrorCode::Internal,
-                                                error.to_string(),
-                                            ),
-                                        )
-                                        .await;
+                        match self.perform_compaction(request_id, key, "threshold").await {
+                            Ok(events) => {
+                                for event in events {
+                                    if !emit(tx, event).await {
+                                        break;
                                     }
                                 }
+                            }
+                            Err(error) => {
+                                let _ = emit(
+                                    tx,
+                                    ServerEvent::error(
+                                        request_id,
+                                        Some(key.clone()),
+                                        ErrorCode::Internal,
+                                        error.to_string(),
+                                    ),
+                                )
+                                .await;
                             }
                         }
                     }

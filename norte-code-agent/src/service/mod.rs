@@ -459,10 +459,10 @@ impl Service {
                 let workspace_root = self.workspace_root.clone();
                 move |info| {
                     effects.intent(info.session, info.call_id, info.tool.as_str());
-                    if info.tool.as_str() == "edit" {
-                        if let Some(source) = edit_source(&workspace_root, &info.arguments) {
-                            activity.snapshot(info.call_id, source);
-                        }
+                    if info.tool.as_str() == "edit"
+                        && let Some(source) = edit_source(&workspace_root, &info.arguments)
+                    {
+                        activity.snapshot(info.call_id, source);
                     }
                     activity
                         .arguments
@@ -1372,10 +1372,10 @@ impl Service {
                 .map(|(key, record)| (key.clone(), record.spec.label()))
                 .collect();
             for (key, reference) in references {
-                if let Ok(spec) = Self::default_spec_for(&next, &catalog, &reference) {
-                    if let Some(record) = self.lock_sessions().get_mut(&key) {
-                        record.spec = spec;
-                    }
+                if let Ok(spec) = Self::default_spec_for(&next, &catalog, &reference)
+                    && let Some(record) = self.lock_sessions().get_mut(&key)
+                {
+                    record.spec = spec;
                 }
             }
         }

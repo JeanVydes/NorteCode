@@ -617,10 +617,10 @@ impl SqliteStore {
     ///
     /// Returns [`SqliteError`] when the file cannot be opened or migrated.
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, SqliteError> {
-        if let Some(parent) = path.as_ref().parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.as_ref().parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         Self::from_connection(Connection::open(path)?)
     }

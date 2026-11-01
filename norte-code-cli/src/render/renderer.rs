@@ -1545,14 +1545,13 @@ impl Renderer {
                 }
                 // The finish event carries the tool's output but not its
                 // arguments, and a write's result is mostly the path it wrote.
-                if matches!(tool.as_str(), "write" | "read") {
-                    if let Some(path) = arguments
+                if matches!(tool.as_str(), "write" | "read")
+                    && let Some(path) = arguments
                         .as_ref()
                         .and_then(|arguments| arguments.get("path"))
                         .and_then(serde_json::Value::as_str)
-                    {
-                        self.pending_paths.insert(call_id.clone(), path.to_owned());
-                    }
+                {
+                    self.pending_paths.insert(call_id.clone(), path.to_owned());
                 }
                 let command = Self::command_summary(arguments.as_ref());
                 let diff = if tool == "edit" {
@@ -1578,15 +1577,14 @@ impl Renderer {
                     if self.verbosity.at_least(Verbosity::High)
                         && tool.as_str() != "ask_user"
                         && tool.as_str() != "edit"
+                        && let Some(arguments) = arguments
                     {
-                        if let Some(arguments) = arguments {
-                            let text = serde_json::to_string_pretty(arguments)
-                                .unwrap_or_else(|_| compact_json(arguments, 4_000));
-                            let (text, truncated) = clip_text(&text, 4_000);
-                            self.code_block("json", &text);
-                            if truncated {
-                                self.notice("arguments shortened for display");
-                            }
+                        let text = serde_json::to_string_pretty(arguments)
+                            .unwrap_or_else(|_| compact_json(arguments, 4_000));
+                        let (text, truncated) = clip_text(&text, 4_000);
+                        self.code_block("json", &text);
+                        if truncated {
+                            self.notice("arguments shortened for display");
                         }
                     }
                 }
@@ -1601,24 +1599,26 @@ impl Renderer {
                 duration_ms,
                 ..
             } => {
-                if let Some(todos) = self.pending_todos.remove(call_id) {
-                    if tool == "todo" && !*is_error {
-                        self.pinned.set_todos(todos);
-                    }
+                if let Some(todos) = self.pending_todos.remove(call_id)
+                    && tool == "todo"
+                    && !*is_error
+                {
+                    self.pinned.set_todos(todos);
                 }
                 let path = self.pending_paths.remove(call_id);
-                if *is_error && tool == "edit" {
-                    if let Some(error) = error {
-                        self.end_blocks();
-                        if self.verbosity.is_quiet() {
-                            for line in error.lines() {
-                                let escaped = crate::text::terminal(line);
-                                let (text, _) = clip_text(&escaped, 400);
-                                self.failure(text);
-                            }
-                        } else {
-                            self.code_block("text", error);
+                if *is_error
+                    && tool == "edit"
+                    && let Some(error) = error
+                {
+                    self.end_blocks();
+                    if self.verbosity.is_quiet() {
+                        for line in error.lines() {
+                            let escaped = crate::text::terminal(line);
+                            let (text, _) = clip_text(&escaped, 400);
+                            self.failure(text);
                         }
+                    } else {
+                        self.code_block("text", error);
                     }
                 }
                 // Whether the run is announced needs `medium`, but what it
@@ -1718,10 +1718,10 @@ impl Renderer {
                 }
                 if self.verbosity.at_least(Verbosity::High) {
                     if *is_error {
-                        if tool.as_str() != "edit" {
-                            if let Some(error) = error {
-                                self.code_block("text", error);
-                            }
+                        if tool.as_str() != "edit"
+                            && let Some(error) = error
+                        {
+                            self.code_block("text", error);
                         }
                     } else if let Some(output) = output {
                         self.code_block("text", output);
@@ -1878,10 +1878,8 @@ impl Renderer {
                 entry.push_line("");
             }
             first = false;
-            if labelled {
-                if let Some(name) = &section.name {
-                    entry.push_inked(crate::transcript::Ink::Cyan, name.clone());
-                }
+            if labelled && let Some(name) = &section.name {
+                entry.push_inked(crate::transcript::Ink::Cyan, name.clone());
             }
             let mut kept = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
             let hidden = tool_lines(&mut kept, &section.lines);
@@ -2350,14 +2348,14 @@ impl Renderer {
                             .map_or_else(String::new, |id| format!(" · new session {}", short(id)))
                     };
                     self.notice(format!("✓ context compacted{detail}"));
-                    if self.verbosity.at_least(Verbosity::High) {
-                        if let Some(summary) = summary {
-                            let escaped = crate::text::terminal(summary);
-                            let (text, truncated) = clip_text(&escaped, 8_000);
-                            self.code_block("markdown", &text);
-                            if truncated {
-                                self.notice("summary shortened for display");
-                            }
+                    if self.verbosity.at_least(Verbosity::High)
+                        && let Some(summary) = summary
+                    {
+                        let escaped = crate::text::terminal(summary);
+                        let (text, truncated) = clip_text(&escaped, 8_000);
+                        self.code_block("markdown", &text);
+                        if truncated {
+                            self.notice("summary shortened for display");
                         }
                     }
                 } else {
@@ -2744,16 +2742,16 @@ impl Renderer {
         // a person recognises the session by; the key follows in brackets,
         // because the key is what `resume` is given and a title is not unique. A
         // session with no title yet leads with the key alone.
-        if self.verbosity.at_least(Verbosity::Medium) {
-            if let Some(key) = &self.session {
-                let key = short(key).to_owned();
-                match self.title.as_deref().map(str::trim) {
-                    Some(title) if !title.is_empty() => {
-                        parts.insert(0, (Ink::Faint, format!("({key})")));
-                        parts.insert(0, (Ink::Cyan, title.to_owned()));
-                    }
-                    _ => parts.insert(0, (Ink::Faint, key)),
+        if self.verbosity.at_least(Verbosity::Medium)
+            && let Some(key) = &self.session
+        {
+            let key = short(key).to_owned();
+            match self.title.as_deref().map(str::trim) {
+                Some(title) if !title.is_empty() => {
+                    parts.insert(0, (Ink::Faint, format!("({key})")));
+                    parts.insert(0, (Ink::Cyan, title.to_owned()));
                 }
+                _ => parts.insert(0, (Ink::Faint, key)),
             }
         }
         parts
@@ -2769,11 +2767,11 @@ impl Renderer {
     pub(crate) fn head_fields(&self) -> Vec<(crate::render::dial::Ink, String)> {
         use crate::render::dial::Ink;
         let mut head = Vec::new();
-        if self.show_workdir {
-            if let Ok(dir) = std::env::current_dir() {
-                head.push((Ink::Faint, short_path(&dir)));
-                head.push((Ink::Faint, " · ".to_owned()));
-            }
+        if self.show_workdir
+            && let Ok(dir) = std::env::current_dir()
+        {
+            head.push((Ink::Faint, short_path(&dir)));
+            head.push((Ink::Faint, " · ".to_owned()));
         }
         // What is being installed, when something is. A clone and a build take
         // minutes, and the screen has to say that is what it is waiting for:

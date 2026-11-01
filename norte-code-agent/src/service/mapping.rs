@@ -106,16 +106,17 @@ pub(super) async fn tool_error(
     let history = engine.history(session).await.ok()?;
     for message in history.iter().rev() {
         for part in &message.parts {
-            if let norte::Part::ToolResult(result) = part {
-                if result.call_id == *call_id && result.is_error {
-                    let text = result
-                        .parts
-                        .iter()
-                        .filter_map(norte::Part::as_text)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    return Some(text);
-                }
+            if let norte::Part::ToolResult(result) = part
+                && result.call_id == *call_id
+                && result.is_error
+            {
+                let text = result
+                    .parts
+                    .iter()
+                    .filter_map(norte::Part::as_text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Some(text);
             }
         }
     }
@@ -131,17 +132,17 @@ pub(super) async fn tool_result_text(
     let history = engine.history(session).await.ok()?;
     for message in history.iter().rev() {
         for part in &message.parts {
-            if let norte::Part::ToolResult(result) = part {
-                if result.call_id == *call_id {
-                    return Some(
-                        result
-                            .parts
-                            .iter()
-                            .filter_map(norte::Part::as_text)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
+            if let norte::Part::ToolResult(result) = part
+                && result.call_id == *call_id
+            {
+                return Some(
+                    result
+                        .parts
+                        .iter()
+                        .filter_map(norte::Part::as_text)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
         }
     }

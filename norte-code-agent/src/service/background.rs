@@ -197,10 +197,10 @@ impl FnExecutor<ShellRequest, ToolOutput> for ShellCalls {
         let job = sink.job_id();
         // A call that failed without starting has no streams to close, so its
         // job would sit `running` for ever. Its own failure is its end.
-        if let Some(id) = job.as_ref() {
-            if !let_go {
-                self.jobs.settle(id, None, false);
-            }
+        if let Some(id) = job.as_ref()
+            && !let_go
+        {
+            self.jobs.settle(id, None, false);
         }
 
         match (eager, job) {

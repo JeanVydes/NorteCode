@@ -749,15 +749,15 @@ impl Config {
     /// fails validation.
     pub fn load(user: Option<&Path>, project: Option<&Path>) -> Result<Loaded, ConfigError> {
         let mut value = Value::Object(serde_json::Map::new());
-        if let Some(path) = user {
-            if path.exists() {
-                merge(&mut value, read_value(path)?);
-            }
+        if let Some(path) = user
+            && path.exists()
+        {
+            merge(&mut value, read_value(path)?);
         }
-        if let Some(path) = project {
-            if path.exists() {
-                merge(&mut value, read_value(path)?);
-            }
+        if let Some(path) = project
+            && path.exists()
+        {
+            merge(&mut value, read_value(path)?);
         }
         Self::from_value(value)
     }
@@ -937,10 +937,10 @@ impl Config {
         environment_keys: &[String],
     ) -> Result<ApiKey, ConfigError> {
         for name in environment_keys {
-            if let Ok(value) = std::env::var(name) {
-                if !value.trim().is_empty() {
-                    return Ok(ApiKey::new(value.trim().to_owned()));
-                }
+            if let Ok(value) = std::env::var(name)
+                && !value.trim().is_empty()
+            {
+                return Ok(ApiKey::new(value.trim().to_owned()));
             }
         }
         if environment_keys.is_empty() {

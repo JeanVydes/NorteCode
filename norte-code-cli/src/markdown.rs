@@ -494,26 +494,28 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
         // `~~struck~~`: two tildes, and the text between them is struck. It is
         // read before the single-character markers below so a lone `~` stays a
         // `~` and a pair is an emphasis.
-        if character == '~' && chars.get(at + 1) == Some(&'~') {
-            if let Some(end) = find_double(&chars, at + 2, '~') {
-                flush!();
-                let inner: String = chars[at + 2..end].iter().collect();
-                runs.push(Run::styled(Emphasis::Strike, inner));
-                at = end + 2;
-                continue;
-            }
+        if character == '~'
+            && chars.get(at + 1) == Some(&'~')
+            && let Some(end) = find_double(&chars, at + 2, '~')
+        {
+            flush!();
+            let inner: String = chars[at + 2..end].iter().collect();
+            runs.push(Run::styled(Emphasis::Strike, inner));
+            at = end + 2;
+            continue;
         }
         // `<u>underlined</u>`: markdown has no marker for an underline, so the
         // one HTML tag a terminal can honour is read as one. A tag this does not
         // know is left as text, which is what it is.
-        if character == '<' && starts_with(&chars, at, "<u>") {
-            if let Some(end) = find_tag(&chars, at + 3, "</u>") {
-                flush!();
-                let inner: String = chars[at + 3..end].iter().collect();
-                runs.push(Run::styled(Emphasis::Underline, inner));
-                at = end + 4;
-                continue;
-            }
+        if character == '<'
+            && starts_with(&chars, at, "<u>")
+            && let Some(end) = find_tag(&chars, at + 3, "</u>")
+        {
+            flush!();
+            let inner: String = chars[at + 3..end].iter().collect();
+            runs.push(Run::styled(Emphasis::Underline, inner));
+            at = end + 4;
+            continue;
         }
         if character == '*' || character == '_' {
             let doubled = chars.get(at + 1) == Some(&character);
@@ -529,28 +531,26 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
                 && at > 0
                 && chars.get(at - 1).is_some_and(|c| c.is_alphanumeric())
                 && chars.get(at + marker).is_some_and(|c| c.is_alphanumeric());
-            if !inside_word {
-                if let Some(end) = find_emphasis(&chars, at + marker, character) {
-                    flush!();
-                    let inner: String = chars[at + marker..end].iter().collect();
-                    runs.push(Run::styled(emphasis, inner));
-                    at = end + marker;
-                    continue;
-                }
+            if !inside_word && let Some(end) = find_emphasis(&chars, at + marker, character) {
+                flush!();
+                let inner: String = chars[at + marker..end].iter().collect();
+                runs.push(Run::styled(emphasis, inner));
+                at = end + marker;
+                continue;
             }
         }
         // A link: the text is what it reads as, and the target is what it
         // points at. Both are worth showing in a terminal, where a target
         // cannot be clicked and a reader may want to copy it.
-        if character == '[' {
-            if let Some((text_end, target_end, target)) = link(&chars, at) {
-                flush!();
-                let label: String = chars[at + 1..text_end].iter().collect();
-                runs.extend(inline(&label));
-                runs.push(Run::styled(Emphasis::Link, format!(" ({target})")));
-                at = target_end;
-                continue;
-            }
+        if character == '['
+            && let Some((text_end, target_end, target)) = link(&chars, at)
+        {
+            flush!();
+            let label: String = chars[at + 1..text_end].iter().collect();
+            runs.extend(inline(&label));
+            runs.push(Run::styled(Emphasis::Link, format!(" ({target})")));
+            at = target_end;
+            continue;
         }
         plain.push(character);
         at += 1;
@@ -685,16 +685,16 @@ pub(crate) fn highlight(language: &str, line: &str) -> Vec<Run> {
         }
         let character = chars[at];
         // A string runs to its own quote, and a backslash escapes one.
-        if character == '"' || character == '\'' || character == '`' {
-            if let Some(end) = string_end(&chars, at, character) {
-                if !plain.is_empty() {
-                    runs.push(Run::styled(Emphasis::Fence, std::mem::take(&mut plain)));
-                }
-                let text: String = chars[at..=end].iter().collect();
-                runs.push(Run::styled(Emphasis::Code, text));
-                at = end + 1;
-                continue;
+        if (character == '"' || character == '\'' || character == '`')
+            && let Some(end) = string_end(&chars, at, character)
+        {
+            if !plain.is_empty() {
+                runs.push(Run::styled(Emphasis::Fence, std::mem::take(&mut plain)));
             }
+            let text: String = chars[at..=end].iter().collect();
+            runs.push(Run::styled(Emphasis::Code, text));
+            at = end + 1;
+            continue;
         }
         // A word, so it can be matched against the language's keywords.
         if character.is_alphabetic() || character == '_' {

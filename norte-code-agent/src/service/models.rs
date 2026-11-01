@@ -299,12 +299,12 @@ fn validate_reasoning(
                     "the reasoning budget must be at least one token".to_owned(),
                 ));
             }
-            if let Some(max) = capabilities.max_budget {
-                if *tokens > max {
-                    return Err(ServiceError::Reasoning(format!(
-                        "the model accepts at most {max} reasoning tokens"
-                    )));
-                }
+            if let Some(max) = capabilities.max_budget
+                && *tokens > max
+            {
+                return Err(ServiceError::Reasoning(format!(
+                    "the model accepts at most {max} reasoning tokens"
+                )));
             }
             Ok(ReasoningRequest::Budget(*tokens))
         }
