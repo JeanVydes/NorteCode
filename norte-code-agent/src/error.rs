@@ -11,9 +11,6 @@ pub enum ServiceError {
     /// The catalogue could not be loaded or written.
     #[error(transparent)]
     Catalog(#[from] norte_code_protocol::catalog::CatalogError),
-    /// A model reference was not `provider/model`.
-    #[error("`{0}` is not a `provider/model` reference")]
-    ModelReference(String),
     /// The provider is not one of the four this build knows.
     #[error("unknown provider `{0}`")]
     UnknownProvider(String),

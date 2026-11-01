@@ -60,7 +60,8 @@ override to write.
 | `threshold` | `0.90` | Context fraction in `(0, 1]`. |
 | `trigger` | `idle` | `idle` or `eager`. |
 | `keep_recent` | `6` | Recent messages kept verbatim. |
-| `model` | null | Summary model; null uses the session model. |
+| `provider` | null | Provider of the summary model; set with `model` or not at all. |
+| `model` | null | Summary model id; null uses the session model. |
 | `reasoning` | `lowest` | Summary reasoning effort. |
 
 ## `titling`
@@ -68,8 +69,14 @@ override to write.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Name a new session from its first message. |
-| `model` | null | Model that writes the title; null uses the session model. |
+| `provider` | null | Provider of the titling model; set with `model` or not at all. |
+| `model` | null | Model id that writes the title; null uses the session model. |
 | `max_output` | `24` | Tokens the title request may produce. |
+
+`provider` and `model` are two keys and never one `provider/model` string: a
+model id may carry slashes of its own — NVIDIA names its models `vendor/model` —
+so the two are set apart. Both or neither: one without the other cannot be
+resolved.
 
 A session with no title is listed by its key, and a key is not a name. When
 titling is on, the first message a person sends is also sent to the model as a
@@ -84,11 +91,12 @@ sanitised rather than trusted: control characters and bidi overrides are dropped
 only the first line survives, whitespace folds, and a reply that is not a name is
 refused so the session keeps its key rather than taking a name nobody can use.
 
-`titling.model` names a cheaper model to ask, resolved the way a model switch
-resolves one, so a provider the catalogue does not list works. `enabled = false`
-turns the feature off: it is one extra request per session, and a host that does
-not want it must be able to say so. A session opened before titling existed, or
-one whose request failed, gets its name from `/rename` instead.
+`titling.provider` and `titling.model` name a cheaper model to ask, resolved
+the way a model switch resolves one, so a provider the catalogue does not list
+works. `enabled = false` turns the feature off: it is one extra request per
+session, and a host that does not want it must be able to say so. A session
+opened before titling existed, or one whose request failed, gets its name from
+`/rename` instead.
 
 ## `retry`
 

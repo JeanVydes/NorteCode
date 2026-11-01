@@ -317,20 +317,32 @@ pub(crate) async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> 
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     for session in sessions {
         if args.json {
+            // The provider and the model are two fields: a model id may carry
+            // slashes of its own, so the two are never written as one string to
+            // be taken apart again.
             let line = serde_json::json!({
                 "key": session.key,
                 "title": session.title,
+                "provider": session.provider,
                 "model": session.model,
                 "created_at": session.created_at.to_rfc3339(),
                 "phase": session.phase,
             });
             println!("{line}");
         } else {
+            // The label is what a person reads. A row written before the
+            // provider had a column of its own has none, and its model is shown
+            // on its own rather than with an empty half in front of it.
+            let label = if session.provider.is_empty() {
+                session.model.clone()
+            } else {
+                format!("{}/{}", session.provider, session.model)
+            };
             println!(
                 "{}\t{}\t{}\t{}",
                 crate::text::terminal(&session.key),
                 crate::text::terminal(session.title.as_deref().unwrap_or("(untitled)")),
-                crate::text::terminal(&session.model),
+                crate::text::terminal(&label),
                 crate::text::terminal(&session.phase)
             );
         }

@@ -382,14 +382,17 @@ impl Service {
         &self,
         request_id: u64,
         session: SessionKey,
+        provider: String,
         model: String,
     ) -> Result<EventStream, ServiceError> {
-        let spec = self.resolve_model_switch(&session, &model).await?;
+        let spec = self
+            .resolve_model_switch(&session, &provider, &model)
+            .await?;
         match self.set_model(&session, spec).await {
             Ok(()) => Ok(single(
                 request_id,
                 Some(session),
-                ServerEventKind::ModelChanged { model },
+                ServerEventKind::ModelChanged { provider, model },
             )),
             // A live turn owns the boundary. Accept the request now and keep it
             // durable; `start_turn` applies it when the session is idle.
@@ -399,33 +402,36 @@ impl Service {
                     let record = sessions
                         .get_mut(&session)
                         .ok_or_else(|| ServiceError::UnknownSession(session.to_string()))?;
+                    record.pending_provider = Some(provider.clone());
                     record.pending_model = Some(model.clone());
                 }
                 self.persist(&session).await?;
                 Ok(single(
                     request_id,
                     Some(session),
-                    ServerEventKind::ModelQueued { model },
+                    ServerEventKind::ModelQueued { provider, model },
                 ))
             }
             Err(error) => Err(error),
         }
     }
 
-    /// Resolves a model reference and checks it against the stored reasoning
-    /// and budget before the switch is queued or applied.
+    /// Resolves a provider and a model and checks them against the stored
+    /// reasoning and budget before the switch is queued or applied.
     pub(super) async fn resolve_model_switch(
         &self,
         session: &SessionKey,
+        provider: &str,
         model: &str,
     ) -> Result<ModelSpec, ServiceError> {
         // The catalogue first, a configured provider second, which is how a run
-        // resolves the same reference. Going straight to the catalogue failed on
+        // resolves the same pair. Going straight to the catalogue failed on
         // every provider the catalogue does not list — `exa`, `river`, any
         // private endpoint declared in the config and nowhere else — so
         // `/model exa/…` said the provider was unknown while `--provider exa`
         // worked.
-        let spec = Service::default_spec_for(&self.lock_config(), &self.catalog(), model)?;
+        let spec =
+            Service::default_spec_for(&self.lock_config(), &self.catalog(), provider, model)?;
         self.ensure_model_supports_reasoning(session, &spec)?;
         self.ensure_model_supports_budget(session, &spec).await?;
         Ok(spec)
@@ -493,14 +499,15 @@ impl Service {
         request_id: u64,
         key: &SessionKey,
     ) -> Result<Option<ServerEvent>, ServiceError> {
-        let Some(model) = self
-            .lock_sessions()
-            .get(key)
-            .and_then(|record| record.pending_model.clone())
-        else {
+        let Some((provider, model)) = self.lock_sessions().get(key).and_then(|record| {
+            Some((
+                record.pending_provider.clone()?,
+                record.pending_model.clone()?,
+            ))
+        }) else {
             return Ok(None);
         };
-        let spec = match self.resolve_model_switch(key, &model).await {
+        let spec = match self.resolve_model_switch(key, &provider, &model).await {
             Ok(spec) => spec,
             Err(error) => {
                 // The queued switch cannot be honoured anymore: the model left
@@ -509,6 +516,7 @@ impl Service {
                 // every turn of the session from now on.
                 tracing::warn!(
                     session = %key,
+                    provider = %provider,
                     model = %model,
                     %error,
                     "dropping a queued model switch that cannot be honoured"
@@ -521,7 +529,7 @@ impl Service {
             Ok(()) => Ok(Some(ServerEvent::new(
                 request_id,
                 Some(key.clone()),
-                ServerEventKind::ModelChanged { model },
+                ServerEventKind::ModelChanged { provider, model },
             ))),
             Err(ServiceError::Unsupported(_)) => Ok(None),
             Err(error) => Err(error),
@@ -535,6 +543,7 @@ impl Service {
             let Some(record) = sessions.get_mut(key) else {
                 return;
             };
+            record.pending_provider = None;
             record.pending_model = None;
         }
         if let Err(error) = self.persist(key).await {

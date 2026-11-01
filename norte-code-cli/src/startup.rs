@@ -27,6 +27,7 @@ use norte_code_protocol::config::{Config, update_user_default};
 use norte_code_protocol::sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
 use norte_code_protocol::{Phase, SessionKey};
 
+use crate::models::ModelChoice;
 use crate::select::{self, Item, Outcome};
 use crate::style::Style;
 
@@ -49,9 +50,9 @@ pub(crate) enum Open {
 pub(crate) struct Startup {
     /// Which session to open.
     pub(crate) open: Open,
-    /// The model the picker chose, or `None` when the configuration already
-    /// named one and nothing had to be asked.
-    pub(crate) model: Option<String>,
+    /// The provider and the model the picker chose, or `None` when the
+    /// configuration already named them and nothing had to be asked.
+    pub(crate) choice: Option<ModelChoice>,
 }
 
 /// One session, as the startup list shows it.
@@ -61,7 +62,9 @@ pub(crate) struct SessionRow {
     pub(crate) key: String,
     /// Its label, when one was set.
     pub(crate) title: Option<String>,
-    /// The `provider/model` it last used.
+    /// The provider it last used.
+    pub(crate) provider: String,
+    /// The model it last used.
     pub(crate) model: String,
     /// Where it is, as the stored phase names it.
     pub(crate) phase: Phase,
@@ -141,6 +144,7 @@ fn row_of(session: StoredSession) -> SessionRow {
         unfinished: matches!(phase, Phase::Streaming),
         key: session.key,
         title: session.title,
+        provider: session.provider,
         model: session.model,
         phase,
     }
@@ -161,21 +165,22 @@ pub(crate) async fn startup(
     let rows = session_rows(database).await?;
     let open = choose_session(&rows, style)?;
     let saved = match &open {
-        // Continuing a session keeps the model it was saved with: replacing it
-        // here would be a decision nobody asked for, and `--model` and `/model`
-        // are how that is changed on purpose.
+        // Continuing a session keeps the provider and the model it was saved
+        // with: replacing them here would be a decision nobody asked for, and
+        // `--model` and `/model` are how that is changed on purpose.
         Open::Existing { key, .. } => rows
             .iter()
             .find(|row| row.key == key.as_str())
-            .map(|row| row.model.clone()),
+            .filter(|row| !row.provider.is_empty() && !row.model.is_empty())
+            .map(|row| ModelChoice::new(row.provider.clone(), row.model.clone())),
         Open::New => None,
     };
-    let model = match saved.filter(|model| !model.is_empty()) {
-        Some(model) => Some(model),
+    let choice = match saved {
+        Some(choice) => Some(choice),
         None if config.default_model.is_some() => None,
         None => Some(choose_model(config, catalog, config_path, style)?),
     };
-    Ok(Startup { open, model })
+    Ok(Startup { open, choice })
 }
 
 /// Asks which session to open.
@@ -263,7 +268,7 @@ pub(crate) fn choose_model(
     catalog: &norte_code_protocol::catalog::Catalog,
     config_path: Option<&Path>,
     style: Style,
-) -> Result<String, String> {
+) -> Result<ModelChoice, String> {
     // One list and not two: the catalogue is the only place a provider comes
     // from, so there is nothing to merge and nothing to prefer.
     let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
@@ -369,20 +374,20 @@ pub(crate) fn choose_model(
     Ok(remember(config, config_path, &provider, &model, style))
 }
 
-/// Writes the choice into the config file and returns the reference.
+/// Writes the choice into the config file and returns it.
 ///
 /// A file that cannot be written is not a reason to refuse the choice: the
-/// session is usable now, and the reference is printed so the run continues with
-/// a line to paste. Either way the reference is what the caller resolves, so the
-/// session opens on the model that was chosen.
+/// session is usable now, and the two names are printed so the run continues
+/// with the keys to set. Either way the pair is what the caller resolves, so the
+/// session opens on the provider and the model that were chosen.
 fn remember(
     config: &mut Config,
     config_path: Option<&Path>,
     provider: &str,
     model: &str,
     style: Style,
-) -> String {
-    let reference = format!("{provider}/{model}");
+) -> ModelChoice {
+    let choice = ModelChoice::new(provider, model);
     let path = config_path
         .map(Path::to_path_buf)
         .or_else(norte_code_protocol::config::user_config_path);
@@ -393,7 +398,7 @@ fn remember(
                 "nowhere to write the choice; set default_provider to `{provider}` and default_model to `{model}` yourself"
             ))
         );
-        return reference;
+        return choice;
     };
     match update_user_default(&path, provider, model) {
         Ok(()) => {
@@ -409,7 +414,7 @@ fn remember(
             ))
         ),
     }
-    reference
+    choice
 }
 
 /// Whether the flow can ask: every question it has needs a terminal.
@@ -451,7 +456,8 @@ mod tests {
         SessionRow {
             key: key.to_owned(),
             title: title.map(str::to_owned),
-            model: "river/deepseek".to_owned(),
+            provider: "river".to_owned(),
+            model: "deepseek".to_owned(),
             phase,
             unfinished,
         }
@@ -462,7 +468,8 @@ mod tests {
             key: "aaaaaaaa-0000-0000-0000-000000000000".to_owned(),
             north: norte::SessionId::new(),
             title: None,
-            model: "openai/gpt-5".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt-5".to_owned(),
             created_at: chrono::Utc::now(),
             phase: phase.to_owned(),
             stats: serde_json::Value::Null,
@@ -575,14 +582,17 @@ mod tests {
         let mut config = Config::from_json("{}").expect("config").config;
         assert_eq!(config.default_model, None);
         assert_eq!(config.default_provider, None);
-        let reference = remember(
+        let choice = remember(
             &mut config,
             Some(&path),
             "river",
             "deepseek-ai/DeepSeek-V4.1-Flash",
             Style::plain(),
         );
-        assert_eq!(reference, "river/deepseek-ai/DeepSeek-V4.1-Flash");
+        // The pair is carried apart: the provider is its own key and the model
+        // keeps its slash, so neither is ever taken from a joined string.
+        assert_eq!(choice.provider, "river");
+        assert_eq!(choice.model, "deepseek-ai/DeepSeek-V4.1-Flash");
         // The two are written apart, and the model keeps its slash: a name is a
         // string and the provider is its own key.
         assert_eq!(config.default_provider.as_deref(), Some("river"));

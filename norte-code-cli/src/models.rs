@@ -67,6 +67,57 @@ pub(crate) fn print_model(model: &ModelInfo) {
     println!("{reference:<54} {context:>8}  {tools:<5}  {reasoning:<18} {name}");
 }
 
+/// The provider and the model a session runs on.
+///
+/// Two fields and never one string: a model id may carry slashes of its own —
+/// `nvidia/nemotron-3.5-super-vl-120b-a12b` is a model of the `nvidia`
+/// provider — so the pair is never joined and taken apart again. The label is
+/// the join, and it is a label: it is what a person reads, not what the code
+/// carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelChoice {
+    /// The provider that serves the model.
+    pub(crate) provider: String,
+    /// The model id.
+    pub(crate) model: String,
+}
+
+impl ModelChoice {
+    /// A choice of a provider and a model.
+    pub(crate) fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+
+    /// The label a person reads: `provider/model`.
+    ///
+    /// It is what the footer shows and what a report prints. It is never parsed
+    /// back into the two halves.
+    #[must_use]
+    pub(crate) fn label(&self) -> String {
+        format!("{}/{}", self.provider, self.model)
+    }
+}
+
+/// The provider and the model a new session opens on.
+///
+/// The flags win over the choice the startup flow made, each on its own half:
+/// `--model` names a model and `--provider` names a provider, so neither takes
+/// the other out of a joined string. A half nobody named falls back to the
+/// choice, and a choice that was never made falls back to the configuration.
+pub(crate) fn session_choice(
+    choice: Option<&ModelChoice>,
+    provider: Option<String>,
+    model: Option<String>,
+) -> (Option<String>, Option<String>) {
+    (
+        provider.or_else(|| choice.map(|choice| choice.provider.clone())),
+        model.or_else(|| choice.map(|choice| choice.model.clone())),
+    )
+}
+
 /// The provider and the model a run opens on, from the flags and the config.
 ///
 /// Neither name is ever split: the provider is its own key and the model is an
@@ -79,7 +130,7 @@ fn resolve_reference(
     config: &Config,
     provider: Option<String>,
     model: Option<String>,
-) -> Result<(String, String), String> {
+) -> Result<ModelChoice, String> {
     let provider = provider.or_else(|| config.default_provider.clone());
     let provider = provider.ok_or_else(|| {
         "no provider specified: pass --provider or set default_provider in config".to_owned()
@@ -88,7 +139,7 @@ fn resolve_reference(
     let model = model.ok_or_else(|| {
         "no model selected: pass --model or set default_model in config".to_owned()
     })?;
-    Ok((provider, model))
+    Ok(ModelChoice::new(provider, model))
 }
 
 /// The spec a run opens on.
@@ -105,10 +156,11 @@ pub(crate) fn resolve_spec(
     endpoint: Option<String>,
     wire: Option<WireSchema>,
 ) -> Result<ModelSpec, String> {
-    let (provider, model_name) = resolve_reference(config, provider, model)?;
-    if catalog.provider(&provider).is_none() {
+    let choice = resolve_reference(config, provider, model)?;
+    if catalog.provider(&choice.provider).is_none() {
         return Err(format!(
-            "unknown provider `{provider}`; add it to providers.json, or pick one of: {}",
+            "unknown provider `{}`; add it to providers.json, or pick one of: {}",
+            choice.provider,
             catalog
                 .providers()
                 .keys()
@@ -117,14 +169,14 @@ pub(crate) fn resolve_spec(
                 .join(", ")
         ));
     }
-    if catalog.find(&provider, &model_name).is_none() {
+    if catalog.find(&choice.provider, &choice.model).is_none() {
         return Err(format!(
-            "the provider `{provider}` has no model `{model_name}`; add it to models.json"
+            "the provider `{}` has no model `{}`; add it to models.json",
+            choice.provider, choice.model
         ));
     }
-    let mut spec =
-        ModelSpec::from_catalog(config, catalog, &format!("{provider}/{model_name}"), wire)
-            .map_err(|error| error.to_string())?;
+    let mut spec = ModelSpec::from_catalog(config, catalog, &choice.provider, &choice.model, wire)
+        .map_err(|error| error.to_string())?;
     // `--endpoint` replaces the wire's base URL for one run: a proxy, a local
     // mirror, a staging host. It is the one override left, and it is about
     // *where* the request goes and never about what it says.
@@ -157,6 +209,41 @@ mod tests {
     }
 
     #[test]
+    fn the_choice_the_flow_made_is_the_pair_the_session_opens_on() {
+        // The startup flow writes the choice into the configuration and hands
+        // back the same pair, and the session is opened on that pair: a run that
+        // dropped it and read the configuration instead died on "no provider
+        // specified" right after the question was answered.
+        let choice = ModelChoice::new("nvidia", "nvidia/nemotron-3.5-super-vl-120b-a12b");
+        let (provider, model) = session_choice(Some(&choice), None, None);
+        assert_eq!(provider.as_deref(), Some("nvidia"));
+        assert_eq!(
+            model.as_deref(),
+            Some("nvidia/nemotron-3.5-super-vl-120b-a12b")
+        );
+
+        // A flag wins on its own half and leaves the other where it was: a
+        // `--model` names a model, not a pair.
+        let (provider, model) = session_choice(
+            Some(&choice),
+            None,
+            Some("deepseek-ai/deepseek-v4.1-flash".to_owned()),
+        );
+        assert_eq!(provider.as_deref(), Some("nvidia"));
+        assert_eq!(model.as_deref(), Some("deepseek-ai/deepseek-v4.1-flash"));
+        let (provider, model) = session_choice(Some(&choice), Some("river".to_owned()), None);
+        assert_eq!(provider.as_deref(), Some("river"));
+        assert_eq!(
+            model.as_deref(),
+            Some("nvidia/nemotron-3.5-super-vl-120b-a12b")
+        );
+
+        // No choice and no flag: the configuration answers.
+        let (provider, model) = session_choice(None, None, None);
+        assert!(provider.is_none() && model.is_none());
+    }
+
+    #[test]
     fn the_flags_beat_the_configuration_and_the_configuration_beats_nothing() {
         let config = Config {
             default_provider: Some("p".to_owned()),
@@ -178,6 +265,26 @@ mod tests {
         )
         .expect("spec");
         assert_eq!(spec.endpoint, "https://proxy.invalid/v1");
+    }
+
+    #[test]
+    fn a_model_id_keeps_the_slashes_it_carries() {
+        // The model id is an opaque string and the provider is its own key: the
+        // two are never joined and taken apart again, so a model id that looks
+        // like a reference survives the trip whole.
+        let config = Config {
+            default_provider: Some("nvidia".to_owned()),
+            default_model: Some("nvidia/nemotron-3.5-super-vl-120b-a12b".to_owned()),
+            ..Config::default()
+        };
+        let choice = resolve_reference(&config, None, None).expect("a choice");
+        assert_eq!(choice.provider, "nvidia");
+        assert_eq!(choice.model, "nvidia/nemotron-3.5-super-vl-120b-a12b");
+        // The label is a label: it is what a person reads, not what is parsed.
+        assert_eq!(
+            choice.label(),
+            "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b"
+        );
     }
 
     #[test]

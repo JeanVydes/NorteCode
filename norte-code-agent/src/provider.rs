@@ -115,21 +115,23 @@ impl ModelSpec {
         })
     }
 
-    /// Looks a `provider/model` reference up in the catalogue and builds it.
+    /// Looks a provider and a model up in the catalogue and builds it.
+    ///
+    /// The two arrive apart: a provider is its own key and a model id may carry
+    /// slashes of its own, so the pair is never carried as one string that has
+    /// to be taken apart again.
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError`] when the reference is not `provider/model`, the
-    /// provider or the model is not in the catalogue, or no key is available.
+    /// Returns [`ServiceError`] when the provider or the model is not in the
+    /// catalogue, or no key is available.
     pub fn from_catalog(
         config: &Config,
         catalog: &Catalog,
-        reference: &str,
+        provider_id: &str,
+        model_id: &str,
         schema: Option<WireSchema>,
     ) -> Result<Self, ServiceError> {
-        let (provider_id, model_id) = reference
-            .split_once('/')
-            .ok_or_else(|| ServiceError::ModelReference(reference.to_owned()))?;
         let provider = catalog
             .provider(provider_id)
             .ok_or_else(|| ServiceError::UnknownProvider(provider_id.to_owned()))?;

@@ -29,6 +29,7 @@ that names the field; it is never silently replaced.
     "threshold": 0.90,
     "trigger": "idle",
     "keep_recent": 6,
+    "provider": null,
     "model": null,
     "reasoning": "lowest"
   },
@@ -148,12 +149,18 @@ never enter a model event, a log or a child process.
 | `threshold` | number in `(0,1]` | `0.90` | Fraction of the model context that triggers a summary. |
 | `trigger` | `"idle"` or `"eager"` | `"idle"` | `idle` compacts at a turn boundary; `eager` compacts at the first safe request boundary inside a turn. |
 | `keep_recent` | integer | `6` | Recent messages copied verbatim into the new session. |
-| `model` | string or `null` | `null` | Model used for the summary; `null` uses the session model. |
+| `provider` | string or `null` | `null` | Provider of the summary model; set with `model` or not at all. |
+| `model` | string or `null` | `null` | Model id used for the summary; `null` uses the session model. |
 | `reasoning` | string | `"lowest"` | Reasoning effort for the summary request: `lowest`, `off`, or an effort such as `low`, `xhigh` or `max`. |
 
 Eager compaction never splits a tool call from its result, and runs at most once per turn. `/compact` triggers the
 same path on demand. A failed summary leaves the old history and session id
 unchanged.
+
+`provider` and `model` are two keys and never one `provider/model` string: a
+model id may carry slashes of its own — NVIDIA names its models `vendor/model` —
+so the two are set apart. Both or neither: one without the other cannot be
+resolved.
 
 ## `retry`
 

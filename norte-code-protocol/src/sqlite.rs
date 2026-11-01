@@ -49,7 +49,13 @@ pub struct StoredSession {
     /// The user-visible title, when one was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The `provider/model` the session last used.
+    /// The provider that served the session.
+    ///
+    /// It has a column of its own: a provider and a model are two facts, and a
+    /// row that carried both in one string had to be split again to be read.
+    #[serde(default)]
+    pub provider: String,
+    /// The model id the session last used.
     pub model: String,
     /// When the session was created.
     pub created_at: DateTime<Utc>,
@@ -666,6 +672,12 @@ impl SqliteStore {
             "sandbox_network",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(
+            &connection,
+            "logical_sessions",
+            "provider",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
@@ -747,6 +759,7 @@ CREATE TABLE IF NOT EXISTS logical_sessions (
     key        TEXT PRIMARY KEY,
     north      TEXT NOT NULL,
     title      TEXT,
+    provider   TEXT NOT NULL DEFAULT '',
     model      TEXT NOT NULL,
     created_at TEXT NOT NULL,
     phase      TEXT NOT NULL,
@@ -1159,11 +1172,12 @@ impl SessionDirectory for SqliteStore {
             String,
             String,
             String,
+            String,
         )> = self
             .run(|connection| {
                 let mut statement = connection
                     .prepare(
-                        "SELECT key, north, title, model, created_at, phase, stats, data
+                        "SELECT key, north, title, provider, model, created_at, phase, stats, data
                          FROM logical_sessions ORDER BY created_at DESC",
                     )
                     .map_err(Fault::from)?;
@@ -1178,6 +1192,7 @@ impl SessionDirectory for SqliteStore {
                             row.get(5)?,
                             row.get(6)?,
                             row.get(7)?,
+                            row.get(8)?,
                         ))
                     })
                     .map_err(Fault::from)?;
@@ -1188,12 +1203,13 @@ impl SessionDirectory for SqliteStore {
             .await?;
         rows.into_iter()
             .map(
-                |(key, north, title, model, created_at, phase, stats, data)| {
+                |(key, north, title, provider, model, created_at, phase, stats, data)| {
                     let extra: StoredSession = decode(&data, "stored session")?;
                     Ok(StoredSession {
                         key,
                         north: north.parse()?,
                         title,
+                        provider,
                         model,
                         created_at: created_at.parse().map_err(|error: chrono::ParseError| {
                             Fault::Corrupt {
@@ -1220,15 +1236,17 @@ impl SessionDirectory for SqliteStore {
             let data = encode(&session, "stored session")?;
             connection
                 .execute(
-                    "INSERT INTO logical_sessions (key, north, title, model, created_at, phase, stats, data)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    "INSERT INTO logical_sessions (key, north, title, provider, model, created_at, phase, stats, data)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                      ON CONFLICT(key) DO UPDATE SET north = excluded.north, title = excluded.title,
-                       model = excluded.model, created_at = excluded.created_at,
+                       provider = excluded.provider, model = excluded.model,
+                       created_at = excluded.created_at,
                        phase = excluded.phase, stats = excluded.stats, data = excluded.data",
                     params![
                         session.key,
                         session.north.to_string(),
                         session.title,
+                        session.provider,
                         session.model,
                         session.created_at.to_rfc3339(),
                         session.phase,
@@ -2013,7 +2031,8 @@ mod tests {
                 key: "session".to_owned(),
                 north: SessionId::new(),
                 title: None,
-                model: "provider/model".to_owned(),
+                provider: "provider".to_owned(),
+                model: "model".to_owned(),
                 created_at: Utc::now(),
                 phase: "streaming".to_owned(),
                 stats: serde_json::json!({}),
@@ -2170,7 +2189,8 @@ mod tests {
             key: "abc".to_owned(),
             north: SessionId::new(),
             title: Some("first".to_owned()),
-            model: "openai/gpt".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt".to_owned(),
             created_at: Utc::now(),
             phase: "idle".to_owned(),
             stats: serde_json::json!({"cost": 0.5}),
@@ -2274,7 +2294,8 @@ mod tests {
                 key: key.to_owned(),
                 north,
                 title: Some(key.to_owned()),
-                model: "openai/gpt".to_owned(),
+                provider: "openai".to_owned(),
+                model: "gpt".to_owned(),
                 created_at: Utc::now(),
                 phase: "idle".to_owned(),
                 stats: serde_json::json!({}),
@@ -2457,7 +2478,8 @@ mod tests {
             key: "older".to_owned(),
             north: SessionId::new(),
             title: None,
-            model: "openai/gpt".to_owned(),
+            provider: "openai".to_owned(),
+            model: "gpt".to_owned(),
             created_at: Utc::now(),
             phase: "idle".to_owned(),
             stats: serde_json::json!({}),

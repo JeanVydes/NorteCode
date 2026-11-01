@@ -2499,17 +2499,17 @@ impl Renderer {
                     }
                 }
             }
-            ServerEventKind::ModelQueued { model }
+            ServerEventKind::ModelQueued { provider, model }
                 if self.verbosity.at_least(Verbosity::Medium) =>
             {
                 self.stop_bar();
-                self.notice(format!("model switch queued: {model}"));
+                self.notice(format!("model switch queued: {provider}/{model}"));
             }
-            ServerEventKind::ModelChanged { model }
+            ServerEventKind::ModelChanged { provider, model }
                 if self.verbosity.at_least(Verbosity::Medium) =>
             {
                 self.stop_bar();
-                self.notice(format!("model set: {model}"));
+                self.notice(format!("model set: {provider}/{model}"));
             }
             ServerEventKind::TurnStopped { reason } => {
                 self.stopped = Some(reason.clone());

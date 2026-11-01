@@ -215,7 +215,12 @@ impl Default for Config {
 pub struct TitlingConfig {
     /// Whether a new session is titled automatically.
     pub enabled: bool,
-    /// A model to title with, or the session's own.
+    /// The provider of the model to title with.
+    ///
+    /// It is its own key and the model id is its own string: a model id may
+    /// carry slashes of its own, so the two are never written as one.
+    pub provider: Option<String>,
+    /// The model id to title with, or the session's own.
     pub model: Option<String>,
     /// How many tokens the title request may produce.
     ///
@@ -229,6 +234,7 @@ impl Default for TitlingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            provider: None,
             model: None,
             // An effort a title needs is nothing: the request ships with
             // reasoning off, and this is the ceiling on what it may write.
@@ -251,7 +257,12 @@ pub struct CompactionConfig {
     pub trigger: String,
     /// How many recent messages to keep verbatim.
     pub keep_recent: usize,
-    /// A model to summarise with, or the session's own.
+    /// The provider of the model to summarise with.
+    ///
+    /// It is its own key and the model id is its own string: a model id may
+    /// carry slashes of its own, so the two are never written as one.
+    pub provider: Option<String>,
+    /// The model id to summarise with, or the session's own.
     pub model: Option<String>,
     /// The reasoning setting for the summary request.
     pub reasoning: String,
@@ -264,6 +275,7 @@ impl Default for CompactionConfig {
             threshold: 0.90,
             trigger: "idle".to_owned(),
             keep_recent: 6,
+            provider: None,
             model: None,
             reasoning: "lowest".to_owned(),
         }
@@ -790,7 +802,7 @@ impl Config {
         Ok(Loaded { config, warnings })
     }
 
-    /// Checks the default provider and model, which are written together.
+    /// Checks every provider and model that are written together.
     ///
     /// Both or neither: a model with no provider cannot be resolved, and a
     /// provider with no model names half a session. Neither is checked for a
@@ -799,23 +811,27 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Invalid`] when exactly one of the two is set, or
-    /// when the provider is blank.
-    fn validate_default_model(&self) -> Result<(), ConfigError> {
-        match (&self.default_provider, &self.default_model) {
-            (Some(provider), Some(_)) if provider.trim().is_empty() => {
-                Err(invalid("default_provider", "must not be empty"))
-            }
-            (Some(_), None) => Err(invalid(
-                "default_provider",
-                "is set without a default_model to go with it",
-            )),
-            (None, Some(_)) => Err(invalid(
-                "default_model",
-                "is set without a default_provider to go with it",
-            )),
-            _ => Ok(()),
-        }
+    /// Returns [`ConfigError::Invalid`] when exactly one of a pair is set, or
+    /// when a provider is blank.
+    fn validate_model_pairs(&self) -> Result<(), ConfigError> {
+        validate_pair(
+            "default_provider",
+            "default_model",
+            self.default_provider.as_deref(),
+            self.default_model.as_deref(),
+        )?;
+        validate_pair(
+            "compaction.provider",
+            "compaction.model",
+            self.compaction.provider.as_deref(),
+            self.compaction.model.as_deref(),
+        )?;
+        validate_pair(
+            "titling.provider",
+            "titling.model",
+            self.titling.provider.as_deref(),
+            self.titling.model.as_deref(),
+        )
     }
 
     /// Checks the invariants the loader cannot express.
@@ -836,7 +852,7 @@ impl Config {
         if self.max_iterations == Some(0) {
             return Err(invalid("max_iterations", "must be at least 1"));
         }
-        self.validate_default_model()?;
+        self.validate_model_pairs()?;
         if self.skills.max_skills == 0 {
             return Err(invalid("skills.max_skills", "must be at least 1"));
         }
@@ -1015,6 +1031,33 @@ fn invalid(path: impl Into<String>, message: impl Into<String>) -> ConfigError {
     ConfigError::Invalid {
         path: path.into(),
         message: message.into(),
+    }
+}
+
+/// Checks a provider and a model that are written together.
+///
+/// Both or neither: a model with no provider cannot be resolved, and a provider
+/// with no model names half a session. Neither is checked for a slash — a model
+/// id is a string that may carry one, and the provider is its own key.
+fn validate_pair(
+    provider_path: &str,
+    model_path: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), ConfigError> {
+    match (provider, model) {
+        (Some(provider), Some(_)) if provider.trim().is_empty() => {
+            Err(invalid(provider_path, "must not be empty"))
+        }
+        (Some(_), None) => Err(invalid(
+            provider_path,
+            format!("is set without a {model_path} to go with it"),
+        )),
+        (None, Some(_)) => Err(invalid(
+            model_path,
+            format!("is set without a {provider_path} to go with it"),
+        )),
+        _ => Ok(()),
     }
 }
 

@@ -36,7 +36,7 @@ mod transcript;
 use commands::{apply_extensions, database_path, duration_label, enter_workdir, run};
 use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, interactive_loop, refresh_effort};
-use models::{list_models, resolve_spec};
+use models::{ModelChoice, list_models, resolve_spec, session_choice};
 use preview::{clip_text, compact_json};
 use render::{
     Format, HostFacts, Renderer, Verbosity, cache_percent_label, find_project_config, human_tokens,
@@ -73,7 +73,7 @@ use norte_code_protocol::catalog::{Catalog, WireSchema};
 use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
-use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore};
+use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore, StoredSession};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
     ErrorCode, JobInfo, ModelInfo, Phase, Reasoning, ReasoningInfo, ReasoningScope, ServerEvent,
@@ -607,25 +607,33 @@ fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Optio
 
 /// Starts a new session and reads it from the terminal.
 ///
-/// `model` is the reference the startup flow chose, when it had to choose one;
-/// `args` carries what the command line said. The flags win, which is what makes
-/// `norte-code new --model openai/gpt-5` open on that model while a bare
-/// `norte-code` opens on `default_model`: the flag is an override, not a
-/// requirement.
+/// `choice` is the provider and the model the startup flow chose, when it had
+/// to choose them; `args` carries what the command line said. The flags win,
+/// which is what makes `norte-code new --model openai/gpt-5` open on that
+/// model while a bare `norte-code` opens on `default_model`: the flag is an
+/// override, not a requirement.
+///
+/// The pair is never joined: the provider is its own key and the model id may
+/// carry slashes of its own, so the two travel as they are. A choice that came
+/// from the flow is the same one the flow wrote into the configuration, so both
+/// agree; the pair is what carries the choice when there was nowhere to write
+/// it down.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn new_session(
     config: Config,
     catalog: Catalog,
-    model: Option<String>,
+    choice: Option<ModelChoice>,
     args: NewArgs,
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
+    let (provider, model) =
+        session_choice(choice.as_ref(), args.provider.clone(), args.model.clone());
     let spec = resolve_spec(
         &config,
         &catalog,
-        args.provider.clone(),
-        args.model.clone().or(model),
+        provider,
+        model,
         args.endpoint.clone(),
         args.wire,
     )?;
@@ -792,25 +800,23 @@ pub(crate) async fn new_session(
     Ok(u8::from(renderer.failed))
 }
 
-/// The directory a stored session was working in, when it recorded one.
+/// The row a stored session left behind.
 ///
-/// It reads the row before the service is built, because the directory has to
-/// change before the tools are rooted: a service built in the wrong tree has
-/// already decided what its tools point at.
+/// It reads the row before the service is built, because two things have to be
+/// settled first: the directory the tools are rooted at — a service built in the
+/// wrong tree has already decided what its tools point at — and the provider and
+/// the model the session was on, which are the session's own and not whatever
+/// the configuration names now.
 ///
 /// A database that cannot be read is not a reason to refuse the resume: the
 /// session is usable here, and the directory is where it would have gone.
-async fn stored_workdir(database: &Path, key: &str) -> Option<String> {
+async fn stored_session(database: &Path, key: &str) -> Option<StoredSession> {
     if !database.exists() {
         return None;
     }
     let store = SqliteStore::open(database).ok()?;
     let sessions = store.sessions().await.ok()?;
-    sessions
-        .into_iter()
-        .find(|session| session.key == key)
-        .and_then(|session| session.workdir)
-        .filter(|dir| !dir.trim().is_empty())
+    sessions.into_iter().find(|session| session.key == key)
 }
 
 /// Continues a session named on the command line.
@@ -850,7 +856,12 @@ async fn resume_session(
     //
     // A session stored before the field existed has none, and the directory the
     // command was typed in stands — which is what `resume` always did.
-    if let Some(dir) = stored_workdir(&database_path()?, &session_key).await {
+    let stored = stored_session(&database_path()?, &session_key).await;
+    if let Some(dir) = stored
+        .as_ref()
+        .and_then(|session| session.workdir.clone())
+        .filter(|dir| !dir.trim().is_empty())
+    {
         let here = std::env::current_dir().ok();
         let there = std::fs::canonicalize(&dir).ok();
         let elsewhere = match (&here, &there) {
@@ -885,7 +896,37 @@ async fn resume_session(
     .apply(&mut config)?;
     let (system_prompt_source, system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
-    let spec = resolve_spec(&config, &catalog, None, None, None, None)?;
+    // A session resumes on the provider and the model it was saved with: the
+    // configuration may have been changed since, and a resume that silently
+    // moved the session to another model is not a resume. The two travel as
+    // the pair they are — a model id may carry slashes of its own.
+    //
+    // A row written before the provider had a column of its own has none, and
+    // so does a pair the catalogue does not carry anymore: the configuration's
+    // answer stands, which is what a session on a provider the catalogue lost
+    // does.
+    let saved = stored.as_ref().and_then(|session| {
+        let provider = session.provider.trim();
+        let model = session.model.trim();
+        if provider.is_empty() || model.is_empty() {
+            return None;
+        }
+        Some((provider.to_owned(), model.to_owned()))
+    });
+    let spec = match saved {
+        Some((provider, model)) => {
+            resolve_spec(&config, &catalog, Some(provider), Some(model), None, None).or_else(
+                |error| {
+                    eprintln!(
+                        "warning: this session was on a model the catalogue does not carry \
+                 ({error}); the configured default is used instead"
+                    );
+                    resolve_spec(&config, &catalog, None, None, None, None)
+                },
+            )?
+        }
+        None => resolve_spec(&config, &catalog, None, None, None, None)?,
+    };
     let model_label = spec.label();
     let provider = spec.provider.clone();
     let effective = effective_reasoning(
@@ -1039,12 +1080,14 @@ async fn resume_session(
     }
     // The override goes through the same request the interactive `/model` sends,
     // so the session's own rules judge it and a model it refuses is reported.
+    // The provider is the session's own: a resume names a model, not a pair.
     if let Some(model) = args.model.clone() {
         let stream = service
             .submit(ClientRequest {
                 request_id: 2,
                 kind: ClientRequestKind::SetModel {
                     session: session.clone(),
+                    provider: provider.clone(),
                     model,
                 },
             })
@@ -1108,6 +1151,12 @@ async fn resume_session(
 /// the service is built around a spec, and there is no spec without a model —
 /// while the session itself may come after: `new_session` creates one, and a key
 /// goes to the resume path.
+///
+/// The configuration the flow settles is the one the session is built from: the
+/// flow writes the choice it made into the config, and a clone of the config
+/// thrown away afterwards left the run with the defaults it had before the
+/// question — which is how a first run that had just named a provider died on
+/// "no provider specified".
 async fn open_session(
     config: Config,
     catalog: Catalog,
@@ -1124,9 +1173,9 @@ async fn open_session(
                 .to_owned(),
         );
     }
-    let mut opening = config.clone();
+    let mut config = config;
     let chosen = startup::startup(
-        &mut opening,
+        &mut config,
         &catalog,
         &database_path()?,
         config_path.as_deref(),
@@ -1147,7 +1196,7 @@ async fn open_session(
             new_session(
                 config,
                 catalog,
-                chosen.model,
+                chosen.choice,
                 NewArgs::bare(),
                 verbosity,
                 config_path,

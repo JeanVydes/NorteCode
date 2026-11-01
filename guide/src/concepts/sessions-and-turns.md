@@ -69,8 +69,8 @@ finishes uncommitted and the session remains resumable.
 
 ## Model switches
 
-A model switch happens at a turn boundary. The service resolves the new
-`provider/model`, checks that the existing session budget can still be measured
+A model switch happens at a turn boundary. The service resolves the new provider
+and the new model, checks that the existing session budget can still be measured
 in the same unit, builds a new engine over the same store and only then drops
 the old one. A failed switch leaves the session on the old model.
 

@@ -50,6 +50,21 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The run that chose a provider and a model opens on the ones it chose. The
+  startup flow wrote its answer into the configuration and then opened the
+  session with the configuration it had *before* the question — the copy it
+  settled was thrown away — so the first run of a new install died on `no
+  provider specified: pass --provider or set default_provider in config` right
+  after the person had named a provider. The configuration the flow settles is
+  the one the session is built from, and the pair the flow chose is carried to
+  it as two values.
+
+- A session resumes on the provider and the model it was saved with. The
+  session table kept them joined in one `provider/model` column, so a resume
+  read the defaults the configuration named now and a session on a provider the
+  configuration no longer names could not be opened at all. The provider has a
+  column of its own now, and a resume reads the pair from the row.
+
 - The context a session is using is the context the last request carried. The
   whole conversation is sent again every time, so the input tokens of the last
   request are what the context holds and not the sum of what the session
@@ -77,6 +92,23 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   the manifest promised was refused by the compiler instead. `rust-toolchain.toml`
   pins the stable channel with `clippy` and `rustfmt`, so a checkout builds
   with the tools it is linted by.
+
+- A provider and a model are two values and never one string. The
+  configuration already kept them apart — `default_provider` and
+  `default_model` — but everywhere else the pair was written as one
+  `provider/model` label and taken apart again on the first slash, which is
+  wrong the moment a model id carries a slash of its own: NVIDIA names its
+  models `vendor/model`, and a model of the `nvidia` provider is
+  `nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b` once joined. The pair now
+  travels apart wherever it is carried: the session table has a `provider`
+  column of its own, `SetModel` and the two events that report a switch carry
+  both halves, `compaction.provider` and `titling.provider` name the provider
+  of the summary and of the title model, and the session list reports the two
+  apart as well. Where a person reads both at once — the footer's model name,
+  the `norte-code models` listing — they are still joined, and that label is
+  never parsed back. A row written before the provider had a column of its own
+  is not migrated: it reopens on the default model, the way a session on a
+  provider the catalogue no longer carries does.
 
 - A catalogue that is missing is written empty. `providers.json` and
   `models.json` are created beside the configuration when they are not there,

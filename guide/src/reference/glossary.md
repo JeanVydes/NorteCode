@@ -45,7 +45,8 @@ forked here.
 latter is untrusted and capped.
 
 **Provider** — A key source, endpoint and wire selected by the catalogue entry.
-The model reference is `provider/model`.
+A provider and a model are two values and never one string; where both are
+shown at once they are joined as `provider/model`.
 
 **Request** — A `ClientRequest` sent to the service. It is not a provider HTTP
 request; telemetry records provider attempts separately.

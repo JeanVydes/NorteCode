@@ -29,6 +29,12 @@ pub(super) struct SessionRecord {
     pub(super) spec: ProviderModelSpec,
     /// A model switch accepted while the session was busy. It replaces the
     /// current spec at the next idle turn boundary.
+    ///
+    /// The provider and the model are two fields: a model id may carry slashes
+    /// of its own, so the pair is never stored as one string to be taken apart
+    /// again.
+    pub(super) pending_provider: Option<String>,
+    /// The model id of the queued switch.
     pub(super) pending_model: Option<String>,
     pub(super) created_at: DateTime<Utc>,
     pub(super) phase: ProtocolPhase,
@@ -97,6 +103,7 @@ fn record_from(
         id: entry.north,
         title: entry.title,
         spec,
+        pending_provider: stat(stats, "pending_provider"),
         pending_model: stat(stats, "pending_model"),
         created_at: entry.created_at,
         phase,
@@ -180,11 +187,17 @@ impl Service {
                 // to reopen on it: going straight to the catalogue dropped every
                 // such session onto the default model, so a `exa` session came
                 // back as whatever the config's default was.
-                match Service::default_spec_for(&self.lock_config(), &catalog, &entry.model) {
+                match Service::default_spec_for(
+                    &self.lock_config(),
+                    &catalog,
+                    &entry.provider,
+                    &entry.model,
+                ) {
                     Ok(spec) => spec,
                     Err(error) => {
                         tracing::warn!(
                             session = %entry.key,
+                            provider = %entry.provider,
                             model = %entry.model,
                             %error,
                             "stored session model is unavailable; using the default"
@@ -309,7 +322,8 @@ impl Service {
             key: key.to_string(),
             north: record.id,
             title: record.title.clone(),
-            model: format!("{}/{}", record.spec.provider, record.spec.model),
+            model: record.spec.model.clone(),
+            provider: record.spec.provider.clone(),
             created_at: record.created_at,
             phase: match record.phase {
                 ProtocolPhase::Idle => "idle",
@@ -332,6 +346,7 @@ impl Service {
                 "reasoning": record.reasoning,
                 "pending_reasoning": record.pending_reasoning,
                 "pending_steers": record.pending_steers,
+                "pending_provider": record.pending_provider,
                 "pending_model": record.pending_model,
                 "disabled_tools": record.disabled_tools,
             }),
@@ -372,6 +387,7 @@ impl Service {
             id: session.id,
             title,
             spec,
+            pending_provider: None,
             pending_model: None,
             created_at: Utc::now(),
             phase: ProtocolPhase::Idle,
@@ -424,6 +440,7 @@ impl Service {
             id: imported.id,
             title,
             spec,
+            pending_provider: None,
             pending_model: None,
             created_at: Utc::now(),
             phase: ProtocolPhase::Idle,
@@ -467,7 +484,8 @@ impl Service {
             .map(|(key, record)| SessionInfo {
                 session: key.clone(),
                 title: record.title.clone(),
-                model: Some(record.spec.label()),
+                provider: Some(record.spec.provider.clone()),
+                model: Some(record.spec.model.clone()),
                 created_at: Some(record.created_at.to_rfc3339()),
                 phase: record.phase,
             })

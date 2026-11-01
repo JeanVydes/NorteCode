@@ -7,6 +7,7 @@ use super::{
     StreamExt, Style, VecDeque, mpsc,
 };
 use crate::input::{Attachment, CompletionNames, EditorAction, EditorEvent, InteractiveInput};
+use crate::models::ModelChoice;
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
@@ -762,12 +763,12 @@ pub(crate) async fn interactive_loop(
                         // apart to find a provider. The provider is the
                         // session's, or the one `/provider` just moved to when
                         // that switch left the model unset.
-                        let full_model = pick_model(service, &current, &model, renderer);
-                        let Some(full_model) = full_model else {
+                        let choice = pick_model(service, &current, &model, renderer);
+                        let Some(choice) = choice else {
                             continue;
                         };
-                        renderer.model_name = Some(full_model.clone());
-                        run_model(service, current, full_model, renderer).await;
+                        renderer.model_name = Some(choice.label());
+                        run_model(service, current, choice, renderer).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -1165,10 +1166,10 @@ async fn handle_live_command(
         }
         ChatCommand::Model { model } => {
             if let Some(session) = current {
-                let full_model = pick_model(service, session, &model, renderer);
-                if let Some(full_model) = full_model {
-                    renderer.model_name = Some(full_model.clone());
-                    run_model(service, session.clone(), full_model, renderer).await;
+                let choice = pick_model(service, session, &model, renderer);
+                if let Some(choice) = choice {
+                    renderer.model_name = Some(choice.label());
+                    run_model(service, session.clone(), choice, renderer).await;
                 }
             } else {
                 renderer.notice("the session is not ready yet; try again");
@@ -1587,7 +1588,8 @@ pub(crate) fn refresh_effort(
     }
 }
 
-/// The `provider/model` a `/model` names, given the half the person did not type.
+/// The provider and the model a `/model` names, given the half the person did
+/// not type.
 ///
 /// The model is a string and nothing else: it may carry slashes of its own —
 /// `nvidia/nemotron` is a model of the `nvidia` provider — so this never takes
@@ -1603,7 +1605,7 @@ fn pick_model(
     session: &SessionKey,
     model: &str,
     renderer: &mut Renderer,
-) -> Option<String> {
+) -> Option<ModelChoice> {
     let provider = renderer
         .pending_provider
         .clone()
@@ -1612,7 +1614,7 @@ fn pick_model(
         renderer.notice("the session has no provider yet; pick one with /provider");
         return None;
     };
-    Some(format!("{provider}/{model}"))
+    Some(ModelChoice::new(provider, model))
 }
 
 /// What a `/provider` asks for, once the catalogue has been asked about it.
@@ -1698,10 +1700,10 @@ async fn switch_provider(
             ));
         }
         ProviderSwitch::Move(model) => {
-            let full = format!("{provider}/{model}");
+            let choice = ModelChoice::new(provider, model);
             renderer.pending_provider = None;
-            renderer.model_name = Some(full.clone());
-            run_model(service, session.clone(), full, renderer).await;
+            renderer.model_name = Some(choice.label());
+            run_model(service, session.clone(), choice, renderer).await;
         }
     }
     // The completion follows the session: a `/model` line now offers the models
@@ -1713,22 +1715,32 @@ async fn switch_provider(
 async fn run_model(
     service: &Arc<Service>,
     session: SessionKey,
-    model: String,
+    choice: ModelChoice,
     renderer: &mut Renderer,
 ) {
     // Cloned: the refresh below needs the key after the request consumed it.
     let key = session.clone();
-    match drain_request(service, ClientRequestKind::SetModel { session, model }).await {
+    match drain_request(
+        service,
+        ClientRequestKind::SetModel {
+            session,
+            provider: choice.provider,
+            model: choice.model,
+        },
+    )
+    .await
+    {
         Ok(events) => {
             let mut reported = false;
             for event in events {
                 match event.kind {
-                    ServerEventKind::ModelChanged { model } => {
+                    ServerEventKind::ModelChanged { provider, model } => {
                         reported = true;
                         // The provider the switch was waiting on is settled once
                         // the model is: from here a message has somewhere to go.
                         renderer.pending_provider = None;
-                        renderer.notice(format!("model set to {model}"));
+                        renderer.model_name = Some(format!("{provider}/{model}"));
+                        renderer.notice(format!("model set to {provider}/{model}"));
                         // A new model can refuse the effort in force — the
                         // service downgrades it to one the model declares — so
                         // the value the footer shows is recomputed rather than
@@ -1738,11 +1750,12 @@ async fn run_model(
                         // `/model` line offers the models of the provider it is on.
                         refresh_completions(service, Some(&key), renderer);
                     }
-                    ServerEventKind::ModelQueued { model } => {
+                    ServerEventKind::ModelQueued { provider, model } => {
                         reported = true;
                         renderer.pending_provider = None;
+                        renderer.model_name = Some(format!("{provider}/{model}"));
                         renderer.notice(format!(
-                            "model switch to {model} queued for the next turn boundary"
+                            "model switch to {provider}/{model} queued for the next turn boundary"
                         ));
                     }
                     ServerEventKind::Error { message, .. } => {

@@ -1,21 +1,25 @@
 # Models and the catalogue
 
-## `provider/model`
+## A provider and a model
 
-A model reference is a provider id and a model id separated by the first slash:
+A model is named by two things: a provider id and a model id.
 
 ```text
-openrouter/anthropic/claude-sonnet-4
-└────────┘ └───────────────────────────┘
-provider    model id
+provider   openrouter
+model      anthropic/claude-sonnet-4
 ```
 
-The model id may contain slashes. The provider id names an entry of
-`providers.json`, which supplies the wire, the base URL and the variables a key
-may come from.
+The model id may contain slashes, so the two are never written as one
+`provider/model` string to be taken apart again. The provider id names an entry
+of `providers.json`, which supplies the wire, the base URL and the variables a
+key may come from.
 
 Two providers may serve a model with the same id, and they are two models: the
 pair is what identifies one.
+
+Where a person reads both at once — the footer's model name, the `norte-code
+models` listing — they are shown joined as `provider/model`. That is a label, and
+it is never parsed back into the two halves.
 
 ## Where models come from
 

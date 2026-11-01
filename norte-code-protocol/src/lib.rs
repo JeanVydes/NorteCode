@@ -188,7 +188,9 @@ pub enum ClientRequestKind {
     SetModel {
         /// The session.
         session: SessionKey,
-        /// A `provider/model` reference.
+        /// The provider that serves it.
+        provider: String,
+        /// The model id.
         model: String,
     },
     /// Set the reasoning setting for a scope.
@@ -539,13 +541,17 @@ pub enum ServerEventKind {
     },
     /// The session's model changed.
     ModelChanged {
-        /// The new `provider/model`.
+        /// The provider that serves it.
+        provider: String,
+        /// The new model id.
         model: String,
     },
     /// A model switch was accepted while the session was busy and will be
     /// applied at the next turn boundary.
     ModelQueued {
-        /// The requested `provider/model`.
+        /// The provider that will serve it.
+        provider: String,
+        /// The requested model id.
         model: String,
     },
     /// The session's reasoning setting was lowered to fit the new model.
@@ -671,7 +677,13 @@ pub struct SessionInfo {
     pub session: SessionKey,
     /// The label.
     pub title: Option<String>,
-    /// The model in use, as `provider/model`.
+    /// The provider that serves the model in use.
+    ///
+    /// Its own field and not half of a `provider/model` string: a model id may
+    /// carry slashes of its own, so the two are never written as one to be
+    /// taken apart again.
+    pub provider: Option<String>,
+    /// The model id in use.
     pub model: Option<String>,
     /// When it was created, as RFC 3339.
     pub created_at: Option<String>,

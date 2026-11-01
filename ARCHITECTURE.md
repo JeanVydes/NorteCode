@@ -103,12 +103,12 @@ the tool declarations.
 ## Model switching
 
 A model switch happens at a turn boundary. The service keeps the logical
-session and its Norte session, resolves the new `provider/model` through the
-catalogue and config overrides, checks that the new model supports the existing
-budget unit, then builds a new engine over the same stores. The old engine is
-dropped only after the new one is built, so a failed switch does not lose the
-session. A switch that would make a session budget unmeasurable is refused
-before it happens.
+session and its Norte session, resolves the new provider and the new model
+through the catalogue and config overrides, checks that the new model supports
+the existing budget unit, then builds a new engine over the same stores. The old
+engine is dropped only after the new one is built, so a failed switch does not
+lose the session. A switch that would make a session budget unmeasurable is
+refused before it happens.
 
 Reasoning is resolved per model: explicit `--reasoning`, then the config
 default, then the catalogue's efforts. An unknown effort is rejected before the
@@ -208,7 +208,7 @@ error event is suppressed and the final failure is emitted once.
 ## Telemetry and metrics
 
 Every provider attempt writes one `requests` row: session and Norte session,
-provider/model, start time, duration, first and last output delta, provider
+provider and model, start time, duration, first and last output delta, provider
 token counters, cache flags, tool calls, reasoning, reported cost, status, error,
 whether the sandbox was enabled and whether it allowed network. Tokens are
 provider-reported; the host does not estimate them, except for a bytes/4

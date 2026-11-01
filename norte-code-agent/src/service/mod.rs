@@ -1316,11 +1316,11 @@ impl Service {
             }
         };
         // The provider and the model are two config keys and never a split
-        // reference: joined here only because the resolver takes the pair as
-        // `provider/model` and the model keeps every slash it has.
+        // reference: the resolver takes the pair as it is, and the model keeps
+        // every slash it has.
         let spec = match (&next.default_provider, &next.default_model) {
             (Some(provider), Some(model)) => {
-                match Self::default_spec_for(&next, &catalog, &format!("{provider}/{model}")) {
+                match Self::default_spec_for(&next, &catalog, provider, model) {
                     Ok(spec) => spec,
                     // A default provider that the catalogue no longer carries must
                     // not abort the whole reload: the spec already in force stays,
@@ -1362,17 +1362,23 @@ impl Service {
         // did what they were told and the request was refused anyway.
         //
         // The reference is not touched: a session stays on the model it was on,
-        // and only the settings around it are re-read. A reference that no
-        // longer resolves is left as it was rather than failing the whole
-        // reload, and the turn reports its own error if it comes to that.
+        // and only the settings around it are re-read. A model that no longer
+        // resolves is left as it was rather than failing the whole reload, and
+        // the turn reports its own error if it comes to that.
         {
-            let references: Vec<(SessionKey, String)> = self
+            let models: Vec<(SessionKey, String, String)> = self
                 .lock_sessions()
                 .iter()
-                .map(|(key, record)| (key.clone(), record.spec.label()))
+                .map(|(key, record)| {
+                    (
+                        key.clone(),
+                        record.spec.provider.clone(),
+                        record.spec.model.clone(),
+                    )
+                })
                 .collect();
-            for (key, reference) in references {
-                if let Ok(spec) = Self::default_spec_for(&next, &catalog, &reference)
+            for (key, provider, model) in models {
+                if let Ok(spec) = Self::default_spec_for(&next, &catalog, &provider, &model)
                     && let Some(record) = self.lock_sessions().get_mut(&key)
                 {
                     record.spec = spec;
@@ -1394,33 +1400,34 @@ impl Service {
         })
     }
 
-    /// Resolves a `provider/model` reference the way a run does.
+    /// Resolves a provider and a model the way a run does.
     ///
     /// [`ModelSpec::from_catalog`] only knows the catalogue, and a configured
     /// provider is not in it: `river` and every other private endpoint is
     /// declared in `config.json` and nowhere else. A reload that went straight
     /// to the catalogue therefore failed on a default model that a run resolves
     /// without complaint — `run --provider river` worked while `/refresh` said
-    /// the provider was unknown, which is the same reference answered two ways.
+    /// the provider was unknown, which is the same pair answered two ways.
     ///
     /// So the catalogue is tried first and a configured provider falls back the
-    /// same way the command line does. A reference that is neither — a typo, or
+    /// same way the command line does. A pair that is neither — a typo, or
     /// a catalogue model that does not exist — is still an error.
     ///
     /// # Errors
     ///
-    /// Returns [`ServiceError`] when the reference is not `provider/model`, or
-    /// when it names neither a catalogue provider nor a configured one.
+    /// Returns [`ServiceError`] when the pair names neither a catalogue
+    /// provider nor a configured one.
     fn default_spec_for(
         config: &Config,
         catalog: &Catalog,
-        reference: &str,
+        provider: &str,
+        model: &str,
     ) -> Result<ModelSpec, ServiceError> {
-        // The catalogue is the only place a model comes from, so a reference it
+        // The catalogue is the only place a model comes from, so a model it
         // does not carry is not resolved from somewhere else: there is nowhere
         // else. A provider is in `providers.json` or it is unknown, and a model
         // is in `models.json` or it is unknown.
-        ModelSpec::from_catalog(config, catalog, reference, None)
+        ModelSpec::from_catalog(config, catalog, provider, model, None)
     }
 
     /// The default spec in force.
@@ -1522,8 +1529,13 @@ impl Service {
                 question,
                 answer,
             },
-            Kind::SetModel { session, model } => Kind::SetModel {
+            Kind::SetModel {
+                session,
+                provider,
+                model,
+            } => Kind::SetModel {
                 session: resolve(session)?,
+                provider,
                 model,
             },
             Kind::SetReasoning {
@@ -1714,8 +1726,13 @@ impl Service {
             Kind::ListSkills => Ok(self.skill_list_event(request_id)),
             Kind::RefreshSkills => Ok(self.refresh_skills_event(request_id)),
             Kind::RefreshCatalog => self.reload_catalog(request_id),
-            Kind::SetModel { session, model } => {
-                self.set_model_event(request_id, session, model).await
+            Kind::SetModel {
+                session,
+                provider,
+                model,
+            } => {
+                self.set_model_event(request_id, session, provider, model)
+                    .await
             }
             Kind::SetBudget { session, budget } => {
                 self.set_budget(request_id, session, budget).await

@@ -235,14 +235,15 @@ impl Service {
     }
 
     fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
-        match &self.config().compaction.model {
+        let config = self.config();
+        match (&config.compaction.provider, &config.compaction.model) {
             // The same resolution a switch uses: a summariser can be a provider
             // the catalogue does not list, and a compaction that failed on one
             // would stop the session it was meant to make room for.
-            Some(reference) => {
-                Service::default_spec_for(&self.lock_config(), &self.catalog(), reference)
+            (Some(provider), Some(model)) => {
+                Service::default_spec_for(&self.lock_config(), &self.catalog(), provider, model)
             }
-            None => Ok(session.clone()),
+            _ => Ok(session.clone()),
         }
     }
 

@@ -240,16 +240,18 @@ impl Service {
 
     /// The model a title is asked of.
     ///
-    /// `titling.model` when set, the session's own otherwise. The resolution is
-    /// the one a model switch uses, so a titler can be a provider the catalogue
-    /// does not list, and a configured one that cannot be built is the error the
-    /// caller reports rather than a silent fall back to a model nobody chose.
+    /// `titling.provider` and `titling.model` when set, the session's own
+    /// otherwise. The resolution is the one a model switch uses, so a titler can
+    /// be a provider the catalogue does not list, and a configured one that
+    /// cannot be built is the error the caller reports rather than a silent fall
+    /// back to a model nobody chose.
     fn titling_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
-        match &self.config().titling.model {
-            Some(reference) => {
-                Service::default_spec_for(&self.lock_config(), &self.catalog(), reference)
+        let config = self.config();
+        match (&config.titling.provider, &config.titling.model) {
+            (Some(provider), Some(model)) => {
+                Service::default_spec_for(&self.lock_config(), &self.catalog(), provider, model)
             }
-            None => Ok(session.clone()),
+            _ => Ok(session.clone()),
         }
     }
 }

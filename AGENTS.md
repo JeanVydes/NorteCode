@@ -154,6 +154,12 @@ feature.
   configuration that could change it could only make the request wrong.
 - The catalogue is the sole authority on a model. The configuration does not
   override a model's limits, modalities or reasoning.
+- A provider and a model are two values and never one string. A model id may
+  carry slashes of its own — NVIDIA names its models `vendor/model` — so a
+  joined `provider/model` label has to be split on a slash that may not be
+  there. Carry the pair apart everywhere it is carried: two config keys, two
+  columns, two fields on the wire. Joining is for a person to read — the
+  footer's model name, the `models` listing — and a label is never parsed back.
 - Provider-reported cost only. Never derive a price from a list price; the
   catalogue may carry `pricing` for reference and it is never a source of cost.
 - OpenAI, Anthropic, Gemini and OpenRouter (OpenAI-compatible chat) are the v1

@@ -1099,7 +1099,8 @@ async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
         &service,
         ClientRequestKind::SetModel {
             session: key.clone(),
-            model: "test/other".to_owned(),
+            provider: "test".to_owned(),
+            model: "other".to_owned(),
         },
     )
     .await;
@@ -1642,7 +1643,8 @@ async fn a_session_can_switch_models_at_a_boundary() {
         &service,
         ClientRequestKind::SetModel {
             session: key.clone(),
-            model: "test/other".to_owned(),
+            provider: "test".to_owned(),
+            model: "other".to_owned(),
         },
     )
     .await;
@@ -1654,7 +1656,8 @@ async fn a_session_can_switch_models_at_a_boundary() {
     let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
         panic!("expected a list");
     };
-    assert_eq!(sessions[0].model.as_deref(), Some("test/other"));
+    assert_eq!(sessions[0].provider.as_deref(), Some("test"));
+    assert_eq!(sessions[0].model.as_deref(), Some("other"));
 
     let (nid, spec, _) = service.require_record(&key).expect("record");
     let history = service
@@ -1668,6 +1671,75 @@ async fn a_session_can_switch_models_at_a_boundary() {
         .filter(|message| message.role == norte::Role::System)
         .collect();
     assert_eq!(system.len(), 1);
+}
+
+#[tokio::test]
+async fn a_stored_session_reopens_on_the_pair_it_was_saved_with() {
+    // The provider and the model are two columns, so a session comes back on the
+    // provider it was saved with and not on whatever the configuration names
+    // now. The model id is its own string and keeps the slashes it carries: it
+    // is never a `provider/model` label that has to be taken apart again.
+    let model = Arc::new(
+        ScriptedModel::new(ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        ))
+        .turn_text("one"),
+    );
+    let (service, store) = persistent_service(model).await;
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("kept".to_owned()),
+        },
+    )
+    .await;
+    let key = created[0].session.clone().expect("session");
+    let changed = drain(
+        &service,
+        ClientRequestKind::SetModel {
+            session: key.clone(),
+            provider: "test".to_owned(),
+            model: "other".to_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        changed[0].kind,
+        ServerEventKind::ModelChanged { .. }
+    ));
+
+    // The row holds the two apart.
+    let rows = store.sessions().await.expect("sessions");
+    let row = rows
+        .iter()
+        .find(|row| row.key == key.as_str())
+        .expect("row");
+    assert_eq!(row.provider, "test");
+    assert_eq!(row.model, "other");
+
+    // A second service over the same store reads the row back and puts the
+    // session on the model it was on.
+    let reopened = Service::with_directory(
+        config(),
+        catalog(),
+        spec("scripted"),
+        Arc::new(ScriptedFactory {
+            model: Arc::new(ScriptedModel::new(ModelRef::new(
+                ProviderId::new("test").expect("provider"),
+                ModelId::new("scripted").expect("model"),
+            ))),
+        }),
+        store.clone(),
+        store.clone(),
+        store.clone(),
+        "system",
+    )
+    .await
+    .expect("service");
+    let (_, spec, _) = reopened.require_record(&key).expect("record");
+    assert_eq!(spec.provider, "test");
+    assert_eq!(spec.model, "other");
 }
 
 #[test]
@@ -2100,7 +2172,8 @@ async fn a_model_switch_rejects_an_incompatible_reasoning_override() {
             request_id: 7,
             kind: ClientRequestKind::SetModel {
                 session: key,
-                model: "test/other".to_owned(),
+                provider: "test".to_owned(),
+                model: "other".to_owned(),
             },
         })
         .await;
@@ -2228,7 +2301,8 @@ async fn a_queued_model_that_cannot_be_honoured_does_not_break_the_session() {
     {
         let mut sessions = service.lock_sessions();
         let record = sessions.get_mut(&key).expect("record");
-        record.pending_model = Some("test/other".to_owned());
+        record.pending_provider = Some("test".to_owned());
+        record.pending_model = Some("other".to_owned());
         record.reasoning = Some(ProtocolReasoning::Effort {
             effort: "high".to_owned(),
         });
@@ -2334,7 +2408,8 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
     {
         let mut sessions = service.lock_sessions();
         let record = sessions.get_mut(&key).expect("record");
-        record.pending_model = Some("test/other".to_owned());
+        record.pending_provider = Some("test".to_owned());
+        record.pending_model = Some("other".to_owned());
     }
     let second = drain(
         &service,
@@ -2559,7 +2634,8 @@ async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
         &service,
         ClientRequestKind::SetModel {
             session: key.clone(),
-            model: "test/other".to_owned(),
+            provider: "test".to_owned(),
+            model: "other".to_owned(),
         },
     )
     .await;
