@@ -460,6 +460,10 @@ pub(crate) fn refresh_plugin_sidebar(renderer: &mut Renderer) {
         .into_iter()
         .map(|(name, rows)| (name.to_owned(), rows))
         .collect();
+    // The rows changed, so the frame that holds them has to be drawn again:
+    // nothing else moves when a turn ends, and a sidebar that kept the numbers
+    // of the last turn is a sidebar nobody can trust.
+    renderer.mark_dirty();
 }
 
 /// Records the names the completion offers for the provider in play.

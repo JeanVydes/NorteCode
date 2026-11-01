@@ -50,6 +50,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The plugin sidebar is redrawn after a turn. A plugin that shows a number
+  there kept the one it had at startup, because the frame that carried the
+  change was never drawn; the rows are asked again and the frame is woken.
+
 - The run that chose a provider and a model opens on the ones it chose. The
   startup flow wrote its answer into the configuration and then opened the
   session with the configuration it had *before* the question — the copy it
