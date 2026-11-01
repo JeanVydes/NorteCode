@@ -28,7 +28,9 @@ Two files beside your configuration, and nothing else:
 
 They are split so a model can be added by appending to a list, without touching
 a provider. Nothing is downloaded, cached or bundled: `norte-code` reads these
-two files at startup, and a file that is missing is an error naming it.
+two files at startup. A file that is missing is written empty — the shape to
+fill in, never a catalogue shipped with the binary — and the error that follows
+names it. A file that is already there is never written over.
 
 They live in `$XDG_CONFIG_HOME/norte-code/` when that is set and
 `~/.config/norte-code/` otherwise, beside `config.json`.

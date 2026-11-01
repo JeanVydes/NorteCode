@@ -7,8 +7,21 @@
 //! whatever directory the process happened to start in and point at a file that
 //! was never written, which is exactly how a catalogue looks empty when it is
 //! not.
+//!
+//! The files are written when they are missing: a first run has no catalogue,
+//! and an empty one says what to fill in without inventing a provider or a
+//! model the person did not choose.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use super::schema::CatalogError;
+
+/// What an empty `providers.json` holds.
+const EMPTY_PROVIDERS: &str = "{\n  \"providers\": {}\n}\n";
+
+/// What an empty `models.json` holds.
+const EMPTY_MODELS: &str = "{\n  \"models\": []\n}\n";
 
 /// The directory the catalogue files live in.
 ///
@@ -50,9 +63,93 @@ pub fn models_path() -> Result<PathBuf, String> {
     Ok(catalog_dir()?.join("models.json"))
 }
 
+/// The files a call to [`ensure_catalog_files`] wrote.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CreatedCatalog {
+    /// Whether `providers.json` was written.
+    pub providers: bool,
+    /// Whether `models.json` was written.
+    pub models: bool,
+}
+
+impl CreatedCatalog {
+    /// Whether anything was written.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.providers || self.models
+    }
+}
+
+/// Writes the two catalogue files when they are missing.
+///
+/// A file that is already there is never touched: what a person wrote is theirs,
+/// and a catalogue that is empty because they emptied it stays empty.
+///
+/// What is written is an empty catalogue and nothing else — no provider, no
+/// model, no price. The first run of a new install has to be told what to use,
+/// and a snapshot shipped with the binary would be one that ages into a lie.
+///
+/// # Errors
+///
+/// Returns [`CatalogError`] when the directory cannot be found or created, and
+/// when a file that was missing cannot be written.
+pub fn ensure_catalog_files() -> Result<CreatedCatalog, CatalogError> {
+    let dir = catalog_dir().map_err(|message| CatalogError::NoDirectory { message })?;
+    ensure_in(&dir)
+}
+
+/// Writes the two files in `dir` when they are missing.
+fn ensure_in(dir: &Path) -> Result<CreatedCatalog, CatalogError> {
+    std::fs::create_dir_all(dir).map_err(|source| CatalogError::Write {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let providers = write_missing(&dir.join("providers.json"), EMPTY_PROVIDERS)?;
+    let models = write_missing(&dir.join("models.json"), EMPTY_MODELS)?;
+    Ok(CreatedCatalog { providers, models })
+}
+
+/// Writes `body` to `path` unless the path is already there.
+///
+/// The file is created exclusively, so two processes racing here leave one
+/// winner and one file: neither of them writes over what the other wrote.
+fn write_missing(path: &Path, body: &str) -> Result<bool, CatalogError> {
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(source) => {
+            return Err(CatalogError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    file.write_all(body.as_bytes())
+        .map_err(|source| CatalogError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("norte-code-catalogue-{}-{n}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
 
     #[test]
     fn the_two_files_sit_beside_the_configuration() {
@@ -63,5 +160,34 @@ mod tests {
         assert_eq!(providers_path().expect("path"), dir.join("providers.json"));
         assert_eq!(models_path().expect("path"), dir.join("models.json"));
         assert!(dir.ends_with("norte-code"), "{}", dir.display());
+    }
+
+    #[test]
+    fn a_missing_catalogue_is_written_empty() {
+        // The first run of a new install has no catalogue. What is written says
+        // the shape and nothing else: a provider or a model invented here would
+        // be one the person did not choose.
+        let dir = temp_dir();
+        let created = ensure_in(&dir).expect("written");
+        assert!(created.providers && created.models, "{created:?}");
+        assert!(created.any());
+        let providers = std::fs::read_to_string(dir.join("providers.json")).expect("providers");
+        let models = std::fs::read_to_string(dir.join("models.json")).expect("models");
+        assert!(providers.contains("\"providers\""), "{providers}");
+        assert!(models.contains("\"models\""), "{models}");
+        assert!(!providers.contains("openai"), "{providers}");
+        assert!(!models.contains("openai"), "{models}");
+    }
+
+    #[test]
+    fn a_catalogue_that_is_there_is_never_written_over() {
+        // What a person wrote is theirs, and a file emptied on purpose stays
+        // empty: the second call writes nothing and changes nothing.
+        let dir = temp_dir();
+        ensure_in(&dir).expect("written");
+        std::fs::write(dir.join("providers.json"), "{\"providers\":{}}").expect("write");
+        let created = ensure_in(&dir).expect("checked");
+        assert!(!created.providers && !created.models, "{created:?}");
+        assert!(!created.any());
     }
 }

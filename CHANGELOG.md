@@ -78,6 +78,16 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   pins the stable channel with `clippy` and `rustfmt`, so a checkout builds
   with the tools it is linted by.
 
+- A catalogue that is missing is written empty. `providers.json` and
+  `models.json` are created beside the configuration when they are not there,
+  holding an empty provider map and an empty model list, and the error that
+  follows names the file to fill in. The first run of a new install stopped on
+  a file the person had never seen, with nothing to edit; what is written is
+  the shape and nothing else, because a provider or a model invented here would
+  be one the person did not choose, and a catalogue shipped with the binary is
+  one that ages into a lie. A file that is already there is never written over:
+  what a person wrote is theirs, and a catalogue emptied on purpose stays empty.
+
 - A wire may name the credential header it carries. `providers.json` gains an
   optional `auth` on each wire — `bearer`, `x_api_key`, `x_goog_api_key` or
   `disabled` — for a gateway that serves another vendor's shape over its own

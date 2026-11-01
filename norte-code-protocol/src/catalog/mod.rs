@@ -3,8 +3,8 @@
 //! The catalogue is two files a person owns, under the configuration directory:
 //! `providers.json` says who serves models and over which wires, and
 //! `models.json` is a flat list of the models themselves. Nothing here fetches
-//! anything: loading blocks on no network, and a file that is missing is an
-//! error that names it rather than a snapshot to fall back on.
+//! anything: loading blocks on no network, and a file that is missing is
+//! written empty rather than replaced by a snapshot that would age into a lie.
 //!
 //! A plugin may build the same two shapes from wherever it likes — one reads
 //! models.dev, one reads an `OpenRouter` listing — and hand them to
@@ -22,4 +22,4 @@ pub use schema::{
     Models, Pricing, Provider, Providers, Reasoning, SupportedEffort, SupportedParams, Wire,
     WireSchema, load_catalog_files,
 };
-pub use source::{catalog_dir, models_path, providers_path};
+pub use source::{CreatedCatalog, catalog_dir, ensure_catalog_files, models_path, providers_path};

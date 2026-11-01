@@ -141,8 +141,10 @@ feature.
 - The catalogue is two files a person owns, beside the configuration:
   `providers.json` (who serves models, over which wires) and `models.json` (a
   flat list, each model naming its provider). **Nothing is fetched, cached or
-  bundled.** A file that is missing is an error naming it, and a plugin that
-  builds the same two shapes hands them to `Catalog::new`.
+  bundled.** A file that is missing is written empty — an empty catalogue, never
+  a snapshot — and the error that follows names the file to fill in. A file
+  that is there is never written over, and a plugin that builds the same two
+  shapes hands them to `Catalog::new`.
 - A provider has `wires`, each a base URL plus the schema it speaks. The three
   schemas are `openai` (chat completions, the shape every compatible vendor
   speaks), `anthropic` and `google`. `--wire` picks one; the preferred order is

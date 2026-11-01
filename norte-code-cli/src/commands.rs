@@ -8,7 +8,7 @@ use super::{
     discovery_roots, find_project_config, human_tokens, list_models, new_session, open_session,
     resume_named, short, summarize, user_config_path,
 };
-use norte_code_protocol::catalog::{models_path, providers_path};
+use norte_code_protocol::catalog::{ensure_catalog_files, models_path, providers_path};
 use norte_code_protocol::config::{
     add_user_mcp_server, remove_user_mcp_server, set_user_mcp_enabled,
 };
@@ -1121,9 +1121,10 @@ pub(crate) fn apply_extensions(config: &mut Config, values: &[String]) -> Result
 /// Reads the two catalogue files, naming what to write when one is missing.
 ///
 /// Every command that needs a model calls this, and nothing is fetched: the
-/// files are a person's, and a plugin that builds them writes them. The message
-/// a missing file produces says which path and what to put in it, because the
-/// first run of a new install is exactly where this is reached.
+/// files are a person's, and a plugin that builds them writes them. A file that
+/// is missing is written empty first, because the first run of a new install is
+/// exactly where this is reached, and the person is told what was written and
+/// where.
 ///
 /// A plugin may offer providers and models of its own, and what it offers is
 /// added to the catalogue in memory: the files are not written, and what is
@@ -1131,11 +1132,20 @@ pub(crate) fn apply_extensions(config: &mut Config, values: &[String]) -> Result
 ///
 /// # Errors
 ///
-/// Returns the catalogue's own message when a file is missing, unreadable, too
-/// large or malformed, and the warnings it produced when it loaded.
+/// Returns the catalogue's own message when a file cannot be written, is
+/// unreadable, too large or malformed, and the warnings it produced when it
+/// loaded.
 pub(crate) fn load_catalogue() -> Result<Catalog, String> {
     let providers = providers_path()?;
     let models = models_path()?;
+    let created = ensure_catalog_files().map_err(|error| error.to_string())?;
+    if created.any() {
+        eprintln!(
+            "created {} and {}: add a provider and a model to begin",
+            providers.display(),
+            models.display()
+        );
+    }
     let mut catalog = Catalog::load(&providers, &models).map_err(|error| error.to_string())?;
     for warning in catalog.validate() {
         eprintln!("warning: {}", crate::text::terminal(&warning));

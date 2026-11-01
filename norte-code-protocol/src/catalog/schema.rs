@@ -469,6 +469,14 @@ pub enum CatalogError {
         /// The underlying error.
         source: std::io::Error,
     },
+    /// A file could not be written.
+    #[error("could not write {path}: {source}")]
+    Write {
+        /// The path.
+        path: PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
     /// A file is not valid JSON, or does not match the shape.
     #[error("{path} is not a valid catalogue: {source}")]
     Parse {
@@ -537,19 +545,32 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError`] when either file is missing, unreadable, too
-    /// large, not valid JSON, or carries nothing: a catalogue with no providers
-    /// or no models cannot open a session, and failing here says which file to
-    /// write rather than failing later on the first message.
+    /// Returns [`CatalogError`] when either file is unreadable, too large, not
+    /// valid JSON, or carries nothing: a catalogue with no providers or no
+    /// models cannot open a session, and failing here says which file to write
+    /// rather than failing later on the first message.
     pub fn load(
         providers: &std::path::Path,
         models: &std::path::Path,
     ) -> Result<Self, CatalogError> {
         let provider_bytes = read_limited(providers)?;
         let model_bytes = read_limited(models)?;
-        let providers: Providers = parse(providers, &provider_bytes)?;
-        let models: Models = parse(models, &model_bytes)?;
-        Self::new(providers, models)
+        let listed: Providers = parse(providers, &provider_bytes)?;
+        let entries: Models = parse(models, &model_bytes)?;
+        // The file that is empty is named here, because this is the error a
+        // person meets on a first run and the path is what tells them where to
+        // write. `new` has no file to name: it builds a catalogue in memory.
+        if listed.providers.is_empty() {
+            return Err(CatalogError::NoProviders {
+                path: providers.to_path_buf(),
+            });
+        }
+        if entries.models.is_empty() {
+            return Err(CatalogError::NoModels {
+                path: models.to_path_buf(),
+            });
+        }
+        Self::new(listed, entries)
     }
 
     /// Builds a catalogue in memory, for a plugin that read the data itself.
@@ -797,13 +818,16 @@ impl Provider {
 /// Reads the two catalogue files from where they belong.
 ///
 /// It is the one place the paths and the reading meet, so the host and the
-/// service cannot disagree about which file is which: both call this, and a
-/// file that is missing is an error naming it rather than an empty catalogue.
+/// service cannot disagree about which file is which: both call this. A file
+/// that is missing is an error naming it: the host writes the two files when
+/// they are not there, and a service that reloads a catalogue somebody deleted
+/// keeps the one it has.
 ///
 /// # Errors
 ///
 /// Returns [`CatalogError`] when the configuration directory cannot be located,
-/// when either file is missing or unreadable, or when either is malformed.
+/// when either file is missing, unreadable or malformed, or when either
+/// carries nothing.
 pub fn load_catalog_files() -> Result<Catalog, CatalogError> {
     let providers =
         super::source::providers_path().map_err(|message| CatalogError::NoDirectory { message })?;
