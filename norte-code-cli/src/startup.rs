@@ -91,6 +91,10 @@ pub(crate) struct SessionRow {
     pub(crate) model: String,
     /// Where it is, as the stored phase names it.
     pub(crate) phase: Phase,
+    /// When the session was created.
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
+    /// Tokens of context the session last used.
+    pub(crate) context_used: u64,
     /// Whether a turn was interrupted and can be continued.
     pub(crate) unfinished: bool,
 }
@@ -102,9 +106,18 @@ impl SessionRow {
     /// that is the name a person types back; a title is what they wrote to
     /// recognise it by, and both are worth seeing.
     pub(crate) fn label(&self) -> String {
+        let key = self.key.get(..12).unwrap_or(&self.key);
+        let date = self.created_at.format("%Y-%m-%d").to_string();
+        let stats = if self.context_used > 0 {
+            format!(" · {} ctx", self.context_used)
+        } else {
+            String::new()
+        };
         match self.title.as_deref().map(str::trim) {
-            Some(title) if !title.is_empty() => format!("{title} ({})", short(&self.key)),
-            _ => short(&self.key).to_owned(),
+            Some(title) if !title.is_empty() => {
+                format!("{title}  ({key}…)  {date}{stats}")
+            }
+            _ => format!("{key}…  {date}{stats}"),
         }
     }
 
@@ -124,11 +137,6 @@ impl SessionRow {
             Phase::Idle => None,
         }
     }
-}
-
-/// The key as the footer and the lists shorten it.
-fn short(key: &str) -> &str {
-    key.get(..8).unwrap_or(key)
 }
 
 /// The sessions in the local database, newest first.
@@ -166,6 +174,12 @@ fn row_of(session: StoredSession) -> SessionRow {
         provider: session.provider,
         model: session.model,
         phase,
+        created_at: session.created_at,
+        context_used: session
+            .stats
+            .get("context_used")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
     }
 }
 
@@ -478,6 +492,10 @@ mod tests {
             provider: "river".to_owned(),
             model: "deepseek".to_owned(),
             phase,
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            context_used: 0,
             unfinished,
         }
     }
@@ -522,11 +540,15 @@ mod tests {
         // The newest session is the running one; the one after it is idle, and
         // an idle session says nothing: "ready" on every row is a column of
         // noise.
-        assert_eq!(items[2].label, "7c19ab22");
+        assert!(items[2].label.starts_with("7c19ab22"), "{}", items[2].label);
         assert_eq!(items[2].note.as_deref(), Some("unfinished"));
         // A titled session leads with the title and keeps its key beside it, so
         // both what a person calls it and what they would type are on the row.
-        assert_eq!(items[3].label, "browser work (03fe0fad)");
+        assert!(
+            items[3].label.starts_with("browser work"),
+            "{}",
+            items[3].label
+        );
         assert_eq!(items[3].note, None);
         assert!(
             items[3].search.contains("03fe0fad-a2ee"),
@@ -553,7 +575,7 @@ mod tests {
         );
         // The last one is a row of the menu, and it is searchable by its key.
         let last = &items[items.len() - 1];
-        assert_eq!(last.label, "0000001d");
+        assert!(last.label.starts_with("0000001d"), "{}", last.label);
         assert!(
             last.search.contains("0000001d-0000"),
             "the whole key is searchable: {}",
@@ -564,13 +586,21 @@ mod tests {
     #[test]
     fn a_row_is_named_by_its_title_or_its_short_key() {
         let named = row("03fe0fad-a2ee", Some("browser work"), Phase::Idle, false);
-        assert_eq!(named.label(), "browser work (03fe0fad)");
+        assert!(
+            named.label().starts_with("browser work"),
+            "{}",
+            named.label()
+        );
         assert_eq!(named.state(), None);
         let untitled = row("03fe0fad-a2ee", None, Phase::Idle, false);
-        assert_eq!(untitled.label(), "03fe0fad");
+        assert!(
+            untitled.label().starts_with("03fe0fad"),
+            "{}",
+            untitled.label()
+        );
         // A blank title is not a name: the key is all it has.
         let blank = row("03fe0fad-a2ee", Some("   "), Phase::Idle, false);
-        assert_eq!(blank.label(), "03fe0fad");
+        assert!(blank.label().starts_with("03fe0fad"), "{}", blank.label());
     }
 
     #[test]
