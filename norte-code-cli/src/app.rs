@@ -276,10 +276,20 @@ impl State {
             let areas = crate::ui::split(area, self.heights(area.width));
             draw_transcript(frame, areas.conversation, self, pinned, style);
             if areas.spinner.height > 0 {
-                draw_spinner(frame, areas.spinner, self, style);
+                let widget = crate::ui::spinner::Spinner {
+                    waiting: self.waiting,
+                    waiting_since: self.waiting_since,
+                    style,
+                };
+                crate::ui::Widget::draw(&widget, frame, areas.spinner, &crate::style::Theme);
             }
             if areas.tasks.height > 0 {
-                draw_tasks(frame, areas.tasks, self, style);
+                let widget = crate::ui::tasks::Tasks {
+                    todos: &self.todos,
+                    waiting: self.waiting.is_some(),
+                    style,
+                };
+                crate::ui::Widget::draw(&widget, frame, areas.tasks, &crate::style::Theme);
             }
             if let Some(question) = self.question.as_ref().filter(|_| areas.question.height > 0) {
                 draw_question(frame, areas.question, question, self, style);
@@ -380,18 +390,6 @@ pub(crate) const INPUT_ROWS: u16 = metrics::INPUT_ROWS;
 /// when tokens started arriving would say the process had stalled at the exact
 /// moment it was working. What changes with the phase is the words.
 ///
-/// The number beside it is the time since the wait began, which is the one thing
-/// a person watching a silent provider wants and cannot get from anything else
-/// on screen.
-fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
-    let widget = crate::ui::spinner::Spinner {
-        waiting: state.waiting,
-        waiting_since: state.waiting_since,
-        style,
-    };
-    crate::ui::Widget::draw(&widget, frame, area, &crate::style::Theme);
-}
-
 /// How long one glyph of the spinner is shown, in ms.
 const SPINNER_MS: u64 = metrics::SPINNER_MS;
 
@@ -424,21 +422,6 @@ fn suggestion_ink(state: &State, style: Style) -> ratatui::style::Style {
 fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style::Style) {
     // One bounded-row helper for every widget: see `crate::ui::clip`.
     crate::ui::clip::paint_text(frame, area, text, style);
-}
-
-/// Draws the task list as one compact row.
-///
-/// The completed count and the task being worked on are what a person watching
-/// the work needs; the whole list is one keystroke away in the conversation and
-/// must not take a column of the screen. The row is bounded exactly like every
-/// other chrome row.
-fn draw_tasks(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
-    let widget = crate::ui::tasks::Tasks {
-        todos: &state.todos,
-        waiting: state.waiting.is_some(),
-        style,
-    };
-    crate::ui::Widget::draw(&widget, frame, area, &crate::style::Theme);
 }
 
 /// Draws the status row: the head, then the fields in their own ink.
