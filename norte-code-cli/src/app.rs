@@ -297,8 +297,17 @@ impl State {
             if areas.input.height > 0 {
                 draw_input(frame, areas.input, self, style);
             }
-            if areas.completion.height > 0 {
-                draw_completion(frame, areas.completion, self, style);
+            if areas.completion.height > 0
+                && let Some(completion) = &self.completion
+            {
+                let top = completion.top();
+                let widget = crate::ui::completion::CompletionMenu {
+                    rows: &completion.rows,
+                    cursor: completion.cursor,
+                    top,
+                    style,
+                };
+                crate::ui::Widget::draw(&widget, frame, areas.completion, &crate::style::Theme);
             }
             // The suggestion names what may be typed next, and when it names a
             // reasoning setting it means the same thing the bar in the status
@@ -1284,39 +1293,6 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     draw_block_from(frame, area, &rows, start);
 }
 
-/// Draws the completion menu in its own band.
-fn draw_completion(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
-    if area.height == 0 {
-        return;
-    }
-    let Some(completion) = &state.completion else {
-        return;
-    };
-    let mut rows: Vec<Line> = Vec::new();
-    let top = completion.top();
-    for (offset, row) in completion
-        .rows
-        .iter()
-        .skip(top)
-        .take(usize::from(area.height).min(COMPLETION_ROWS))
-        .enumerate()
-    {
-        let index = top + offset;
-        let here = index == completion.cursor;
-        let row = row.replace('\n', " ");
-        let room = usize::from(area.width)
-            .saturating_sub(metrics::MENU_INDENT + 2)
-            .max(1);
-        let shown = crate::ui::clip::clip_text(&row, room);
-        let text = format!("{}{shown}", " ".repeat(metrics::MENU_INDENT));
-        rows.push(if here {
-            Line::styled(text, Style::selected())
-        } else {
-            Line::from(Span::styled(text, style.dim_span()))
-        });
-    }
-    draw_block_from(frame, area, &rows, 0);
-}
 
 /// Draws rows inside a block, from the top of the area it was given.
 fn draw_block(frame: &mut Draw<'_>, area: Rect, rows: &[Line]) {

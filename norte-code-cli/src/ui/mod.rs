@@ -15,6 +15,7 @@
 use ratatui::layout::Rect;
 
 pub(crate) mod clip;
+pub(crate) mod completion;
 pub(crate) mod tasks;
 pub(crate) mod transcript;
 pub(crate) mod spinner;

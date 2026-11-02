@@ -1,6 +1,6 @@
 //! The completion menu as a widget.
 
-use crate::style::{Style, icon, metrics};
+use crate::style::{Style, metrics};
 use crate::ui::clip;
 use crate::ui::Widget;
 use ratatui::layout::Rect;
@@ -16,7 +16,7 @@ pub(crate) struct CompletionMenu<'a> {
 
 impl Widget for CompletionMenu<'_> {
     fn measure(&self, _width: u16, _theme: &crate::style::Theme) -> u16 {
-        self.rows.len().min(metrics::COMPLETION_ROWS) as u16
+        u16::try_from(self.rows.len().min(metrics::COMPLETION_ROWS)).unwrap_or(u16::MAX)
     }
 
     fn draw(
@@ -44,28 +44,8 @@ impl Widget for CompletionMenu<'_> {
             } else {
                 Line::from(Span::styled(text, self.style.dim_span()))
             };
-            let row_area = Rect::new(area.x, area.y + offset as u16, area.width, 1);
+            let row_area = Rect::new(area.x, area.y + u16::try_from(offset).unwrap_or(0), area.width, 1);
             Paragraph::new(line).render(row_area, frame.buffer_mut());
         }
     }
 }
-EOF
-python3 - <<'PY'
-p='norte-code-cli/src/ui/mod.rs'
-s=open(p).read()
-if 'pub(crate) mod completion;' not in s:
-    s=s.replace('pub(crate) mod clip;\n', 'pub(crate) mod clip;\npub(crate) mod completion;\n',1)
-open(p,'w').write(s)
-PY
-# truncate
-python3 - <<'PY'
-p='norte-code-cli/src/ui/completion.rs'
-lines=open(p).read().splitlines()
-out=[]
-for l in lines:
-    if l=='EOF' or l.startswith('echo '):
-        break
-    out.append(l)
-open(p,'w').write('\n'.join(out)+'\n')
-PY
-cargo build -p norte-code-cli 2>&1 | tail -4
