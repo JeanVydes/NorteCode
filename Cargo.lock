@@ -1184,7 +1184,7 @@ dependencies = [
 [[package]]
 name = "norte"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "norte-anthropic",
  "norte-core",
@@ -1201,7 +1201,7 @@ dependencies = [
 [[package]]
 name = "norte-anthropic"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1286,7 +1286,7 @@ dependencies = [
 [[package]]
 name = "norte-core"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1298,7 +1298,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "strum 0.27.2",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -1309,7 +1308,7 @@ dependencies = [
 [[package]]
 name = "norte-gemini"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1326,7 +1325,7 @@ dependencies = [
 [[package]]
 name = "norte-harness"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1343,7 +1342,7 @@ dependencies = [
 [[package]]
 name = "norte-http"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1363,7 +1362,7 @@ dependencies = [
 [[package]]
 name = "norte-macros"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1373,7 +1372,7 @@ dependencies = [
 [[package]]
 name = "norte-mcp"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1391,7 +1390,7 @@ dependencies = [
 [[package]]
 name = "norte-media"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "image",
@@ -1401,7 +1400,7 @@ dependencies = [
 [[package]]
 name = "norte-openai"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1418,7 +1417,7 @@ dependencies = [
 [[package]]
 name = "norte-testing"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1433,7 +1432,7 @@ dependencies = [
 [[package]]
 name = "norte-tools"
 version = "0.0.2"
-source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#0182e00e968c5ae2411665028f594341ab1525a3"
+source = "git+https://github.com/JeanVydes/Norte.git?branch=dev#7c5853cdbf2ed181c4ddd27d097ff240dd8f5820"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1711,7 +1710,7 @@ dependencies = [
  "itertools",
  "lru",
  "paste",
- "strum 0.26.3",
+ "strum",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
@@ -2152,16 +2151,7 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
- "strum_macros 0.26.4",
-]
-
-[[package]]
-name = "strum"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
-dependencies = [
- "strum_macros 0.27.2",
+ "strum_macros",
 ]
 
 [[package]]
@@ -2174,18 +2164,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
  "syn 2.0.119",
 ]
 

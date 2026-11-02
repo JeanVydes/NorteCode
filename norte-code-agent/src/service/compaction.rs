@@ -183,13 +183,16 @@ impl Service {
             &summary_spec.capabilities.reasoning,
             self.config().compaction.reasoning,
         );
-        let outcome = summary_engine
+        let mut turn = summary_engine
             .turn(scratch.id)
             .reasoning(reasoning)
             .tools(std::iter::empty::<norte::ToolName>())
-            .start()
-            .finish()
-            .await?;
+            .start_stepped();
+        let outcome = loop {
+            if let Some(norte::harness::Step::Done(outcome)) = turn.step().await? {
+                break outcome;
+            }
+        };
         let message = outcome.message.ok_or_else(|| {
             ServiceError::Compaction("the summary request committed no message".to_owned())
         })?;

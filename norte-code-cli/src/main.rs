@@ -1153,6 +1153,7 @@ async fn resume_session(
 /// thrown away afterwards left the run with the defaults it had before the
 /// question — which is how a first run that had just named a provider died on
 /// "no provider specified".
+#[allow(clippy::large_futures)]
 async fn open_session(
     config: Config,
     catalog: Catalog,

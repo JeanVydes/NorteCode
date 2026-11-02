@@ -14,6 +14,7 @@ use norte_code_protocol::config::{
 };
 use norte_code_protocol::sqlite::RequestStatus;
 
+#[allow(clippy::large_futures)]
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     let config_path = cli.config.clone();
     let user_config = config_path.clone().or_else(user_config_path);

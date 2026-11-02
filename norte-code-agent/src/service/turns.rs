@@ -4,7 +4,7 @@
 //! cost. The steering messages the running turns have not reached are handed
 //! to the engine here, at the boundary where the turn begins.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -38,6 +38,15 @@ use super::mapping::{
 use super::models::resolve_reasoning;
 use super::tooling::output_text;
 use super::{EventStream, Service, ServiceError, Stats};
+
+/// Aborts a spawned task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 impl Service {
     /// Starts a turn (or a resume) and returns the stream of its events.
@@ -236,7 +245,8 @@ impl Service {
         let this = Arc::clone(self);
         let task_key = key.clone();
         tokio::spawn(async move {
-            let result = this
+            let runner = Arc::clone(&this);
+            let result = runner
                 .run_turn(
                     engine,
                     Some(book),
@@ -275,7 +285,7 @@ impl Service {
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_turn(
-        &self,
+        self: Arc<Self>,
         mut engine: Harness,
         budget: Option<Arc<Mutex<BudgetBook>>>,
         mut gate: Option<Arc<CompactionGate>>,
@@ -293,7 +303,49 @@ impl Service {
         let mut current_nid = nid;
         let mut input = input;
         let mut stats = self.stats(key, turn);
-        let mut questions = self.questions.subscribe();
+        let current_nid_cell = Arc::new(Mutex::new(current_nid));
+        let q_tx = tx.clone();
+        let q_key = key.clone();
+        let q_service = Arc::clone(&self);
+        let q_cell = Arc::clone(&current_nid_cell);
+        // Subscribe synchronously so the broker sees a receiver before any
+        // tool calls `ask` (which would otherwise fail with "no listener").
+        let mut qrx = self.questions.subscribe();
+        let q_handle = tokio::spawn(async move {
+            #[allow(clippy::while_let_loop)]
+            loop {
+                match qrx.recv().await {
+                    Ok(question) => {
+                        let nid = *q_cell.lock().unwrap_or_else(PoisonError::into_inner);
+                        if question.session == Some(nid) {
+                            if !emit(
+                                &q_tx,
+                                ServerEvent::new(
+                                    request_id,
+                                    Some(q_key.clone()),
+                                    ServerEventKind::QuestionAsked {
+                                        turn,
+                                        question: question.id,
+                                        prompt: question.question,
+                                        options: question.options,
+                                        multiple: question.multiple,
+                                    },
+                                ),
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                            q_service
+                                .set_phase(&q_key, norte_code_protocol::Phase::AwaitingTool)
+                                .await;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let _q_guard = AbortOnDrop(q_handle);
 
         let mut compacted_eagerly = false;
         let mut retries = 0u32;
@@ -329,59 +381,33 @@ impl Service {
             for (key, value) in &self.config().extensions {
                 turn_builder = turn_builder.extension(key.clone(), value.clone());
             }
-            let mut stream = turn_builder.start();
+            let mut stepped = turn_builder.start_stepped();
 
             let mut cancelled = false;
             let mut interrupted = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
-            loop {
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => {
-                        cancelled = true;
-                        interrupted = true;
-                        stream.cancel();
-                        break;
-                    }
-                    question = questions.recv() => {
-                        if let Ok(question) = question
-                            && question.session == Some(current_nid)
-                        {
-                                if !emit(
-                                    tx,
-                                    ServerEvent::new(
-                                        request_id,
-                                        Some(key.clone()),
-                                        ServerEventKind::QuestionAsked {
-                                            turn,
-                                            question: question.id,
-                                            prompt: question.question,
-                                            options: question.options,
-                                            multiple: question.multiple,
-                                        },
-                                    ),
-                                )
-                                .await
-                                {
-                                    return Ok(());
-                                }
-                                self.set_phase(key, norte_code_protocol::Phase::AwaitingTool).await;
-                        }
-                    }
-                    next = stream.next() => {
-                        match next {
-                            Some(Ok(event)) => {
-                                if is_compaction_abort(&event) {
-                                    failure = Some(COMPACTION_SAFE_POINT.to_owned());
-                                    break;
-                                }
-                                // The engine reports a fatal error as an event and
-                                // again as the turn's result. Wait for the result:
-                                // the retry policy decides whether the client sees
-                                // an error at all.
-                                if !matches!(event, EngineEvent::Error { .. })
-                                    && !self.handle(
+            let mut outcome: Result<norte::harness::TurnOutcome, norte::Error> =
+                Err(norte::Error::Other("not run".to_owned()));
+
+            'stepping: loop {
+                if cancellation.is_cancelled() {
+                    cancelled = true;
+                    interrupted = true;
+                    stepped.cancel();
+                    break 'stepping;
+                }
+
+                match stepped.step().await {
+                    Ok(Some(norte::harness::Step::Tools { session })) => {
+                        current_nid = session.id;
+                        while let Ok(event) = stepped.events().try_recv() {
+                            if is_compaction_abort(&event) {
+                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
+                            }
+                            if !matches!(event, EngineEvent::Error { .. })
+                                && !self
+                                    .handle(
                                         &engine,
                                         request_id,
                                         key,
@@ -392,28 +418,98 @@ impl Service {
                                         gate.as_deref(),
                                     )
                                     .await
-                                {
-                                    return Ok(());
-                                }
+                            {
+                                return Ok(());
                             }
-                            Some(Err(error)) => {
-                                failure_code = Some(error_code(&error));
-                                failure = Some(error.to_string());
-                                break;
-                            }
-                            None => break,
+                        }
+                        if failure.is_some() {
+                            break 'stepping;
                         }
                     }
-                }
-                if cancelled {
-                    stream.cancel();
-                    cancelled = false;
+                    Ok(Some(norte::harness::Step::Generated {
+                        session,
+                        message: _,
+                        interrupted: iv,
+                    })) => {
+                        current_nid = session.id;
+                        interrupted = iv;
+                        while let Ok(event) = stepped.events().try_recv() {
+                            if is_compaction_abort(&event) {
+                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
+                            }
+                            if !matches!(event, EngineEvent::Error { .. })
+                                && !self
+                                    .handle(
+                                        &engine,
+                                        request_id,
+                                        key,
+                                        current_nid,
+                                        &event,
+                                        &mut stats,
+                                        tx,
+                                        gate.as_deref(),
+                                    )
+                                    .await
+                            {
+                                return Ok(());
+                            }
+                        }
+                        if failure.is_some() || interrupted {
+                            break 'stepping;
+                        }
+                    }
+                    Ok(Some(norte::harness::Step::Done(o))) => {
+                        outcome = Ok(o);
+                        while let Ok(event) = stepped.events().try_recv() {
+                            if is_compaction_abort(&event) {
+                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
+                            }
+                            if !matches!(event, EngineEvent::Error { .. }) {
+                                let _ = self
+                                    .handle(
+                                        &engine,
+                                        request_id,
+                                        key,
+                                        current_nid,
+                                        &event,
+                                        &mut stats,
+                                        tx,
+                                        gate.as_deref(),
+                                    )
+                                    .await;
+                            }
+                        }
+                        break 'stepping;
+                    }
+                    Ok(None) => break 'stepping,
+                    Err(error) => {
+                        failure_code = Some(error_code(&error));
+                        failure = Some(error.to_string());
+                        outcome = Err(error);
+                        while let Ok(event) = stepped.events().try_recv() {
+                            if is_compaction_abort(&event) {
+                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
+                            }
+                            if !matches!(event, EngineEvent::Error { .. }) {
+                                let _ = self
+                                    .handle(
+                                        &engine,
+                                        request_id,
+                                        key,
+                                        current_nid,
+                                        &event,
+                                        &mut stats,
+                                        tx,
+                                        gate.as_deref(),
+                                    )
+                                    .await;
+                            }
+                        }
+                        break 'stepping;
+                    }
                 }
             }
 
-            // A cancelled turn must not wait for the stream to finish: the
-            // provider may never send the terminal event, and the client would
-            // hang on "cancelling…". Skip the finish and settle what we have.
             if interrupted {
                 let phase = norte_code_protocol::Phase::Idle;
                 self.set_phase(key, phase).await;
@@ -446,27 +542,25 @@ impl Service {
                 return Ok(());
             }
 
-            let outcome = stream.finish().await;
-            // The last request has no successor to settle it.
-            let _ = self
-                .settle(
-                    &engine,
-                    request_id,
-                    key,
-                    current_nid,
-                    &mut stats,
-                    tx,
-                    true,
-                    gate.as_deref(),
-                )
-                .await;
-            self.store_stats(key, &stats).await;
+            if !interrupted {
+                let _ = self
+                    .settle(
+                        &engine,
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
+                        tx,
+                        true,
+                        gate.as_deref(),
+                    )
+                    .await;
+                self.store_stats(key, &stats).await;
+            }
 
             let compaction_abort = failure.as_deref().is_some_and(is_compaction_message)
-                || matches!(
-                    &outcome,
-                    Err(error) if is_compaction_message(&error.to_string())
-                );
+                || matches!(&outcome, Err(e) if is_compaction_message(&e.to_string()));
+
             if !cancelled && !interrupted && compaction_abort {
                 match self.perform_compaction(request_id, key, "threshold").await {
                     Ok(events) => {
@@ -543,6 +637,9 @@ impl Service {
                 }
                 engine = self.engine_with_budget(&new_spec, Some(key), budget.clone(), None)?;
                 current_nid = new_nid;
+                *current_nid_cell
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = new_nid;
                 input = None;
                 gate = None;
                 compacted_eagerly = true;
@@ -874,6 +971,7 @@ impl Service {
                     action: status.action,
                 }),
             EngineEvent::RequestReconstructed { .. } => {
+                eprintln!("HANDLE RequestReconstructed");
                 return self
                     .settle(engine, request_id, key, nid, stats, tx, false, gate)
                     .await;

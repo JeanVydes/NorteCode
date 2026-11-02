@@ -179,7 +179,7 @@ impl Service {
         // No tools and no reasoning: the question is "what is this called", and
         // a tool call or a chain of thought is neither a cheaper nor a better
         // answer to it. The instruction is the whole history.
-        let outcome = engine
+        let mut turn = engine
             .turn(scratch.id)
             .input(Message::user(format!(
                 "{TITLE_PROMPT}\n\n---\n{first_message}"
@@ -187,9 +187,12 @@ impl Service {
             .reasoning(ReasoningRequest::Disabled)
             .tools(std::iter::empty::<norte::ToolName>())
             .max_output_tokens(self.config().titling.max_output)
-            .start()
-            .finish()
-            .await?;
+            .start_stepped();
+        let outcome = loop {
+            if let Some(norte::harness::Step::Done(outcome)) = turn.step().await? {
+                break outcome;
+            }
+        };
         let message = outcome
             .message
             .filter(|message| message.role == Role::Assistant)
