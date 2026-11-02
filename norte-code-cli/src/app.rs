@@ -461,22 +461,12 @@ fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style:
 /// must not take a column of the screen. The row is bounded exactly like every
 /// other chrome row.
 fn draw_tasks(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
-    if area.height == 0 || state.todos.is_empty() {
-        return;
-    }
-    let done = state.todos.iter().filter(|task| task.done).count();
-    let mark = if state.waiting.is_some() {
-        icon::RUNNING
-    } else if done == state.todos.len() {
-        icon::DONE
-    } else {
-        icon::PENDING
+    let widget = crate::ui::tasks::Tasks {
+        todos: &state.todos,
+        waiting: state.waiting.is_some(),
+        style,
     };
-    let text = state.todos.iter().find(|task| !task.done).map_or_else(
-        || format!("{mark} tasks {done}/{}", state.todos.len()),
-        |task| format!("{mark} tasks {done}/{} · {}", state.todos.len(), task.text),
-    );
-    draw_row(frame, area, &text, style.dim_span());
+    crate::ui::Widget::draw(&widget, frame, area, &crate::style::Theme);
 }
 
 /// Draws the status row: the head, then the fields in their own ink.

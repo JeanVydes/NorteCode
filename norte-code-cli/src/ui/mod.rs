@@ -15,6 +15,7 @@
 use ratatui::layout::Rect;
 
 pub(crate) mod clip;
+pub(crate) mod tasks;
 
 /// The rows each band asks for at one width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
