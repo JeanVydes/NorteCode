@@ -119,6 +119,12 @@ use ratatui::Frame;
 /// layout asks first, and the same number is what it is given.
 #[allow(dead_code)]
 pub(crate) trait Widget {
+    /// How many rows the widget needs at `width`.
+    ///
+    /// Measured once, from the same data the painter uses, so the height a
+    /// painter assumes and the rows it is given cannot disagree.
+    fn measure(&self, width: u16, theme: &crate::style::Theme) -> u16;
+
     /// Paints the widget into `area`.
     #[allow(clippy::trivially_copy_pass_by_ref)]
     fn draw(&self, frame: &mut Frame<'_>, area: Rect, theme: &crate::style::Theme);
