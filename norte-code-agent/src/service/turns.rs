@@ -411,6 +411,41 @@ impl Service {
                 }
             }
 
+            // A cancelled turn must not wait for the stream to finish: the
+            // provider may never send the terminal event, and the client would
+            // hang on "cancelling…". Skip the finish and settle what we have.
+            if interrupted {
+                let phase = norte_code_protocol::Phase::Idle;
+                self.set_phase(key, phase).await;
+                let _ = self
+                    .settle(
+                        &engine,
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
+                        tx,
+                        true,
+                        gate.as_deref(),
+                    )
+                    .await;
+                self.store_stats(key, &stats).await;
+                emit(
+                    tx,
+                    ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::TurnFinished {
+                            turn,
+                            phase,
+                            committed: false,
+                        },
+                    ),
+                )
+                .await;
+                return Ok(());
+            }
+
             let outcome = stream.finish().await;
             // The last request has no successor to settle it.
             let _ = self
