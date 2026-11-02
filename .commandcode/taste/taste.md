@@ -1,2 +1,3 @@
 - When a plan is already approved and saved to a file, execute it directly: read the plan file first, then implement it step by step, referring back to the plan as you work; never re-enter plan mode or re-present the plan for approval. Confidence: 0.7
 - Prefer the edit tool (`edit_file`) over shell commands with Python/`sed` for modifying files. Confidence: 0.8
+- When making code changes, batch large edits together and run checks/tests once afterward rather than checking after each individual edit. Confidence: 0.8
