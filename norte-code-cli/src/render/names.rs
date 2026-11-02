@@ -187,6 +187,9 @@ pub(crate) fn supported_param_name(
         P::TopP => "top_p",
         P::TopLogprobs => "top_logprobs",
         P::TopK => "top_k",
+        P::TopA => "top_a",
+        P::LogitBias => "logit_bias",
+        P::RepetitionPenalty => "repetition_penalty",
         P::Verbosity => "verbosity",
     }
 }

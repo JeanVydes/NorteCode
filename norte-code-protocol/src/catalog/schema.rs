@@ -370,6 +370,12 @@ pub enum SupportedParams {
     TopLogprobs,
     /// `top_k`.
     TopK,
+    /// `top_a`.
+    TopA,
+    /// `logit_bias`.
+    LogitBias,
+    /// `repetition_penalty`.
+    RepetitionPenalty,
     /// `verbosity`.
     Verbosity,
 }
