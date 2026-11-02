@@ -14,6 +14,8 @@
 
 use ratatui::layout::Rect;
 
+pub(crate) mod clip;
+
 /// The rows each band asks for at one width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Heights {

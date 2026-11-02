@@ -450,33 +450,8 @@ fn suggestion_ink(state: &State, style: Style) -> ratatui::style::Style {
 
 /// Draws one row of chrome, clipped to its area.
 fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style::Style) {
-    if area.height == 0 || text.is_empty() {
-        return;
-    }
-    // A row is one line and the chrome is built to fit it, so what is longer
-    // than the row is cut here rather than wrapped: a hint that pushed the
-    // input down a row would move everything under the eye mid-keystroke. The
-    // builders keep it short — `session_status` drops what does not fit — and
-    // this is the backstop for a width they did not expect.
-    let room = usize::from(area.width).saturating_sub(2).max(1);
-    // The escapes go first. The chrome is built by the string painters — the
-    // status line in particular, which colours each of its fields — and those
-    // wrap text in SGR codes. A frame draws text: the codes would be shown as
-    // the characters they are, and they would be counted as characters by the
-    // cut below, so a row that fit came back chopped mid-field with the tail of
-    // an escape sequence left on screen.
-    let text = crate::select::strip_style(text);
-    let text = text.replace(['\n', '\r'], " ");
-    let text = crate::text::terminal(&text);
-    let shown = if text.chars().count() > room {
-        let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-        cut.push(icon::MORE.chars().next().unwrap_or('…'));
-        cut
-    } else {
-        text.into_owned()
-    };
-    let line = Line::from(vec![Span::raw("  "), Span::styled(shown, style)]);
-    Paragraph::new(line).render(area, frame.buffer_mut());
+    // One bounded-row helper for every widget: see `crate::ui::clip`.
+    crate::ui::clip::paint_text(frame, area, text, style);
 }
 
 /// Draws the task list as one compact row.
@@ -528,34 +503,8 @@ fn draw_status(frame: &mut Draw<'_>, area: Rect, state: &State) {
 /// The cut counts characters and keeps each span's ink, so a row that is too
 /// long loses its tail and not its colour.
 fn truncate_line(line: Line<'static>, room: usize) -> Line<'static> {
-    let total: usize = line
-        .spans
-        .iter()
-        .map(|span| span.content.chars().count())
-        .sum();
-    if total <= room {
-        return line;
-    }
-    let mut left = room.saturating_sub(1);
-    let mut spans = Vec::with_capacity(line.spans.len());
-    for span in line.spans {
-        if left == 0 {
-            break;
-        }
-        let style = span.style;
-        let text = span.content.into_owned();
-        let count = text.chars().count();
-        if count <= left {
-            left -= count;
-            spans.push(Span::styled(text, style));
-        } else {
-            let cut: String = text.chars().take(left).collect();
-            spans.push(Span::styled(cut, style));
-            left = 0;
-        }
-    }
-    spans.push(Span::raw("…"));
-    Line::from(spans)
+    // Delegated to the shared helper so the cut glyph stays one.
+    crate::ui::clip::clip_line(line, room)
 }
 
 /// The bar in front of a row, which is what says who is talking.
@@ -1413,13 +1362,7 @@ fn draw_completion(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style
         let room = usize::from(area.width)
             .saturating_sub(metrics::MENU_INDENT + 2)
             .max(1);
-        let shown = if row.chars().count() > room {
-            let mut cut: String = row.chars().take(room.saturating_sub(1)).collect();
-            cut.push(icon::MORE.chars().next().unwrap_or('…'));
-            cut
-        } else {
-            row
-        };
+        let shown = crate::ui::clip::clip_text(&row, room);
         let text = format!("{}{shown}", " ".repeat(metrics::MENU_INDENT));
         rows.push(if here {
             Line::styled(text, Style::selected())
