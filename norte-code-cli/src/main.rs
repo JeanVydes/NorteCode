@@ -182,6 +182,16 @@ enum PluginsCommand {
         /// The plugin to update, as `list` shows it. Omitted, every plugin.
         name: Option<String>,
     },
+    /// Load an installed plugin again.
+    Enable {
+        /// The name of the plugin, as `list` shows it.
+        name: String,
+    },
+    /// Stop loading an installed plugin.
+    Disable {
+        /// The name of the plugin, as `list` shows it.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

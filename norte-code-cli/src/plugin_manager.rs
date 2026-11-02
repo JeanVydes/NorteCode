@@ -74,6 +74,7 @@ fn remember_source(stem: &str, url: &str) {
 
 /// List installed plugins. Each .so file in the plugin directory is a plugin;
 /// its file name (without extension) is the plugin name.
+#[cfg(test)]
 pub(crate) fn list_plugins() -> Vec<String> {
     installed_libraries()
         .into_iter()
@@ -298,6 +299,79 @@ fn is_library(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .is_some_and(|ext| ext == "so" || ext == "dll" || ext == "dylib")
+}
+
+/// The suffix that marks a library as disabled.
+///
+/// Disabling a plugin is renaming its file: the loader only opens `.so`/`.dll`
+/// /`.dylib`, so a `.disabled` suffix is enough for the host to pass it by,
+/// and the bytes stay where they are.
+const DISABLED_SUFFIX: &str = ".disabled";
+
+/// Whether a path is a disabled plugin library.
+fn is_disabled_library(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(DISABLED_SUFFIX))
+        .is_some_and(|stem| is_library(Path::new(stem)))
+}
+
+/// Every installed plugin file, enabled and disabled, in path order.
+pub(crate) fn installed_entries() -> Vec<PathBuf> {
+    let plugin_dir = plugin_dir();
+    let mut paths = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&plugin_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_library(&path) || is_disabled_library(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// Enables or disables a plugin by renaming its library.
+///
+/// The name is either the one the plugin answers with or the one its file has,
+/// enabled or disabled, so a person types what the list shows.
+///
+/// # Errors
+///
+/// Returns an error when the plugin is not installed or the rename fails.
+pub(crate) fn set_plugin_enabled(name: &str, enabled: bool) -> Result<(), String> {
+    let path = installed_entries()
+        .into_iter()
+        .find(|path| {
+            let stem = path.file_stem().and_then(|s| s.to_str());
+            stem == Some(name)
+                || crate::plugin_loader::describe(path).is_ok_and(|plugin| plugin == name)
+        })
+        .ok_or_else(|| format!("plugin {name} not found"))?;
+    let currently_enabled = is_library(&path);
+    if currently_enabled == enabled {
+        return Ok(());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("plugin {name} has no file name"))?
+        .to_owned();
+    let renamed = if enabled {
+        let stem = file_name
+            .strip_suffix(DISABLED_SUFFIX)
+            .ok_or_else(|| format!("plugin {name} is not disabled"))?;
+        path.with_file_name(stem)
+    } else {
+        path.with_file_name(format!("{file_name}{DISABLED_SUFFIX}"))
+    };
+    std::fs::rename(&path, &renamed).map_err(|e| {
+        format!(
+            "could not {} {name}: {e}",
+            if enabled { "enable" } else { "disable" }
+        )
+    })
 }
 
 /// The shared library cargo built, read out of its JSON messages.

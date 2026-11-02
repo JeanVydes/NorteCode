@@ -182,6 +182,14 @@ pub(crate) fn built() -> Registry {
         )
         .arg(ArgSpec::optional("name")),
     );
+    registry.register(
+        CommandSpec::new("/plugins enable", "load an installed plugin again")
+            .arg(ArgSpec::required("name")),
+    );
+    registry.register(
+        CommandSpec::new("/plugins disable", "stop loading an installed plugin")
+            .arg(ArgSpec::required("name")),
+    );
     // The plugins lead: a command of theirs that names one of the client's is
     // the one that wins, because the plugin was asked for by name and the
     // client was not.

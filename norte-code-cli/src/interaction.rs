@@ -133,6 +133,12 @@ pub(crate) enum ChatCommand {
     /// Rebuild installed plugins from their source, all or one.
     PluginsUpdate { name: Option<String> },
 
+    /// Enable an installed plugin by renaming its library back.
+    PluginsEnable { name: String },
+
+    /// Disable an installed plugin by renaming its library away.
+    PluginsDisable { name: String },
+
     /// Remove an installed plugin.
     PluginsRm { name: String },
 
@@ -204,6 +210,12 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         },
         "/plugins update" => ChatCommand::PluginsUpdate {
             name: invocation.arg("name").map(str::to_owned),
+        },
+        "/plugins enable" => ChatCommand::PluginsEnable {
+            name: invocation.arg_or_empty("name").to_owned(),
+        },
+        "/plugins disable" => ChatCommand::PluginsDisable {
+            name: invocation.arg_or_empty("name").to_owned(),
         },
         "/plugins rm" => ChatCommand::PluginsRm {
             name: invocation.arg("name").unwrap_or_default().to_owned(),
@@ -688,26 +700,10 @@ pub(crate) async fn interactive_loop(
                 }
 
                 ChatCommand::PluginsList => {
-                    let installed = crate::plugin_manager::list_plugins();
-                    if installed.is_empty() {
+                    let lines = plugins_panel_lines();
+                    if lines.is_empty() {
                         renderer.notice("no plugins installed");
                     } else {
-                        let loaded: std::collections::HashSet<String> = crate::plugins::loaded()
-                            .names()
-                            .into_iter()
-                            .map(str::to_owned)
-                            .collect();
-                        let lines: Vec<String> = installed
-                            .iter()
-                            .map(|name| {
-                                let state = if loaded.contains(name) {
-                                    "loaded"
-                                } else {
-                                    "installed, not loaded"
-                                };
-                                format!("  {name}  ({state})")
-                            })
-                            .collect();
                         renderer.open_modal("installed plugins".to_owned(), lines);
                     }
                 }
@@ -728,6 +724,24 @@ pub(crate) async fn interactive_loop(
                     renderer.notice(format!("updating {label}…"));
                     renderer.mark_dirty();
                     crate::installs::start_update(name, Arc::clone(&renderer.pinned));
+                }
+
+                ChatCommand::PluginsEnable { name } => {
+                    match crate::plugin_manager::set_plugin_enabled(&name, true) {
+                        Ok(()) => renderer.notice(format!(
+                            "plugin {name} enabled — restart norte-code to load it"
+                        )),
+                        Err(error) => renderer.failure(error),
+                    }
+                }
+
+                ChatCommand::PluginsDisable { name } => {
+                    match crate::plugin_manager::set_plugin_enabled(&name, false) {
+                        Ok(()) => renderer.notice(format!(
+                            "plugin {name} disabled — restart norte-code to apply it"
+                        )),
+                        Err(error) => renderer.failure(error),
+                    }
                 }
 
                 ChatCommand::PluginsRm { name } => {
@@ -1307,11 +1321,10 @@ async fn handle_live_command(
         }
 
         ChatCommand::PluginsList => {
-            let plugins = crate::plugin_manager::list_plugins();
-            if plugins.is_empty() {
+            let lines = plugins_panel_lines();
+            if lines.is_empty() {
                 renderer.notice("no plugins installed");
             } else {
-                let lines: Vec<String> = plugins.iter().map(|name| format!("  {name}")).collect();
                 renderer.open_modal("installed plugins".to_owned(), lines);
             }
         }
@@ -1330,6 +1343,24 @@ async fn handle_live_command(
             renderer.notice(format!("updating {label}…"));
             renderer.mark_dirty();
             crate::installs::start_update(name, Arc::clone(&renderer.pinned));
+        }
+
+        ChatCommand::PluginsEnable { name } => {
+            match crate::plugin_manager::set_plugin_enabled(&name, true) {
+                Ok(()) => renderer.notice(format!(
+                    "plugin {name} enabled — restart norte-code to load it"
+                )),
+                Err(error) => renderer.failure(error),
+            }
+        }
+
+        ChatCommand::PluginsDisable { name } => {
+            match crate::plugin_manager::set_plugin_enabled(&name, false) {
+                Ok(()) => renderer.notice(format!(
+                    "plugin {name} disabled — restart norte-code to apply it"
+                )),
+                Err(error) => renderer.failure(error),
+            }
         }
 
         ChatCommand::PluginsRm { name } => match crate::plugin_manager::remove_plugin(&name) {
@@ -2558,6 +2589,43 @@ pub(crate) async fn read_repl_line(
 /// loaded at startup, and a library loaded into a running process would have
 /// to share the address space it was already given. The client says so
 /// instead of letting a person wonder why their command is not there.
+/// The lines of the installed-plugins panel.
+///
+/// One row per installed library, enabled or disabled, saying what state it is
+/// in — loaded, waiting for a restart, disabled, or why it did not load. The
+/// state is read from the host's own registry and from the library itself, so
+/// "not loaded" comes with the reason instead of leaving a person to guess.
+fn plugins_panel_lines() -> Vec<String> {
+    let entries = crate::plugin_manager::installed_entries();
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let loaded: std::collections::HashSet<String> = crate::plugins::loaded()
+        .names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    entries
+        .into_iter()
+        .map(|path| {
+            let file = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if file.ends_with(".disabled") {
+                return format!("  {file}  (disabled)");
+            }
+            match crate::plugin_loader::describe(&path) {
+                Ok(name) if loaded.contains(&name) => format!("  {name}  ({file})  loaded"),
+                Ok(name) => {
+                    format!("  {name}  ({file})  installed — restart norte-code to load it")
+                }
+                Err(error) => format!("  {file}  not loaded: {error}"),
+            }
+        })
+        .collect()
+}
+
 fn report_installs(renderer: &mut Renderer) {
     let reports = renderer.pinned.take_install_reports();
     if reports.is_empty() {
@@ -3608,6 +3676,27 @@ mod tests {
             Some(Ok(ChatCommand::PluginsUpdate { name: Some(name) })) if name == "session-info"
         ));
         assert!(offered("/plugins update"));
+    }
+
+    #[test]
+    fn the_plugins_enable_and_disable_commands_take_a_name() {
+        assert!(matches!(
+            parse_chat_command("/plugins enable session-info"),
+            Some(Ok(ChatCommand::PluginsEnable { name })) if name == "session-info"
+        ));
+        assert!(matches!(
+            parse_chat_command("/plugins disable session-info"),
+            Some(Ok(ChatCommand::PluginsDisable { name })) if name == "session-info"
+        ));
+        // The name is required: a bare toggle has nothing to act on.
+        assert!(matches!(
+            parse_chat_command("/plugins enable"),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            parse_chat_command("/plugins disable"),
+            Some(Err(_))
+        ));
     }
 
     #[test]

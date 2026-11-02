@@ -211,24 +211,29 @@ pub(crate) fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, S
 /// The plugins are loaded when the client starts, so an installed one is used
 /// after a restart. The command says so rather than letting a person install
 /// a plugin and wonder why its command is not there.
+#[allow(clippy::too_many_lines)]
 fn plugins_command(args: &PluginsArgs) -> u8 {
     match &args.command {
         PluginsCommand::List => {
-            let libraries = crate::plugin_manager::installed_libraries();
-            if libraries.is_empty() {
+            let entries = crate::plugin_manager::installed_entries();
+            if entries.is_empty() {
                 println!("no plugins installed");
                 return 0;
             }
             let mut failed = false;
-            for path in libraries {
+            for path in entries {
                 let file = path
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
                     .unwrap_or_default();
+                if file.ends_with(".disabled") {
+                    println!("{file}\tdisabled");
+                    continue;
+                }
                 match crate::plugin_loader::describe(&path) {
                     Ok(name) => println!("{name}\t{file}"),
                     Err(error) => {
-                        eprintln!("{file}: {error}");
+                        println!("{file}\tnot loaded: {error}");
                         failed = true;
                     }
                 }
@@ -259,6 +264,30 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
                 1
             }
         },
+        PluginsCommand::Enable { name } => {
+            match crate::plugin_manager::set_plugin_enabled(name, true) {
+                Ok(()) => {
+                    println!("plugin {name} enabled — restart norte-code to load it");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            }
+        }
+        PluginsCommand::Disable { name } => {
+            match crate::plugin_manager::set_plugin_enabled(name, false) {
+                Ok(()) => {
+                    println!("plugin {name} disabled — restart norte-code to apply it");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            }
+        }
         PluginsCommand::Update { name } => {
             let label = name.clone().unwrap_or_else(|| "plugins".to_owned());
             eprintln!("updating {label}…");
