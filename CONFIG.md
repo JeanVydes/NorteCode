@@ -42,6 +42,13 @@ that names the field; it is never silently replaced.
     "default": "auto"
   },
   "system_prompt": null,
+  "titling": {
+    "enabled": true,
+    "provider": null,
+    "model": null,
+    "max_output": 24
+  },
+  "approval_mode": "ask",
   "approvals": {
     "allow": [],
     "deny": []
@@ -54,6 +61,10 @@ that names the field; it is never silently replaced.
   },
   "cost": {
     "show": true
+  },
+  "ui": {
+    "verbosity": "medium",
+    "diff_style": "unified"
   },
   "budgets": {
     "message": null,
@@ -116,10 +127,13 @@ that names the field; it is never silently replaced.
 | `retry` | object | see below | Bounded retries for transient provider failures. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
 | `system_prompt` | string or `null` | `null` | Replaces the built-in base prompt. `AGENTS.md` is appended after it. |
+| `titling` | object | see below | Automatic session titles. |
+| `approval_mode` | `"ask"`, `"auto-edit"` or `"yolo"` | `"ask"` | The default approval mode. |
 | `approvals` | object | `{"allow":[],"deny":[]}` | Tool-wide rules that outlive a session. |
 | `max_iterations` | integer or `null` | `null` | Model iterations per turn; `null` is unlimited. |
 | `extensions` | object | `{}` | Vendor request fields keyed `<wire-family>:<dotted.path>`. |
 | `cost` | object | `{"show":true}` | Whether to display reported cost. |
+| `ui` | object | see below | Verbosity and diff style. |
 | `budgets` | object | all `null` | Optional message, session and daily limits. |
 | `tools` | object | see below | Tool switches and the command sandbox. |
 | `skills` | object | see below | Agent Skills discovery and execution. |
@@ -182,6 +196,27 @@ appended twice.
 resume. The value is checked against the selected model before the turn starts,
 so `xhigh` and `max` are accepted only where the model declares them.
 
+## `titling`
+
+Automatic session titles: a new session's first message is summarised into a
+short name in the footer. `enabled` turns it off; `provider` and `model` name
+the model to ask (the session's own by default); `max_output` caps the words it
+may write (24 by default). A title is asked once, never again.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | Title a new session automatically. |
+| `provider` | string or `null` | `null` | Provider for the title request. |
+| `model` | string or `null` | `null` | Model id for the title request. |
+| `max_output` | integer | `24` | Tokens the title may produce. |
+
+## `approval_mode`
+
+How a tool call is decided when no `/allow`, `/deny` or session rule names it.
+`ask` (the default) asks before every write and command; `auto-edit` allows
+edits without asking and still asks for commands; `yolo` allows everything.
+`--approval-mode` overrides it for one run.
+
 ## `approvals`
 
 `approvals.allow` and `approvals.deny` contain tool names. A denied tool is
@@ -212,6 +247,13 @@ leaves it resumable. `ask` currently behaves like a resumable stop with a
 notice rather than opening a prompt: raise the budget and resume to continue.
 Cost is only the amount the provider reports; Norte Code never derives a price
 from the catalogue.
+
+## `ui`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `verbosity` | `"low"`, `"medium"` or `"high"` | `"medium"` | `low` shows the answer alone, `medium` also shows that tools run and that the model is thinking, `high` adds reasoning, tool arguments and results. `--verbose` overrides it for one run. |
+| `diff_style` | `"unified"` or `"split"` | `"unified"` | How an `edit` call is drawn: a patch (`-`/`+`) or two columns before/after. |
 
 ## `tools`
 

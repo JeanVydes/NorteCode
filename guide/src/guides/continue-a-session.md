@@ -61,22 +61,29 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | `/rename [title]` | Name the session. Bare, the model picks a name from the first message the session holds. |
 | `/compact` | Summarise and continue on a fresh Norte session. |
 | `/model <model>` | Switch model, keeping the provider. |
+| `/models` | Open the provider/model picker; `Enter` expands a provider, and picking a model sets both. |
 | `/provider <provider>` | Switch provider, keeping the model. |
+| `/sessions` | Open the session picker: new session, last session, or a saved one. |
 | `/reasoning <setting> [session\|message]` | Set the reasoning effort. |
 | `/allow <tool> [session\|global]` | Allow a tool without asking. |
 | `/deny <tool> [session\|global]` | Refuse a tool without asking. |
-| `/tab [name\|number]` | Switch tab (chat, todo). Bare lists them; during a turn it cycles. |
 | `/mcp [list\|enable\|disable] [server]` | List the MCP servers, or switch one. |
 | `/jobs [list\|check\|stop] [id]` | List the background jobs, read one, or stop one. |
+| `/plugins list` | List installed plugins and their state. |
+| `/plugins add <url>` | Install a plugin from a git URL. |
+| `/plugins update [name]` | Rebuild one plugin, or all of them. |
+| `/plugins enable <name>` / `/plugins disable <name>` | Load or skip a plugin at the next start. |
 | `/debug` | Report what the process knows: model, tools, paths. |
+| `/telemetry` | The request ledger for this session and every provider. |
 | `/refresh`, `/reload` | Re-read the config, the skills and the MCP servers. |
-| `/restart` | Start a fresh session; this one stays saved. |
-| `/menu`, `/back` | Go back to the startup screen: the providers and their models, with the session's own marked. It keeps the session; pick with `/provider` and `/model`. |
+| `/restart` | Re-read the config and rebuild the engine; this session stays saved. |
+| `/menu`, `/back` | Show every provider and the models each lists, with the session's own marked. It keeps the session; pick with `/provider` and `/model`. |
+| `/delete` | Delete this session, with its cost and telemetry, and leave. |
 | `/exit`, `/quit` | Leave. |
 
-Ctrl-D or Ctrl-C at the prompt also leaves. Commands with no argument at all —
-`/tab`, `/model`, `/provider`, `/mcp`, `/jobs` — list what they can
-act on instead of erroring, so asking is never a mistake.
+Ctrl-D or Ctrl-C at the prompt also leaves. Commands with an optional argument —
+`/models`, `/provider`, `/mcp`, `/jobs` — do something useful without it
+instead of erroring, so asking is never a mistake.
 
 A question from the model is answered the same way the startup menu is: the
 choices are drawn where the draft is drawn and the arrow keys walk them. The

@@ -123,12 +123,6 @@ The menu is drawn inside the input's own rows, which is why the input is
 One row: the model, the context dial, the cache share, the cost, the reasoning
 effort. It is the row the footer has always carried, and it stays a row.
 
-### Tabs
-
-The tab row and the summary of the active tab, on one line. Each tab is a summary
-and not a list — a tab has one row — and the lists are commands (`/tools`, `/mcp`)
-that print into the transcript.
-
 ### Suggestion
 
 The completion hint, on its own row rather than appended to the draft's: it is
@@ -137,22 +131,28 @@ because that row was the only thing the editor had.
 
 ## Where a plugin enters
 
-A plugin adds a **panel**: a widget with a name, a place in the layout (above the
-status, below the transcript, beside the tabs) and a size constraint. The registry
-is the same shape as the command registry — declared once, read by the layout —
-and a panel is given only its area and a read-only view of the state.
+A plugin is a shared library (`cdylib`) loaded once at startup from
+`~/.config/norte-code/plugins/` (or `$NORTE_CODE_PLUGINS`). It exports
+`norte_plugin_abi_version`, and the host refuses a library whose number is not
+its own — the two sides pass each other structures whose layout has to match,
+and they cannot agree on that at compile time.
 
-What a plugin cannot do is as much the point: it cannot write escapes, cannot
-move the cursor, cannot claim rows it was not given, and cannot block the frame.
-The layout decides, and an area is all it gets.
+The `Plugin` trait a plugin implements adds what the host draws:
 
-## What is left to move
-
-| Part | State |
+| Method | What it adds |
 | --- | --- |
-| The terminal, the guard, the backend | Done |
-| The startup menu | Done — a widget over a pure `Menu` |
-| The layout, and the widgets above | Not started |
-| The editor: input, footer, tabs | Not started — still escapes and row arithmetic |
-| The transcript | Not started — still the terminal's scroll region |
-| The approval panel, the loading bar | Not started — still `eprintln!` and a repaint thread |
+| `name` | How the host reports it. |
+| `commands` | Commands it answers to, parsed and completed like the host's own. |
+| `run` | What a command returns: plain lines for a panel. |
+| `status` | One field on the status row. |
+| `banner` | A line under the wordmark. |
+| `catalogue` | Providers and models it offers for this run. They are never written to `providers.json`/`models.json`. |
+
+The session is reached through `PluginHost` — `session`, `session_model`,
+`session_provider`, `session_title`, `session_context` — a trait object, so the
+host and the plugin never share a concrete type and the plugin compiles against
+`norte-code-protocol` alone.
+
+What it cannot do is as much the point: it cannot write to the terminal, cannot
+claim rows, and cannot block the frame. It returns text and a catalogue, and the
+host decides where they go.

@@ -177,6 +177,35 @@ session that moved less than one percent of the total is left out of the
 session table, and the report says how many. `--json` carries the same
 numbers.
 
+## `plugins`
+
+Plugins are shared libraries in `~/.config/norte-code/plugins/` (or
+`$NORTE_CODE_PLUGINS`). A plugin adds commands, a status line, or providers and
+models to the catalogue. The host checks the library's
+`norte_plugin_abi_version` against its own before loading it; a mismatch is
+refused with both numbers named, never loaded on a guess.
+
+```text
+norte-code plugins list
+norte-code plugins add URL
+norte-code plugins rm NAME
+norte-code plugins update [NAME]
+norte-code plugins enable NAME
+norte-code plugins disable NAME
+```
+
+| Subcommand | Meaning |
+| --- | --- |
+| `list` | Every installed file, enabled or disabled, with its reported name and why it did not load when it did not. |
+| `add URL` | Clone, build as a `cdylib` and copy the library into the plugin directory. The source URL is recorded beside it for updates. |
+| `rm NAME` | Remove the library and its recorded source. |
+| `update [NAME]` | Rebuild one plugin, or every plugin with a recorded source, from the URL it came from. |
+| `enable NAME` / `disable NAME` | Rename the library between `.so` and `.so.disabled`. The loader only opens `.so`/`.dll`/`.dylib`, so a disabled plugin is skipped at the next start. |
+
+Installing, removing, updating and toggling take effect at the next start;
+plugins are loaded once, before the catalogue is read. The chat has the same
+commands under `/plugins …`.
+
 ## Chat commands
 
 A session opened by `norte-code`, `norte-code new` or `norte-code resume` reads
@@ -193,34 +222,37 @@ reject unknown values instead of forwarding them to the model.
 | `/tools` | List every tool the model can reach, with how a call to each is decided — `allow`, `deny` or `ask` — and how far its rule reaches. |
 | `/reasoning SETTING [session\|message]` | Set the reasoning override. `SETTING` is `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. The scope defaults to `session`. |
 | `/model PROVIDER/MODEL` | Switch the model at the next turn boundary. |
+| `/models` | Open the provider/model picker: `Enter` expands a provider into its models, and picking one sets both the provider and the model. |
 | `/provider NAME` | Switch provider at the next turn boundary, keeping the model where it has one. |
-| `/revoke [GRANT-OR-TOOL]` | List the approval grants, or revoke one. |
-| `/refresh` | Re-scan the skills and their tools. |
-| `/reload` | Re-read the configuration file. |
+| `/sessions` | Open the session picker: start a new session, open the last one, or open a saved session. |
+| `/refresh`, `/reload` | Re-read the configuration, the skills and the MCP servers. |
 | `/restart` | Re-read the configuration and rebuild the engine at the next turn boundary. |
 | `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one off or on. |
 | `/jobs [list\|check\|stop] [ID]` | List the session's background jobs, look at one, or stop one. |
 | `/rename [TITLE]` | Name the session. Bare, ask the model for a name from the first message. |
-| `/tab [NAME\|NUMBER]` | Show a footer tab: `stats`, `todo`, `tools` or `mcp`. Bare, list them. |
 | `/debug` | Print what the process knows about itself: paths, model, catalogue, tools, servers. |
-| `/menu`, `/back` | Go back to the startup screen: every provider and the models each lists, with the session's own marked. Pick one with `/provider` and `/model`. |
+| `/telemetry` | The request ledger: this session, and every provider. |
+| `/menu`, `/back` | Show every provider and the models each lists, with the session's own marked. Pick one with `/provider` and `/model`. |
+| `/plugins list` | List installed plugins and whether each is loaded, waiting for a restart, disabled, or why it failed. |
+| `/plugins add URL` | Clone, build and install a plugin from a git URL. |
+| `/plugins rm NAME` | Remove an installed plugin. |
+| `/plugins update [NAME]` | Rebuild one plugin, or every plugin with a recorded source. |
+| `/plugins enable NAME` / `/plugins disable NAME` | Rename a plugin between `.so` and `.so.disabled`, so the next start loads it or skips it. |
+| `/delete` | Delete this session, with its cost and telemetry, and leave. |
 | `/exit`, `/quit` | Leave the chat. |
 
-The footer carries a row of tabs above the input: `stats` is what the session
-has spent, `todo` the model's task list, `tools` how many tools are allowed,
-denied or gated by the approval mode, and `mcp` how many servers are up. `Ctrl-T`
-cycles them, `Ctrl-1` to `Ctrl-4` go straight to one, and `/tab` names one
-without a modified key. Each tab has a single row, so the ones that count say
-the count and `/tools` is where the names are.
+The footer holds the session line, the task list and the session totals; the
+tabs that used to share it were removed.
 
 The editor suggests the command names and their arguments in dimmed text as
 you type, and Tab accepts the suggestion.
 
 While a turn is running, the commands that make sense there are handled
-immediately (`/allow`, `/deny`, `/reasoning`, `/model`, `/revoke`, `/refresh`,
-`/help`). `/compact` and `/exit` wait for the turn to finish. Any other text is
-steered into that turn: it reaches the request the turn is about to make, and
-it stays durable until the engine reports it applied.
+immediately (`/allow`, `/deny`, `/reasoning`, `/model`, `/refresh`, `/help`,
+`/plugins …`). `/compact`, `/models`, `/menu` and `/exit` wait for the turn to
+finish. Any other text is steered into that turn: it reaches the request the
+turn is about to make, and it stays durable until the engine reports it
+applied.
 
 ## Exit status
 
