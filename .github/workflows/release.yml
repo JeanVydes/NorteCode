@@ -28,11 +28,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-latest
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -66,27 +64,18 @@ jobs:
           rm -rf dist
           mkdir -p "$staging"
           cp LICENSE README.md "$staging/"
-          if [[ "$target" == *windows* ]]; then
-            bin="target/$target/release/norte-code.exe"
-            if [[ ! -f "$bin" ]]; then bin="target/release/norte-code.exe"; fi
-            cp "$bin" "$staging/norte-code.exe"
-            (cd dist && zip -r "../norte-code-$target.zip" "norte-code")
-          else
-            bin="target/$target/release/norte-code"
-            if [[ ! -f "$bin" ]]; then bin="target/release/norte-code"; fi
-            echo "Using binary: $bin"
-            find target -name 'norte-code' -not -path '*/deps/*' | head -15
-            cp "$bin" "$staging/norte-code"
-            tar -czf "norte-code-$target.tar.gz" -C dist "norte-code"
-          fi
+          bin="target/$target/release/norte-code"
+          if [[ ! -f "$bin" ]]; then bin="target/release/norte-code"; fi
+          echo "Using binary: $bin"
+          find target -name 'norte-code' -not -path '*/deps/*' | head -15
+          cp "$bin" "$staging/norte-code"
+          tar -czf "norte-code-$target.tar.gz" -C dist "norte-code"
           rm -rf dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
-          path: |
-            norte-code-*.tar.gz
-            norte-code-*.zip
+          path: norte-code-*.tar.gz
 
   release:
     name: Publish
@@ -101,7 +90,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum norte-code-*.tar.gz norte-code-*.zip > SHA256SUMS
+          sha256sum norte-code-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
@@ -110,5 +99,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist/norte-code-*.tar.gz
-            dist/norte-code-*.zip
             dist/SHA256SUMS
