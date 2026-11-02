@@ -59,17 +59,11 @@ use crate::commands::{CommandSpec, Invocation};
 /// Bump it when the layout of [`PluginContext`], [`Plugin`] or [`PluginHost`]
 /// changes in a way an old plugin would not survive.
 ///
-/// Version 2 is the host that answers about the session by itself: version 1
-/// asked for the session key with every question, and a plugin built against
-/// it would call methods this host no longer have.
-///
-/// Version 3 is the plugin that offers providers and models: version 2 knew
-/// nothing about a catalogue, and a plugin built against it has no method to
-/// answer with.
-///
-/// Version 4 removes the sidebar: the column beside the conversation is gone,
-/// and a plugin built against version 3 has a method this host no longer calls.
-pub const PLUGIN_ABI_VERSION: u32 = 4;
+/// The check is an exact match on purpose: a plugin built against another
+/// version is a plugin whose method table this host cannot call safely, so it
+/// is refused with the two numbers named rather than loaded on a guess. A
+/// plugin built against an older release must be rebuilt against this one.
+pub const PLUGIN_ABI_VERSION: u32 = 1;
 
 /// The symbol a plugin exports to say which version it was built against.
 ///
