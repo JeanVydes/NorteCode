@@ -779,6 +779,7 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
                     .map(|line| line.text.as_str())
                     .collect::<Vec<_>>()
                     .join("\n"),
+                usize::from(width),
             ) {
                 push_rendered(&mut out, entry.kind, &rendered, width);
             }

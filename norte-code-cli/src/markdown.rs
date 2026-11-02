@@ -54,6 +54,7 @@ pub(crate) enum Emphasis {
     /// A table's header cell.
     TableHead,
     /// A table's body cell.
+    #[allow(dead_code)]
     TableCell,
 }
 
@@ -125,7 +126,7 @@ const MAX_INDENT: usize = 8;
 /// that spans lines, and a renderer that saw one line would draw the code as
 /// prose and the prose as code.
 #[must_use]
-pub(crate) fn render(text: &str) -> Vec<Rendered> {
+pub(crate) fn render(text: &str, width: usize) -> Vec<Rendered> {
     let mut out = Vec::new();
     // The fence that is open, if any: its backtick run and its language.
     let mut fence: Option<(String, String)> = None;
@@ -185,7 +186,21 @@ pub(crate) fn render(text: &str) -> Vec<Rendered> {
                 body.push(cells(lines[index]));
                 index += 1;
             }
-            let widths = widths_of(&header, &body);
+            let mut widths = widths_of(&header, &body);
+            // Responsive: never wider than the terminal. Scale the columns down
+            // when the table does not fit, keeping at least three cells per
+            // column so a column never vanishes.
+            let sep = widths.len().saturating_sub(1) * 3;
+            let total: usize = widths.iter().sum::<usize>() + sep;
+            if total > width && width > sep && !widths.is_empty() {
+                let avail = width - sep;
+                let per = (avail / widths.len()).max(3);
+                for w in &mut widths {
+                    if *w > per {
+                        *w = per;
+                    }
+                }
+            }
             out.extend(table_rows(&header, &widths, true));
             // The rule under the header, drawn as the separator a terminal has
             // room for: a run of dashes per column, joined at the cells.
@@ -269,10 +284,20 @@ fn table_rows(row: &[String], widths: &[usize], header: bool) -> Vec<Rendered> {
     let mut runs: Vec<Run> = Vec::new();
     for (at, cell) in row.iter().enumerate() {
         let width = widths.get(at).copied().unwrap_or(0);
+        // Inline markdown is honoured inside a cell, so `**bold**` and `` `code` ``
+        // read as emphasis rather than as literal text.
+        let mut cell_runs = inline(cell);
+        let cell_width: usize = cell_runs.iter().map(|run| run.text.chars().count()).sum();
         if header {
-            runs.push(Run::styled(Emphasis::TableHead, format!("{cell:<width$}")));
-        } else {
-            runs.push(Run::styled(Emphasis::TableCell, format!("{cell:<width$}")));
+            for run in &mut cell_runs {
+                if run.emphasis == Emphasis::Plain {
+                    run.emphasis = Emphasis::TableHead;
+                }
+            }
+        }
+        runs.extend(cell_runs);
+        if cell_width < width {
+            runs.push(Run::plain(" ".repeat(width - cell_width)));
         }
         if at + 1 < row.len() {
             runs.push(Run::styled(Emphasis::TableHead, " │ "));
@@ -946,7 +971,7 @@ mod tests {
 
     /// One rendered line as `text`, for the assertions about content.
     fn texts(text: &str) -> Vec<String> {
-        render(text).iter().map(Rendered::text).collect()
+        render(text, 80).iter().map(Rendered::text).collect()
     }
 
     #[test]
@@ -1143,7 +1168,7 @@ mod tests {
     fn a_table_column_is_as_wide_as_its_widest_cell() {
         // The body can be wider than the header, and the column grows to hold
         // it: a header-only measurement would wrap the longest cell.
-        let rendered = render("| h |\n| --- |\n| a longer cell |");
+        let rendered = render("| h |\n| --- |\n| a longer cell |", 80);
         let body = rendered.last().expect("body").text();
         assert!(body.contains("a longer cell"), "{body:?}");
         // The header is padded to the same column, so the rule under it lines up.
