@@ -77,19 +77,31 @@ impl ApprovalRules {
     /// is a tool somebody changed their mind about, and refusing is the answer
     /// that cannot surprise anyone.
     pub(super) fn denies(&self, session: SessionId, tool: &str) -> bool {
-        if self
-            .global_deny
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(tool)
-        {
+        // A session rule overrides a global one for that session: a tool allowed
+        // in this session runs even when it is denied globally, and a tool
+        // denied here is refused even when it is allowed globally.
+        let (session_allow, session_deny) = self.session(session);
+        if session_allow.contains(tool) {
+            return false;
+        }
+        if session_deny.contains(tool) {
             return true;
         }
-        self.session_deny
+        let global_deny = self
+            .global_deny
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&session)
-            .is_some_and(|tools| tools.contains(tool))
+            .unwrap_or_else(PoisonError::into_inner);
+        if global_deny.contains(tool) {
+            return true;
+        }
+        let global_allow = self
+            .global_allow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if global_allow.contains(tool) {
+            return false;
+        }
+        false
     }
 
     /// Whether a rule lets this tool run.
@@ -100,22 +112,7 @@ impl ApprovalRules {
     /// whether it may run.
     #[cfg(test)]
     pub(super) fn allows(&self, session: SessionId, tool: &str) -> bool {
-        if self.denies(session, tool) {
-            return false;
-        }
-        if self
-            .global_allow
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(tool)
-        {
-            return true;
-        }
-        self.session_allow
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&session)
-            .is_some_and(|tools| tools.contains(tool))
+        !self.denies(session, tool)
     }
 
     pub(super) fn allow_global(&self, tool: &str) {
@@ -249,19 +246,19 @@ impl ApprovalRules {
 
     /// Where a tool's rule comes from, and what it says.
     pub(super) fn status(&self, session: SessionId, tool: &str) -> (bool, RuleScope) {
-        let (global_allow, global_deny) = self.global();
-        if global_deny.contains(tool) {
-            return (false, RuleScope::Global);
-        }
-        if global_allow.contains(tool) {
-            return (true, RuleScope::Global);
-        }
         let (session_allow, session_deny) = self.session(session);
         if session_deny.contains(tool) {
             return (false, RuleScope::Session);
         }
         if session_allow.contains(tool) {
             return (true, RuleScope::Session);
+        }
+        let (global_allow, global_deny) = self.global();
+        if global_deny.contains(tool) {
+            return (false, RuleScope::Global);
+        }
+        if global_allow.contains(tool) {
+            return (true, RuleScope::Global);
         }
         (true, RuleScope::Default)
     }
