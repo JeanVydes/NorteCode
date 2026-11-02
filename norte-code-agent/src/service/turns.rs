@@ -459,7 +459,7 @@ impl Service {
                         }
                     }
                     Ok(Some(norte::harness::Step::Done(o))) => {
-                        outcome = Ok(o);
+                        outcome = Ok(*o);
                         while let Ok(event) = stepped.events().try_recv() {
                             if is_compaction_abort(&event) {
                                 failure = Some(COMPACTION_SAFE_POINT.to_owned());
