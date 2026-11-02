@@ -281,29 +281,99 @@ fn widths_of(header: &[String], body: &[Vec<String>]) -> Vec<usize> {
 /// One table row as a rendered line, with each cell padded to its column.
 #[must_use]
 fn table_rows(row: &[String], widths: &[usize], header: bool) -> Vec<Rendered> {
-    let mut runs: Vec<Run> = Vec::new();
+    // Wrap each cell to its column width, so a wide table does not overflow
+    // the terminal: the row grows downward instead of sideways.
+    let mut wrapped: Vec<Vec<String>> = Vec::with_capacity(row.len());
+    let mut height = 1usize;
     for (at, cell) in row.iter().enumerate() {
-        let width = widths.get(at).copied().unwrap_or(0);
-        // Inline markdown is honoured inside a cell, so `**bold**` and `` `code` ``
-        // read as emphasis rather than as literal text.
-        let mut cell_runs = inline(cell);
-        let cell_width: usize = cell_runs.iter().map(|run| run.text.chars().count()).sum();
-        if header {
-            for run in &mut cell_runs {
-                if run.emphasis == Emphasis::Plain {
-                    run.emphasis = Emphasis::TableHead;
+        let width = widths.get(at).copied().unwrap_or(0).max(1);
+        let lines = wrap_cell(cell, width);
+        height = height.max(lines.len());
+        wrapped.push(lines);
+    }
+    let mut out: Vec<Rendered> = Vec::with_capacity(height);
+    for line_index in 0..height {
+        let mut runs: Vec<Run> = Vec::new();
+        for (at, cell_lines) in wrapped.iter().enumerate() {
+            let width = widths.get(at).copied().unwrap_or(0).max(1);
+            let text = cell_lines.get(line_index).cloned().unwrap_or_default();
+            let mut cell_runs = inline(&text);
+            let cell_width: usize = cell_runs.iter().map(|run| run.text.chars().count()).sum();
+            if header {
+                for run in &mut cell_runs {
+                    if run.emphasis == Emphasis::Plain {
+                        run.emphasis = Emphasis::TableHead;
+                    }
+                }
+            }
+            runs.extend(cell_runs);
+            if cell_width < width {
+                runs.push(Run::plain(" ".repeat(width - cell_width)));
+            }
+            if at + 1 < row.len() {
+                runs.push(Run::styled(Emphasis::TableHead, " │ "));
+            }
+        }
+        out.push(Rendered { runs, indent: 0 });
+    }
+    out
+}
+
+/// Wraps a cell's text to `width`, breaking on spaces first and on characters
+/// when a single word does not fit.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_owned()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            if current.is_empty() {
+                if word.chars().count() <= width {
+                    current.push_str(word);
+                } else {
+                    // Break the long word.
+                    let mut chunk = String::new();
+                    for ch in word.chars() {
+                        if chunk.chars().count() >= width {
+                            lines.push(std::mem::take(&mut chunk));
+                        }
+                        chunk.push(ch);
+                    }
+                    if !chunk.is_empty() {
+                        current = chunk;
+                    }
+                }
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                if word.chars().count() <= width {
+                    current.push_str(word);
+                } else {
+                    let mut chunk = String::new();
+                    for ch in word.chars() {
+                        if chunk.chars().count() >= width {
+                            lines.push(std::mem::take(&mut chunk));
+                        }
+                        chunk.push(ch);
+                    }
+                    if !chunk.is_empty() {
+                        current = chunk;
+                    }
                 }
             }
         }
-        runs.extend(cell_runs);
-        if cell_width < width {
-            runs.push(Run::plain(" ".repeat(width - cell_width)));
-        }
-        if at + 1 < row.len() {
-            runs.push(Run::styled(Emphasis::TableHead, " │ "));
+        if !current.is_empty() || lines.is_empty() {
+            lines.push(current);
         }
     }
-    vec![Rendered { runs, indent: 0 }]
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// The rule under a table's header: a run of dashes per column, joined.
