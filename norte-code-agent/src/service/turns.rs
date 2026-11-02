@@ -399,9 +399,12 @@ impl Service {
                 }
 
                 match stepped.step().await {
-                    Ok(Some(norte::harness::Step::Tools { session })) => {
+                    Ok(Some(norte::harness::StepResult {
+                        step: norte::harness::Step::Tools { session },
+                        events,
+                    })) => {
                         current_nid = session.id;
-                        while let Ok(event) = stepped.events().try_recv() {
+                        for event in events {
                             if is_compaction_abort(&event) {
                                 failure = Some(COMPACTION_SAFE_POINT.to_owned());
                             }
@@ -426,14 +429,18 @@ impl Service {
                             break 'stepping;
                         }
                     }
-                    Ok(Some(norte::harness::Step::Generated {
-                        session,
-                        message: _,
-                        interrupted: iv,
+                    Ok(Some(norte::harness::StepResult {
+                        step:
+                            norte::harness::Step::Generated {
+                                session,
+                                message: _,
+                                interrupted: iv,
+                            },
+                        events,
                     })) => {
                         current_nid = session.id;
                         interrupted = iv;
-                        while let Ok(event) = stepped.events().try_recv() {
+                        for event in events {
                             if is_compaction_abort(&event) {
                                 failure = Some(COMPACTION_SAFE_POINT.to_owned());
                             }
@@ -458,9 +465,12 @@ impl Service {
                             break 'stepping;
                         }
                     }
-                    Ok(Some(norte::harness::Step::Done(o))) => {
+                    Ok(Some(norte::harness::StepResult {
+                        step: norte::harness::Step::Done(o),
+                        events,
+                    })) => {
                         outcome = Ok(*o);
-                        while let Ok(event) = stepped.events().try_recv() {
+                        for event in events {
                             if is_compaction_abort(&event) {
                                 failure = Some(COMPACTION_SAFE_POINT.to_owned());
                             }
@@ -486,7 +496,7 @@ impl Service {
                         failure_code = Some(error_code(&error));
                         failure = Some(error.to_string());
                         outcome = Err(error);
-                        while let Ok(event) = stepped.events().try_recv() {
+                        for event in stepped.drain_events() {
                             if is_compaction_abort(&event) {
                                 failure = Some(COMPACTION_SAFE_POINT.to_owned());
                             }

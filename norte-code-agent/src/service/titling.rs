@@ -189,7 +189,11 @@ impl Service {
             .max_output_tokens(self.config().titling.max_output)
             .start_stepped();
         let outcome = loop {
-            if let Some(norte::harness::Step::Done(outcome)) = turn.step().await? {
+            if let Some(norte::harness::StepResult {
+                step: norte::harness::Step::Done(outcome),
+                ..
+            }) = turn.step().await?
+            {
                 break outcome;
             }
         };
