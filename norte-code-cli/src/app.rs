@@ -544,7 +544,7 @@ pub(crate) struct Row {
 const TAIL_BAR: &str = "↓ back to the latest · End";
 
 /// Draws the conversation: the part that fits, newest at the bottom.
-fn draw_transcript(
+pub(crate) fn draw_transcript(
     frame: &mut Draw<'_>,
     area: Rect,
     state: &State,
