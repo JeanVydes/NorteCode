@@ -519,6 +519,46 @@ impl Renderer {
         }
     }
 
+    /// Resets the view to a session the person just opened.
+    ///
+    /// A session switch is a new conversation on screen: the old transcript,
+    /// counters and footer belong to the session being left, so they are
+    /// cleared before the chosen session's history is replayed into them.
+    pub(crate) fn begin_session(&mut self) {
+        self.session = None;
+        self.title = None;
+        self.model_name = None;
+        self.pending_provider = None;
+        self.models_expanded = None;
+        self.reasoning = None;
+        self.waiting = None;
+        self.waiting_since = None;
+        self.failed = false;
+        self.cancelled = false;
+        self.budget_stopped = false;
+        self.budget_prompt = None;
+        self.stopped = None;
+        self.activity = None;
+        self.requests = 0;
+        self.turn_requests = 0;
+        self.input = 0;
+        self.output = 0;
+        self.cache_read = 0;
+        self.cache_write = 0;
+        self.cache_reported = false;
+        self.cost = 0.0;
+        self.unpriced = 0;
+        self.tool_counts.clear();
+        self.context_used = 0;
+        self.pending_todos.clear();
+        self.streamed_calls.clear();
+        self.closed_calls.clear();
+        self.pending_paths.clear();
+        self.answer_buffer.clear();
+        self.modal = None;
+        self.transcript = crate::transcript::Transcript::new();
+    }
+
     /// Marks the top of a session in the conversation.
     ///
     /// The transcript is scrolled and the first line is what says where a

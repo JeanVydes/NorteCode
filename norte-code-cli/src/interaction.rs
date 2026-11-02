@@ -569,12 +569,48 @@ pub(crate) async fn interactive_loop(
             match read_repl_line(service, session.as_ref(), input, renderer, style).await? {
                 ReplInput::End => break,
                 ReplInput::Session(key) => {
-                    // A panel chose a session: switch to it and stay in the loop.
+                    // A panel chose a session: start its view afresh, then
+                    // replay its history so the screen shows the conversation
+                    // that was opened, not the one that was left.
+                    renderer.begin_session();
                     renderer.session = Some(key.to_string());
                     if let Some(title) = service.session_title(&key) {
                         renderer.set_title(title);
                     }
-                    session = Some(key);
+                    session = Some(key.clone());
+                    crate::plugins::attach(service, Some(key.clone()));
+                    refresh_effort(service, &key, renderer);
+                    refresh_completions(service, Some(&key), renderer);
+                    match service
+                        .submit(ClientRequest {
+                            request_id,
+                            kind: ClientRequestKind::Resume {
+                                session: key.clone(),
+                            },
+                        })
+                        .await
+                    {
+                        Ok(stream) => {
+                            request_id = request_id.saturating_add(1);
+                            renderer.mark_working();
+                            let outcome = drive_turns(
+                                service,
+                                stream,
+                                renderer,
+                                style,
+                                Some(key),
+                                Some(&mut *input),
+                            )
+                            .await?;
+                            renderer.ensure_newline();
+                            session = outcome.session.or(session);
+                            crate::plugins::attach(service, session.clone());
+                            refresh_completions(service, session.as_ref(), renderer);
+                        }
+                        Err(error) => {
+                            renderer.notice(format!("could not open the session: {error}"));
+                        }
+                    }
                     renderer.draw()?;
                     continue;
                 }
