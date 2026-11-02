@@ -327,7 +327,12 @@ impl State {
             // model, the dial, the cost, the effort — and the bottom row is
             // where a status is read from.
             if areas.status.height > 0 {
-                draw_status(frame, areas.status, self);
+                let room = usize::from(areas.status.width).saturating_sub(2).max(1);
+                let mut line = self.status.clone();
+                line.spans.insert(0, Span::raw("  "));
+                let line = crate::ui::clip::clip_line(line, room);
+                let widget = crate::ui::status::StatusRow { line, style };
+                crate::ui::Widget::draw(&widget, frame, areas.status, &crate::style::Theme);
             }
         }
         // What was painted, row by row, so a selection can be read back as
@@ -431,34 +436,6 @@ fn suggestion_ink(state: &State, style: Style) -> ratatui::style::Style {
 fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style::Style) {
     // One bounded-row helper for every widget: see `crate::ui::clip`.
     crate::ui::clip::paint_text(frame, area, text, style);
-}
-
-/// Draws the status row: the head, then the fields in their own ink.
-///
-/// The row is spans the renderer already styled — the dial's colour and the
-/// effort bar's come from one scale read by both the log and the frame — so it
-/// is drawn as it is rather than stripped and repainted in one colour. Only the
-/// width is the frame's business: a row longer than the terminal is cut here,
-/// mid-field, the way the plain-text footer would let the terminal wrap it.
-fn draw_status(frame: &mut Draw<'_>, area: Rect, state: &State) {
-    if area.height == 0 {
-        return;
-    }
-    let room = usize::from(area.width).saturating_sub(2).max(1);
-    let mut line = state.status.clone();
-    // The two-space gutter every chrome row carries, then the row's own spans.
-    line.spans.insert(0, Span::raw("  "));
-    let line = truncate_line(line, room);
-    Paragraph::new(line).render(area, frame.buffer_mut());
-}
-
-/// Cuts a styled line to `room` columns, ending it with `…` when it went over.
-///
-/// The cut counts characters and keeps each span's ink, so a row that is too
-/// long loses its tail and not its colour.
-fn truncate_line(line: Line<'static>, room: usize) -> Line<'static> {
-    // Delegated to the shared helper so the cut glyph stays one.
-    crate::ui::clip::clip_line(line, room)
 }
 
 /// The bar in front of a row, which is what says who is talking.
