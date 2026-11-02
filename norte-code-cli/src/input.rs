@@ -35,6 +35,8 @@ pub(crate) struct InstallReport {
     pub(crate) name: String,
     /// The library that was installed, or why the install failed.
     pub(crate) result: Result<String, String>,
+    /// Whether this was an update of an installed plugin, not a first install.
+    pub(crate) updated: bool,
 }
 
 /// One item in the session's todo list, as the footer renders it.

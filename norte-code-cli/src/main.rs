@@ -177,6 +177,11 @@ enum PluginsCommand {
         /// The name of the plugin, as `list` shows it.
         name: String,
     },
+    /// Rebuild installed plugins from their source; with a name, just that one.
+    Update {
+        /// The plugin to update, as `list` shows it. Omitted, every plugin.
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

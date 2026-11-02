@@ -259,6 +259,31 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
                 1
             }
         },
+        PluginsCommand::Update { name } => {
+            let label = name.clone().unwrap_or_else(|| "plugins".to_owned());
+            eprintln!("updating {label}…");
+            match crate::plugin_manager::update_plugins(name.as_deref()) {
+                Ok(results) => {
+                    let mut failed = false;
+                    for (stem, result) in results {
+                        match result {
+                            Ok(updated) => println!(
+                                "plugin {updated} updated — restart norte-code to apply it"
+                            ),
+                            Err(error) => {
+                                eprintln!("could not update {stem}: {error}");
+                                failed = true;
+                            }
+                        }
+                    }
+                    u8::from(failed)
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            }
+        }
     }
 }
 

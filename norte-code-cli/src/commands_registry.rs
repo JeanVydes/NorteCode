@@ -175,6 +175,13 @@ pub(crate) fn built() -> Registry {
         CommandSpec::new("/plugins rm", "remove an installed plugin")
             .arg(ArgSpec::required("name")),
     );
+    registry.register(
+        CommandSpec::new(
+            "/plugins update",
+            "rebuild installed plugins from their source, all or one",
+        )
+        .arg(ArgSpec::optional("name")),
+    );
     // The plugins lead: a command of theirs that names one of the client's is
     // the one that wins, because the plugin was asked for by name and the
     // client was not.

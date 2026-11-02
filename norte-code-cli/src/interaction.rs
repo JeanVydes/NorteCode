@@ -130,6 +130,9 @@ pub(crate) enum ChatCommand {
     /// Install a plugin from a git URL.
     PluginsAdd { url: String },
 
+    /// Rebuild installed plugins from their source, all or one.
+    PluginsUpdate { name: Option<String> },
+
     /// Remove an installed plugin.
     PluginsRm { name: String },
 
@@ -198,6 +201,9 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/sessions" => ChatCommand::Sessions,
         "/plugins add" => ChatCommand::PluginsAdd {
             url: invocation.arg_or_empty("url").to_owned(),
+        },
+        "/plugins update" => ChatCommand::PluginsUpdate {
+            name: invocation.arg("name").map(str::to_owned),
         },
         "/plugins rm" => ChatCommand::PluginsRm {
             name: invocation.arg("name").unwrap_or_default().to_owned(),
@@ -715,6 +721,13 @@ pub(crate) async fn interactive_loop(
                     renderer.notice(format!("installing {name}…"));
                     renderer.mark_dirty();
                     crate::installs::start(url, Arc::clone(&renderer.pinned));
+                }
+
+                ChatCommand::PluginsUpdate { name } => {
+                    let label = name.clone().unwrap_or_else(|| "plugins".to_owned());
+                    renderer.notice(format!("updating {label}…"));
+                    renderer.mark_dirty();
+                    crate::installs::start_update(name, Arc::clone(&renderer.pinned));
                 }
 
                 ChatCommand::PluginsRm { name } => {
@@ -1310,6 +1323,13 @@ async fn handle_live_command(
             renderer.notice(format!("installing {name}…"));
             renderer.mark_dirty();
             crate::installs::start(url, Arc::clone(&renderer.pinned));
+        }
+
+        ChatCommand::PluginsUpdate { name } => {
+            let label = name.clone().unwrap_or_else(|| "plugins".to_owned());
+            renderer.notice(format!("updating {label}…"));
+            renderer.mark_dirty();
+            crate::installs::start_update(name, Arc::clone(&renderer.pinned));
         }
 
         ChatCommand::PluginsRm { name } => match crate::plugin_manager::remove_plugin(&name) {
@@ -2544,11 +2564,17 @@ fn report_installs(renderer: &mut Renderer) {
         return;
     }
     for report in reports {
+        let verb = if report.updated {
+            "updated"
+        } else {
+            "installed"
+        };
+        let failed = if report.updated { "update" } else { "install" };
         match report.result {
             Ok(name) => renderer.notice(format!(
-                "plugin {name} installed — restart norte-code to apply it"
+                "plugin {name} {verb} — restart norte-code to apply it"
             )),
-            Err(error) => renderer.failure(format!("could not install plugin: {error}")),
+            Err(error) => renderer.failure(format!("could not {failed} plugin: {error}")),
         }
     }
     renderer.mark_dirty();
@@ -3568,6 +3594,20 @@ mod tests {
         assert_eq!(usage_of("/models"), Some("/models".to_owned()));
         assert_eq!(usage_of("/sessions"), Some("/sessions".to_owned()));
         assert!(matches!(parse_chat_command("/models now"), Some(Err(_))));
+    }
+
+    #[test]
+    fn the_plugins_update_command_takes_an_optional_name() {
+        // Bare updates every plugin; a name updates just that one.
+        assert!(matches!(
+            parse_chat_command("/plugins update"),
+            Some(Ok(ChatCommand::PluginsUpdate { name: None }))
+        ));
+        assert!(matches!(
+            parse_chat_command("/plugins update session-info"),
+            Some(Ok(ChatCommand::PluginsUpdate { name: Some(name) })) if name == "session-info"
+        ));
+        assert!(offered("/plugins update"));
     }
 
     #[test]

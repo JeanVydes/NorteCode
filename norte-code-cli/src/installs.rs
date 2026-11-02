@@ -31,21 +31,61 @@ pub(crate) fn start(url: String, pinned: Arc<Pinned>) {
             Ok(Ok(library)) => InstallReport {
                 name,
                 result: Ok(library),
+                updated: false,
             },
             Ok(Err(error)) => InstallReport {
                 name,
                 result: Err(error),
+                updated: false,
             },
             Err(error) => InstallReport {
                 name,
                 result: Err(format!("the build stopped before it finished: {error}")),
+                updated: false,
             },
         };
         pinned.finish_install(report);
     });
 }
 
-/// The name of the plugin a URL names.
+/// Starts updating installed plugins and returns immediately.
+///
+/// With `only`, just that plugin; without it, every plugin with a recorded
+/// source. Each outcome reaches the conversation when its build ends.
+pub(crate) fn start_update(only: Option<String>, pinned: Arc<Pinned>) {
+    let label = only.clone().unwrap_or_else(|| "plugins".to_owned());
+    pinned.set_installing(label);
+    tokio::spawn(async move {
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::plugin_manager::update_plugins(only.as_deref())
+        })
+        .await;
+        match outcome {
+            Ok(Ok(results)) => {
+                for (stem, result) in results {
+                    let name = result.as_ref().cloned().unwrap_or(stem);
+                    pinned.finish_install(InstallReport {
+                        name,
+                        result,
+                        updated: true,
+                    });
+                }
+            }
+            Ok(Err(error)) => pinned.finish_install(InstallReport {
+                name: "plugins".to_owned(),
+                result: Err(error),
+                updated: true,
+            }),
+            Err(error) => pinned.finish_install(InstallReport {
+                name: "plugins".to_owned(),
+                result: Err(format!("the build stopped before it finished: {error}")),
+                updated: true,
+            }),
+        }
+    });
+}
+
+/// The name of the plugin a URL names./// The name of the plugin a URL names.
 ///
 /// The last segment of the path, without the `.git` a clone URL may carry: it
 /// is what the person recognises the plugin by, and what the footer shows
