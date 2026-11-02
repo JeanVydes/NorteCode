@@ -811,10 +811,7 @@ impl Panel {
                         metric_scalar(peak, self.metric)
                     )));
                 } else {
-                    out.push(ViewLine::plain(format!(
-                        "{:<LABEL_COLUMN$} {row}",
-                        ""
-                    )));
+                    out.push(ViewLine::plain(format!("{:<LABEL_COLUMN$} {row}", "")));
                 }
             }
         }
