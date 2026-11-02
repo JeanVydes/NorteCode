@@ -123,6 +123,7 @@ pub(crate) trait Widget {
     ///
     /// Measured once, from the same data the painter uses, so the height a
     /// painter assumes and the rows it is given cannot disagree.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     fn measure(&self, width: u16, theme: &crate::style::Theme) -> u16;
 
     /// Paints the widget into `area`.

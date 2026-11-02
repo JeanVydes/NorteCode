@@ -599,12 +599,26 @@ pub(crate) async fn interactive_loop(
                 }
 
                 ChatCommand::PluginsList => {
-                    let plugins = crate::plugin_manager::list_plugins();
-                    if plugins.is_empty() {
+                    let installed = crate::plugin_manager::list_plugins();
+                    if installed.is_empty() {
                         renderer.notice("no plugins installed");
                     } else {
-                        let lines: Vec<String> =
-                            plugins.iter().map(|name| format!("  {name}")).collect();
+                        let loaded: std::collections::HashSet<String> = crate::plugins::loaded()
+                            .names()
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect();
+                        let lines: Vec<String> = installed
+                            .iter()
+                            .map(|name| {
+                                let state = if loaded.contains(name) {
+                                    "loaded"
+                                } else {
+                                    "installed, not loaded"
+                                };
+                                format!("  {name}  ({state})")
+                            })
+                            .collect();
                         renderer.open_modal("installed plugins".to_owned(), lines);
                     }
                 }
