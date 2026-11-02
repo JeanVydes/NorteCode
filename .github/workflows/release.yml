@@ -44,8 +44,18 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      - name: Install cross-compilation dependencies (Linux ARM64 cross)
+        if: matrix.target == 'aarch64-unknown-linux-gnu' && runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config
+
+      - name: Set up linker for aarch64 GNU (cross)
+        if: matrix.target == 'aarch64-unknown-linux-gnu' && runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
       - name: Build
-        run: cargo build --release --locked --bin norte-code
+        run: cargo build --release --target ${{ matrix.target }} --locked --bin norte-code
 
       - name: Package
         shell: bash
@@ -57,10 +67,16 @@ jobs:
           mkdir -p "$staging"
           cp LICENSE README.md "$staging/"
           if [[ "$target" == *windows* ]]; then
-            cp "target/$target/release/norte-code.exe" "$staging/norte-code.exe"
+            bin="target/$target/release/norte-code.exe"
+            if [[ ! -f "$bin" ]]; then bin="target/release/norte-code.exe"; fi
+            cp "$bin" "$staging/norte-code.exe"
             (cd dist && zip -r "../norte-code-$target.zip" "norte-code")
           else
-            cp "target/$target/release/norte-code" "$staging/norte-code"
+            bin="target/$target/release/norte-code"
+            if [[ ! -f "$bin" ]]; then bin="target/release/norte-code"; fi
+            echo "Using binary: $bin"
+            find target -name 'norte-code' -not -path '*/deps/*' | head -15
+            cp "$bin" "$staging/norte-code"
             tar -czf "norte-code-$target.tar.gz" -C dist "norte-code"
           fi
           rm -rf dist
