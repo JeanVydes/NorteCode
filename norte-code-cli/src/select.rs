@@ -521,7 +521,12 @@ fn draw(
                 Rect::new(area.x, block.y.saturating_sub(2), area.width, 1),
             );
             let list = List::new(listed)
-                .highlight_style(Style::selected())
+                .highlight_style(
+                    ratatui::style::Style::new()
+                        .bg(ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2))
+                        .fg(ratatui::style::Color::Rgb(0x0B, 0x10, 0x14))
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                )
                 .highlight_symbol("› ");
             frame.render_stateful_widget(list, block, &mut state);
             frame.render_widget(
@@ -563,7 +568,7 @@ fn art_rows(area: Rect) -> u16 {
         rows += 2;
     }
     if area.height >= 24 {
-        rows += 6;
+        rows += 4;
     }
     rows.min(area.height)
 }
@@ -576,7 +581,7 @@ fn draw_art(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usize, style: Styl
     use ratatui::widgets::Paragraph;
 
     let [wordmark, tagline, _gap, bear] = Layout::vertical([
-        Constraint::Length(if area.height >= 24 { 6 } else { 0 }),
+        Constraint::Length(if area.height >= 24 { 4 } else { 0 }),
         Constraint::Length(u16::from(area.height >= 20)),
         Constraint::Length(1),
         Constraint::Length(if area.height >= 30 { 7 } else { 0 }),

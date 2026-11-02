@@ -20,13 +20,11 @@ pub(crate) const FRAME_MS: u64 = 640;
 ///
 /// Six rows, because the screen is a terminal of unknown height and the art is
 /// the first thing that should give way.
-pub(crate) const WORDMARK: [&str; 6] = [
-    r"  ███╗   ██╗ ██████╗ ██████╗ ████████╗███████╗",
-    r"  ████╗  ██║██╔═══██╗██╔══██╗╚══██╔══╝██╔════╝",
-    r"  ██╔██╗ ██║██║   ██║██████╔╝   ██║   █████╗  ",
-    r"  ██║╚██╗██║██║   ██║██╔══██╗   ██║   ██╔══╝  ",
-    r"  ██║ ╚████║╚██████╔╝██║  ██║   ██║   ███████╗",
-    r"  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
+pub(crate) const WORDMARK: [&str; 4] = [
+    r"  ╔╗ ╔╦╗ ╔═╗ ╦═╗ ╔╦╗  ",
+    r"  ║║  ║  ║ ║ ╠╦╝  ║   ",
+    r"  ║║  ║  ║ ║ ║╚╗  ║   ",
+    r"  ╚╝  ╩  ╚═╝ ╩ ╩  ╩   ",
 ];
 
 /// The tagline under the wordmark.
@@ -49,12 +47,12 @@ const BEAR_WIDTH: usize = 19;
 /// The ears and the muzzle are the same in all three frames: a bear whose whole
 /// head changed would be a different bear blinking.
 const BEAR_HEAD: [&str; 6] = [
-    "     ▄▄▄▄▄▄▄▄▄     ",
-    "   ▄███████████▄   ",
-    "  ███████████████  ",
-    " █████████████████ ",
-    "  ███████████████  ",
-    "   ▀███████████▀   ",
+    "  .----------.     ",
+    r"  /            \   ",
+    "  |            |   ",
+    "  |      ^     |   ",
+    r"  \            /   ",
+    "  '----------'     ",
 ];
 
 /// The three faces, one per frame: awake, blinking, winking.
@@ -63,15 +61,15 @@ const BEAR_HEAD: [&str; 6] = [
 /// are the only thing that changes.
 const EYES: [&str; 3] = [
     // Awake: both eyes open.
-    "  ██  ●     ●  ██  ",
+    "  |   ●      ●   | ",
     // Blinking: both closed.
-    "  ██  ─     ─  ██  ",
+    "  |   ─      ─   | ",
     // A wink: one open, one closed.
-    "  ██  ●     ─  ██  ",
+    "  |   ●      ─   | ",
 ];
 
 /// The muzzle, which none of the faces changes.
-const MUZZLE: &str = "  ████  ▄▄▄  ████  ";
+const MUZZLE: &str = r"  \     vvv     /  ";
 
 /// The frames of the mascot, in order.
 ///

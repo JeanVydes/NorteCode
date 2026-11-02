@@ -31,6 +31,7 @@ use ratatui::widgets::{Clear, Paragraph, Widget as _};
 
 use crate::style::Style;
 use crate::terminal::Draw;
+use norte_code_protocol::SessionKey;
 
 /// One row of a panel.
 ///
@@ -134,6 +135,8 @@ pub(crate) enum Action {
     Forget(String),
     /// Switch an MCP server on or off.
     Toggle(String),
+    /// Open or resume a session, carrying its key.
+    OpenSession(SessionKey),
 }
 
 /// How far a rule reaches.

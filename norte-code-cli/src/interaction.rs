@@ -122,6 +122,9 @@ pub(crate) enum ChatCommand {
     /// List installed plugins.
     PluginsList,
 
+    /// List sessions and pick one to open.
+    Sessions,
+
     /// Install a plugin from a git URL.
     PluginsAdd { url: String },
 
@@ -190,6 +193,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/menu" => ChatCommand::Menu,
         "/delete" => ChatCommand::Delete,
         "/plugins list" => ChatCommand::PluginsList,
+        "/sessions" => ChatCommand::Sessions,
         "/plugins add" => ChatCommand::PluginsAdd {
             url: invocation.arg_or_empty("url").to_owned(),
         },
@@ -595,6 +599,34 @@ pub(crate) async fn interactive_loop(
                             "`{}` was declared by a plugin and nothing answered it",
                             invocation.command
                         )),
+                    }
+                }
+
+                ChatCommand::Sessions => {
+                    let database = match crate::commands::database_path() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            renderer.notice(e);
+                            continue;
+                        }
+                    };
+                    let rows = crate::startup::session_rows(&database)
+                        .await
+                        .unwrap_or_default();
+                    if rows.is_empty() {
+                        renderer.notice("no sessions yet");
+                    } else {
+                        let mut modal_rows: Vec<crate::modal::Row> = vec![
+                            crate::modal::Row::text("new session"),
+                            crate::modal::Row::text("last session"),
+                        ];
+                        for row in &rows {
+                            modal_rows.push(crate::modal::Row::actable(
+                                row.label(),
+                                crate::modal::Action::OpenSession(SessionKey::new(row.key.clone())),
+                            ));
+                        }
+                        renderer.open_editable("sessions".to_owned(), modal_rows);
                     }
                 }
 
@@ -1105,6 +1137,28 @@ async fn handle_live_command(
             }
         }
 
+        ChatCommand::Sessions => {
+            let database = match crate::commands::database_path() {
+                Ok(p) => p,
+                Err(e) => {
+                    renderer.notice(e);
+                    return;
+                }
+            };
+            let rows = crate::startup::session_rows(&database)
+                .await
+                .unwrap_or_default();
+            if rows.is_empty() {
+                renderer.notice("no sessions yet");
+            } else {
+                let mut lines = vec!["  new session".to_owned(), "  last session".to_owned()];
+                for row in &rows {
+                    lines.push(format!("  {}  {}", row.label(), row.key));
+                }
+                renderer.open_modal("sessions".to_owned(), lines);
+            }
+        }
+
         ChatCommand::PluginsList => {
             let plugins = crate::plugin_manager::list_plugins();
             if plugins.is_empty() {
@@ -1358,7 +1412,7 @@ async fn apply_tool_action(
     style: Style,
     action: crate::modal::Action,
     scope: crate::modal::Scope,
-) {
+) -> Option<SessionKey> {
     let global = scope == crate::modal::Scope::Global;
     // A rule is set or forgotten, and which of the two the key asks for is the
     // action the row carried. The two are one call here because the panel shows
@@ -1376,7 +1430,10 @@ async fn apply_tool_action(
                 renderer,
                 &crate::modal::Action::Toggle(name.clone()),
             );
-            return;
+            return None;
+        }
+        crate::modal::Action::OpenSession(key) => {
+            return Some(key.clone());
         }
     };
     let outcome = match rule {
@@ -1413,6 +1470,7 @@ async fn apply_tool_action(
             renderer.failure(format!("could not change the rule for `{tool}`: {error}"));
         }
     }
+    None
 }
 
 fn report_debug(
@@ -2229,7 +2287,8 @@ pub(crate) async fn read_repl_line(
             // the call would be a round trip for something already here.
             Some(EditorEvent::Action(EditorAction::Panel(press))) => {
                 if let Some((decision, scope)) = renderer.modal_key(press) {
-                    apply_tool_action(service, session, renderer, style, decision, scope).await;
+                    let _ =
+                        apply_tool_action(service, session, renderer, style, decision, scope).await;
                 }
                 renderer.draw()?;
                 continue;
@@ -2469,7 +2528,7 @@ pub(crate) async fn drive_turns(
                             // idea one exists.
                             EditorAction::Panel(press) => {
                                 if let Some((decision, scope)) = renderer.modal_key(press) {
-                                    apply_tool_action(
+                                    let Some(new_session) = apply_tool_action(
                                         service,
                                         current.as_ref(),
                                         renderer,
@@ -2477,7 +2536,12 @@ pub(crate) async fn drive_turns(
                                         decision,
                                         scope,
                                     )
-                                    .await;
+                                    .await
+                                    else {
+                                        renderer.draw()?;
+                                        continue;
+                                    };
+                                    current = Some(new_session);
                                 }
                                 renderer.draw()?;
                                 continue;

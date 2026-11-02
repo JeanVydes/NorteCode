@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! The startup flow of a bare `norte-code`.
 //!
 //! `run` and `resume` both start from a decision the command line already made:
@@ -195,60 +196,17 @@ pub(crate) async fn startup(
     config_path: Option<&Path>,
     style: Style,
 ) -> Result<Startup, String> {
-    let rows = session_rows(database).await?;
-    let open = choose_session(&rows, style)?;
-    let saved = match &open {
-        // Continuing a session keeps the provider and the model it was saved
-        // with: replacing them here would be a decision nobody asked for, and
-        // `--model` and `/model` are how that is changed on purpose.
-        Open::Existing { key, .. } => rows
-            .iter()
-            .find(|row| row.key == key.as_str())
-            .filter(|row| !row.provider.is_empty() && !row.model.is_empty())
-            .map(|row| ModelChoice::new(row.provider.clone(), row.model.clone())),
-        Open::New => None,
-    };
+    // The default entrypoint is a new session: the session picker moved to
+    // the `/sessions` command, so a bare run no longer stops on a menu.
+    let _ = session_rows(database).await?;
+    let open = Open::New;
+    let saved: Option<ModelChoice> = None;
     let choice = match saved {
         Some(choice) => Some(choice),
         None if config.default_model.is_some() => None,
         None => Some(choose_model(config, catalog, config_path, style)?),
     };
     Ok(Startup { open, choice })
-}
-
-/// Asks which session to open.
-///
-/// Nothing saved yet skips the question: a first run has exactly one thing it
-/// can do, and a menu whose only working entry is "new" is a keystroke asked for
-/// nothing.
-pub(crate) fn choose_session(rows: &[SessionRow], style: Style) -> Result<Open, String> {
-    if rows.is_empty() {
-        return Ok(Open::New);
-    }
-    let items = session_items(rows);
-    match select::run(items, "which session?", style)? {
-        // A bare Enter took the new session, and Escape means the same thing: it
-        // is the one choice that needs nothing typed, so it is what an
-        // unanswered menu means.
-        Outcome::Chosen(0) | Outcome::Left => Ok(Open::New),
-        // The second entry is the newest session, whatever its key is.
-        Outcome::Chosen(1) => Ok(open_of(&rows[0])),
-        Outcome::Chosen(index) => Ok(open_of(&rows[index - 2])),
-        // A name that matched no entry is a session key the list did not show,
-        // typed from an older footer. It is passed through rather than checked
-        // here, which would need a second reader of the same table; the service
-        // resolves it at the first message and says so if it is unknown.
-        Outcome::Typed(typed) => {
-            let typed = typed.trim();
-            if typed.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-                return Ok(Open::Existing {
-                    key: SessionKey::new(typed.to_owned()),
-                    unfinished: false,
-                });
-            }
-            Err(format!("`{typed}` names no session"))
-        }
-    }
 }
 
 fn open_of(row: &SessionRow) -> Open {
