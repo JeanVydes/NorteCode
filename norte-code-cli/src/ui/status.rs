@@ -1,8 +1,8 @@
 //! The status row as a widget.
 
 use crate::style::Style;
-use crate::ui::clip;
 use crate::ui::Widget;
+use crate::ui::clip;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::Widget as _;
@@ -18,12 +18,7 @@ impl Widget for StatusRow {
         1
     }
 
-    fn draw(
-        &self,
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        _theme: &crate::style::Theme,
-    ) {
+    fn draw(&self, frame: &mut ratatui::Frame<'_>, area: Rect, _theme: &crate::style::Theme) {
         if area.height == 0 {
             return;
         }

@@ -1,7 +1,7 @@
 //! The conversation as a widget.
 
-use crate::input::Pinned;
 use crate::app::State;
+use crate::input::Pinned;
 use crate::style::Style;
 use crate::ui::Widget;
 use ratatui::layout::Rect;
@@ -21,12 +21,7 @@ impl Widget for TranscriptView<'_> {
         0
     }
 
-    fn draw(
-        &self,
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        _theme: &crate::style::Theme,
-    ) {
+    fn draw(&self, frame: &mut ratatui::Frame<'_>, area: Rect, _theme: &crate::style::Theme) {
         if area.height == 0 {
             return;
         }

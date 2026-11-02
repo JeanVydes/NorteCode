@@ -16,15 +16,10 @@ pub(crate) struct Spinner {
 
 impl Widget for Spinner {
     fn measure(&self, _width: u16, _theme: &crate::style::Theme) -> u16 {
-u16::from(self.waiting.is_some())
+        u16::from(self.waiting.is_some())
     }
 
-    fn draw(
-        &self,
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        _theme: &crate::style::Theme,
-    ) {
+    fn draw(&self, frame: &mut ratatui::Frame<'_>, area: Rect, _theme: &crate::style::Theme) {
         if area.height == 0 {
             return;
         }
@@ -48,10 +43,7 @@ u16::from(self.waiting.is_some())
             Span::styled(glyph.to_owned(), self.style.accent_span()),
             Span::raw(" "),
             Span::styled(label.to_owned(), self.style.dim_span()),
-            Span::styled(
-                format!(" · {since_secs}s"),
-                self.style.faint_span(),
-            ),
+            Span::styled(format!(" · {since_secs}s"), self.style.faint_span()),
         ]);
         Paragraph::new(line).render(area, frame.buffer_mut());
     }

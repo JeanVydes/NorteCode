@@ -2,8 +2,8 @@
 
 use crate::app::TaskRow;
 use crate::style::{Style, icon};
-use crate::ui::clip;
 use crate::ui::Widget;
+use crate::ui::clip;
 use ratatui::layout::Rect;
 
 /// The task list, drawn as one compact row.
@@ -18,12 +18,7 @@ impl Widget for Tasks<'_> {
         u16::from(!self.todos.is_empty())
     }
 
-    fn draw(
-        &self,
-        frame: &mut ratatui::Frame<'_>,
-        area: Rect,
-        _theme: &crate::style::Theme,
-    ) {
+    fn draw(&self, frame: &mut ratatui::Frame<'_>, area: Rect, _theme: &crate::style::Theme) {
         if area.height == 0 || self.todos.is_empty() {
             return;
         }
@@ -35,14 +30,10 @@ impl Widget for Tasks<'_> {
         } else {
             icon::PENDING
         };
-        let text = self
-            .todos
-            .iter()
-            .find(|task| !task.done)
-            .map_or_else(
-                || format!("{mark} tasks {done}/{}", self.todos.len()),
-                |task| format!("{mark} tasks {done}/{} · {}", self.todos.len(), task.text),
-            );
+        let text = self.todos.iter().find(|task| !task.done).map_or_else(
+            || format!("{mark} tasks {done}/{}", self.todos.len()),
+            |task| format!("{mark} tasks {done}/{} · {}", self.todos.len(), task.text),
+        );
         clip::paint_text(frame, area, &text, self.style.dim_span());
     }
 }

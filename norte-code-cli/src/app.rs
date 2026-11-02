@@ -1275,7 +1275,6 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     draw_block_from(frame, area, &rows, start);
 }
 
-
 /// Draws rows inside a block, from the top of the area it was given.
 fn draw_block(frame: &mut Draw<'_>, area: Rect, rows: &[Line]) {
     draw_block_from(frame, area, rows, 0);

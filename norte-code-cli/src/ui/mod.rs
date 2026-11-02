@@ -16,10 +16,10 @@ use ratatui::layout::Rect;
 
 pub(crate) mod clip;
 pub(crate) mod completion;
-pub(crate) mod tasks;
-pub(crate) mod transcript;
 pub(crate) mod spinner;
 pub(crate) mod status;
+pub(crate) mod tasks;
+pub(crate) mod transcript;
 
 /// The rows each band asks for at one width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
