@@ -104,6 +104,14 @@ pub(crate) fn built() -> Registry {
         CommandSpec::new("/model", "switch the model at the next turn boundary")
             .arg(ArgSpec::required("model")),
     );
+    registry.register(CommandSpec::new(
+        "/models",
+        "choose a provider and a model in a panel",
+    ));
+    registry.register(CommandSpec::new(
+        "/sessions",
+        "open another session, or start a new one",
+    ));
     registry.register(
         CommandSpec::new(
             "/provider",
@@ -201,6 +209,8 @@ mod tests {
             "/tools",
             "/reasoning",
             "/model",
+            "/models",
+            "/sessions",
             "/provider",
             "/refresh",
             "/mcp",

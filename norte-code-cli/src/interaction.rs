@@ -101,6 +101,8 @@ pub(crate) enum ChatCommand {
     },
     /// Request a model switch.
     Model { model: String },
+    /// Open the provider/model picker panel.
+    Models,
     /// Set the current provider.
     Provider { provider: String },
     /// Name the session. A bare `/rename` asks the model for a title from the
@@ -229,6 +231,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/model" => ChatCommand::Model {
             model: invocation.arg_or_empty("model").to_owned(),
         },
+        "/models" => ChatCommand::Models,
         "/provider" => ChatCommand::Provider {
             provider: invocation.arg_or_empty("provider").to_owned(),
         },
@@ -562,11 +565,21 @@ pub(crate) async fn interactive_loop(
         renderer.set_title(title);
     }
     loop {
-        let Some((text, attachments)) =
-            read_repl_line(service, session.as_ref(), input, renderer, style).await?
-        else {
-            break;
-        };
+        let (text, attachments) =
+            match read_repl_line(service, session.as_ref(), input, renderer, style).await? {
+                ReplInput::End => break,
+                ReplInput::Session(key) => {
+                    // A panel chose a session: switch to it and stay in the loop.
+                    renderer.session = Some(key.to_string());
+                    if let Some(title) = service.session_title(&key) {
+                        renderer.set_title(title);
+                    }
+                    session = Some(key);
+                    renderer.draw()?;
+                    continue;
+                }
+                ReplInput::Line(text, attachments) => (text, attachments),
+            };
         let command = match parse_chat_command(&text) {
             None => None,
             Some(Ok(command)) => Some(command),
@@ -613,21 +626,23 @@ pub(crate) async fn interactive_loop(
                     let rows = crate::startup::session_rows(&database)
                         .await
                         .unwrap_or_default();
-                    if rows.is_empty() {
-                        renderer.notice("no sessions yet");
-                    } else {
-                        let mut modal_rows: Vec<crate::modal::Row> = vec![
-                            crate::modal::Row::text("new session"),
-                            crate::modal::Row::text("last session"),
-                        ];
-                        for row in &rows {
-                            modal_rows.push(crate::modal::Row::actable(
-                                row.label(),
-                                crate::modal::Action::OpenSession(SessionKey::new(row.key.clone())),
-                            ));
-                        }
-                        renderer.open_editable("sessions".to_owned(), modal_rows);
+                    let mut modal_rows: Vec<crate::modal::Row> = vec![crate::modal::Row::actable(
+                        "new session",
+                        crate::modal::Action::NewSession,
+                    )];
+                    if rows.len() > 1 {
+                        modal_rows.push(crate::modal::Row::actable(
+                            "last session",
+                            crate::modal::Action::ResumeLast,
+                        ));
                     }
+                    for row in &rows {
+                        modal_rows.push(crate::modal::Row::actable(
+                            row.label(),
+                            crate::modal::Action::OpenSession(SessionKey::new(row.key.clone())),
+                        ));
+                    }
+                    renderer.open_editable("sessions".to_owned(), modal_rows);
                 }
 
                 ChatCommand::PluginsList => {
@@ -853,6 +868,19 @@ pub(crate) async fn interactive_loop(
                 // session: a screen that threw the conversation away to show a
                 // list would be a worse answer than the list on its own, and
                 // `/restart` is the command that starts a fresh one.
+                ChatCommand::Models => match session.as_ref() {
+                    Some(current) => {
+                        renderer.models_expanded = None;
+                        let rows = models_panel(
+                            service.catalog().as_ref(),
+                            provider_of(service, current).as_deref(),
+                            model_name_of(service, current).as_deref(),
+                            None,
+                        );
+                        renderer.open_editable("models".to_owned(), rows);
+                    }
+                    None => renderer.notice("there is no session yet; send a message first"),
+                },
                 ChatCommand::Menu => {
                     let catalog = service.catalog();
                     let current = session
@@ -1062,6 +1090,76 @@ fn provider_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
     service.session_spec(session).map(|spec| spec.provider)
 }
 
+/// The rows of the `/models` panel: every provider, and the models of the one
+/// expanded provider beneath it.
+///
+/// Collapsed, a provider is one actable row; expanded, it is a heading and its
+/// models, each actable and carrying the pair to set. The current provider and
+/// model are marked so a person can see what a selection would change.
+fn models_panel(
+    catalog: &norte_code_protocol::catalog::Catalog,
+    current_provider: Option<&str>,
+    current_model: Option<&str>,
+    expanded: Option<&str>,
+) -> Vec<crate::modal::Row> {
+    let current_provider = current_provider.map(str::to_owned);
+    let current_model = current_model.map(str::to_owned);
+    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
+    providers.sort();
+    let mut rows = Vec::new();
+    for provider in &providers {
+        let is_current = current_provider.as_deref() == Some(provider.as_str());
+        if expanded == Some(provider.as_str()) {
+            let mut heading = provider.clone();
+            if is_current {
+                heading.push_str(" (current)");
+            }
+            rows.push(crate::modal::Row::heading(heading));
+            let mut models: Vec<String> = catalog
+                .models_of(provider)
+                .map(|entry| entry.id.clone())
+                .collect();
+            models.sort();
+            if models.is_empty() {
+                let mut row = crate::modal::Row::text("  (no models listed)");
+                row.dim = true;
+                rows.push(row);
+            }
+            for model in models {
+                let note = if is_current && current_model.as_deref() == Some(model.as_str()) {
+                    Some("current")
+                } else {
+                    None
+                };
+                let mut row = crate::modal::Row::actable(
+                    format!("  {model}"),
+                    crate::modal::Action::SetModel {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                    },
+                );
+                if let Some(note) = note {
+                    row = row.noted(note);
+                }
+                rows.push(row);
+            }
+        } else {
+            let mut row = crate::modal::Row::actable(
+                provider.clone(),
+                crate::modal::Action::ExpandProvider(provider.clone()),
+            );
+            if is_current {
+                row = row.noted("current");
+            }
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        rows.push(crate::modal::Row::text("no providers configured"));
+    }
+    rows
+}
+
 /// Steers a message into the running turn and names it, so the client can
 /// tell it apart when the engine reports it applied.
 async fn steer_text(
@@ -1264,6 +1362,9 @@ async fn handle_live_command(
         ChatCommand::Menu => {
             renderer.notice("wait until the current turn finishes, then /menu");
         }
+        ChatCommand::Models => {
+            renderer.notice("wait until the current turn finishes, then /models");
+        }
     }
 }
 
@@ -1405,6 +1506,7 @@ async fn read_telemetry() -> Result<Vec<norte_code_protocol::sqlite::RequestReco
 /// rebuilt after every decision and opened again, so the row a person just
 /// changed says what it became — a rule that changed with the list still saying
 /// the old word is a list nobody can trust.
+#[allow(clippy::too_many_lines)]
 async fn apply_tool_action(
     service: &Arc<Service>,
     session: Option<&SessionKey>,
@@ -1434,6 +1536,63 @@ async fn apply_tool_action(
         }
         crate::modal::Action::OpenSession(key) => {
             return Some(key.clone());
+        }
+        // A fresh session: the service creates an empty one and the loop
+        // switches to it, so the next message lands in it.
+        crate::modal::Action::NewSession => {
+            return match service.start_session(None).await {
+                Ok(key) => Some(key),
+                Err(error) => {
+                    renderer.failure(format!("could not start a session: {error}"));
+                    None
+                }
+            };
+        }
+        // The newest session that is not the one open now.
+        crate::modal::Action::ResumeLast => {
+            let newest = service
+                .sessions()
+                .into_iter()
+                .map(|info| info.session)
+                .find(|key| Some(key) != session);
+            if let Some(key) = newest {
+                return Some(key);
+            }
+            renderer.notice("there is no other session to open");
+            return None;
+        }
+        // Expand or collapse a provider in the models panel, rebuilding it from
+        // the new state so the chosen provider's models show beneath it.
+        crate::modal::Action::ExpandProvider(provider) => {
+            let Some(current) = session else {
+                renderer.notice("there is no session yet; send a message first");
+                return None;
+            };
+            renderer.models_expanded =
+                if renderer.models_expanded.as_deref() == Some(provider.as_str()) {
+                    None
+                } else {
+                    Some(provider.clone())
+                };
+            let rows = models_panel(
+                service.catalog().as_ref(),
+                provider_of(service, current).as_deref(),
+                model_name_of(service, current).as_deref(),
+                renderer.models_expanded.as_deref(),
+            );
+            renderer.open_editable("models".to_owned(), rows);
+            return None;
+        }
+        // A model picked in the panel sets both halves at once.
+        crate::modal::Action::SetModel { provider, model } => {
+            let Some(current) = session else {
+                renderer.notice("there is no session yet; send a message first");
+                return None;
+            };
+            let choice = ModelChoice::new(provider.clone(), model.clone());
+            run_model(service, current.clone(), choice, renderer).await;
+            renderer.close_modal();
+            return None;
         }
     };
     let outcome = match rule {
@@ -2226,13 +2385,23 @@ pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
 /// raw mode, so the key never becomes `SIGINT`. At the prompt its meaning
 /// depends on what is running — a background job is stopped, and with none the
 /// key leaves the loop, which is what it did when it was a signal.
+/// What the prompt got: a line to send, a session the panel chose, or the end.
+pub(crate) enum ReplInput {
+    /// A typed line and its attachments.
+    Line(String, Vec<Attachment>),
+    /// A session chosen in a panel; the loop switches to it.
+    Session(SessionKey),
+    /// The editor ended.
+    End,
+}
+
 pub(crate) async fn read_repl_line(
     service: &Arc<Service>,
     session: Option<&SessionKey>,
     input: &mut InteractiveInput,
     renderer: &mut Renderer,
     style: Style,
-) -> Result<Option<(String, Vec<Attachment>)>, String> {
+) -> Result<ReplInput, String> {
     let _ = style;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(READER_TICK_MS));
     loop {
@@ -2241,7 +2410,7 @@ pub(crate) async fn read_repl_line(
             // A signal can still arrive from outside the terminal, so it keeps
             // its old meaning: leave the loop.
             _ = tokio::signal::ctrl_c() => {
-                return Ok(None);
+                return Ok(ReplInput::End);
             }
             event = input.recv() => event,
             // The clock is what keeps an animation moving — the spinner, and
@@ -2279,16 +2448,19 @@ pub(crate) async fn read_repl_line(
                 continue;
             }
             Some(EditorEvent::End) | None => {
-                return Ok(None);
+                return Ok(ReplInput::End);
             }
             // A panel key at the prompt: the panel decides what it means and
             // this carries the decision out. It is `async`, so it can: the
             // caller is the loop that owns the service, and asking it to make
             // the call would be a round trip for something already here.
             Some(EditorEvent::Action(EditorAction::Panel(press))) => {
-                if let Some((decision, scope)) = renderer.modal_key(press) {
-                    let _ =
-                        apply_tool_action(service, session, renderer, style, decision, scope).await;
+                if let Some((decision, scope)) = renderer.modal_key(press)
+                    && let Some(chosen) =
+                        apply_tool_action(service, session, renderer, style, decision, scope).await
+                {
+                    renderer.close_modal();
+                    return Ok(ReplInput::Session(chosen));
                 }
                 renderer.draw()?;
                 continue;
@@ -2298,7 +2470,7 @@ pub(crate) async fn read_repl_line(
                 else {
                     // No job to stop: the key means what it always meant at the
                     // prompt, which is to leave.
-                    return Ok(None);
+                    return Ok(ReplInput::End);
                 };
                 stop_jobs(service, session.clone(), renderer).await;
                 continue;
@@ -2314,9 +2486,9 @@ pub(crate) async fn read_repl_line(
             continue;
         }
         if matches!(line, "/exit" | "/quit" | "exit" | "quit") {
-            return Ok(None);
+            return Ok(ReplInput::End);
         }
-        return Ok(Some((line.to_owned(), attachments)));
+        return Ok(ReplInput::Line(line.to_owned(), attachments));
     }
 }
 
@@ -2846,7 +3018,7 @@ mod tests {
 
     use super::{
         BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
-        ReasoningScope, SignalGuard, command_suggestion, interactive_loop, mpsc,
+        ReasoningScope, SignalGuard, command_suggestion, interactive_loop, models_panel, mpsc,
         parse_budget_limit, parse_chat_command, plan_provider_switch, refresh_completions,
         switch_provider,
     };
@@ -3341,6 +3513,76 @@ mod tests {
         // It takes no argument, so one is the mistake it is elsewhere: a word
         // after the command is a word the command does not use.
         assert!(matches!(parse_chat_command("/menu now"), Some(Err(_))));
+    }
+
+    #[test]
+    fn the_models_and_sessions_panels_are_reachable() {
+        // Both open a panel; neither takes an argument, so a word after one is
+        // a word the command does not use.
+        assert!(matches!(
+            parse_chat_command("/models"),
+            Some(Ok(ChatCommand::Models))
+        ));
+        assert!(matches!(
+            parse_chat_command("/sessions"),
+            Some(Ok(ChatCommand::Sessions))
+        ));
+        assert!(offered("/models"), "the list must offer /models");
+        assert!(offered("/sessions"), "the list must offer /sessions");
+        assert_eq!(usage_of("/models"), Some("/models".to_owned()));
+        assert_eq!(usage_of("/sessions"), Some("/sessions".to_owned()));
+        assert!(matches!(parse_chat_command("/models now"), Some(Err(_))));
+    }
+
+    #[test]
+    fn the_models_panel_expands_a_provider_into_its_models() {
+        use norte_code_protocol::catalog::{Catalog, Models, Providers};
+
+        let providers: Providers = serde_json::from_str(
+            r#"{"providers":{
+                "a":{"name":"A","environment_keys":["K"],
+                    "wires":[{"api":"https://example.invalid/a","schema":"openai"}]},
+                "b":{"name":"B","environment_keys":["K"],
+                    "wires":[{"api":"https://example.invalid/b","schema":"openai"}]}}}"#,
+        )
+        .expect("providers");
+        let models: Models = serde_json::from_str(
+            r#"{"models":[
+                {"id":"m1","provider_id":"a","name":"M1","supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}},
+                {"id":"m2","provider_id":"a","name":"M2","supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}}]}"#,
+        )
+        .expect("models");
+        let catalog = Catalog::new(providers, models).expect("catalogue");
+
+        // Collapsed: one actable row per provider, each expanding.
+        let rows = models_panel(&catalog, Some("a"), Some("m1"), None);
+        let actables: Vec<_> = rows.iter().filter_map(|row| row.action.clone()).collect();
+        assert_eq!(actables.len(), 2, "one row per provider");
+        assert!(
+            matches!(&actables[0], crate::modal::Action::ExpandProvider(p) if p == "a"),
+            "{actables:?}"
+        );
+
+        // Expanded: the provider is a heading and each model sets both halves.
+        let rows = models_panel(&catalog, Some("a"), Some("m1"), Some("a"));
+        assert!(rows.iter().any(|row| row.heading), "the provider heads it");
+        let set: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.action {
+                Some(action @ crate::modal::Action::SetModel { .. }) => Some(action.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(set.len(), 2, "two models are selectable");
+        assert!(
+            matches!(&set[0], crate::modal::Action::SetModel { provider, model }
+                if provider == "a" && model == "m1"),
+            "{set:?}"
+        );
     }
 
     /// The routing that was missing. `/provider` and `/model` reach the

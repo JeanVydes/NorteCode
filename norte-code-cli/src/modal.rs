@@ -137,6 +137,19 @@ pub(crate) enum Action {
     Toggle(String),
     /// Open or resume a session, carrying its key.
     OpenSession(SessionKey),
+    /// Start a fresh session.
+    NewSession,
+    /// Open the newest session that is not the current one.
+    ResumeLast,
+    /// Expand a provider in the models panel, or collapse it again.
+    ExpandProvider(String),
+    /// Set both the provider and the model to a choice from the models panel.
+    SetModel {
+        /// The provider that serves the model.
+        provider: String,
+        /// The model to switch to.
+        model: String,
+    },
 }
 
 /// How far a rule reaches.
@@ -302,6 +315,30 @@ impl Modal {
                 }
             })
             .collect();
+    }
+
+    /// Puts the cursor on the actable row nearest to `cursor`.
+    ///
+    /// A panel rebuilt in place — the tools list after a rule changes, the
+    /// models list after a provider expands — keeps the selection a person had
+    /// instead of jumping back to the first row. The row at `cursor` may be a
+    /// heading after a rebuild, so the search moves forward to the next actable
+    /// row and falls back to the last one.
+    pub(crate) fn resume_cursor(&mut self, cursor: usize) {
+        if self.rows.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        let at = cursor.min(self.rows.len() - 1);
+        let nearest = self
+            .rows
+            .iter()
+            .enumerate()
+            .skip(at)
+            .find(|(_, row)| row.action.is_some() && !row.heading)
+            .map(|(index, _)| index)
+            .or_else(|| self.rows.iter().rposition(|row| row.action.is_some()));
+        self.cursor = nearest.unwrap_or_else(|| self.first_actable());
     }
 
     /// The first row that can be acted on, or zero when none can.

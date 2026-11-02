@@ -198,6 +198,12 @@ pub(crate) struct Renderer {
     /// session's row holds — so this is a state of the window and not of the
     /// conversation: leaving with it set reopens on the model the session had.
     pub(crate) pending_provider: Option<String>,
+    /// The provider expanded in the `/models` panel, if one is.
+    ///
+    /// The panel is rebuilt from this on every action, so the expanded
+    /// provider's models stay visible while the cursor moves and a selection
+    /// is made.
+    pub(crate) models_expanded: Option<String>,
     /// The reasoning effort the session is actually using, as `/reasoning`
     /// names it. `None` until a turn has settled it, because before that the
     /// setting is whatever the next turn resolves.
@@ -351,6 +357,7 @@ impl Renderer {
             pending_paths: BTreeMap::new(),
             model_name: None,
             pending_provider: None,
+            models_expanded: None,
             reasoning: None,
             waiting: None,
             waiting_since: None,
@@ -642,7 +649,18 @@ impl Renderer {
     }
 
     /// Puts a panel on screen and tells the keyboard it is there.
-    fn set_modal(&mut self, modal: crate::modal::Modal) {
+    fn set_modal(&mut self, mut modal: crate::modal::Modal) {
+        // A panel rebuilt in place — the tools list after a rule changes, the
+        // models list after a provider expands — keeps the row the person was
+        // on. A different panel starts at its top.
+        if let Some(previous) = &self.modal
+            && previous.editable
+            && modal.editable
+            && previous.title == modal.title
+        {
+            modal.resume_cursor(previous.cursor);
+            modal.top = previous.top.min(modal.rows.len().saturating_sub(1));
+        }
         // The keyboard reads this on its own thread: it is the one thing that
         // decides which keys belong to the panel and which to the report's
         // scroll, and the panel itself is not shared across the two threads.
