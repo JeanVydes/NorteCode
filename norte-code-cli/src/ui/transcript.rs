@@ -5,11 +5,10 @@ use crate::app::State;
 use crate::style::Style;
 use crate::ui::Widget;
 use ratatui::layout::Rect;
-use std::sync::Arc;
 
 pub(crate) struct TranscriptView<'a> {
     pub(crate) state: &'a State,
-    pub(crate) pinned: &'a Arc<Pinned>,
+    pub(crate) pinned: &'a Pinned,
     pub(crate) style: Style,
 }
 

@@ -274,7 +274,12 @@ impl State {
             // height. The whole width is the conversation's: nothing is parked
             // beside it.
             let areas = crate::ui::split(area, self.heights(area.width));
-            draw_transcript(frame, areas.conversation, self, pinned, style);
+            let widget = crate::ui::transcript::TranscriptView {
+                state: self,
+                pinned,
+                style,
+            };
+            crate::ui::Widget::draw(&widget, frame, areas.conversation, &crate::style::Theme);
             if areas.spinner.height > 0 {
                 let widget = crate::ui::spinner::Spinner {
                     waiting: self.waiting,
