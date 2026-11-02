@@ -441,10 +441,10 @@ fn bucket_of(at: DateTime<Utc>, range: Range) -> String {
 /// It is text and not a widget, so a bar survives a pipe and reads the same in
 /// the panel as in `--jsonl`'s neighbour. The width is fixed, so a row of bars
 /// lines up down the panel and the eye can compare them.
-const BAR_CELLS: usize = 24;
+const BAR_CELLS: usize = 48;
 
 /// The label column, so the bars and the numbers line up down the panel.
-const LABEL_COLUMN: usize = 22;
+const LABEL_COLUMN: usize = 32;
 
 /// One drawn line: text plus the ink it is written in.
 #[derive(Clone, Debug, PartialEq, Eq)]
