@@ -55,6 +55,29 @@ pub(crate) struct Startup {
     pub(crate) choice: Option<ModelChoice>,
 }
 
+/// The state of a session worth saying at startup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionState {
+    /// A turn was interrupted and can be continued.
+    Unfinished,
+    /// The session is waiting on a tool.
+    Waiting,
+    /// The session was interrupted mid-stream.
+    Interrupted,
+}
+
+impl SessionState {
+    /// The word a person reads for this state.
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SessionState::Unfinished => "unfinished",
+            SessionState::Waiting => "waiting",
+            SessionState::Interrupted => "interrupted",
+        }
+    }
+}
+
 /// One session, as the startup list shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionRow {
@@ -91,13 +114,13 @@ impl SessionRow {
     /// column of noise. The states worth a word are the ones where opening the
     /// session does something that was not asked for — continuing unfinished
     /// work — or where it is waiting on a person.
-    pub(crate) fn state(&self) -> Option<&'static str> {
+    pub(crate) fn state(&self) -> Option<SessionState> {
         if self.unfinished {
-            return Some("unfinished");
+            return Some(SessionState::Unfinished);
         }
         match self.phase {
-            Phase::AwaitingTool => Some("waiting"),
-            Phase::Streaming => Some("interrupted"),
+            Phase::AwaitingTool => Some(SessionState::Waiting),
+            Phase::Streaming => Some(SessionState::Interrupted),
             Phase::Idle => None,
         }
     }
@@ -237,12 +260,12 @@ fn session_items(rows: &[SessionRow]) -> Vec<Item> {
     if let Some(state) = rows[0].state() {
         // The state belongs to the row it describes, and that row is found by
         // its place: the second entry is the newest session.
-        items[1] = items[1].clone().noted(state);
+        items[1] = items[1].clone().noted(state.as_str());
     }
     for row in rows {
         let mut item = Item::new(row.label(), false).searched_by(row.key.clone());
         if let Some(state) = row.state() {
-            item = item.noted(state);
+            item = item.noted(state.as_str());
         }
         items.push(item);
     }
@@ -553,9 +576,9 @@ mod tests {
     #[test]
     fn a_session_with_something_to_continue_says_so() {
         let unfinished = row("aaaaaaaa", None, Phase::Streaming, true);
-        assert_eq!(unfinished.state(), Some("unfinished"));
+        assert_eq!(unfinished.state(), Some(SessionState::Unfinished));
         let stale = row("aaaaaaaa", None, Phase::AwaitingTool, false);
-        assert_eq!(stale.state(), Some("waiting"));
+        assert_eq!(stale.state(), Some(SessionState::Waiting));
     }
 
     #[test]
