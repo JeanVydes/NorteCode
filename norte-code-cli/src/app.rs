@@ -384,40 +384,12 @@ pub(crate) const INPUT_ROWS: u16 = metrics::INPUT_ROWS;
 /// a person watching a silent provider wants and cannot get from anything else
 /// on screen.
 fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    if area.height == 0 {
-        return;
-    }
-    // The phase decides the words and the clock decides the glyph: the two say
-    // different things and one of them is not about time passing.
-    let label = match state.waiting {
-        Some(crate::render::Wait::Streaming) => "streaming",
-        Some(crate::render::Wait::Thinking) => "thinking",
-        _ => "waiting for the first token",
+    let widget = crate::ui::spinner::Spinner {
+        waiting: state.waiting,
+        waiting_since: state.waiting_since,
+        style,
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_millis());
-    let step = now / u128::from(SPINNER_MS);
-    let glyph = SPINNER[(step % SPINNER.len() as u128) as usize];
-    // The count is of the wait, and the wait began when the client was told a
-    // turn started. The frame is the only thing that knows that instant, so it
-    // is kept here rather than travelling from the loop.
-    let since = state
-        .waiting_since
-        .map_or(0, |started| now.saturating_sub(started));
-    let since_secs = u64::try_from(since / 1_000).unwrap_or(u64::MAX);
-    let line = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(glyph.to_owned(), style.accent_span()),
-        Span::raw(" "),
-        Span::styled(label.to_owned(), style.dim_span()),
-        Span::styled(
-            format!(" · {}", elapsed(std::time::Duration::from_secs(since_secs))),
-            style.faint_span(),
-        ),
-    ]);
-    Paragraph::new(line).render(area, frame.buffer_mut());
+    crate::ui::Widget::draw(&widget, frame, area, &crate::style::Theme);
 }
 
 /// How long one glyph of the spinner is shown, in ms.
