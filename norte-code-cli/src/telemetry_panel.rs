@@ -801,13 +801,22 @@ impl Panel {
             buckets.last().map_or("–", String::as_str)
         )));
         for (label, points) in &series {
-            let spark = sparkline(points);
             let peak = points.iter().copied().max().unwrap_or(0);
-            out.push(ViewLine::plain(format!(
-                "{:<LABEL_COLUMN$} {spark}  peak {}",
-                clip(label, LABEL_COLUMN),
-                metric_scalar(peak, self.metric)
-            )));
+            let rows = plot(points, 4);
+            for (i, row) in rows.iter().enumerate() {
+                if i == 0 {
+                    out.push(ViewLine::plain(format!(
+                        "{:<LABEL_COLUMN$} {row}  peak {}",
+                        clip(label, LABEL_COLUMN),
+                        metric_scalar(peak, self.metric)
+                    )));
+                } else {
+                    out.push(ViewLine::plain(format!(
+                        "{:<LABEL_COLUMN$} {row}",
+                        ""
+                    )));
+                }
+            }
         }
     }
 
@@ -864,7 +873,30 @@ fn clip(label: &str, width: usize) -> String {
     label.chars().take(width).collect()
 }
 
+/// A small multi-row plot of a series: `height` rows, one column per point,
+/// so the shape reads as a chart and not as a single line of blocks.
+#[must_use]
+fn plot(points: &[u64], height: usize) -> Vec<String> {
+    let peak = points.iter().copied().max().unwrap_or(0);
+    let height = height.max(1);
+    if peak == 0 {
+        return vec!["·".repeat(points.len()); height];
+    }
+    let mut rows = vec![String::with_capacity(points.len()); height];
+    for point in points {
+        let level = usize::try_from(point.saturating_mul(height as u64) / peak).unwrap_or(0);
+        let level = level.min(height);
+        for (row, line) in rows.iter_mut().enumerate() {
+            // row 0 is the top: a column reaches it only when its level is high.
+            let filled = level > (height - 1 - row);
+            line.push(if filled { '█' } else { ' ' });
+        }
+    }
+    rows
+}
+
 /// The eight-step sparkline of a series, one character per point.
+#[allow(dead_code)]
 fn sparkline(points: &[u64]) -> String {
     const STEPS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let peak = points.iter().copied().max().unwrap_or(0);
