@@ -981,7 +981,6 @@ impl Service {
                     action: status.action,
                 }),
             EngineEvent::RequestReconstructed { .. } => {
-                eprintln!("HANDLE RequestReconstructed");
                 return self
                     .settle(engine, request_id, key, nid, stats, tx, false, gate)
                     .await;
