@@ -27,11 +27,11 @@ use norte::{
     ToolContext, Usage,
 };
 use norte_code_protocol::catalog::WireSchema;
-use norte_code_protocol::config::{ApiKey, BudgetConfig, RetryConfig};
+use norte_code_protocol::config::{ApiKey, BudgetConfig, CompactionTrigger, RetryConfig};
 use norte_code_protocol::sqlite::{RequestStatus, SqliteStore};
 use norte_code_protocol::{
-    Budget, BudgetUnit, ClientRequest, ClientRequestKind, Delta, ErrorCode,
-    Reasoning as ProtocolReasoning, ReasoningScope,
+    Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, CompactionReason, Delta,
+    ErrorCode, Reasoning as ProtocolReasoning, ReasoningScope,
 };
 use norte_testing::ScriptedModel;
 use norte_tools::{ShellLimits, ShellRequest, ShellTool};
@@ -2652,9 +2652,9 @@ async fn the_budget_stops_the_next_request_every_time() {
     // next request, so the budget sometimes let that request through.
     let mut config = config();
     config.budgets.session = Some(BudgetConfig {
-        unit: "requests".to_owned(),
+        unit: BudgetUnit::Requests,
         limit: 1.0,
-        action: "stop".to_owned(),
+        action: BudgetAction::Stop,
     });
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
@@ -2931,7 +2931,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
     for event in &first {
         match &event.kind {
             ServerEventKind::CompactionStarted { reason } => {
-                assert_eq!(reason, "threshold");
+                assert_eq!(*reason, CompactionReason::Threshold);
                 started = true;
             }
             ServerEventKind::CompactionFinished {
@@ -3024,7 +3024,7 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
     );
     let mut config = config();
     config.compaction.threshold = 0.5;
-    config.compaction.trigger = "eager".to_owned();
+    config.compaction.trigger = CompactionTrigger::Eager;
     config.compaction.keep_recent = 1;
     let (service, store) = persistent_service_with_config(config, model).await;
     let events = drain(
@@ -3050,7 +3050,7 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
     for event in &events {
         match &event.kind {
             ServerEventKind::CompactionStarted { reason } => {
-                assert_eq!(reason, "threshold");
+                assert_eq!(*reason, CompactionReason::Threshold);
                 started += 1;
             }
             ServerEventKind::CompactionFinished {
@@ -3113,7 +3113,7 @@ async fn a_failed_eager_summary_stops_at_the_safe_point() {
     ]));
     let mut config = config();
     config.compaction.threshold = 0.5;
-    config.compaction.trigger = "eager".to_owned();
+    config.compaction.trigger = CompactionTrigger::Eager;
     config.compaction.keep_recent = 1;
     let (service, store) = persistent_service_with_config(config, model).await;
     let events = drain(
@@ -3707,9 +3707,9 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
 async fn a_session_budget_stops_the_next_request() {
     let mut config = config();
     config.budgets.session = Some(BudgetConfig {
-        unit: "requests".to_owned(),
+        unit: BudgetUnit::Requests,
         limit: 1.0,
-        action: "stop".to_owned(),
+        action: BudgetAction::Stop,
     });
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
@@ -5212,7 +5212,7 @@ fn replays(events: &[ServerEvent]) -> Vec<(String, String)> {
         .iter()
         .filter_map(|event| match &event.kind {
             ServerEventKind::MessageReplayed { role, text, .. } => {
-                Some((role.clone(), text.clone()))
+                Some((role.to_string(), text.clone()))
             }
             _ => None,
         })

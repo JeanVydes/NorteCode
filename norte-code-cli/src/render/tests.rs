@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use norte_code_protocol::{Delta, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_protocol::{Delta, OutputStream, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::input::{Pinned, TodoItem, TodoStatus};
 use crate::render::argument::todo_items;
@@ -466,7 +466,7 @@ fn a_streamed_chunk_is_recorded_once() {
                 turn: 1,
                 call_id: "call-1".to_owned(),
                 tool: "shell".to_owned(),
-                stream: "stdout".to_owned(),
+                stream: OutputStream::Stdout,
                 text: "only once\n".to_owned(),
                 last: false,
             },
@@ -512,7 +512,7 @@ fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
         turn: 1,
         call_id: "call-1".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stdout".to_owned(),
+        stream: OutputStream::Stdout,
         text: "first\n".to_owned(),
         last: false,
     });
@@ -537,7 +537,7 @@ fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
         turn: 1,
         call_id: "call-1".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stdout".to_owned(),
+        stream: OutputStream::Stdout,
         text: "late\n".to_owned(),
         last: false,
     });
@@ -551,7 +551,7 @@ fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
         turn: 1,
         call_id: "call-2".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stdout".to_owned(),
+        stream: OutputStream::Stdout,
         text: "other\n".to_owned(),
         last: false,
     });
@@ -573,7 +573,7 @@ fn a_streamed_call_is_remembered_so_its_finish_does_not_repeat_it() {
         turn: 1,
         call_id: "call-1".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stdout".to_owned(),
+        stream: OutputStream::Stdout,
         text: "building…\n".to_owned(),
         last: false,
     });
@@ -585,7 +585,7 @@ fn a_streamed_call_is_remembered_so_its_finish_does_not_repeat_it() {
         turn: 1,
         call_id: "call-2".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stderr".to_owned(),
+        stream: OutputStream::Stderr,
         text: String::new(),
         last: true,
     });
@@ -1061,7 +1061,7 @@ fn streamed_output_is_boxed_and_closed_by_a_chunk_with_no_bytes() {
             turn: 1,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: "stdout".to_owned(),
+            stream: OutputStream::Stdout,
             text: text.to_owned(),
             last,
         });
@@ -1091,7 +1091,7 @@ fn a_finished_call_closes_the_box_and_its_result_is_not_repeated() {
         turn: 1,
         call_id: "call-1".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stdout".to_owned(),
+        stream: OutputStream::Stdout,
         text: "output\n".to_owned(),
         last: false,
     });
@@ -1129,7 +1129,10 @@ fn a_line_split_across_chunks_waits_until_it_is_whole() {
             turn: 1,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: stream.to_owned(),
+            stream: match stream {
+                "stderr" => OutputStream::Stderr,
+                _ => OutputStream::Stdout,
+            },
             text: text.to_owned(),
             last: false,
         });
@@ -1176,7 +1179,7 @@ fn a_line_that_never_ends_is_shown_once_it_is_long_enough() {
             turn: 1,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: "stdout".to_owned(),
+            stream: OutputStream::Stdout,
             text: text.to_owned(),
             last: false,
         });
@@ -1210,7 +1213,7 @@ fn the_output_box_keeps_four_rows_and_the_last_four_are_the_ones_kept() {
             turn: 1,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: "stdout".to_owned(),
+            stream: OutputStream::Stdout,
             text: format!("line {index}\n"),
             last: false,
         });
@@ -1233,7 +1236,7 @@ fn the_output_box_keeps_four_rows_and_the_last_four_are_the_ones_kept() {
         turn: 1,
         call_id: "call-1".to_owned(),
         tool: "shell".to_owned(),
-        stream: "stdout".to_owned(),
+        stream: OutputStream::Stdout,
         text: String::new(),
         last: true,
     });
@@ -1253,7 +1256,7 @@ fn a_long_output_is_the_tail_and_not_the_head() {
             turn: 1,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: "stdout".to_owned(),
+            stream: OutputStream::Stdout,
             text: format!("{label}\n"),
             last: false,
         });

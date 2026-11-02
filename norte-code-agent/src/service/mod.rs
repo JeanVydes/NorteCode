@@ -57,7 +57,7 @@ use norte_tools::{
 use tokio_util::sync::CancellationToken;
 
 use norte_code_protocol::catalog::{Catalog, load_catalog_files};
-use norte_code_protocol::config::Config;
+use norte_code_protocol::config::{CompactionTrigger, Config};
 use norte_code_protocol::plugins::ContextUsage;
 use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
@@ -519,7 +519,9 @@ impl Service {
     /// The eager-compaction gate, when enabled and the model declares a context
     /// window. Without a window there is no threshold to compare against.
     fn compaction_gate(&self, spec: &ModelSpec) -> Option<Arc<CompactionGate>> {
-        if !self.config().compaction.enabled || self.config().compaction.trigger != "eager" {
+        if !self.config().compaction.enabled
+            || self.config().compaction.trigger != CompactionTrigger::Eager
+        {
             return None;
         }
         let max_context = spec.capabilities.max_context?;

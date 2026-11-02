@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::Phase;
 use crate::costs::CostRecord;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -60,7 +61,7 @@ pub struct StoredSession {
     /// When the session was created.
     pub created_at: DateTime<Utc>,
     /// The last phase Norte Code observed, as its protocol names it.
-    pub phase: String,
+    pub phase: Phase,
     /// Host counters (billed messages, reported cost), opaque to the store.
     #[serde(default)]
     pub stats: Value,
@@ -456,8 +457,8 @@ impl SessionDirectory for InMemoryDirectory {
         let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         let mut repaired = 0;
         for session in sessions.values_mut() {
-            if session.phase == "streaming" {
-                "idle".clone_into(&mut session.phase);
+            if session.phase == Phase::Streaming {
+                session.phase = Phase::Idle;
                 repaired += 1;
             }
         }
@@ -1217,7 +1218,11 @@ impl SessionDirectory for SqliteStore {
                                 reason: error.to_string(),
                             }
                         })?,
-                        phase,
+                        phase: match phase.as_str() {
+                            "streaming" => Phase::Streaming,
+                            "awaiting_tool" => Phase::AwaitingTool,
+                            _ => Phase::Idle,
+                        },
                         stats: decode(&stats, "session stats")?,
                         denied_tools: extra.denied_tools,
                         allowed_tools: extra.allowed_tools,
@@ -1249,7 +1254,7 @@ impl SessionDirectory for SqliteStore {
                         session.provider,
                         session.model,
                         session.created_at.to_rfc3339(),
-                        session.phase,
+                        session.phase.to_string(),
                         stats,
                         data,
                     ],
@@ -1937,7 +1942,7 @@ impl SessionDirectory for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norte::harness::Phase;
+    use norte::harness::Phase as NortePhase;
     use norte::{CallId, Message};
 
     #[tokio::test]
@@ -2034,7 +2039,7 @@ mod tests {
                 provider: "provider".to_owned(),
                 model: "model".to_owned(),
                 created_at: Utc::now(),
-                phase: "streaming".to_owned(),
+                phase: Phase::Streaming,
                 stats: serde_json::json!({}),
                 denied_tools: Vec::new(),
                 allowed_tools: Vec::new(),
@@ -2045,7 +2050,7 @@ mod tests {
             .expect("save");
         assert_eq!(store.repair_interrupted().await.expect("repair"), 1);
         let sessions = store.sessions().await.expect("sessions");
-        assert_eq!(sessions[0].phase, "idle");
+        assert_eq!(sessions[0].phase, Phase::Idle);
         assert_eq!(store.repair_interrupted().await.expect("repair"), 0);
     }
 
@@ -2094,7 +2099,7 @@ mod tests {
                 expected_version: None,
                 nodes: Vec::new(),
                 head: None,
-                phase: Phase::Idle,
+                phase: NortePhase::Idle,
                 turn: 0,
                 metadata: None,
             })
@@ -2121,7 +2126,7 @@ mod tests {
                 expected_version: Some(1),
                 nodes: vec![node.clone()],
                 head: Some(node.id),
-                phase: Phase::Idle,
+                phase: NortePhase::Idle,
                 turn: 1,
                 metadata: None,
             })
@@ -2151,7 +2156,7 @@ mod tests {
                     expected_version: None,
                     nodes: Vec::new(),
                     head: None,
-                    phase: Phase::Idle,
+                    phase: NortePhase::Idle,
                     turn: 0,
                     metadata: None,
                 })
@@ -2164,7 +2169,7 @@ mod tests {
                     expected_version: Some(1),
                     nodes: vec![node.clone()],
                     head: Some(node.id),
-                    phase: Phase::Idle,
+                    phase: NortePhase::Idle,
                     turn: 1,
                     metadata: None,
                 })
@@ -2192,7 +2197,7 @@ mod tests {
             provider: "openai".to_owned(),
             model: "gpt".to_owned(),
             created_at: Utc::now(),
-            phase: "idle".to_owned(),
+            phase: Phase::Idle,
             stats: serde_json::json!({"cost": 0.5}),
             denied_tools: vec!["command".to_owned()],
             allowed_tools: vec!["write".to_owned()],
@@ -2297,7 +2302,7 @@ mod tests {
                 provider: "openai".to_owned(),
                 model: "gpt".to_owned(),
                 created_at: Utc::now(),
-                phase: "idle".to_owned(),
+                phase: Phase::Idle,
                 stats: serde_json::json!({}),
                 denied_tools: Vec::new(),
                 allowed_tools: Vec::new(),
@@ -2313,7 +2318,7 @@ mod tests {
                 expected_version: None,
                 nodes: Vec::new(),
                 head: None,
-                phase: Phase::Idle,
+                phase: NortePhase::Idle,
                 turn: 0,
                 metadata: None,
             })
@@ -2326,7 +2331,7 @@ mod tests {
                 expected_version: Some(1),
                 nodes: vec![first.clone()],
                 head: Some(first.id),
-                phase: Phase::Idle,
+                phase: NortePhase::Idle,
                 turn: 1,
                 metadata: None,
             })
@@ -2339,7 +2344,7 @@ mod tests {
                 expected_version: Some(2),
                 nodes: vec![second.clone()],
                 head: Some(second.id),
-                phase: Phase::Idle,
+                phase: NortePhase::Idle,
                 turn: 2,
                 metadata: None,
             })
@@ -2481,7 +2486,7 @@ mod tests {
             provider: "openai".to_owned(),
             model: "gpt".to_owned(),
             created_at: Utc::now(),
-            phase: "idle".to_owned(),
+            phase: Phase::Idle,
             stats: serde_json::json!({}),
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),

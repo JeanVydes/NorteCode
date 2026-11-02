@@ -19,8 +19,8 @@ use norte::{
 };
 use norte_code_protocol::costs::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
-    Attachment, Budget, ErrorCode, Reasoning as ProtocolReasoning, ServerEvent, ServerEventKind,
-    SessionKey,
+    Attachment, Budget, ErrorCode, MessageRole, Reasoning as ProtocolReasoning, ServerEvent,
+    ServerEventKind, SessionKey,
 };
 
 use norte_code_protocol::sqlite::{RequestStatus, SessionDirectory};
@@ -744,7 +744,7 @@ impl Service {
                     turn: stats.turn,
                     call_id: call_id.to_string(),
                     tool: tool.to_string(),
-                    stream: stream_label(*stream).to_owned(),
+                    stream: stream_label(*stream),
                     // The tool redacted before it stored the bytes; the lossy
                     // conversion is for a chunk that splits a code point, which
                     // the reader already avoids by cutting on character
@@ -1254,7 +1254,7 @@ async fn replay_events(
                 Some(key.clone()),
                 ServerEventKind::MessageReplayed {
                     index: u64::try_from(offset + 1).unwrap_or(u64::MAX),
-                    role: role_name(message.role).to_owned(),
+                    role: role_name(message.role),
                     text,
                 },
             ))
@@ -1263,17 +1263,14 @@ async fn replay_events(
 }
 
 /// The wire name of a message's role.
-///
-/// The catch-all is not a guess: `Role` is `non_exhaustive`, so a role this
-/// build does not know has to name itself something.
-fn role_name(role: Role) -> &'static str {
+fn role_name(role: Role) -> MessageRole {
     match role {
-        Role::System => "system",
-        Role::Developer => "developer",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::Tool => "tool",
-        _ => "unknown",
+        Role::System => MessageRole::System,
+        Role::Developer => MessageRole::Developer,
+        Role::User => MessageRole::User,
+        Role::Assistant => MessageRole::Assistant,
+        Role::Tool => MessageRole::Tool,
+        _ => MessageRole::Unknown,
     }
 }
 

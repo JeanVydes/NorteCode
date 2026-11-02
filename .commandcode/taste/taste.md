@@ -1,0 +1,1 @@
+- When a plan is already approved and saved to a file, execute it directly: read the plan file first, then implement it step by step, referring back to the plan as you work; never re-enter plan mode or re-present the plan for approval. Confidence: 0.7

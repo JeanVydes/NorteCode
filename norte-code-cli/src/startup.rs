@@ -131,11 +131,7 @@ pub(crate) async fn session_rows(path: &Path) -> Result<Vec<SessionRow>, String>
 
 /// One stored session as a row.
 fn row_of(session: StoredSession) -> SessionRow {
-    let phase = match session.phase.as_str() {
-        "streaming" => Phase::Streaming,
-        "awaiting_tool" => Phase::AwaitingTool,
-        _ => Phase::Idle,
-    };
+    let phase = session.phase;
     SessionRow {
         // A phase a live turn writes is a phase that outlived it: no process is
         // streaming a session it has just opened, so it is work to continue. A
@@ -471,7 +467,11 @@ mod tests {
             provider: "openai".to_owned(),
             model: "gpt-5".to_owned(),
             created_at: chrono::Utc::now(),
-            phase: phase.to_owned(),
+            phase: match phase {
+                "streaming" => Phase::Streaming,
+                "awaiting_tool" => Phase::AwaitingTool,
+                _ => Phase::Idle,
+            },
             stats: serde_json::Value::Null,
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),

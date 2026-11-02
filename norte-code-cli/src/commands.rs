@@ -343,7 +343,7 @@ pub(crate) async fn sessions_command(args: &SessionsArgs) -> Result<u8, String> 
                 crate::text::terminal(&session.key),
                 crate::text::terminal(session.title.as_deref().unwrap_or("(untitled)")),
                 crate::text::terminal(&label),
-                crate::text::terminal(&session.phase)
+                crate::text::terminal(&session.phase.to_string())
             );
         }
     }

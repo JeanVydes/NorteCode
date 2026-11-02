@@ -447,25 +447,6 @@ fn catalogue_candidates(
         .collect()
 }
 
-/// The rows the plugins ask for, asked again.
-///
-/// The sidebar is read at startup and after every turn: a plugin that shows a
-/// number wants it to move, and the frame never reaches for a plugin itself.
-/// A frame that could stall on somebody else's code is a frame that can freeze
-/// the client, so the asking happens here, where a slow plugin costs one
-/// redraw and not the whole interface.
-pub(crate) fn refresh_plugin_sidebar(renderer: &mut Renderer) {
-    renderer.sidebar = crate::plugins::loaded()
-        .sidebar()
-        .into_iter()
-        .map(|(name, rows)| (name.to_owned(), rows))
-        .collect();
-    // The rows changed, so the frame that holds them has to be drawn again:
-    // nothing else moves when a turn ends, and a sidebar that kept the numbers
-    // of the last turn is a sidebar nobody can trust.
-    renderer.mark_dirty();
-}
-
 /// Records the names the completion offers for the provider in play.
 ///
 /// The catalogue belongs to the service and the completion is answered on the
@@ -972,7 +953,6 @@ pub(crate) async fn interactive_loop(
         // plugins ask the host about the session in play, so the handle is
         // pointed at the one that is now.
         crate::plugins::attach(service, session.clone());
-        refresh_plugin_sidebar(renderer);
         if outcome.parked || renderer.budget_stopped {
             break;
         }
@@ -1314,47 +1294,6 @@ fn report_tools_now(
     // names the tool.
     let rows = tools_panel(style, service, session);
     renderer.open_editable("tools", rows);
-}
-
-/// Every MCP server the sidebar names: the ones switched on.
-///
-/// A server configured off is left out, not drawn as a dead row. It is off on
-/// purpose and a row that kept saying so took a line of the column for the life
-/// of the process, next to the ones that are actually up; the `/mcp` panel is
-/// where a person goes to see and switch every entry, including the off ones.
-/// A server that failed to start stays: it is configured on and not running,
-/// which is exactly what the column should warn about.
-pub(crate) fn mcp_rows(service: &norte_code_agent::Service) -> Vec<crate::input::McpRow> {
-    use crate::input::{McpRow, McpState};
-    let status = service.mcp_status();
-    let failures = service.mcp_failures();
-    service
-        .config()
-        .mcp_servers
-        .iter()
-        .filter(|(_, config)| config.enabled)
-        .map(|(name, _)| {
-            let running = status.iter().find(|server| &server.name == name);
-            let state = if let Some(server) = running {
-                if server.active {
-                    McpState::On
-                } else {
-                    McpState::Off
-                }
-            } else if let Some((_, reason)) = failures.iter().find(|(failed, _)| failed == name) {
-                McpState::Failed(reason.clone())
-            } else {
-                // Configured on and neither running nor failed: it is trying, or
-                // it was never reached. Off is the honest word for that.
-                McpState::Off
-            };
-            McpRow {
-                name: name.clone(),
-                tools: running.map_or(0, |server| server.tools.len()),
-                state,
-            }
-        })
-        .collect()
 }
 
 /// Opens the telemetry panel: this session's ledger and every provider's.
@@ -1973,8 +1912,6 @@ async fn report_refresh(
     if !failed.is_empty() {
         renderer.notice(format!("{} mcp server(s) unreachable", failed.len()));
     }
-    // The sidebar follows: it is a column of state, and the state just changed.
-    renderer.set_mcp(mcp_rows(service));
     // And so does the completion: `/refresh` is what re-reads the catalogue, so
     // a model added to `models.json` is one the next `/model` offers.
     refresh_completions(service, session, renderer);
@@ -1992,8 +1929,6 @@ async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
     for (name, reason) in failed {
         renderer.notice(format!("`{name}` did not start: {reason}"));
     }
-    // The sidebar follows: it is a column of state, and the state just changed.
-    renderer.set_mcp(mcp_rows(service));
 }
 
 /// Lists, adds, removes or switches an MCP server.
@@ -2060,8 +1995,8 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
             }
             // The file changed, so the configuration in memory is stale: a
             // reload reads it back before the connections are rebuilt. Without
-            // this the sidebar was filtered from the old `enabled` flag and a
-            // server switched off here kept its row until a `/refresh`.
+            // this the status kept the old `enabled` flag and a server switched
+            // off here kept its row until a `/refresh`.
             if let Err(error) = service.reload_config() {
                 renderer.notice(format!("warning: could not reload the config: {error}"));
             }
@@ -2119,7 +2054,6 @@ fn apply_mcp_action(
             if !state {
                 renderer.notice("its tools leave the next turn; the process stays up");
             }
-            renderer.set_mcp(mcp_rows(service));
             let rows = mcp_panel(service);
             if rows.is_empty() {
                 renderer.close_modal();

@@ -31,7 +31,7 @@ use norte_code_protocol::plugins::{ContextUsage, PluginContext, PluginHost, Plug
 
 /// The plugins this client loaded.
 ///
-/// A static and not a value passed around: the command registry, the sidebar
+/// A static and not a value passed around: the command registry, the panels
 /// and the commands themselves all need the same plugins, and a registry that
 /// was copied would be a copy that lost whatever the plugins kept.
 static LOADED: OnceLock<Plugins> = OnceLock::new();

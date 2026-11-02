@@ -37,32 +37,6 @@ pub(crate) struct InstallReport {
     pub(crate) result: Result<String, String>,
 }
 
-/// One MCP server, as the sidebar renders it.
-///
-/// It is a configured entry and not a connection: a server that is off, or that
-/// failed to start, is exactly what a person wants to see in the column, so the
-/// row exists whether or not anything is running behind it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct McpRow {
-    /// The name the configuration gave it.
-    pub(crate) name: String,
-    /// How many tools it publishes, or zero when none connected.
-    pub(crate) tools: usize,
-    /// What the row says about it.
-    pub(crate) state: McpState,
-}
-
-/// What a configured MCP server is doing, as the sidebar shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum McpState {
-    /// Connected, and its tools reach the model.
-    On,
-    /// Connected, but switched off for the turn.
-    Off,
-    /// It did not start; the string is why.
-    Failed(String),
-}
-
 /// One item in the session's todo list, as the footer renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TodoItem {
@@ -177,7 +151,7 @@ fn text_in(range: ((u16, u16), (u16, u16)), rows: &[String]) -> String {
             chars.len()
         };
         let slice: String = chars[from.min(to)..to].iter().collect();
-        out.push(slice.trim_end().to_owned());
+        out.push(strip_gutter(&slice).trim_end().to_owned());
     }
     // A drag that starts on a blank row above the text picks up the blank rows
     // it passed over, and they are not part of what the person meant to copy:
@@ -191,6 +165,26 @@ fn text_in(range: ((u16, u16), (u16, u16)), rows: &[String]) -> String {
         out.pop();
     }
     out.join("\n")
+}
+
+/// Removes the frame's margin from a painted row.
+///
+/// Every conversation row is drawn behind a one-character margin (`▌ ` for a
+/// human, `│ ` for reasoning, two spaces otherwise). A selection that copied
+/// the frame verbatim carried it, so a paragraph pasted into an editor was
+/// indented by a column nobody typed. Only that two-character prefix goes:
+/// the indentation inside a fenced block is after it and stays.
+fn strip_gutter(row: &str) -> &str {
+    let row = row
+        .strip_prefix(" ▌ ")
+        .or_else(|| row.strip_prefix(" │ "))
+        .or_else(|| row.strip_prefix("   "))
+        .unwrap_or(row);
+    let row = row
+        .strip_prefix("▌ ")
+        .or_else(|| row.strip_prefix("│ "))
+        .unwrap_or(row);
+    row.strip_prefix("  ").unwrap_or(row)
 }
 
 /// Everything the footer draws, read under one lock.
@@ -277,8 +271,6 @@ struct PinnedInner {
     todos: Vec<TodoItem>,
     /// The question being answered, when the model asked one.
     asked: Option<Asked>,
-    /// The connected MCP servers, as the sidebar draws them.
-    mcp: Vec<McpRow>,
     /// The provider ids and the `provider/model` names the catalogue holds.
     ///
     /// They are here because the completion is answered on two other threads —
@@ -553,20 +545,6 @@ impl Pinned {
         self.lock().asked.is_some()
     }
 
-    /// Replaces the MCP server list the sidebar shows. Empty clears it.
-    pub(crate) fn set_mcp(&self, servers: Vec<McpRow>) {
-        let mut inner = self.lock();
-        if inner.mcp != servers {
-            inner.mcp = servers;
-            self.dirty.store(true, Ordering::Relaxed);
-        }
-    }
-
-    /// The connected MCP servers, in configuration order.
-    pub(crate) fn mcp(&self) -> Vec<McpRow> {
-        self.lock().mcp.clone()
-    }
-
     /// Replaces the catalogue names the completion offers.
     pub(crate) fn set_completion_names(&self, names: CompletionNames) {
         let mut inner = self.lock();
@@ -591,7 +569,7 @@ impl Pinned {
     }
     /// A snapshot of the todo list, in the model's order.
     ///
-    /// The sidebar draws it, so it is read on every frame and not only by a
+    /// The task row draws it, so it is read on every frame and not only by a
     /// test: the list is the model's plan, and it belongs beside the work.
     pub(crate) fn todos(&self) -> Vec<TodoItem> {
         self.lock().todos.clone()
@@ -1828,7 +1806,7 @@ mod unix {
                         // reads the terminal's size when it draws: what it needs
                         // is to be told to draw. Nothing marked this before, so
                         // the flag the frame's own resize handling reads was
-                        // never set — the sidebar kept the columns it had been
+                        // never set — the frame kept the columns it had been
                         // given at the old size and took the rest of the screen.
                         Ok(Event::Resize(..)) => {
                             pinned.resized.store(true, Ordering::Release);
@@ -2599,19 +2577,20 @@ mod pinned_tests {
         // `l` and a space, which is what a terminal copies too.
         assert_eq!(
             super::text_in(((8, 0), (8, 1)), &rows),
-            "line of the answer\n  second"
+            "line of the answer\nsecond"
         );
         // A drag that ends on a later row takes the rows between whole, which
-        // is what makes a drag over a paragraph yield the paragraph.
+        // is what makes a drag over a paragraph yield the paragraph. The
+        // frame's margin is not part of the text, so it does not travel.
         assert_eq!(
             super::text_in(((2, 0), (4, 2)), &rows),
-            "first line of the answer\n  second line\n  thi"
+            "first line of the answer\nsecond line\nthi"
         );
         // And the corners may come in any order: a drag goes up as easily as
         // down.
         assert_eq!(
             super::text_in(((8, 1), (8, 0)), &rows),
-            "line of the answer\n  second"
+            "line of the answer\nsecond"
         );
         // A click with no drag is one character, and a click past the end is
         // nothing to copy at all.

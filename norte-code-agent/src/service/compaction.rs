@@ -12,7 +12,7 @@ use norte::{
     Continuation, Layer, LayerContext, Message, ModelRequest, ModelStream,
     Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role, ShortCircuitReason,
 };
-use norte_code_protocol::{ServerEvent, ServerEventKind, SessionKey};
+use norte_code_protocol::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
 
 use super::mapping::reported_cost;
 use super::{CostRecord, ModelSpec, Service, ServiceError};
@@ -78,7 +78,10 @@ impl Service {
             request_id,
             Some(key.clone()),
             ServerEventKind::CompactionStarted {
-                reason: reason.to_owned(),
+                reason: match reason {
+                    "manual" => CompactionReason::Manual,
+                    _ => CompactionReason::Threshold,
+                },
             },
         )];
         match result {
@@ -178,7 +181,7 @@ impl Service {
             .await?;
         let reasoning = compaction_reasoning(
             &summary_spec.capabilities.reasoning,
-            &self.config().compaction.reasoning,
+            self.config().compaction.reasoning,
         );
         let outcome = summary_engine
             .turn(scratch.id)
@@ -356,27 +359,27 @@ pub(super) fn recent_start(messages: &[Message], keep: usize) -> usize {
 /// The lowest reasoning the model allows, or `Automatic` when it has none.
 pub(super) fn compaction_reasoning(
     reasoning: &ReasoningCapability,
-    setting: &str,
+    setting: norte_code_protocol::config::CompactionReasoning,
 ) -> ReasoningRequest {
+    use norte_code_protocol::config::CompactionReasoning as S;
     if !reasoning.supported {
         return ReasoningRequest::Automatic;
     }
-    let setting = setting.trim().to_ascii_lowercase();
-    match setting.as_str() {
-        "off" | "lowest" if reasoning.can_disable => ReasoningRequest::Disabled,
-        "lowest" => reasoning
+    match setting {
+        S::Off | S::Lowest if reasoning.can_disable => ReasoningRequest::Disabled,
+        S::Off => ReasoningRequest::Automatic,
+        S::Lowest => reasoning
             .efforts
             .iter()
             .next()
             .copied()
             .map_or(ReasoningRequest::Automatic, ReasoningRequest::Effort),
-        "minimal" => ReasoningRequest::Effort(ReasoningEffort::Minimal),
-        "low" => ReasoningRequest::Effort(ReasoningEffort::Low),
-        "medium" => ReasoningRequest::Effort(ReasoningEffort::Medium),
-        "high" => ReasoningRequest::Effort(ReasoningEffort::High),
-        "xhigh" => ReasoningRequest::Effort(ReasoningEffort::XHigh),
-        "max" => ReasoningRequest::Effort(ReasoningEffort::Max),
-        _ => ReasoningRequest::Automatic,
+        S::Minimal => ReasoningRequest::Effort(ReasoningEffort::Minimal),
+        S::Low => ReasoningRequest::Effort(ReasoningEffort::Low),
+        S::Medium => ReasoningRequest::Effort(ReasoningEffort::Medium),
+        S::High => ReasoningRequest::Effort(ReasoningEffort::High),
+        S::XHigh => ReasoningRequest::Effort(ReasoningEffort::XHigh),
+        S::Max => ReasoningRequest::Effort(ReasoningEffort::Max),
     }
 }
 

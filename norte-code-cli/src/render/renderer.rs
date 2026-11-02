@@ -19,8 +19,9 @@ use super::labels::{
     budget_action_name, budget_label, code_name, format_measure, scope_name, short, unit_name,
 };
 use super::{
-    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, DiffStyle, HostFacts, Phase,
-    ServerEvent, ServerEventKind, Style, clip_text, compact_json, duration_label,
+    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, DiffStyle, HostFacts, MessageRole,
+    OutputStream, Phase, ServerEvent, ServerEventKind, Style, clip_text, compact_json,
+    duration_label,
 };
 
 /// How events are written.
@@ -213,12 +214,6 @@ pub(crate) struct Renderer {
     /// wait ends, which is what the row beside the spinner counts: a number
     /// that outlived the wait would keep counting after the answer arrived.
     pub(crate) waiting_since: Option<u128>,
-    /// The rows the plugins asked for, read once at startup.
-    ///
-    /// Kept rather than asked for per row: the plugins are a value the host
-    /// built, and a frame that reached for them would be a frame that could
-    /// stall on somebody else's code.
-    pub(crate) sidebar: Vec<(String, Vec<norte_code_protocol::plugins::SidebarRow>)>,
     pub(crate) failed: bool,
     pub(crate) cancelled: bool,
     pub(crate) budget_stopped: bool,
@@ -359,7 +354,6 @@ impl Renderer {
             reasoning: None,
             waiting: None,
             waiting_since: None,
-            sidebar: Vec::new(),
             failed: false,
             cancelled: false,
             budget_stopped: false,
@@ -488,7 +482,7 @@ impl Renderer {
                 // The replay says who spoke, and it is not always the human: a
                 // resumed session replays the tool results and the model's own
                 // answers too.
-                let kind = if role == "user" {
+                let kind = if *role == MessageRole::User {
                     Entry::Said
                 } else {
                     Entry::Answer
@@ -588,7 +582,7 @@ impl Renderer {
                 self.usage_event(&event.kind);
             }
             ServerEventKind::MessageReplayed { index, role, text } => {
-                self.replay_message(*index, role, text);
+                self.replay_message(*index, *role, text);
             }
             // The list the session already had, sent when a client attaches: the
             // transcript shows messages, and the task list is a widget the turn's
@@ -858,10 +852,6 @@ impl Renderer {
         };
         crate::app::State {
             transcript: self.transcript.clone(),
-            // Asked for on every frame rather than kept: a plugin that shows a
-            // number wants it to move, and one that wants it still returns the
-            // same text, which the frame's diff then writes nothing for.
-            sidebar: self.sidebar.clone(),
             input,
             cursor,
             select: anchor,
@@ -887,7 +877,6 @@ impl Renderer {
             // be stripped of its escapes and drawn in one colour, which is what
             // hid the two warnings the row exists for.
             status: self.status_line(),
-            mcp: self.pinned.mcp(),
             todos: self.task_rows(),
             suggestion,
             waiting: self.waiting,
@@ -947,26 +936,10 @@ impl Renderer {
         self.pinned.set_completion_names(names);
     }
 
-    /// Records the connected MCP servers, so the sidebar can draw them.
+    /// The task list, as the compact footer row shows it.
     ///
-    /// The renderer does not hold the service and cannot ask it: the CLI calls
-    /// this when it opens a session and after every `/refresh`, which is exactly
-    /// when the set of connected servers can change. What the sidebar draws is
-    /// then a snapshot taken at those moments, which is what a column of state is.
-    pub(crate) fn set_mcp(&mut self, servers: Vec<crate::input::McpRow>) {
-        self.pinned.set_mcp(servers);
-    }
-
-    /// The task list, as the rows the sidebar shows.
-    ///
-    /// The list used to be a tab in the footer, and a footer row is one line:
-    /// what the model planned and what it has finished is a list, and a list
-    /// does not fit in a row that also carries the model, the cost and the
-    /// effort. It is a column of the sidebar now, where it has the room and
-    /// where a person can see the work in flight beside the work.
-    ///
-    /// The rows come from the same state the footer's row used to be built
-    /// from, so the two can never disagree about what is pending.
+    /// The row comes from the same state the pinned footer is built from, so
+    /// the two can never disagree about what is pending.
     fn task_rows(&self) -> Vec<crate::app::TaskRow> {
         self.pinned
             .todos()
@@ -1256,7 +1229,7 @@ impl Renderer {
     /// A user message keeps the live prompt's `›` marker; an assistant message
     /// is rendered as markdown, like the answer it once was. Tool and system
     /// messages are shown dimmed so they read as context, not as the answer.
-    pub(crate) fn replay_message(&mut self, index: u64, role: &str, text: &str) {
+    pub(crate) fn replay_message(&mut self, index: u64, role: MessageRole, text: &str) {
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
@@ -1267,13 +1240,13 @@ impl Renderer {
         // The replay is the conversation that already happened, so it goes to
         // the transcript in one piece: a resumed session shows what was said
         // and not a second rendering of it.
-        let kind = if role == "user" {
+        let kind = if role == MessageRole::User {
             crate::transcript::Kind::Said
         } else {
             crate::transcript::Kind::Answer
         };
         let mut entry = crate::transcript::Entry::new(kind);
-        if role != "user" && role != "assistant" {
+        if role != MessageRole::User && role != MessageRole::Assistant {
             // A role the client does not draw on its own says which it is: a
             // system or developer message reads as neither side of the
             // conversation.
@@ -1753,7 +1726,15 @@ impl Renderer {
                 self.stop_bar();
                 self.end_reasoning();
                 self.block = Block::None;
-                self.output_delta(call_id, stream, text);
+                self.output_delta(
+                    call_id,
+                    match *stream {
+                        OutputStream::Stdout => "stdout",
+                        OutputStream::Stderr => "stderr",
+                        OutputStream::Other => "other",
+                    },
+                    text,
+                );
             }
             _ => {}
         }

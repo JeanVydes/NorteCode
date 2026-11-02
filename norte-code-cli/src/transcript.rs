@@ -305,6 +305,47 @@ impl Transcript {
         &self.entries
     }
 
+    /// The text of the conversation, as data and not as it was painted.
+    ///
+    /// The range selects lines from the flattened conversation — every line of
+    /// every entry, in order — and what comes back has no margin glyph, no
+    /// colour and no frame padding: each row is trimmed of trailing space, and
+    /// the blank rows the frame adds around the text are dropped. That is what a
+    /// copy should put on the clipboard, because it is what was said and not
+    /// what the screen drew.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn plain_text<R: std::ops::RangeBounds<usize>>(&self, range: R) -> String {
+        let lines: Vec<&str> = self
+            .entries
+            .iter()
+            .flat_map(|entry| entry.lines.iter().map(|line| line.text.as_str()))
+            .collect();
+        let start = match range.start_bound() {
+            std::ops::Bound::Included(i) => *i,
+            std::ops::Bound::Excluded(i) => i.saturating_add(1),
+            std::ops::Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            std::ops::Bound::Included(i) => i.saturating_add(1),
+            std::ops::Bound::Excluded(i) => *i,
+            std::ops::Bound::Unbounded => lines.len(),
+        };
+        let start = start.min(lines.len());
+        let end = end.min(lines.len());
+        let mut out: Vec<String> = lines[start..end]
+            .iter()
+            .map(|text| text.trim_end().to_owned())
+            .collect();
+        while out.first().is_some_and(|row| row.trim().is_empty()) {
+            out.remove(0);
+        }
+        while out.last().is_some_and(|row| row.trim().is_empty()) {
+            out.pop();
+        }
+        out.join("\n")
+    }
+
     /// How many entries there are.
     #[cfg(test)]
     #[must_use]
@@ -622,5 +663,14 @@ mod tests {
             [Kind::Said, Kind::Answer, Kind::ToolStarted],
             "the order is the conversation"
         );
+    }
+
+    #[test]
+    fn plain_text_drops_margin_and_padding() {
+        let mut transcript = Transcript::new();
+        transcript.push(Entry::line(Kind::Said, "alpha beta"));
+        transcript.push(Entry::line(Kind::Answer, "gamma"));
+        let text = transcript.plain_text(..);
+        assert_eq!(text, "alpha beta\ngamma");
     }
 }

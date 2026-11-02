@@ -287,7 +287,7 @@ impl Service {
     /// loaded, so a hard kill left it behind. Put the store back to idle and
     /// rewrite the directory row.
     async fn read_phase(&self, entry: &StoredSession) -> (ProtocolPhase, bool) {
-        let stored_phase = entry.phase.clone();
+        let stored_phase = entry.phase;
         let phase = match self.store.load(entry.north).await {
             Ok(session) if session.phase == norte::harness::Phase::Streaming => {
                 // The store outlived the streaming that wrote it, so the turn
@@ -303,17 +303,15 @@ impl Service {
                     %error,
                     "could not read the session phase; using the directory copy"
                 );
-                match stored_phase.as_str() {
-                    "awaiting_tool" => ProtocolPhase::AwaitingTool,
-                    // `streaming` cannot survive a process; everything else
-                    // starts idle.
+                match stored_phase {
+                    ProtocolPhase::AwaitingTool => ProtocolPhase::AwaitingTool,
                     _ => ProtocolPhase::Idle,
                 }
             }
         };
         // A directory row that says `streaming` is stale whether or not the
         // store agreed, so it is rewritten either way.
-        (phase, stored_phase == "streaming")
+        (phase, stored_phase == ProtocolPhase::Streaming)
     }
 
     /// Writes one session back to the directory.
@@ -325,12 +323,7 @@ impl Service {
             model: record.spec.model.clone(),
             provider: record.spec.provider.clone(),
             created_at: record.created_at,
-            phase: match record.phase {
-                ProtocolPhase::Idle => "idle",
-                ProtocolPhase::Streaming => "streaming",
-                ProtocolPhase::AwaitingTool => "awaiting_tool",
-            }
-            .to_owned(),
+            phase: record.phase,
             stats: serde_json::json!({
                 "billed": record.billed,
                 "requests": record.requests,

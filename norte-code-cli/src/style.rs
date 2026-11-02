@@ -14,8 +14,10 @@ use std::fmt::Display;
 use std::io::IsTerminal;
 
 mod colors;
+mod theme;
 
 pub(crate) use colors::Colors;
+pub(crate) use theme::{ACCENT, ACCENT_256, ACCENT_ANSI, RULE, Theme, icon, metrics};
 
 /// How a styled run ends its SGR sequence.
 ///
@@ -244,6 +246,12 @@ impl Style {
     #[must_use]
     pub(crate) fn orange_span(self) -> ratatui::style::Style {
         self.ratatui(ORANGE, 208, "33")
+    }
+
+    /// The widget style for the brand: the spinner, the prompt, a live rule.
+    #[must_use]
+    pub(crate) fn accent_span(self) -> ratatui::style::Style {
+        self.ratatui(ACCENT, ACCENT_256, ACCENT_ANSI)
     }
 
     /// The widget style for the model identity.

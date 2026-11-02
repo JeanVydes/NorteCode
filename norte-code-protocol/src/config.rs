@@ -17,6 +17,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::{BudgetAction, BudgetUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -243,6 +244,41 @@ impl Default for TitlingConfig {
     }
 }
 
+/// When an automatic compaction may run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTrigger {
+    /// Only at an idle turn boundary (and before the next turn on resume or
+    /// switch to a smaller model).
+    #[default]
+    Idle,
+    /// At the first safe model-request boundary inside a turn.
+    Eager,
+}
+
+/// The reasoning setting for a compaction summary request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionReasoning {
+    /// Turn reasoning off when the model allows it.
+    Off,
+    /// The lowest effort the model allows (or off when it can disable).
+    #[default]
+    Lowest,
+    /// A named effort.
+    Minimal,
+    /// A named effort.
+    Low,
+    /// A named effort.
+    Medium,
+    /// A named effort.
+    High,
+    /// A named effort.
+    XHigh,
+    /// A named effort.
+    Max,
+}
+
 /// Compaction settings.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -254,7 +290,7 @@ pub struct CompactionConfig {
     /// When an automatic compaction may run: `idle` (the default) only at an
     /// idle turn boundary, or `eager` at the first safe model-request boundary
     /// inside a turn. Eager still never splits a tool call from its results.
-    pub trigger: String,
+    pub trigger: CompactionTrigger,
     /// How many recent messages to keep verbatim.
     pub keep_recent: usize,
     /// The provider of the model to summarise with.
@@ -265,7 +301,7 @@ pub struct CompactionConfig {
     /// The model id to summarise with, or the session's own.
     pub model: Option<String>,
     /// The reasoning setting for the summary request.
-    pub reasoning: String,
+    pub reasoning: CompactionReasoning,
 }
 
 impl Default for CompactionConfig {
@@ -273,11 +309,11 @@ impl Default for CompactionConfig {
         Self {
             enabled: true,
             threshold: 0.90,
-            trigger: "idle".to_owned(),
+            trigger: CompactionTrigger::default(),
             keep_recent: 6,
             provider: None,
             model: None,
-            reasoning: "lowest".to_owned(),
+            reasoning: CompactionReasoning::default(),
         }
     }
 }
@@ -438,19 +474,19 @@ pub struct BudgetsConfig {
 #[serde(default)]
 pub struct BudgetConfig {
     /// `usd`, `tokens` or `requests`.
-    pub unit: String,
+    pub unit: BudgetUnit,
     /// The limit.
     pub limit: f64,
     /// `warn`, `ask` or `stop`.
-    pub action: String,
+    pub action: BudgetAction,
 }
 
 impl Default for BudgetConfig {
     fn default() -> Self {
         Self {
-            unit: "usd".to_owned(),
+            unit: BudgetUnit::Usd,
             limit: 0.0,
-            action: "warn".to_owned(),
+            action: BudgetAction::Warn,
         }
     }
 }
@@ -863,9 +899,6 @@ impl Config {
                 "must be a fraction in (0, 1]",
             ));
         }
-        if !matches!(self.compaction.trigger.as_str(), "idle" | "eager") {
-            return Err(invalid("compaction.trigger", "must be `idle` or `eager`"));
-        }
         if self.retry.max_attempts > 10 {
             return Err(invalid(
                 "retry.max_attempts",
@@ -908,25 +941,13 @@ impl Config {
             ("session", &self.budgets.session),
             ("global_daily", &self.budgets.global_daily),
         ] {
-            if let Some(budget) = budget {
-                if budget.limit <= 0.0 {
-                    return Err(invalid(
-                        format!("budgets.{scope}.limit"),
-                        "must be greater than zero",
-                    ));
-                }
-                if !matches!(budget.unit.as_str(), "usd" | "tokens" | "requests") {
-                    return Err(invalid(
-                        format!("budgets.{scope}.unit"),
-                        "must be `usd`, `tokens` or `requests`",
-                    ));
-                }
-                if !matches!(budget.action.as_str(), "warn" | "ask" | "stop") {
-                    return Err(invalid(
-                        format!("budgets.{scope}.action"),
-                        "must be `warn`, `ask` or `stop`",
-                    ));
-                }
+            if let Some(budget) = budget
+                && budget.limit <= 0.0
+            {
+                return Err(invalid(
+                    format!("budgets.{scope}.limit"),
+                    "must be greater than zero",
+                ));
             }
         }
         Ok(())
@@ -1596,12 +1617,12 @@ mod tests {
     #[test]
     fn compaction_trigger_defaults_to_idle_and_rejects_unknown_modes() {
         let loaded = Config::from_json("{}").expect("config");
-        assert_eq!(loaded.config.compaction.trigger, "idle");
+        assert_eq!(loaded.config.compaction.trigger, CompactionTrigger::Idle);
         let eager = Config::from_json(r#"{"compaction":{"trigger":"eager"}}"#).expect("config");
-        assert_eq!(eager.config.compaction.trigger, "eager");
+        assert_eq!(eager.config.compaction.trigger, CompactionTrigger::Eager);
         let error =
             Config::from_json(r#"{"compaction":{"trigger":"always"}}"#).expect_err("trigger");
-        assert!(error.to_string().contains("compaction.trigger"));
+        assert!(error.to_string().contains("always"));
     }
 
     #[test]

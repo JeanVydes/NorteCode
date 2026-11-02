@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use norte_code_protocol::catalog::{Catalog, Model};
+use norte_code_protocol::config::CompactionTrigger;
 
 use super::helpers::find_project_config;
 use super::names::{
@@ -141,7 +142,7 @@ pub(crate) fn report_start(
                     .unwrap_or_default(),
                 if !configuration.compaction.enabled {
                     " (disabled)"
-                } else if configuration.compaction.trigger == "eager" {
+                } else if configuration.compaction.trigger == CompactionTrigger::Eager {
                     " (eager)"
                 } else {
                     " (idle)"

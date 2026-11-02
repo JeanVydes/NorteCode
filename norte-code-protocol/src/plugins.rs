@@ -1,7 +1,7 @@
 //! The plugin registry: what a plugin may add to a Norte Code client.
 //!
 //! A plugin is a box that is asked for things. It answers with **data** — a
-//! command to register, lines for a panel, rows for a sidebar, a fragment of
+//! command to register, lines for a panel, a fragment of
 //! the wordmark — and the host draws it. That is the whole design, and
 //! everything else follows from it:
 //!
@@ -20,7 +20,6 @@
 //! | --- | --- |
 //! | The command registry | a command, with its arguments and its usage line |
 //! | A panel | lines over the interface, opened by a command |
-//! | A sidebar | rows beside the conversation, redrawn as they change |
 //! | The footer | a field on the status row |
 //! | The screen | a line of the wordmark, and the tagline under it |
 //!
@@ -67,7 +66,10 @@ use crate::commands::{CommandSpec, Invocation};
 /// Version 3 is the plugin that offers providers and models: version 2 knew
 /// nothing about a catalogue, and a plugin built against it has no method to
 /// answer with.
-pub const PLUGIN_ABI_VERSION: u32 = 3;
+///
+/// Version 4 removes the sidebar: the column beside the conversation is gone,
+/// and a plugin built against version 3 has a method this host no longer calls.
+pub const PLUGIN_ABI_VERSION: u32 = 4;
 
 /// The symbol a plugin exports to say which version it was built against.
 ///
@@ -80,7 +82,7 @@ pub const PLUGIN_ABI_SYMBOL: &[u8] = b"norte_plugin_abi_version\0";
 ///
 /// Every method has a default that adds nothing, so a plugin implements the one
 /// or two it cares about and says nothing about the rest. That is what keeps a
-/// plugin that adds a command from having to know what a sidebar is.
+/// plugin that adds a command from having to know what a panel is.
 pub trait Plugin: Send + Sync {
     /// The name the host reports it by, in `/plugins` and in an error.
     fn name(&self) -> &str;
@@ -103,15 +105,6 @@ pub trait Plugin: Send + Sync {
         None
     }
 
-    /// The rows this plugin puts beside the conversation.
-    ///
-    /// Called when the host repaints, so a plugin that wants a number to move
-    /// returns a different one; it is text and not a widget, so nothing here
-    /// can hold the frame.
-    fn sidebar(&self) -> Vec<SidebarRow> {
-        Vec::new()
-    }
-
     /// A field on the status row, under the conversation.
     ///
     /// `None` adds nothing. A row is one line and the host bounds it, so a
@@ -130,7 +123,7 @@ pub trait Plugin: Send + Sync {
 
     /// Receives the host context before the host asks anything of the plugin.
     ///
-    /// The host calls this once, before `commands`, `run`, `sidebar`, `status`
+    /// The host calls this once, before `commands`, `run`, `status`
     /// or `banner`. A plugin stores whatever it wants from the context in its
     /// own fields — the trait does not keep a copy. The host is passed as a
     /// [`PluginHost`] so this crate never names a concrete service type; the
@@ -260,35 +253,6 @@ impl fmt::Debug for PluginContext {
     }
 }
 
-/// One row of the sidebar a plugin asked for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SidebarRow {
-    /// What the row says.
-    pub text: String,
-    /// Whether it is a heading, which the host draws in the foreground ink.
-    pub heading: bool,
-}
-
-impl SidebarRow {
-    /// A row of body text.
-    #[must_use]
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            heading: false,
-        }
-    }
-
-    /// A row that names a section.
-    #[must_use]
-    pub fn heading(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            heading: true,
-        }
-    }
-}
-
 /// Every plugin this client loaded.
 ///
 /// It is a plain collection with no interior mutability: plugins are loaded
@@ -353,22 +317,6 @@ impl Plugins {
     #[must_use]
     pub fn run(&self, command: &Invocation) -> Option<Vec<String>> {
         self.loaded.iter().find_map(|plugin| plugin.run(command))
-    }
-
-    /// Every sidebar row, grouped by the plugin that asked for it.
-    ///
-    /// Grouped rather than flat so a person can tell which plugin a row came
-    /// from: a list of rows with no attribution is one nobody can turn off.
-    #[must_use]
-    pub fn sidebar(&self) -> BTreeMap<&str, Vec<SidebarRow>> {
-        let mut out: BTreeMap<&str, Vec<SidebarRow>> = BTreeMap::new();
-        for plugin in &self.loaded {
-            let rows = plugin.sidebar();
-            if !rows.is_empty() {
-                out.insert(plugin.name(), rows);
-            }
-        }
-        out
     }
 
     /// The status fields, in the order the plugins were loaded.
@@ -457,10 +405,6 @@ mod tests {
                 .then(|| vec![format!("hello {}", command.arg_or_empty("who"))])
         }
 
-        fn sidebar(&self) -> Vec<SidebarRow> {
-            vec![SidebarRow::heading("hello"), SidebarRow::text("world")]
-        }
-
         fn status(&self) -> Option<String> {
             Some("hello".to_owned())
         }
@@ -492,14 +436,13 @@ mod tests {
     #[test]
     fn a_plugin_that_implements_one_thing_says_nothing_about_the_rest() {
         // The whole reason the trait has defaults: a plugin that adds a command
-        // should not have to know what a sidebar is to compile.
+        // should not have to know what a panel is to compile.
         let plugins = {
             let mut plugins = Plugins::new();
             plugins.add(Box::new(Only));
             plugins
         };
         assert_eq!(plugins.commands().len(), 1);
-        assert_eq!(plugins.sidebar().len(), 0);
         assert_eq!(plugins.status().len(), 0);
         assert_eq!(plugins.banner().len(), 0);
     }
@@ -544,20 +487,6 @@ mod tests {
         plugins.add(Box::new(Second));
         let lines = plugins.run(&invocation("/hello")).expect("an answer");
         assert_eq!(lines, ["hello "], "the one loaded first answers");
-    }
-
-    #[test]
-    fn the_sidebar_says_which_plugin_a_row_came_from() {
-        // A list of rows with no attribution is one nobody can turn off.
-        let mut plugins = Plugins::new();
-        plugins.add(Box::new(Only));
-        plugins.add(Box::new(Everything));
-        let sidebar = plugins.sidebar();
-        assert_eq!(sidebar.len(), 1, "the plugin with no rows adds none");
-        let rows = sidebar.get("everything").expect("its rows");
-        assert_eq!(rows.len(), 2);
-        assert!(rows[0].heading, "the first row names a section");
-        assert!(!rows[1].heading);
     }
 
     #[test]

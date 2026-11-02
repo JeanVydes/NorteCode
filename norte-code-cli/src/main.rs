@@ -32,6 +32,7 @@ mod telemetry_panel;
 mod terminal;
 mod text;
 mod transcript;
+mod ui;
 
 use commands::{apply_extensions, database_path, duration_label, enter_workdir, run};
 use input::{InteractiveInput, Pinned};
@@ -76,8 +77,8 @@ use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
 use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore, StoredSession};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
-    ErrorCode, JobInfo, ModelInfo, Phase, Reasoning, ReasoningInfo, ReasoningScope, ServerEvent,
-    ServerEventKind, SessionKey,
+    ErrorCode, JobInfo, MessageRole, ModelInfo, OutputStream, Phase, Reasoning, ReasoningInfo,
+    ReasoningScope, ServerEvent, ServerEventKind, SessionKey,
 };
 use tokio::sync::mpsc;
 
@@ -596,7 +597,7 @@ fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Optio
     ]
     .into_iter()
     .flatten()
-    .any(|budget| budget.unit.eq_ignore_ascii_case("usd"));
+    .any(|budget| budget.unit == BudgetUnit::Usd);
     (budget_is_usd || configured).then(|| {
         format!(
             "warning: {provider} does not report cost, so a USD budget cannot be measured; \
@@ -782,7 +783,6 @@ pub(crate) async fn new_session(
     // catalogue, because what they offer belongs in it; the handle they were
     // given is the same one, and it now knows where to look.
     crate::plugins::attach(&service, Some(session.clone()));
-    crate::interaction::refresh_plugin_sidebar(&mut renderer);
     if let Some(receiver) = input.as_mut() {
         interactive_loop(
             &service,
@@ -1005,9 +1005,6 @@ async fn resume_session(
     renderer.model_name = Some(model_label);
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
-    // The connected MCP servers, for the sidebar. Read once here, and again
-    // after every `/refresh`: those are the moments the set can change.
-    renderer.set_mcp(crate::interaction::mcp_rows(&service));
     renderer.host_facts = Some(HostFacts {
         database: database.clone(),
         providers_path: norte_code_protocol::catalog::providers_path().unwrap_or_default(),
@@ -1021,7 +1018,6 @@ async fn resume_session(
     // catalogue, because what they offer belongs in it; the handle they were
     // given is the same one, and it now knows where to look.
     crate::plugins::attach(&service, Some(session.clone()));
-    crate::interaction::refresh_plugin_sidebar(&mut renderer);
     // The session may carry a reasoning override of its own — `/reasoning max`
     // leaves one — and that is what the next turn sends. The line above is the
     // configuration's answer, which is what a session with no override is on;

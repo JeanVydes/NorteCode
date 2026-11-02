@@ -15,7 +15,7 @@ use norte::{
 use norte_code_protocol::config::{BudgetConfig, RetryConfig};
 use norte_code_protocol::costs::{BudgetBook, CostRecord};
 use norte_code_protocol::{
-    Budget, BudgetUnit, Delta, ErrorCode, ServerEvent, ServerEventKind, SessionKey,
+    Budget, BudgetUnit, Delta, ErrorCode, OutputStream, ServerEvent, ServerEventKind, SessionKey,
 };
 use tokio::sync::mpsc;
 
@@ -181,22 +181,10 @@ pub(super) fn to_usage(usage: &Usage) -> norte_code_protocol::Usage {
 /// guessed at.
 pub(super) fn configured_budget(budget: Option<&BudgetConfig>) -> Option<Budget> {
     let budget = budget?;
-    let unit = match budget.unit.as_str() {
-        "usd" => BudgetUnit::Usd,
-        "tokens" => BudgetUnit::Tokens,
-        "requests" => BudgetUnit::Requests,
-        _ => return None,
-    };
-    let action = match budget.action.as_str() {
-        "warn" => norte_code_protocol::BudgetAction::Warn,
-        "ask" => norte_code_protocol::BudgetAction::Ask,
-        "stop" => norte_code_protocol::BudgetAction::Stop,
-        _ => return None,
-    };
     Some(Budget {
-        unit,
+        unit: budget.unit,
         limit: budget.limit,
-        action,
+        action: budget.action,
     })
 }
 
@@ -382,13 +370,13 @@ pub(super) fn retry_plan(
 }
 
 /// The wire name of the stream a chunk came from.
-pub(super) fn stream_label(stream: ToolStream) -> &'static str {
+pub(super) fn stream_label(stream: ToolStream) -> OutputStream {
     match stream {
-        ToolStream::Stdout => "stdout",
-        ToolStream::Stderr => "stderr",
+        ToolStream::Stdout => OutputStream::Stdout,
+        ToolStream::Stderr => OutputStream::Stderr,
         // `ToolStream` is `#[non_exhaustive]`: a stream added later is one this
         // client has no name for, and an unnamed one is better than a panic.
-        _ => "other",
+        _ => OutputStream::Other,
     }
 }
 

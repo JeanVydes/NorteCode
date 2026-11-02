@@ -64,9 +64,9 @@ fn a_usd_budget_on_a_cost_silent_provider_is_flagged() {
 
     let mut config = Config::default();
     config.budgets.session = Some(BudgetConfig {
-        unit: "usd".to_owned(),
-        limit: 1.0,
-        action: "stop".to_owned(),
+        unit: BudgetUnit::Usd,
+        limit: 5.0,
+        action: BudgetAction::Stop,
     });
     assert!(budget_warning("google", &config, false).is_some());
 }

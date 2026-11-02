@@ -28,12 +28,11 @@
 //! in whatever was left, so a question one row too tall pushed the box off the
 //! screen. A constraint says what it wants and the layout decides.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 
-use crate::input::{McpRow, McpState};
-use crate::style::Style;
+use crate::style::{Style, icon, metrics};
 use crate::terminal::{self, Draw};
 use crate::transcript::{Ink, Kind, Transcript};
 /// What the interface is showing.
@@ -67,18 +66,7 @@ pub(crate) struct State {
     /// frame that stripped a painted string would lose both. The ink is chosen
     /// where those fields are built, and a frame draws it as it is.
     pub(crate) status: Line<'static>,
-    /// The rows a plugin put beside the conversation, with their plugin's name.
-    ///
-    /// Empty when nothing was loaded, which is every ordinary run: the column
-    /// takes no space when there is nothing to put in it.
-    pub(crate) sidebar: Vec<(String, Vec<norte_code_protocol::plugins::SidebarRow>)>,
-    /// The connected MCP servers, as the sidebar shows them.
-    pub(crate) mcp: Vec<McpRow>,
-    /// The model's task list, as the sidebar shows it.
-    ///
-    /// It was a footer tab and a footer row is one line: a plan is a list, and
-    /// a list does not fit in a row that also carries the model, the cost and
-    /// the effort. It is a column of the sidebar now, where it has the room.
+    /// The model's task list, as the compact footer widget shows it.
     pub(crate) todos: Vec<TaskRow>,
     /// What may be typed next, when there is something to say about it.
     pub(crate) suggestion: String,
@@ -102,7 +90,7 @@ pub(crate) struct State {
     pub(crate) selection: Option<((u16, u16), (u16, u16))>,
 }
 
-/// One row of the task list, as the sidebar draws it.
+/// One row of the task list, as the compact footer row draws it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TaskRow {
     /// What the task says.
@@ -165,19 +153,58 @@ impl State {
         Self::default()
     }
 
-    /// How many rows the input takes at this width, one at least.
+    /// The rows each band asks for at this width.
     ///
-    /// The input is as tall as what is in it and no taller than
-    /// [`INPUT_ROWS`]; the completion, when open, takes rows from its own
-    /// budget rather than growing the block without bound.
+    /// This is the measure half of the contract: [`paint`](State::paint) hands
+    /// every band exactly what it reports here, so a painter never has to guess
+    /// the height it was given and the layout never has to guess what a painter
+    /// will draw. The draft and the completion are separate bands, which is
+    /// what keeps a tall draft from scrolling the menu off the screen.
     #[must_use]
-    fn input_height(&self, width: u16) -> u16 {
-        let width = usize::from(width).max(1);
-        // A long line is several rows, and the block has to be as tall as what
-        // is in it or the draft would be cut off at the bottom of its own
-        // space — the words being typed are the last thing that should
-        // disappear.
-        let wrapped = if self.input.is_empty() {
+    fn heights(&self, width: u16) -> crate::ui::Heights {
+        let waiting = u16::from(self.waiting.is_some());
+        let tasks = u16::from(!self.todos.is_empty());
+        // A question takes its own rows: the prompt, every choice, the row that
+        // opens the box, and the box itself once it is open. Counting it as one
+        // row is what once cut the list to the prompt alone.
+        let question = self.question.as_ref().map_or(0, |question| {
+            let choices = u16::try_from(question.choices.len()).unwrap_or(u16::MAX);
+            1_u16
+                .saturating_add(choices)
+                .saturating_add(1)
+                .saturating_add(u16::from(question.typing))
+        });
+        // A question holds the draft: the answer is typed into the question's
+        // own box, so the draft band is empty while it is up.
+        let input = if self.question.is_some() {
+            0
+        } else {
+            self.draft_rows(width)
+        };
+        let completion = self.completion.as_ref().map_or(0, |completion| {
+            u16::try_from(completion.rows.len().min(COMPLETION_ROWS)).unwrap_or(0)
+        });
+        crate::ui::Heights {
+            spinner: waiting,
+            tasks,
+            question,
+            input,
+            completion,
+            suggestion: 1,
+            rule: 1,
+            status: 1,
+        }
+    }
+
+    /// The rows the draft wraps to at this width, clamped to [`INPUT_ROWS`].
+    ///
+    /// The clamp is a bound and not a reservation: a draft of one line leaves
+    /// the rest to the conversation, and one taller than the bound scrolls to
+    /// keep the cursor visible.
+    #[must_use]
+    fn draft_rows(&self, width: u16) -> u16 {
+        let width = crate::app::draft_width(width);
+        let rows = if self.input.is_empty() {
             1
         } else {
             self.input
@@ -185,18 +212,7 @@ impl State {
                 .map(|line| line.chars().count().div_ceil(width).max(1))
                 .sum::<usize>()
         };
-        let completion = self
-            .completion
-            .as_ref()
-            .map_or(0, |completion| completion.rows.len().min(COMPLETION_ROWS));
-        // A question takes its own rows: the prompt, every choice, and the row
-        // that opens the box. Counting it as one row is what once cut the list
-        // to the prompt alone, so the choices never reached the screen.
-        let question = self
-            .question
-            .as_ref()
-            .map_or(0, |question| 1 + question.choices.len() + 1);
-        u16::try_from(wrapped + completion + question)
+        u16::try_from(rows)
             .unwrap_or(INPUT_ROWS)
             .clamp(1, INPUT_ROWS)
     }
@@ -236,94 +252,64 @@ impl State {
     pub(crate) fn paint(&self, frame: &mut Draw<'_>, style: Style, pinned: &crate::input::Pinned) {
         {
             let area = frame.area();
-            let waiting = u16::from(self.waiting.is_some());
             //
-            //   ┌──────────────────────────┬──────────────┐
-            //   │ conversation             │ sidebar      │
-            //   │  (scrolls)               │  tasks       │
-            //   │                          │  plugins     │
-            //   ├──────────────────────────┤              │
-            //   │ waiting                  │              │
-            //   │ input                    │              │
-            //   │ suggestion               │              │
-            //   │ status                   │              │
-            //   └──────────────────────────┴──────────────┘
+            //   ┌──────────────────────────┐
+            //   │ conversation   (scrolls) │
+            //   ├──────────────────────────┤
+            //   │ waiting                  │
+            //   │ tasks                    │
+            //   │ question                 │
+            //   │ input                    │
+            //   │ completion               │
+            //   │ suggestion               │
+            //   │ rule                     │
+            //   │ status                   │
+            //   └──────────────────────────┘
             //
-            // The sidebar takes a column on the right, and only when there is
-            // something to put in it: the task list, or a plugin that asked for
-            // one. A run with neither draws exactly what it drew before there
-            // was a sidebar.
-            // A sidebar needs a screen to be a sidebar on. At a quarter of a
-            // narrow terminal it is a column too thin to read a task in, and
-            // what it costs is the conversation, which is the thing the screen
-            // is for: below the bound the column is not drawn and the
-            // conversation keeps the width.
-            let aside =
-                (!self.sidebar.is_empty() || !self.todos.is_empty() || !self.mcp.is_empty())
-                    && area.width >= SIDEBAR_MIN_WIDTH;
-            let body = if aside {
-                let [main, rule, side] = Layout::horizontal([
-                    Constraint::Fill(1),
-                    // One column, drawn as a rule: a panel is a panel because
-                    // its edge is visible, and a gap alone reads as a mistake.
-                    Constraint::Length(1),
-                    Constraint::Percentage(SIDEBAR_PERCENT),
-                ])
-                .areas(area);
-                draw_rule(frame, rule, style);
-                draw_sidebar(frame, side, self, style);
-                main
-            } else {
-                area
-            };
-            // The chrome is measured from the bottom up, and what is left over
-            // is the conversation: the input grows with what is typed and the
-            // status row is always exactly one line, so the transcript takes
-            // whatever those two do not, which is what keeps it scrollable
-            // against a terminal of any height.
-            //
-            // The input's height is measured against the *body* width and not
-            // the screen's: the sidebar takes a column on the right, so the
-            // draft wraps sooner than the terminal would. Counting it at the
-            // full width gave the block one row fewer than the text needed, and
-            // the last row of a draft was cut off at the bottom of its own
-            // space — the words being typed, which are the last thing that
-            // should disappear.
-            let input = self.input_height(body.width);
-            let [conversation, spinner, entry, suggestion, rule, status] = Layout::vertical([
-                Constraint::Fill(1),
-                Constraint::Length(waiting),
-                // The input grows with what is in it and stops: a draft of a
-                // thousand lines is not a reason to lose the conversation.
-                Constraint::Length(input),
-                Constraint::Length(1),
-                // The rule is a row of its own. It used to be drawn onto the
-                // status row and then overwritten by it, so half of it survived
-                // as stray dashes across the bottom line.
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .areas(body);
-
-            draw_transcript(frame, conversation, self, pinned, style);
-            if waiting > 0 {
-                draw_spinner(frame, spinner, self, style);
+            // Every band measures itself at this width and is handed exactly the
+            // rows it asked for. That is the contract: the height a painter
+            // assumes cannot drift from the rows it was given, because there is
+            // only one number. The conversation takes whatever the chrome does
+            // not, which is what keeps it scrollable against a terminal of any
+            // height. The whole width is the conversation's: nothing is parked
+            // beside it.
+            let areas = crate::ui::split(area, self.heights(area.width));
+            draw_transcript(frame, areas.conversation, self, pinned, style);
+            if areas.spinner.height > 0 {
+                draw_spinner(frame, areas.spinner, self, style);
             }
-            draw_input(frame, entry, self, style);
+            if areas.tasks.height > 0 {
+                draw_tasks(frame, areas.tasks, self, style);
+            }
+            if let Some(question) = self.question.as_ref().filter(|_| areas.question.height > 0) {
+                draw_question(frame, areas.question, question, self, style);
+            }
+            if areas.input.height > 0 {
+                draw_input(frame, areas.input, self, style);
+            }
+            if areas.completion.height > 0 {
+                draw_completion(frame, areas.completion, self, style);
+            }
             // The suggestion names what may be typed next, and when it names a
             // reasoning setting it means the same thing the bar in the status
             // does: it reads in the same colour, so the scale is learned once.
-            draw_row(
-                frame,
-                suggestion,
-                &self.suggestion,
-                suggestion_ink(self, style),
-            );
-            draw_chrome_rule(frame, rule, style);
+            if areas.suggestion.height > 0 {
+                draw_row(
+                    frame,
+                    areas.suggestion,
+                    &self.suggestion,
+                    suggestion_ink(self, style),
+                );
+            }
+            if areas.rule.height > 0 {
+                draw_chrome_rule(frame, areas.rule, style);
+            }
             // The status closes the frame: it is what the session *is* — the
             // model, the dial, the cost, the effort — and the bottom row is
             // where a status is read from.
-            draw_status(frame, status, self);
+            if areas.status.height > 0 {
+                draw_status(frame, areas.status, self);
+            }
         }
         // What was painted, row by row, so a selection can be read back as
         // text. It is taken from the finished frame and not from the state
@@ -383,14 +369,10 @@ fn highlight(frame: &mut Draw<'_>, range: ((u16, u16), (u16, u16))) {
 }
 
 /// The most rows the completion takes from the input block.
-pub(crate) const COMPLETION_ROWS: usize = 4;
+pub(crate) const COMPLETION_ROWS: usize = metrics::COMPLETION_ROWS;
 
 /// The most rows the input block may take, completion and question included.
-///
-/// It is a bound and not a reservation: the block is as tall as what is in it,
-/// so a draft of one line leaves the rest to the conversation. Past this the
-/// draft scrolls inside its own rows.
-pub(crate) const INPUT_ROWS: u16 = 10;
+pub(crate) const INPUT_ROWS: u16 = metrics::INPUT_ROWS;
 
 /// Draws what the client is waiting for: a turning glyph and how long.
 ///
@@ -427,10 +409,7 @@ fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     let since_secs = u64::try_from(since / 1_000).unwrap_or(u64::MAX);
     let line = Line::from(vec![
         Span::raw("  "),
-        Span::styled(
-            glyph.to_owned(),
-            style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
-        ),
+        Span::styled(glyph.to_owned(), style.accent_span()),
         Span::raw(" "),
         Span::styled(label.to_owned(), style.dim_span()),
         Span::styled(
@@ -442,16 +421,10 @@ fn draw_spinner(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
 }
 
 /// How long one glyph of the spinner is shown, in ms.
-///
-/// A live row uses the same clock as the status spinner, so the two turn
-/// together: they are one process saying it is alive, not two.
-const SPINNER_MS: u64 = 90;
+const SPINNER_MS: u64 = metrics::SPINNER_MS;
 
 /// The frames of the spinner, in the order they turn.
-///
-/// Plain characters rather than braille: every terminal shows them, and a
-/// missing glyph would leave a hole where the only sign of life was.
-const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+const SPINNER: [&str; 4] = icon::SPINNER;
 
 /// The ink the suggestion row is written in.
 ///
@@ -493,16 +466,42 @@ fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style:
     // cut below, so a row that fit came back chopped mid-field with the tail of
     // an escape sequence left on screen.
     let text = crate::select::strip_style(text);
+    let text = text.replace(['\n', '\r'], " ");
     let text = crate::text::terminal(&text);
     let shown = if text.chars().count() > room {
         let mut cut: String = text.chars().take(room.saturating_sub(1)).collect();
-        cut.push('…');
+        cut.push(icon::MORE.chars().next().unwrap_or('…'));
         cut
     } else {
         text.into_owned()
     };
     let line = Line::from(vec![Span::raw("  "), Span::styled(shown, style)]);
     Paragraph::new(line).render(area, frame.buffer_mut());
+}
+
+/// Draws the task list as one compact row.
+///
+/// The completed count and the task being worked on are what a person watching
+/// the work needs; the whole list is one keystroke away in the conversation and
+/// must not take a column of the screen. The row is bounded exactly like every
+/// other chrome row.
+fn draw_tasks(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
+    if area.height == 0 || state.todos.is_empty() {
+        return;
+    }
+    let done = state.todos.iter().filter(|task| task.done).count();
+    let mark = if state.waiting.is_some() {
+        icon::RUNNING
+    } else if done == state.todos.len() {
+        icon::DONE
+    } else {
+        icon::PENDING
+    };
+    let text = state.todos.iter().find(|task| !task.done).map_or_else(
+        || format!("{mark} tasks {done}/{}", state.todos.len()),
+        |task| format!("{mark} tasks {done}/{} · {}", state.todos.len(), task.text),
+    );
+    draw_row(frame, area, &text, style.dim_span());
 }
 
 /// Draws the status row: the head, then the fields in their own ink.
@@ -565,11 +564,11 @@ fn truncate_line(line: Line<'static>, room: usize) -> Line<'static> {
 /// none: the bar is the part that survives, and the ink on top of it says the
 /// same thing twice for a terminal that can show it.
 #[must_use]
-pub(crate) fn margin(kind: Kind) -> &'static str {
+pub(crate) fn margin(kind: Kind) -> String {
     match kind {
-        Kind::Said => "▌ ",
-        Kind::Reasoning => "│ ",
-        _ => "  ",
+        Kind::Said => format!("{} ", icon::SAID),
+        Kind::Reasoning => format!("{} ", icon::THINKING),
+        _ => "  ".to_owned(),
     }
 }
 
@@ -577,7 +576,7 @@ pub(crate) fn margin(kind: Kind) -> &'static str {
 ///
 /// One space and the bar: the narrowest thing that still reads as a column of
 /// its own beside the text.
-pub(crate) const MARGIN_COLS: u16 = 3;
+pub(crate) const MARGIN_COLS: u16 = metrics::MARGIN_COLS;
 
 /// Which part of a box a row is.
 ///
@@ -740,23 +739,23 @@ fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
     match row.frame {
         Some(Frame::Top) => {
             // The title leads, and the rule fills what is left of the row.
-            let label = format!("─ {} ", row.text);
+            let label = format!("{} {} ", icon::RULE, row.text);
             let room = usize::from(width).saturating_sub(3);
             let label: String = label.chars().take(room).collect();
             let fill = room.saturating_sub(label.chars().count());
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("╭", style.blue_span()),
+                Span::styled(icon::BOX_TOP.to_owned(), style.blue_span()),
                 Span::styled(label.clone(), Style::bold_span()),
-                Span::styled("─".repeat(fill), style.blue_span()),
+                Span::styled(icon::RULE.repeat(fill), style.blue_span()),
                 Span::styled("╮", style.blue_span()),
             ])
         }
         Some(Frame::Bottom) => Line::from(vec![
             Span::raw("  "),
-            Span::styled("╰", style.blue_span()),
+            Span::styled(icon::BOX_BOTTOM.to_owned(), style.blue_span()),
             Span::styled(
-                "─".repeat(usize::from(width).saturating_sub(2)),
+                icon::RULE.repeat(usize::from(width).saturating_sub(2)),
                 style.blue_span(),
             ),
             Span::styled("╯", style.blue_span()),
@@ -773,12 +772,12 @@ fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
             // carry it — a terminal with no colour shows none — and the margin
             // costs a column and reads at a glance.
             let bar_ink = match row.kind {
-                Kind::Said => style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+                Kind::Said => style.accent_span(),
                 Kind::Reasoning => style.faint_span(),
                 _ => style.dim_span(),
             };
             let bar = margin(row.kind);
-            let mut spans = vec![Span::raw(" "), Span::styled(bar.to_owned(), bar_ink)];
+            let mut spans = vec![Span::raw(" "), Span::styled(bar, bar_ink)];
             spans.extend(row_spans(row, ink, style));
             Line::from(spans)
         }
@@ -1206,94 +1205,6 @@ pub(crate) fn ink(kind: Kind, style: Style) -> ratatui::style::Style {
     }
 }
 
-/// Cuts plain text to a number of columns, saying that it did.
-///
-/// It is for text a plugin wrote: the row has as many columns as the layout
-/// gave it and no more, and a row that ran past the edge would be cut by the
-/// terminal at a place nobody chose.
-#[must_use]
-fn clip_visible(text: &str, columns: usize) -> String {
-    if text.chars().count() <= columns {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(columns.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
-}
-
-/// How much of the width the sidebar takes.
-///
-/// A quarter, and it is a bound on what the conversation loses: a sidebar that
-/// grew with its content would take the screen from the thing it is beside.
-const SIDEBAR_PERCENT: u16 = 25;
-
-/// The narrowest terminal the sidebar is drawn on.
-///
-/// Under it a quarter of the width is a column too thin to read a task in, and
-/// the conversation is what the screen is for: the sidebar gives way, and the
-/// row it would have shown is still reachable with `/jobs`, `/tools` and the
-/// task events in the conversation itself.
-const SIDEBAR_MIN_WIDTH: u16 = 72;
-
-/// The MCP servers as one sidebar panel, or `None` when none is configured.
-///
-/// It is its own function because the column is one panel per subject and this
-/// is the second: keeping them all in the drawing function made it do two jobs
-/// and read as a wall.
-fn mcp_panel_rows(state: &State, style: Style, width: u16) -> Option<(String, Vec<Line<'static>>)> {
-    if state.mcp.is_empty() {
-        return None;
-    }
-    let on = state
-        .mcp
-        .iter()
-        .filter(|row| matches!(row.state, McpState::On))
-        .count();
-    let rows = state
-        .mcp
-        .iter()
-        .map(|row| {
-            // The state is a word and not only a colour: a terminal with no
-            // colour shows none, and whether a server is on is what this row is
-            // for.
-            let (mark, ink) = match &row.state {
-                McpState::On => ("on ", style.dim_span()),
-                McpState::Off => ("off", style.faint_span()),
-                McpState::Failed(_) => ("!! ", style.red_span()),
-            };
-            let text = format!(
-                "{mark} {} ({})",
-                clip_visible(
-                    &crate::text::terminal(&row.name),
-                    usize::from(width).saturating_sub(14)
-                ),
-                row.tools
-            );
-            Line::from(Span::styled(text, ink))
-        })
-        .collect();
-    Some((format!("mcp {on}/{}", state.mcp.len()), rows))
-}
-
-/// Draws the one column between the conversation and the sidebar.
-///
-/// A panel is a panel because its edge is visible: a gap alone reads as a
-/// mistake in the layout, and a rule reads as the border it is.
-fn draw_rule(frame: &mut Draw<'_>, area: Rect, style: Style) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let rows: Vec<Line> = (0..area.height)
-        .map(|_| {
-            Line::from(Span::styled(
-                "│",
-                style.ratatui((0x4A, 0x4E, 0x54), 238, "90"),
-            ))
-        })
-        .collect();
-    Paragraph::new(rows).render(area, frame.buffer_mut());
-}
-
 /// Draws a horizontal rule across the top edge of an area.
 fn draw_chrome_rule(frame: &mut Draw<'_>, area: Rect, style: Style) {
     if area.height == 0 || area.width == 0 {
@@ -1301,114 +1212,12 @@ fn draw_chrome_rule(frame: &mut Draw<'_>, area: Rect, style: Style) {
     }
     let line = Line::from(Span::styled(
         "─".repeat(usize::from(area.width)),
-        style.ratatui((0x4A, 0x4E, 0x54), 238, "90"),
+        style.ratatui(crate::style::RULE, 238, "90"),
     ));
     let strip = Rect::new(area.x, area.y, area.width, 1);
     Paragraph::new(line).render(strip, frame.buffer_mut());
 }
 
-/// Draws the column a plugin asked for, beside the conversation.
-///
-/// It is drawn in the area the layout gave it and nowhere else, and every row
-/// is clipped to the width: a plugin says what to read and the host decides how
-/// much of it fits. A plugin that asked for more rows than there are gets the
-/// beginning of its list and a count of what did not fit — the rule every
-/// bounded list in this client follows.
-fn draw_sidebar(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let width = area.width;
-    // The panels the column holds, top to bottom. The task list leads: it is
-    // what the model is doing, and a person watching the work wants to see it
-    // before they want what a plugin has to say about it.
-    let mut panels: Vec<(String, Vec<Line>)> = Vec::new();
-    if !state.todos.is_empty() {
-        let done = state.todos.iter().filter(|task| task.done).count();
-        let rows = state
-            .todos
-            .iter()
-            .map(|task| {
-                // The mark is a character and not a colour: a terminal with no
-                // colour shows none, and the state of a task is the one thing
-                // this column exists to say.
-                let (mark, ink) = if task.done {
-                    ("✔", style.faint_span())
-                } else {
-                    ("·", style.dim_span())
-                };
-                let text = format!(
-                    "{mark} {}",
-                    clip_visible(
-                        &crate::text::terminal(&task.text),
-                        usize::from(width).saturating_sub(3)
-                    )
-                );
-                Line::from(Span::styled(text, ink))
-            })
-            .collect();
-        panels.push((format!("tasks {done}/{}", state.todos.len()), rows));
-    }
-    if let Some(panel) = mcp_panel_rows(state, style, width) {
-        panels.push(panel);
-    }
-    for (plugin, list) in &state.sidebar {
-        // The name leads, because a column of rows with no attribution is one
-        // nobody can turn off.
-        let rows = list
-            .iter()
-            .map(|row| {
-                let ink = if row.heading {
-                    Style::bold_span()
-                } else {
-                    style.dim_span()
-                };
-                Line::from(Span::styled(
-                    clip_visible(&crate::text::terminal(&row.text), usize::from(width)),
-                    ink,
-                ))
-            })
-            .collect();
-        panels.push((plugin.clone(), rows));
-    }
-    let mut rows: Vec<Line> = Vec::new();
-    for (index, (title, body)) in panels.iter().enumerate() {
-        if index > 0 {
-            rows.push(Line::default());
-        }
-        // Each panel has a heading and a rule under it: a column of rows with
-        // no edge is a column nobody can tell apart from the conversation.
-        rows.push(Line::from(Span::styled(
-            clip_visible(title, usize::from(width)),
-            style.faint_span(),
-        )));
-        rows.push(Line::from(Span::styled(
-            "─".repeat(usize::from(width)),
-            style.ratatui((0x4A, 0x4E, 0x54), 238, "90"),
-        )));
-        rows.extend(body.iter().cloned());
-    }
-    let take = usize::from(area.height).min(rows.len());
-    let hidden = rows.len().saturating_sub(take);
-    let mut shown = rows[..take].to_vec();
-    if hidden > 0
-        && let Some(last) = shown.last_mut()
-    {
-        *last = Line::from(Span::styled(
-            format!("… {hidden} more"),
-            style.yellow_span(),
-        ));
-    }
-    Paragraph::new(shown).render(area, frame.buffer_mut());
-}
-
-/// Draws a question: the prompt, every choice, the row that opens the box, and
-/// the box itself once it is open.
-///
-/// It is its own function because a question replaces the block rather than
-/// growing it, and folding it into the draft's drawing made one function do two
-/// jobs. The prompt is the model's own words and keeps the amber ink the wait
-/// uses, so a question reads as the model speaking and not as a notice.
 fn draw_question(
     frame: &mut Draw<'_>,
     area: Rect,
@@ -1468,28 +1277,35 @@ fn draw_question(
     draw_block(frame, area, &rows);
 }
 
-/// Draws the input block: the draft, the completion and the question.
+/// The columns a draft line wraps to, after the prompt takes its own.
 ///
-/// All three live in the same rows, so they are one widget with three states
-/// rather than three widgets competing for the same space.
+/// Measure and paint both call this: the wrap the height is counted from and
+/// the wrap the rows are drawn in are the same number, so a full line cannot
+/// be counted as one row and drawn as two.
+#[must_use]
+fn draft_width(area_width: u16) -> usize {
+    let prompt = icon::PROMPT.chars().count() + 1;
+    usize::from(area_width).saturating_sub(prompt).max(1)
+}
+
+/// Draws the input block: the draft and its cursor.
+///
+/// The question and the completion used to live in these rows too, which meant
+/// three things competed for one band and the height of each was guessed from
+/// the other two. They are bands of their own now; this painter draws exactly
+/// the draft, and [`State::heights`] gave it exactly the rows the wrap needs.
+#[allow(clippy::too_many_lines)]
 fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
     if area.height == 0 {
         return;
     }
     let mut rows: Vec<Line> = Vec::new();
-    // A question takes the block: it is what the model is waiting on, and the
-    // draft is not what the person is working on while it is up.
-    if let Some(question) = &state.question {
-        draw_question(frame, area, question, state, style);
-        return;
-    }
-
     // The draft, wrapped to the width it has and with the cursor drawn as the
     // character it is on. Wrapping is what makes a long line readable: a draft
     // the terminal cut off at the edge would hide the words being typed, which
     // is the one thing the person is looking at.
-    let prompt = "› ";
-    let width = usize::from(area.width).saturating_sub(prompt.len()).max(1);
+    let prompt = format!("{} ", icon::PROMPT);
+    let width = draft_width(area.width);
     let mut cursor_row = 0usize;
     // The selected range, in the draft's own character indices, normalised so
     // the low end is first: a selection drawn backwards is the same text as one
@@ -1527,11 +1343,16 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
                 cursor_row = rows.len();
             }
             let label = if index == 0 && index_of_row == 0 {
-                prompt
+                prompt.as_str()
             } else {
                 "  "
             };
-            let mut spans = vec![Span::styled(label, style.faint_span())];
+            let label_ink = if index == 0 && index_of_row == 0 {
+                style.accent_span()
+            } else {
+                style.faint_span()
+            };
+            let mut spans = vec![Span::styled(label, label_ink)];
             for (position, character) in part.iter().enumerate() {
                 // The absolute index of this character in the draft, which is
                 // what both the cursor and the selection are measured in.
@@ -1557,32 +1378,6 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
         }
         offset += len + 1;
     }
-    // The completion sits under the draft, on the rows the block already has.
-    if let Some(completion) = &state.completion {
-        // It is a window and not the head of the list: the cursor walks every
-        // row — a list of a hundred models is walked the way a list of three is
-        // — and drawing the first rows whatever the cursor did left the choice
-        // below the window, moving with no highlight to show for it. The window
-        // follows the cursor, so the row Enter or Tab would take is always one
-        // of the rows on screen.
-        let top = completion.top();
-        for (offset, row) in completion
-            .rows
-            .iter()
-            .skip(top)
-            .take(COMPLETION_ROWS)
-            .enumerate()
-        {
-            let index = top + offset;
-            let here = index == completion.cursor;
-            let text = format!("    {row}");
-            rows.push(if here {
-                Line::styled(text, Style::selected())
-            } else {
-                Line::from(Span::styled(text, style.dim_span()))
-            });
-        }
-    }
     // A draft taller than the block shows the rows around the cursor rather
     // than the first rows: the line being written is the one being looked at,
     // and a block pinned to its top would scroll the cursor off the bottom.
@@ -1593,6 +1388,46 @@ fn draw_input(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
         0
     };
     draw_block_from(frame, area, &rows, start);
+}
+
+/// Draws the completion menu in its own band.
+fn draw_completion(frame: &mut Draw<'_>, area: Rect, state: &State, style: Style) {
+    if area.height == 0 {
+        return;
+    }
+    let Some(completion) = &state.completion else {
+        return;
+    };
+    let mut rows: Vec<Line> = Vec::new();
+    let top = completion.top();
+    for (offset, row) in completion
+        .rows
+        .iter()
+        .skip(top)
+        .take(usize::from(area.height).min(COMPLETION_ROWS))
+        .enumerate()
+    {
+        let index = top + offset;
+        let here = index == completion.cursor;
+        let row = row.replace('\n', " ");
+        let room = usize::from(area.width)
+            .saturating_sub(metrics::MENU_INDENT + 2)
+            .max(1);
+        let shown = if row.chars().count() > room {
+            let mut cut: String = row.chars().take(room.saturating_sub(1)).collect();
+            cut.push(icon::MORE.chars().next().unwrap_or('…'));
+            cut
+        } else {
+            row
+        };
+        let text = format!("{}{shown}", " ".repeat(metrics::MENU_INDENT));
+        rows.push(if here {
+            Line::styled(text, Style::selected())
+        } else {
+            Line::from(Span::styled(text, style.dim_span()))
+        });
+    }
+    draw_block_from(frame, area, &rows, 0);
 }
 
 /// Draws rows inside a block, from the top of the area it was given.
@@ -1703,32 +1538,6 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_shows_only_the_servers_that_are_on() {
-        // The column is what is *connected*: a server switched off in the config
-        // never reaches these rows, because `mcp_rows` drops it, so nothing of it
-        // takes a line here. The `/mcp` panel is where every configured entry is
-        // listed and switched. A server that failed is still a row, because it is
-        // configured on and not running, which is what the column should warn of.
-        let mut state = State::new();
-        state.mcp = vec![
-            McpRow {
-                name: "on-one".to_owned(),
-                tools: 2,
-                state: McpState::On,
-            },
-            McpRow {
-                name: "broken".to_owned(),
-                tools: 0,
-                state: McpState::Failed("no such command".to_owned()),
-            },
-        ];
-        let screen = screen_of(&state, 90, 24).join("\n");
-        assert!(screen.contains("on-one"), "{screen}");
-        assert!(screen.contains("broken"), "{screen}");
-        assert!(screen.contains("mcp 1/2"), "one of two is on: {screen}");
-    }
-
-    #[test]
     fn a_blank_row_separates_two_entries_and_not_a_call() {
         // Two messages are two things and a blank row says so; a tool
         // announcement and its output are one call and stay together.
@@ -1819,30 +1628,41 @@ mod tests {
         // A block that reserved its maximum would take the conversation's rows
         // for a draft of one line.
         let mut state = State::new();
-        assert_eq!(state.input_height(80), 1, "an empty draft is one row");
+        assert_eq!(state.heights(80).input, 1, "an empty draft is one row");
         state.input = "one\ntwo\nthree".to_owned();
-        assert_eq!(state.input_height(80), 3);
+        assert_eq!(state.heights(80).input, 3);
         // And it stops: a draft of a thousand lines is not a reason to lose the
         // conversation.
         state.input = "x\n".repeat(1_000);
-        assert_eq!(state.input_height(80), INPUT_ROWS);
+        assert_eq!(state.heights(80).input, INPUT_ROWS);
+    }
+
+    #[test]
+    fn the_completion_is_its_own_band_so_a_tall_draft_cannot_hide_it() {
+        let mut state = State::new();
+        state.input = "x\n".repeat(100);
+        state.completion = Some(Completion {
+            text: "alpha".to_owned(),
+            rows: vec!["alpha".to_owned(), "beta".to_owned()],
+            cursor: 0,
+        });
+        let heights = state.heights(80);
+        assert_eq!(heights.input, INPUT_ROWS, "the draft keeps its own rows");
+        assert_eq!(heights.completion, 2, "the menu keeps its own rows");
+        assert!(
+            heights.input + heights.completion
+                <= INPUT_ROWS + u16::try_from(COMPLETION_ROWS).unwrap_or(0),
+            "the two are measured separately, not out of one budget"
+        );
     }
 
     #[test]
     fn the_input_wraps_at_the_body_width_and_shows_every_row() {
-        // The sidebar takes a column, so the draft wraps sooner than the
-        // terminal would. Counting the block's height at the full width gave it
-        // one row fewer than the text needed and cut the last row off — the
-        // words being typed. The input is drawn in the body, so its height is
-        // measured there too.
+        // The conversation owns the whole width now, so the draft wraps at the
+        // terminal's width. The block's height is measured there too: counting
+        // it narrower than the text gave it one row fewer than it needed and cut
+        // the last row off — the words being typed.
         let mut state = State::new();
-        state.mcp = vec![crate::input::McpRow {
-            name: "srv".to_owned(),
-            tools: 1,
-            state: crate::input::McpState::On,
-        }];
-        // 80 columns with a 25% sidebar leaves 59 for the body, so a 70-column
-        // draft is two rows there and only one at 80.
         state.input = "x".repeat(70);
         let rows_of_x: Vec<usize> = screen_of(&state, 80, 24)
             .iter()
@@ -1851,8 +1671,8 @@ mod tests {
             .collect();
         assert_eq!(
             rows_of_x.len(),
-            2,
-            "the draft wrapped to two rows: {rows_of_x:?}"
+            1,
+            "the draft fits one row at the full width: {rows_of_x:?}"
         );
         assert_eq!(
             rows_of_x.iter().sum::<usize>(),
@@ -2319,37 +2139,6 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_shows_the_connected_mcp_servers() {
-        // The column is a column of state, and whether a server is on is part
-        // of it: a person watching the work wants to see the servers their
-        // tools came from beside it.
-        let mut state = State::new();
-        state.mcp = vec![
-            McpRow {
-                name: "context7".to_owned(),
-                tools: 2,
-                state: McpState::On,
-            },
-            McpRow {
-                name: "everything".to_owned(),
-                tools: 5,
-                state: McpState::Off,
-            },
-        ];
-        let screen = screen_of(&state, 90, 24).join("\n");
-        assert!(screen.contains("context7"), "{screen}");
-        // A narrow column clips the name, which is why the row leads with its
-        // state: the word is what has to survive the cut.
-        assert!(screen.contains("everyth"), "{screen}");
-        assert!(screen.contains("on  context7"), "{screen}");
-        assert!(screen.contains("off everyth"), "{screen}");
-        assert!(
-            screen.contains("mcp 1/2"),
-            "the count of what is on: {screen}"
-        );
-    }
-
-    #[test]
     fn a_question_shows_its_prompt_and_every_choice() {
         // The bug this pins: the block counted a question as one row, so the
         // frame cut the list to the prompt and the choices never reached the
@@ -2442,10 +2231,7 @@ mod tests {
         pinned.begin_selection(0, 0);
         pinned.extend_selection(4, row);
         let copied = pinned.finish_selection().expect("the selection");
-        assert!(
-            copied.starts_with("   al") && copied.ends_with("al"),
-            "it starts and stops where the drag did: {copied:?}"
-        );
+        assert_eq!(copied, "al", "the drag's own text, without the margin");
         assert_eq!(
             copied.lines().count(),
             1,
