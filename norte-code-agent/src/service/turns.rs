@@ -468,6 +468,26 @@ impl Service {
                                 return Ok(());
                             }
                         }
+                        // The summary belongs under the answer its request
+                        // produced. The step hands its events over only after
+                        // it finishes, so settling earlier -- while the deltas
+                        // are still in this vector -- printed the summary above
+                        // tokens that had not reached the transcript yet.
+                        if !self
+                            .settle(
+                                &engine,
+                                request_id,
+                                key,
+                                current_nid,
+                                &mut stats,
+                                tx,
+                                false,
+                                gate.as_deref(),
+                            )
+                            .await
+                        {
+                            return Ok(());
+                        }
                         if failure.is_some() || interrupted {
                             break 'stepping;
                         }
@@ -987,9 +1007,15 @@ impl Service {
                     action: status.action,
                 }),
             EngineEvent::RequestReconstructed { .. } => {
-                return self
-                    .settle(engine, request_id, key, nid, stats, tx, false, gate)
-                    .await;
+                // The summary waits for the commit, but the eager gate has to
+                // see the context this request is about to carry before it is
+                // sent; this event is the last point at which it can.
+                if let Some(gate) = gate
+                    && let Ok(history) = engine.history(nid).await
+                {
+                    gate.update(used_context(&history));
+                }
+                None
             }
             EngineEvent::TurnStopped { reason, .. } => Some(ServerEventKind::TurnStopped {
                 reason: reason.clone(),

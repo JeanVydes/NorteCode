@@ -6679,3 +6679,46 @@ async fn a_session_whose_tools_were_taken_away_still_runs_its_turns() {
         "the session survived"
     );
 }
+
+#[tokio::test]
+async fn the_request_summary_follows_the_answer_it_describes() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("the answer"));
+    let (service, _store) = persistent_service(model).await;
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "hello".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    let last_text = events
+        .iter()
+        .rposition(|event| {
+            matches!(
+                &event.kind,
+                ServerEventKind::Delta {
+                    delta: Delta::Text { text, .. },
+                    ..
+                } if !text.is_empty()
+            )
+        })
+        .expect("the answer streams");
+    let summary = events
+        .iter()
+        .position(|event| matches!(event.kind, ServerEventKind::RequestReconstructed { .. }))
+        .expect("the request is summarised");
+    assert!(
+        last_text < summary,
+        "the summary belongs under the answer, not above it: text {last_text}, summary {summary}"
+    );
+}
