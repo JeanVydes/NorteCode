@@ -673,8 +673,8 @@ pub(crate) async fn new_session(
         Some(resolve_spec(
             &config,
             &catalog,
-            provider,
-            model,
+            effective_provider.clone(),
+            effective_model.clone(),
             args.endpoint.clone(),
             args.wire,
         )?)
@@ -976,8 +976,12 @@ async fn resume_session(
     let saved_model = saved.as_ref().map(|(_, m)| m.clone());
     let effective_provider = saved_provider
         .clone()
-        .or_else(|| config.default_provider.clone());
-    let effective_model = saved_model.clone().or_else(|| config.default_model.clone());
+        .or_else(|| config.default_provider.clone())
+        .filter(|p| !p.is_empty());
+    let effective_model = saved_model
+        .clone()
+        .or_else(|| config.default_model.clone())
+        .filter(|m| !m.is_empty());
 
     let model_unset = effective_provider.is_none() || effective_model.is_none();
 
