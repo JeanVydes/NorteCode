@@ -1875,7 +1875,8 @@ impl Service {
     /// Cancels the turn for `session`, if one is running. Returns whether a
     /// token was found and signalled.
     pub fn cancel_turn(&self, session: &SessionKey) -> bool {
-        if let Some(token) = self.lock_cancels().get(session).cloned() {
+        let cancels = self.lock_cancels();
+        if let Some(token) = cancels.get(session).cloned() {
             token.cancel();
             true
         } else {
