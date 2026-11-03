@@ -3260,17 +3260,15 @@ pub(crate) async fn drive_turns(
                                 if let Some(session) = current.clone() {
                                     renderer.mark_cancelled();
                                     renderer.notice("cancelling the running turn…");
-                                    let request = ClientRequest {
-                                        request_id: 0,
-                                        kind: ClientRequestKind::CancelTurn { session },
-                                    };
-                                    // Fire-and-forget: don't await the cancel request, as it
-                                    // may block if the service is busy. The cancel token is
-                                    // signalled by the server when it processes the request.
-                                    let service = Arc::clone(service);
-                                    tokio::spawn(async move {
-                                        let _ = service.submit(request).await;
-                                    });
+                                    // Cancel directly: the service's cancel_turn signals the
+                                    // token without going through submit's request handler, which
+                                    // may be busy or blocked.
+                                    let found = service.cancel_turn(&session);
+                                    if !found {
+                                        renderer.notice(
+                                            "warning: no running turn to cancel".to_owned(),
+                                        );
+                                    }
                                 }
                                 continue;
                             }
@@ -3319,15 +3317,11 @@ pub(crate) async fn drive_turns(
                         renderer.notice(
                             "the running tool is being stopped; press Ctrl-C again to force quit",
                         );
-                        let request = ClientRequest {
-                            request_id: 0,
-                            kind: ClientRequestKind::CancelTurn { session },
-                        };
-                        // Fire-and-forget: don't await the cancel request.
-                        let service = Arc::clone(service);
-                        tokio::spawn(async move {
-                            let _ = service.submit(request).await;
-                        });
+                        // Cancel directly.
+                        let found = service.cancel_turn(&session);
+                        if !found {
+                            renderer.notice("warning: no running turn to cancel".to_owned());
+                        }
                         continue;
                     }
                     Wake::Line(line, attachments) => {

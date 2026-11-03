@@ -1868,8 +1868,19 @@ impl Service {
         Ok(Box::pin(futures_util::stream::empty()))
     }
 
-    fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, CancellationToken>> {
+    pub(super) fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, CancellationToken>> {
         self.cancels.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Cancels the turn for `session`, if one is running. Returns whether a
+    /// token was found and signalled.
+    pub fn cancel_turn(&self, session: &SessionKey) -> bool {
+        if let Some(token) = self.lock_cancels().get(session).cloned() {
+            token.cancel();
+            true
+        } else {
+            false
+        }
     }
 
     fn lock_catalog(&self) -> RwLockReadGuard<'_, Arc<Catalog>> {
