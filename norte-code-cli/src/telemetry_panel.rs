@@ -708,8 +708,14 @@ impl Panel {
 
     /// Renders a 2D canvas plot of the time series into `area` using ratatui's
     /// Chart widget with Braille markers for high-resolution plotting.
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::items_after_statements)]
+    #[allow(clippy::many_single_char_names)]
+    #[allow(unused_variables)]
+    #[allow(clippy::cast_possible_wrap)]
     pub(crate) fn draw_chart(&self, frame: &mut crate::terminal::Draw<'_>, area: ratatui::layout::Rect) {
-        if area.width < 12 || area.height < 6 {
+        if area.width < 14 || area.height < 8 {
             return;
         }
         let series = self.model_series(self.metric);
@@ -744,6 +750,9 @@ impl Panel {
 
         let x_max = (n_pts - 1).max(1) as f64;
         let y_max = max_val as f64;
+        // Leave room for axes labels
+        let _plot_w = f64::from(area.width.saturating_sub(8));
+        let _plot_h = f64::from(area.height.saturating_sub(4));
 
         let canvas = ratatui::widgets::canvas::Canvas::default()
             .block(ratatui::widgets::Block::default()
@@ -754,23 +763,44 @@ impl Panel {
             .y_bounds([0.0, y_max])
             .marker(ratatui::symbols::Marker::Braille)
             .paint(|ctx| {
-                // Horizontal grid lines
-                for i in 1..4 {
+                // --- Grid lines (horizontal) with labels ---
+                for i in 0..=4 {
                     let y = y_max * f64::from(i) / 4.0;
+                    let color = if i == 0 || i == 4 {
+                        ratatui::style::Color::Rgb(0x66, 0x66, 0x66)
+                    } else {
+                        ratatui::style::Color::Rgb(0x2A, 0x2A, 0x2A)
+                    };
                     ctx.draw(&ratatui::widgets::canvas::Line {
                         x1: 0.0, y1: y, x2: x_max, y2: y,
-                        color: ratatui::style::Color::Rgb(0x33, 0x33, 0x33),
+                        color,
                     });
                 }
-                // Vertical grid lines
-                for i in 1..4 {
+                // --- Grid lines (vertical) ---
+                for i in 0..=4 {
                     let x = x_max * f64::from(i) / 4.0;
                     ctx.draw(&ratatui::widgets::canvas::Line {
                         x1: x, y1: 0.0, x2: x, y2: y_max,
-                        color: ratatui::style::Color::Rgb(0x33, 0x33, 0x33),
+                        color: ratatui::style::Color::Rgb(0x2A, 0x2A, 0x2A),
                     });
                 }
-                // Draw each series
+                // --- Draw filled area under each series (gradient) ---
+                for (i, _) in series.iter().enumerate() {
+                    let (r, g, b) = colors[i % colors.len()];
+                    let data = &all_data[i];
+                    // Draw area fill: vertical lines from 0 to data point
+                    for (xi, pt) in data.iter().enumerate() {
+                        let x = pt.0;
+                        let y = pt.1;
+                        if y > 0.0 {
+                            ctx.draw(&ratatui::widgets::canvas::Line {
+                                x1: x, y1: 0.0, x2: x, y2: y,
+                                color: ratatui::style::Color::Rgb(r / 4, g / 4, b / 4),
+                            });
+                        }
+                    }
+                }
+                // --- Draw series lines ---
                 for (i, _) in series.iter().enumerate() {
                     let (r, g, b) = colors[i % colors.len()];
                     let color = ratatui::style::Color::Rgb(r, g, b);
@@ -781,6 +811,12 @@ impl Panel {
                             color,
                         });
                     }
+                }
+                // --- Draw series points with highlight ---
+                for (i, _) in series.iter().enumerate() {
+                    let (r, g, b) = colors[i % colors.len()];
+                    let color = ratatui::style::Color::Rgb(r, g, b);
+                    let data = &all_data[i];
                     for &(x, y) in data {
                         ctx.draw(&ratatui::widgets::canvas::Points {
                             coords: &[(x, y)],
@@ -788,9 +824,39 @@ impl Panel {
                         });
                     }
                 }
+                // --- Draw peak markers (circles at max points) ---
+                for (i, _) in series.iter().enumerate() {
+                    let (r, g, b) = colors[i % colors.len()];
+                    let color = ratatui::style::Color::Rgb(r, g, b);
+                    let data = &all_data[i];
+                    if let Some(max_pt) = data.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)) {
+                        ctx.draw(&ratatui::widgets::canvas::Circle {
+                            x: max_pt.0, y: max_pt.1, radius: 0.3,
+                            color,
+                        });
+                    }
+                }
             });
 
         frame.render_widget(canvas, area);
+
+        // Draw legend below the chart
+        let legend_y = area.y + area.height.saturating_sub(1);
+        if legend_y < area.y + area.height {
+            let mut legend = String::new();
+            for (i, (label, _)) in series.iter().enumerate() {
+                let (r, g, b) = colors[i % colors.len()];
+                if i > 0 { legend.push_str("  "); }
+                legend.push_str(label);
+            }
+            // Draw legend as a dim line
+            let legend_line = ratatui::text::Line::from(legend);
+            let legend_area = ratatui::layout::Rect::new(area.x + 2, legend_y, area.width.saturating_sub(4), 1);
+            use ratatui::widgets::Widget as _;
+            ratatui::widgets::Paragraph::new(legend_line)
+                .style(ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88)))
+                .render(legend_area, frame.buffer_mut());
+        }
     }
 
     /// This session's own figures, its own models ranked, and its errors.
