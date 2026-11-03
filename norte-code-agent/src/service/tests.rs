@@ -103,6 +103,44 @@ impl Model for FlakyModel {
     }
 }
 
+/// A model whose `stream()` never resolves, so a turn waits before the
+/// provider answers. The probe records that the request future was dropped.
+struct StallingModel {
+    inner: Arc<ScriptedModel>,
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Model for StallingModel {
+    fn reference(&self) -> &ModelRef {
+        self.inner.reference()
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn continuity(&self) -> &dyn norte::ContinuityAdapter {
+        self.inner.continuity()
+    }
+
+    async fn stream(&self, _request: ModelRequest) -> norte::Result<ModelStream> {
+        let _probe = DropProbe(Arc::clone(&self.dropped));
+        self.started.notify_one();
+        std::future::pending::<()>().await;
+        unreachable!("a pending future never resolves")
+    }
+}
+
 fn catalog() -> Arc<Catalog> {
     let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
         r#"{
@@ -738,6 +776,144 @@ async fn cancelling_a_turn_stops_a_running_command() {
         rest.iter()
             .any(|event| matches!(event.kind, ServerEventKind::TurnFinished { .. })),
         "a cancelled command must let the turn finish"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_turn_before_its_first_token_stops_it() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model = Arc::new(StallingModel {
+        inner: Arc::new(ScriptedModel::new(reference)),
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+    });
+    let (service, _store) = persistent_service_with_config(config(), model).await;
+    let mut events = service
+        .submit(ClientRequest {
+            request_id: 7,
+            kind: ClientRequestKind::SendMessage {
+                session: None,
+                text: "go".to_owned(),
+                attachments: Vec::new(),
+                budget: None,
+                reasoning: None,
+                replay: false,
+            },
+        })
+        .await
+        .expect("turn");
+
+    let mut key = None;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = events.next().await {
+            if let Some(session) = event.session {
+                key = Some(session);
+            }
+            if matches!(event.kind, ServerEventKind::TurnStarted { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the turn starts");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("the provider request is in flight");
+
+    let key = key.expect("session");
+    let _ = service
+        .submit(ClientRequest {
+            request_id: 0,
+            kind: ClientRequestKind::CancelTurn { session: key },
+        })
+        .await
+        .expect("cancel");
+    let rest = tokio::time::timeout(Duration::from_secs(2), events.collect::<Vec<_>>())
+        .await
+        .expect("the cancelled turn settles");
+
+    assert!(
+        rest.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: false,
+                ..
+            }
+        )),
+        "the turn ends cancelled: {rest:?}"
+    );
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "the provider request future was dropped"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_immediately_after_a_message_stops_the_turn() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let model = Arc::new(StallingModel {
+        inner: Arc::new(ScriptedModel::new(reference)),
+        started,
+        dropped,
+    });
+    let (service, _store) = persistent_service_with_config(config(), model).await;
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+
+    let events = service
+        .submit(ClientRequest {
+            request_id: 8,
+            kind: ClientRequestKind::SendMessage {
+                session: Some(key.clone()),
+                text: "go".to_owned(),
+                attachments: Vec::new(),
+                budget: None,
+                reasoning: None,
+                replay: false,
+            },
+        })
+        .await
+        .expect("turn");
+    let _ = service
+        .submit(ClientRequest {
+            request_id: 0,
+            kind: ClientRequestKind::CancelTurn {
+                session: key.clone(),
+            },
+        })
+        .await
+        .expect("cancel");
+    let rest = tokio::time::timeout(Duration::from_secs(2), events.collect::<Vec<_>>())
+        .await
+        .expect("the cancelled turn settles");
+
+    assert!(
+        rest.iter()
+            .any(|event| matches!(event.kind, ServerEventKind::TurnFinished { .. })),
+        "the turn ends cancelled: {rest:?}"
+    );
+    let (nid, spec, _) = service.require_record(&key).expect("record");
+    let history = service
+        .engine(&spec, Some(&key))
+        .expect("engine")
+        .history(nid)
+        .await
+        .expect("history");
+    assert!(
+        history
+            .iter()
+            .any(|message| message.role == Role::User && message.text() == "go"),
+        "the message is saved for the next turn"
     );
 }
 

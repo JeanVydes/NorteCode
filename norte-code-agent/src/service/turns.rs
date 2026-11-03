@@ -76,211 +76,224 @@ impl Service {
             let (nid, spec, _) = self.require_record(&key)?;
             (key, nid, spec)
         };
-        let mut leading = Vec::new();
-        if let Some(changed) = self.apply_pending_model(request_id, &key).await? {
-            leading.push(changed);
-            let (new_nid, new_spec, _) = self.require_record(&key)?;
-            nid = new_nid;
-            spec = new_spec;
-        }
-        if self.compaction_due(&key, &spec, nid).await? {
-            // The compaction joins what the boundary already reported: a model
-            // switch that landed first must not be dropped.
-            let events = match self.perform_compaction(request_id, &key, "threshold").await {
-                Ok(events) => events,
-                Err(error) => vec![ServerEvent::error(
-                    request_id,
-                    Some(key.clone()),
-                    ErrorCode::Conflict,
-                    error.to_string(),
-                )],
-            };
-            leading.extend(events);
-            let (new_nid, new_spec, _) = self.require_record(&key)?;
-            nid = new_nid;
-            spec = new_spec;
-        }
-        let (session_reasoning, pending_reasoning, pending_steers) = {
-            let sessions = self.lock_sessions();
-            let record = sessions
-                .get(&key)
-                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            (
-                record.reasoning.clone(),
-                record.pending_reasoning.clone(),
-                record.pending_steers.clone(),
-            )
-        };
-        // Precedence: an explicit message setting, then a one-shot override,
-        // then the session override, then the configured default.
-        let requested_reasoning = reasoning
-            .or(pending_reasoning.clone())
-            .or(session_reasoning);
-        let reasoning = resolve_reasoning(
-            requested_reasoning.as_ref(),
-            &self.config().reasoning.default,
-            &spec.capabilities.reasoning,
-        )?;
-        let configured_message = configured_budget(self.config().budgets.message.as_ref());
-        let message = message_budget.map(|budget| budget.or(configured_message.clone()));
-        if let Some(budget) = message.as_ref().and_then(Option::as_ref) {
-            self.validate_budget(&key, budget).await?;
-        }
-        let existing = self.lock_budget_states().get(&key).cloned();
-        let book = if let Some(message) = message {
-            let book = self.new_budget_book(&key, message).await?;
-            self.lock_budget_states()
-                .insert(key.clone(), Arc::clone(&book));
-            book
-        } else if let Some(book) = existing {
-            book
-        } else {
-            let book = self.new_budget_book(&key, configured_message).await?;
-            self.lock_budget_states()
-                .insert(key.clone(), Arc::clone(&book));
-            book
-        };
-        let gate = self.compaction_gate(&spec);
-        let engine =
-            self.engine_with_budget(&spec, Some(&key), Some(Arc::clone(&book)), gate.clone())?;
-        let state = engine.session(nid).await?;
-        let turn = state.turn + 1;
-        // The steering messages belong to the turn boundary that is starting
-        // now. The interceptor takes them before the turn's input, so they keep
-        // their arrival order; a message the engine already holds is not
-        // queued twice.
-        for steered in &pending_steers {
-            if !self.steering.is_pending(nid, &steered.id) {
-                self.steering.push(nid, steered.clone());
-            }
-        }
-        if pending_reasoning.is_some() {
-            self.clear_pending(&key, pending_reasoning.as_ref(), &[]);
-            self.persist(&key).await?;
-        }
-        // A client that starts blank cannot tell what the session holds, so it
-        // asks for the transcript. It asks explicitly because the request's own
-        // shape cannot answer it: a resume has no message and a message has one,
-        // but `run --session KEY` sends a message to a session with a history
-        // and wants both.
-        let replay = if replay {
-            let ancestors = compaction_ancestors(self.directory.as_ref(), nid).await;
-            let mut events = Vec::new();
-            if let Some(stats) = self
-                .resume_stats(request_id, &key, &engine, nid, &spec)
-                .await
-            {
-                events.push(stats);
-            }
-            events.extend(replay_events(request_id, &key, &engine, nid, &ancestors).await);
-            // The task list is the model's, written through `todo`, and it lives
-            // in the call it made — which is committed with the conversation and
-            // therefore survived the restart. Reading it back puts the widget on
-            // screen and, just as much, gives the next compaction a list to
-            // summarise instead of nothing.
-            if let Ok(history) = engine.history(nid).await {
-                let todos = restored_todos(&history);
-                if !todos.is_empty() {
-                    self.todo
-                        .restore(nid, todos.iter().map(to_todo_item).collect());
-                    events.push(ServerEvent::new(
-                        request_id,
-                        Some(key.clone()),
-                        ServerEventKind::SessionTodos { todos },
-                    ));
-                }
-            }
-            events
-        } else {
-            Vec::new()
-        };
-        // A turn starts by committing the user's message and only then checks
-        // it against the model, so an attachment the model cannot take used to
-        // be committed first and rejected second: every later turn rebuilt the
-        // history, met the same part and failed the same way, which left the
-        // session unusable. A new model did not help, because the part is in the
-        // history, not in the request. The check therefore belongs here, before
-        // anything is committed: a part that cannot be sent is refused while
-        // there is still nothing to undo, and the session carries on.
-        if let Some((code, message)) = unsupported_attachment(&spec.capabilities, &attachments) {
-            // The session's own phase, not a made-up `Idle`: nothing was
-            // committed, so whatever it was before the turn it still is, and a
-            // session parked on an approval has to stay parked for the client
-            // that is looking at the approval it owes.
-            let phase = to_phase(state.phase);
-            self.set_phase(&key, phase).await;
-            return Ok(Box::pin(futures_util::stream::iter(vec![
-                ServerEvent::new(
-                    request_id,
-                    Some(key.clone()),
-                    ServerEventKind::TurnStarted { turn },
-                ),
-                ServerEvent::error(request_id, Some(key.clone()), code, message),
-                ServerEvent::new(
-                    request_id,
-                    Some(key),
-                    ServerEventKind::TurnFinished {
-                        turn,
-                        phase,
-                        committed: false,
-                    },
-                ),
-            ])));
-        }
-        // The turn starts here, in the stream's prefix, so a client always sees
-        // it begin before the transcript it replays. `run_turn` used to be the
-        // only sender, and its event arrives after this prefix is read, which
-        // put `TurnStarted` after the replayed messages.
-        leading.push(ServerEvent::new(
-            request_id,
-            Some(key.clone()),
-            ServerEventKind::TurnStarted { turn },
-        ));
-        leading.extend(replay);
-        let (tx, rx) = mpsc::channel::<ServerEvent>(256);
+        // Registered before the first await: a cancel that lands while the
+        // turn boundary compacts must survive the compaction, not be lost.
         let cancellation = CancellationToken::new();
         self.lock_cancels()
             .insert(key.clone(), cancellation.clone());
-
-        let this = Arc::clone(self);
-        let task_key = key.clone();
-        tokio::spawn(async move {
-            let runner = Arc::clone(&this);
-            let result = runner
-                .run_turn(
-                    engine,
-                    Some(book),
-                    gate,
-                    request_id,
-                    &task_key,
-                    nid,
-                    turn,
-                    input,
-                    attachments,
-                    reasoning,
-                    spec.capabilities.max_output,
-                    &tx,
-                    &cancellation,
-                )
-                .await;
-            if let Err(error) = result {
-                let _ = tx
-                    .send(ServerEvent::error(
-                        request_id,
-                        Some(task_key.clone()),
-                        ErrorCode::Internal,
-                        error.to_string(),
-                    ))
-                    .await;
+        let result: Result<EventStream, ServiceError> = async {
+            let mut leading = Vec::new();
+            if let Some(changed) = self.apply_pending_model(request_id, &key).await? {
+                leading.push(changed);
+                let (new_nid, new_spec, _) = self.require_record(&key)?;
+                nid = new_nid;
+                spec = new_spec;
             }
-            this.lock_cancels().remove(&task_key);
-        });
+            if self.compaction_due(&key, &spec, nid).await? {
+                // The compaction joins what the boundary already reported: a model
+                // switch that landed first must not be dropped.
+                let events = match self.perform_compaction(request_id, &key, "threshold").await {
+                    Ok(events) => events,
+                    Err(error) => vec![ServerEvent::error(
+                        request_id,
+                        Some(key.clone()),
+                        ErrorCode::Conflict,
+                        error.to_string(),
+                    )],
+                };
+                leading.extend(events);
+                let (new_nid, new_spec, _) = self.require_record(&key)?;
+                nid = new_nid;
+                spec = new_spec;
+            }
+            let (session_reasoning, pending_reasoning, pending_steers) = {
+                let sessions = self.lock_sessions();
+                let record = sessions
+                    .get(&key)
+                    .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+                (
+                    record.reasoning.clone(),
+                    record.pending_reasoning.clone(),
+                    record.pending_steers.clone(),
+                )
+            };
+            // Precedence: an explicit message setting, then a one-shot override,
+            // then the session override, then the configured default.
+            let requested_reasoning = reasoning
+                .or(pending_reasoning.clone())
+                .or(session_reasoning);
+            let reasoning = resolve_reasoning(
+                requested_reasoning.as_ref(),
+                &self.config().reasoning.default,
+                &spec.capabilities.reasoning,
+            )?;
+            let configured_message = configured_budget(self.config().budgets.message.as_ref());
+            let message = message_budget.map(|budget| budget.or(configured_message.clone()));
+            if let Some(budget) = message.as_ref().and_then(Option::as_ref) {
+                self.validate_budget(&key, budget).await?;
+            }
+            let existing = self.lock_budget_states().get(&key).cloned();
+            let book = if let Some(message) = message {
+                let book = self.new_budget_book(&key, message).await?;
+                self.lock_budget_states()
+                    .insert(key.clone(), Arc::clone(&book));
+                book
+            } else if let Some(book) = existing {
+                book
+            } else {
+                let book = self.new_budget_book(&key, configured_message).await?;
+                self.lock_budget_states()
+                    .insert(key.clone(), Arc::clone(&book));
+                book
+            };
+            let gate = self.compaction_gate(&spec);
+            let engine =
+                self.engine_with_budget(&spec, Some(&key), Some(Arc::clone(&book)), gate.clone())?;
+            let state = engine.session(nid).await?;
+            let turn = state.turn + 1;
+            // The steering messages belong to the turn boundary that is starting
+            // now. The interceptor takes them before the turn's input, so they keep
+            // their arrival order; a message the engine already holds is not
+            // queued twice.
+            for steered in &pending_steers {
+                if !self.steering.is_pending(nid, &steered.id) {
+                    self.steering.push(nid, steered.clone());
+                }
+            }
+            if pending_reasoning.is_some() {
+                self.clear_pending(&key, pending_reasoning.as_ref(), &[]);
+                self.persist(&key).await?;
+            }
+            // A client that starts blank cannot tell what the session holds, so it
+            // asks for the transcript. It asks explicitly because the request's own
+            // shape cannot answer it: a resume has no message and a message has one,
+            // but `run --session KEY` sends a message to a session with a history
+            // and wants both.
+            let replay = if replay {
+                let ancestors = compaction_ancestors(self.directory.as_ref(), nid).await;
+                let mut events = Vec::new();
+                if let Some(stats) = self
+                    .resume_stats(request_id, &key, &engine, nid, &spec)
+                    .await
+                {
+                    events.push(stats);
+                }
+                events.extend(replay_events(request_id, &key, &engine, nid, &ancestors).await);
+                // The task list is the model's, written through `todo`, and it lives
+                // in the call it made — which is committed with the conversation and
+                // therefore survived the restart. Reading it back puts the widget on
+                // screen and, just as much, gives the next compaction a list to
+                // summarise instead of nothing.
+                if let Ok(history) = engine.history(nid).await {
+                    let todos = restored_todos(&history);
+                    if !todos.is_empty() {
+                        self.todo
+                            .restore(nid, todos.iter().map(to_todo_item).collect());
+                        events.push(ServerEvent::new(
+                            request_id,
+                            Some(key.clone()),
+                            ServerEventKind::SessionTodos { todos },
+                        ));
+                    }
+                }
+                events
+            } else {
+                Vec::new()
+            };
+            // A turn starts by committing the user's message and only then checks
+            // it against the model, so an attachment the model cannot take used to
+            // be committed first and rejected second: every later turn rebuilt the
+            // history, met the same part and failed the same way, which left the
+            // session unusable. A new model did not help, because the part is in the
+            // history, not in the request. The check therefore belongs here, before
+            // anything is committed: a part that cannot be sent is refused while
+            // there is still nothing to undo, and the session carries on.
+            if let Some((code, message)) = unsupported_attachment(&spec.capabilities, &attachments)
+            {
+                // The session's own phase, not a made-up `Idle`: nothing was
+                // committed, so whatever it was before the turn it still is, and a
+                // session parked on an approval has to stay parked for the client
+                // that is looking at the approval it owes.
+                let phase = to_phase(state.phase);
+                self.set_phase(&key, phase).await;
+                self.lock_cancels().remove(&key);
+                let stream: EventStream = Box::pin(futures_util::stream::iter(vec![
+                    ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::TurnStarted { turn },
+                    ),
+                    ServerEvent::error(request_id, Some(key.clone()), code, message),
+                    ServerEvent::new(
+                        request_id,
+                        Some(key.clone()),
+                        ServerEventKind::TurnFinished {
+                            turn,
+                            phase,
+                            committed: false,
+                        },
+                    ),
+                ]));
+                return Ok(stream);
+            }
+            // The turn starts here, in the stream's prefix, so a client always sees
+            // it begin before the transcript it replays. `run_turn` used to be the
+            // only sender, and its event arrives after this prefix is read, which
+            // put `TurnStarted` after the replayed messages.
+            leading.push(ServerEvent::new(
+                request_id,
+                Some(key.clone()),
+                ServerEventKind::TurnStarted { turn },
+            ));
+            leading.extend(replay);
+            let (tx, rx) = mpsc::channel::<ServerEvent>(256);
+            let task_cancellation = cancellation.clone();
 
-        Ok(Box::pin(futures_util::stream::iter(leading).chain(
-            futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.map(|event| (event, rx))
-            }),
-        )))
+            let this = Arc::clone(self);
+            let task_key = key.clone();
+            tokio::spawn(async move {
+                let runner = Arc::clone(&this);
+                let result = runner
+                    .run_turn(
+                        engine,
+                        Some(book),
+                        gate,
+                        request_id,
+                        &task_key,
+                        nid,
+                        turn,
+                        input,
+                        attachments,
+                        reasoning,
+                        spec.capabilities.max_output,
+                        &tx,
+                        &task_cancellation,
+                    )
+                    .await;
+                if let Err(error) = result {
+                    let _ = tx
+                        .send(ServerEvent::error(
+                            request_id,
+                            Some(task_key.clone()),
+                            ErrorCode::Internal,
+                            error.to_string(),
+                        ))
+                        .await;
+                }
+                this.lock_cancels().remove(&task_key);
+            });
+
+            Ok(Box::pin(futures_util::stream::iter(leading).chain(
+                futures_util::stream::unfold(rx, |mut rx| async move {
+                    rx.recv().await.map(|event| (event, rx))
+                }),
+            )))
+        }
+        .await;
+        if result.is_err() {
+            self.lock_cancels().remove(&key);
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -381,9 +394,10 @@ impl Service {
             for (key, value) in &self.config().extensions {
                 turn_builder = turn_builder.extension(key.clone(), value.clone());
             }
-            let mut stepped = turn_builder.start_stepped();
+            let mut stepped = turn_builder
+                .cancellation(cancellation.clone())
+                .start_stepped();
 
-            let mut cancelled = false;
             let mut interrupted = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
@@ -391,13 +405,6 @@ impl Service {
                 Err(norte::Error::Other("not run".to_owned()));
 
             'stepping: loop {
-                if cancellation.is_cancelled() {
-                    cancelled = true;
-                    interrupted = true;
-                    stepped.cancel();
-                    break 'stepping;
-                }
-
                 match stepped.step().await {
                     Ok(Some(norte::harness::StepResult {
                         step: norte::harness::Step::Tools { session },
@@ -520,7 +527,8 @@ impl Service {
                 }
             }
 
-            if interrupted {
+            let cancelled = cancellation.is_cancelled();
+            if interrupted || cancelled {
                 let phase = norte_code_protocol::Phase::Idle;
                 self.set_phase(key, phase).await;
                 let _ = self
@@ -552,21 +560,19 @@ impl Service {
                 return Ok(());
             }
 
-            if !interrupted {
-                let _ = self
-                    .settle(
-                        &engine,
-                        request_id,
-                        key,
-                        current_nid,
-                        &mut stats,
-                        tx,
-                        true,
-                        gate.as_deref(),
-                    )
-                    .await;
-                self.store_stats(key, &stats).await;
-            }
+            let _ = self
+                .settle(
+                    &engine,
+                    request_id,
+                    key,
+                    current_nid,
+                    &mut stats,
+                    tx,
+                    true,
+                    gate.as_deref(),
+                )
+                .await;
+            self.store_stats(key, &stats).await;
 
             let compaction_abort = failure.as_deref().is_some_and(is_compaction_message)
                 || matches!(&outcome, Err(e) if is_compaction_message(&e.to_string()));
