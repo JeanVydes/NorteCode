@@ -115,6 +115,10 @@ pub(crate) fn built() -> Registry {
         "/sessions",
         "open another session, or start a new one",
     ));
+    registry.register(CommandSpec::new(
+        "/plans",
+        "show this session's saved plans, status and file paths",
+    ));
     registry.register(
         CommandSpec::new(
             "/provider",
@@ -234,6 +238,7 @@ mod tests {
             "/model",
             "/models",
             "/sessions",
+            "/plans",
             "/provider",
             "/refresh",
             "/mcp",

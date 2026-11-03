@@ -804,7 +804,8 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
             }
             continue;
         }
-        for (index, line) in entry.lines.iter().enumerate() {
+        let visible_lines = visible_output_lines(&mut out, entry);
+        for (index, line) in visible_lines.iter().enumerate() {
             // A call that is out says so on the row it will end on: a glyph
             // that turns and the time it has taken. The clock is the one number
             // that turns a silent wait into something a person can read, and the
@@ -861,7 +862,7 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         }
         // What the bound dropped is said where it was dropped: a cut that hides
         // itself is worse than a short list that admits it.
-        if entry.dropped > 0 {
+        if entry.dropped > 0 && entry.collapsed_lines.is_none() {
             out.push(Row {
                 ink: Some(Ink::Yellow),
                 kind: Kind::Notice,
@@ -881,6 +882,45 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         }
     }
     out
+}
+
+/// Adds the collapsed-output hint and returns the rows the view should draw.
+fn visible_output_lines<'a>(
+    out: &mut Vec<Row>,
+    entry: &'a crate::transcript::Entry,
+) -> &'a [crate::transcript::Line] {
+    let Some(limit) = entry.collapsed_lines else {
+        return &entry.lines;
+    };
+    let start = entry.lines.len().saturating_sub(limit);
+    if !entry.expanded && start > 0 {
+        out.push(Row {
+            ink: Some(Ink::Yellow),
+            kind: Kind::Notice,
+            text: format!(
+                "… {} line(s) hidden · Ctrl+O to expand",
+                start.saturating_add(entry.dropped)
+            ),
+            frame: entry.boxed.then_some(Frame::Inside),
+            runs: Vec::new(),
+        });
+    } else if entry.dropped > 0 {
+        out.push(Row {
+            ink: Some(Ink::Yellow),
+            kind: Kind::Notice,
+            text: format!(
+                "… {} earlier line(s) omitted (retention limit)",
+                entry.dropped
+            ),
+            frame: entry.boxed.then_some(Frame::Inside),
+            runs: Vec::new(),
+        });
+    }
+    if entry.expanded {
+        &entry.lines
+    } else {
+        &entry.lines[start..]
+    }
 }
 
 /// Puts a blank row between two entries that are not the same call.

@@ -174,6 +174,10 @@ pub struct Entry {
     pub boxed: bool,
     /// What the frame says on its top edge, when it says anything.
     pub title: Option<String>,
+    /// The number of rows to show while a tool output is collapsed.
+    pub collapsed_lines: Option<usize>,
+    /// Whether a bounded output entry is currently expanded.
+    pub expanded: bool,
 }
 
 impl Entry {
@@ -188,6 +192,8 @@ impl Entry {
             call_id: None,
             boxed: false,
             title: None,
+            collapsed_lines: None,
+            expanded: false,
         }
     }
 
@@ -305,6 +311,11 @@ impl Transcript {
         &self.entries
     }
 
+    /// Every entry, oldest first, for state changes owned by the renderer.
+    pub(crate) fn entries_mut(&mut self) -> &mut [Entry] {
+        &mut self.entries
+    }
+
     /// The text of the conversation, as data and not as it was painted.
     ///
     /// The range selects lines from the flattened conversation — every line of
@@ -419,7 +430,7 @@ impl Transcript {
         self.entries
             .iter_mut()
             .rev()
-            .find(|entry| entry.call_id.as_deref() == Some(call_id))
+            .find(|entry| !entry.boxed && entry.call_id.as_deref() == Some(call_id))
     }
 
     /// Ends the open entry, so the next line starts a new one.

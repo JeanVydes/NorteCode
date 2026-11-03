@@ -129,6 +129,8 @@ pub(crate) enum ChatCommand {
 
     /// List sessions and pick one to open.
     Sessions,
+    /// Show saved plans for the current session.
+    Plans,
 
     /// Install a plugin from a git URL.
     PluginsAdd { url: String },
@@ -219,6 +221,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/delete" => ChatCommand::Delete,
         "/plugins list" => ChatCommand::PluginsList,
         "/sessions" => ChatCommand::Sessions,
+        "/plans" => ChatCommand::Plans,
         "/plugins add" => ChatCommand::PluginsAdd {
             url: invocation.arg_or_empty("url").to_owned(),
         },
@@ -739,6 +742,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::Telemetry => {
                     report_telemetry(session.as_ref(), renderer).await;
                 }
+                ChatCommand::Plans => show_plans(session.as_ref(), renderer).await,
                 // A command from a plugin: the plugin answers with the lines
                 // of a panel, and the frame draws it like any other. The client
                 // does not know what the command is for and does not need to:
@@ -1415,6 +1419,161 @@ async fn steer_text(
     }
 }
 
+/// Shows the current session's Markdown plans and their on-disk locations.
+async fn show_plans(session: Option<&SessionKey>, renderer: &mut Renderer) {
+    let Some(session) = session else {
+        renderer.notice("start or resume a session before using /plans");
+        return;
+    };
+    if session.as_str().is_empty()
+        || !session
+            .as_str()
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        renderer.failure(format!(
+            "invalid session id `{session}` for the plans directory"
+        ));
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        renderer.failure("HOME is not set; cannot locate this session's plans");
+        return;
+    };
+    let directory = std::path::PathBuf::from(home)
+        .join(".local")
+        .join("norte-code")
+        .join(session.as_str())
+        .join("plans");
+    let paths = match plan_paths(&directory).await {
+        Ok(Some(paths)) => paths,
+        Ok(None) => {
+            renderer.open_modal(
+                "plans",
+                vec![
+                    "No plans saved for this session.".to_owned(),
+                    format!("Plans directory: {}", directory.display()),
+                ],
+            );
+            return;
+        }
+        Err(error) => {
+            renderer.failure(error);
+            return;
+        }
+    };
+    let mut lines = vec![
+        format!("Plans directory: {}", directory.display()),
+        String::new(),
+    ];
+    if paths.is_empty() {
+        lines.push("No plans saved for this session.".to_owned());
+    }
+    for path in paths {
+        let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+            renderer.failure(format!(
+                "plan filename is not valid UTF-8: {}",
+                path.display()
+            ));
+            return;
+        };
+        let contents = match tokio::fs::read_to_string(&path).await {
+            Ok(contents) => contents,
+            Err(error) => {
+                renderer.failure(format!("could not read plan {}: {error}", path.display()));
+                return;
+            }
+        };
+        let status = plan_file_status(&contents);
+        let title = plan_file_title(&contents).unwrap_or(id);
+        let (indicator, label) = match status {
+            Some("active") => ("🟢", "active"),
+            Some("pending") => ("🟡", "pending"),
+            Some("canceled") => ("🔴", "canceled"),
+            _ => ("⚪", "invalid"),
+        };
+        lines.push(format!("{indicator} {title}  [{label}]"));
+        lines.push(format!("  {}", path.display()));
+        if let Some(created_at) = plan_file_metadata(&contents, "created_at") {
+            lines.push(format!("  created: {created_at}"));
+        }
+        if let Some(updated_at) = plan_file_metadata(&contents, "updated_at") {
+            lines.push(format!("  modified: {updated_at}"));
+        }
+        if let (Some(provider), Some(model)) = (
+            plan_file_metadata(&contents, "provider"),
+            plan_file_metadata(&contents, "model"),
+        ) {
+            lines.push(format!("  created by: {provider}/{model}"));
+        }
+        if status.is_none() {
+            lines.push("  Invalid or missing status in Markdown front matter.".to_owned());
+        }
+        lines.push(String::new());
+    }
+    renderer.open_modal("plans", lines);
+}
+
+async fn plan_paths(
+    directory: &std::path::Path,
+) -> Result<Option<Vec<std::path::PathBuf>>, String> {
+    let mut entries = match tokio::fs::read_dir(directory).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "could not read plans directory {}: {error}",
+                directory.display()
+            ));
+        }
+    };
+    let mut paths = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("could not list plans in {}: {error}", directory.display()))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|error| format!("could not inspect plan file: {error}"))?;
+        if file_type.is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    Ok(Some(paths))
+}
+
+fn plan_file_status(contents: &str) -> Option<&str> {
+    let metadata = contents.strip_prefix("---\n")?.split_once("\n---\n")?.0;
+    let status = metadata
+        .lines()
+        .find_map(|line| line.strip_prefix("status: "))?;
+    matches!(status, "active" | "pending" | "canceled").then_some(status)
+}
+
+fn plan_file_title(contents: &str) -> Option<&str> {
+    let markdown = contents
+        .strip_prefix("---\n")?
+        .split_once("\n---\n")?
+        .1
+        .trim_start_matches('\n');
+    let first_line = markdown.lines().next()?.trim();
+    let title = first_line
+        .strip_prefix('#')
+        .map_or(first_line, |line| line.trim_start_matches('#').trim());
+    (!title.is_empty()).then_some(title)
+}
+
+fn plan_file_metadata(contents: &str, key: &str) -> Option<String> {
+    let metadata = contents.strip_prefix("---\n")?.split_once("\n---\n")?.0;
+    let value = metadata
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}: ")))?;
+    Some(serde_json::from_str(value).unwrap_or_else(|_| value.to_owned()))
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_live_command(
     service: &Arc<Service>,
@@ -1438,6 +1597,7 @@ async fn handle_live_command(
         ChatCommand::Telemetry => {
             report_telemetry(current, renderer).await;
         }
+        ChatCommand::Plans => show_plans(current, renderer).await,
         // A command from a plugin: the plugin answers with the lines
         // of a panel, and the frame draws it like any other. The client
         // does not know what the command is for and does not need to:
@@ -2943,6 +3103,13 @@ pub(crate) async fn read_repl_line(
                 renderer.draw()?;
                 continue;
             }
+            Some(EditorEvent::Action(EditorAction::ToggleOutput)) => {
+                if !renderer.toggle_output() {
+                    renderer.notice("there is no expandable shell output");
+                }
+                renderer.draw()?;
+                continue;
+            }
             // A panel key at the prompt: the panel decides what it means and
             // this carries the decision out. It is `async`, so it can: the
             // caller is the loop that owns the service, and asking it to make
@@ -3241,6 +3408,13 @@ pub(crate) async fn drive_turns(
                             // No filterable panel is open during a turn: the
                             // key belongs to the prompt between turns.
                             EditorAction::Filter(_) => continue,
+                            EditorAction::ToggleOutput => {
+                                if !renderer.toggle_output() {
+                                    renderer.notice("there is no expandable shell output");
+                                }
+                                renderer.draw()?;
+                                continue;
+                            }
                             // A key the panel owns: the panel decides what it
                             // means and the loop carries the decision out,
                             // because the service is here and the panel has no
@@ -3430,7 +3604,7 @@ pub(crate) async fn drive_turns(
                     &event,
                     input.as_deref_mut(),
                     &mut interrupt_rx,
-                    &mut || renderer.draw(),
+                    renderer,
                 )
                 .await?
                 {
@@ -3565,8 +3739,8 @@ mod tests {
     use super::{
         BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
         ReasoningScope, SignalGuard, command_suggestion, interactive_loop, models_panel, mpsc,
-        parse_budget_limit, parse_chat_command, plan_provider_switch, refresh_completions,
-        switch_provider,
+        parse_budget_limit, parse_chat_command, plan_file_metadata, plan_file_status,
+        plan_file_title, plan_provider_switch, refresh_completions, switch_provider,
     };
     use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
     use crate::render::{Format, Renderer, Verbosity};
@@ -4117,6 +4291,65 @@ mod tests {
         assert_eq!(usage_of("/models"), Some("/models".to_owned()));
         assert_eq!(usage_of("/sessions"), Some("/sessions".to_owned()));
         assert!(matches!(parse_chat_command("/models now"), Some(Err(_))));
+    }
+
+    #[test]
+    fn plans_command_is_offered_and_takes_no_arguments() {
+        assert!(matches!(
+            parse_chat_command("/plans"),
+            Some(Ok(ChatCommand::Plans))
+        ));
+        assert!(offered("/plans"));
+        assert_eq!(usage_of("/plans"), Some("/plans".to_owned()));
+        assert!(matches!(parse_chat_command("/plans now"), Some(Err(_))));
+    }
+
+    #[test]
+    fn plan_status_reads_only_supported_front_matter_values() {
+        assert_eq!(
+            plan_file_status("---\nstatus: active\n---\n# Plan"),
+            Some("active")
+        );
+        assert_eq!(
+            plan_file_status("---\nstatus: pending\n---\n# Plan"),
+            Some("pending")
+        );
+        assert_eq!(
+            plan_file_status("---\nstatus: canceled\n---\n# Plan"),
+            Some("canceled")
+        );
+        assert_eq!(plan_file_status("---\nstatus: unknown\n---\n"), None);
+        assert_eq!(plan_file_status("# No metadata"), None);
+    }
+
+    #[test]
+    fn plan_title_uses_first_markdown_line_without_heading_prefix() {
+        assert_eq!(
+            plan_file_title("---\nstatus: active\n---\n### Add plans command\n\nDetails"),
+            Some("Add plans command")
+        );
+        assert_eq!(
+            plan_file_title("---\nstatus: pending\n---\nPlan title\n\nDetails"),
+            Some("Plan title")
+        );
+        assert_eq!(plan_file_title("---\nstatus: pending\n---\n#"), None);
+    }
+
+    #[test]
+    fn plan_metadata_reads_timestamps_and_json_quoted_provider_values() {
+        let contents = "---\nstatus: active\ncreated_at: 2026-01-02T03:04:05Z\nprovider: \"openai\"\nmodel: \"model/one\"\n---\n# Title";
+        assert_eq!(
+            plan_file_metadata(contents, "created_at").as_deref(),
+            Some("2026-01-02T03:04:05Z")
+        );
+        assert_eq!(
+            plan_file_metadata(contents, "provider").as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            plan_file_metadata(contents, "model").as_deref(),
+            Some("model/one")
+        );
     }
 
     #[test]

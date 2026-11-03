@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use super::{
-    ClientRequest, ClientRequestKind, ServerEvent, ServerEventKind, Service, SessionKey, StreamExt,
-    mpsc,
+    ClientRequest, ClientRequestKind, Renderer, ServerEvent, ServerEventKind, Service, SessionKey,
+    StreamExt, mpsc,
 };
 
 /// How often the question on screen is repainted while it waits for an answer.
@@ -13,6 +13,7 @@ use super::{
 /// under the cursor would move in the editor and not on screen until something
 /// else happened to draw.
 const QUESTION_TICK_MS: u64 = 60;
+const PLAN_REVIEW_PREFIX: &str = "NORTE_CODE_PLAN_REVIEW\n";
 
 /// Answers a `QuestionAsked` event, walking the choices with the arrow keys.///
 /// With closed `options` the choices are drawn as a list the cursor walks, and
@@ -29,7 +30,7 @@ pub(crate) async fn answer_if_asked(
     event: &ServerEvent,
     input: Option<&mut crate::input::InteractiveInput>,
     interrupts: &mut mpsc::Receiver<()>,
-    draw: &mut impl FnMut() -> Result<(), String>,
+    renderer: &mut Renderer,
 ) -> Result<bool, String> {
     let ServerEventKind::QuestionAsked {
         question,
@@ -47,19 +48,44 @@ pub(crate) async fn answer_if_asked(
         .ok_or("a question arrived without a session")?;
     let question = question.clone();
     let Some(input) = input else {
+        if let Some(plan) = prompt.strip_prefix(PLAN_REVIEW_PREFIX) {
+            eprintln!("proposed plan:\n{}", crate::text::terminal(plan));
+            eprintln!("(no interactive client; the saved plan remains pending)");
+            return submit_answer(
+                service,
+                session,
+                question,
+                "Plan review left pending".to_owned(),
+            )
+            .await;
+        }
         eprintln!("? {}", crate::text::terminal(prompt));
         eprintln!("(no interactive client; answering with a note)");
         let answer =
             "(no interactive client is attached; continue with your best judgment)".to_owned();
         return submit_answer(service, session, question, answer).await;
     };
-    // The question is drawn where the draft is drawn: the editor owns those rows
-    // and is the only thing that can read a key while a turn runs.
-    pinned.ask(
-        crate::text::terminal(prompt).into_owned(),
-        options.clone(),
-        *multiple,
-    );
+    // Plans are already saved as Markdown before this event is emitted. Show
+    // that exact file content in the scrollable report modal, while the
+    // existing question choices remain the approval decision.
+    if let Some(plan) = prompt.strip_prefix(PLAN_REVIEW_PREFIX) {
+        let mut lines = vec![
+            "This proposal is saved and pending. Close this panel to approve or reject it."
+                .to_owned(),
+            String::new(),
+        ];
+        lines.extend(crate::text::terminal(plan).lines().map(str::to_owned));
+        renderer.open_modal("proposed plan", lines);
+        pinned.ask("Approve this plan?".to_owned(), options.clone(), *multiple);
+    } else {
+        // The question is drawn where the draft is drawn: the editor owns
+        // those rows and is the only thing that can read a key while a turn runs.
+        pinned.ask(
+            crate::text::terminal(prompt).into_owned(),
+            options.clone(),
+            *multiple,
+        );
+    }
     if options.is_empty() {
         // Nothing to walk: the box is the whole question, and it opens at once
         // on the same surface "something else" opens. The old path printed a
@@ -71,7 +97,7 @@ pub(crate) async fn answer_if_asked(
     // waits. `ask` only marks the block dirty, and nothing else draws while
     // this loop is parked on the answer: without this the question was set and
     // never shown, which is a question nobody can answer.
-    draw()?;
+    renderer.draw()?;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(QUESTION_TICK_MS));
     let answer = loop {
         let next = tokio::select! {
@@ -82,7 +108,7 @@ pub(crate) async fn answer_if_asked(
             // move it: a key changes the block and the tick is what paints it,
             // exactly as it is at the prompt.
             _ = tick.tick() => {
-                draw()?;
+                renderer.draw()?;
                 continue;
             }
         };
@@ -106,6 +132,7 @@ pub(crate) async fn answer_if_asked(
     // The block goes whatever happened: an answer was sent, or there is nobody
     // left to answer and a question on screen would be one that cannot be.
     pinned.retire();
+    renderer.close_modal();
     let answer = match answer {
         Some(crate::input::Answer::Taken(taken)) => compose_selection(options, &taken, None),
         Some(crate::input::Answer::Typed(text)) => text,

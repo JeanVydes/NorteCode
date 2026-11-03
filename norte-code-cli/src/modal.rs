@@ -574,21 +574,6 @@ impl Modal {
             .collect();
         Paragraph::new(rows).render(inner, frame.buffer_mut());
 
-        // For telemetry panels, render a 2D canvas chart below the text.
-        if let Some(panel) = self.telemetry.as_ref() {
-            let chart_area = Rect::new(
-                inner.x,
-                inner.y + u16::try_from(shown).unwrap_or(u16::MAX),
-                inner.width,
-                inner
-                    .height
-                    .saturating_sub(u16::try_from(shown).unwrap_or(u16::MAX)),
-            );
-            if chart_area.height >= 5 {
-                panel.draw_chart(frame, chart_area);
-            }
-        }
-
         // The frame of the panel, drawn after its contents so the corners are
         // not overwritten by a long line.
         let border = style.blue_span();
@@ -653,7 +638,14 @@ impl Modal {
                 self.rows.len()
             );
         }
-        if self.editable {
+        if let Some(panel) = self.telemetry.as_ref() {
+            use std::fmt::Write as _;
+            let _ = write!(
+                hint,
+                "· tab {} · [ ] range · r/R metric · ↑↓ scroll · ^c copy · esc close ",
+                panel.tab.label()
+            );
+        } else if self.editable {
             use std::fmt::Write as _;
             let _ = write!(
                 hint,

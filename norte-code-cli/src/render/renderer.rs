@@ -40,19 +40,12 @@ pub(crate) enum Format {
 /// newline that never comes would show nothing at all while the tool runs.
 const MAX_PARTIAL_LINE_CHARS: usize = 512;
 
-/// The most rows one streamed output box keeps.
+/// The most rows one streamed output box retains.
 ///
-/// Four, and the last four rather than the first: a command that prints
-/// thousands of lines would push the transcript off the screen, and of what it
-/// printed, the end is what says whether it worked. The model has the whole
-/// output either way — this is what a person is shown while it runs — so the
-/// box is a glance at how the call went and not a report to read. The count of
-/// what was dropped says there was more.
-///
-/// It was the ceiling for a screen-measured bound and the head of the output
-/// was what it kept, which left the box showing the beginning of a build and
-/// counting the end away.
-const MAX_OUTPUT_ROWS: usize = 4;
+/// The view shows four at a time, but keeps a bounded tail so a person can
+/// expand a long command without losing the useful part of its output.
+const MAX_OUTPUT_ROWS: usize = crate::transcript::MAX_ENTRY_LINES;
+const COLLAPSED_OUTPUT_ROWS: usize = 4;
 
 /// How much of the conversation the renderer shows.
 ///
@@ -869,6 +862,29 @@ impl Renderer {
         }
     }
 
+    /// Toggles the most recent expandable output entry.
+    ///
+    /// Ctrl+O toggles the latest output that has hidden rows; the retained tail
+    /// stays bounded regardless of how much a command writes.
+    pub(crate) fn toggle_output(&mut self) -> bool {
+        let Some(entry) = self
+            .transcript
+            .entries_mut()
+            .iter_mut()
+            .rev()
+            .find(|entry| {
+                entry
+                    .collapsed_lines
+                    .is_some_and(|limit| entry.lines.len() > limit || entry.dropped > 0)
+            })
+        else {
+            return false;
+        };
+        entry.expanded = !entry.expanded;
+        self.mark_dirty();
+        true
+    }
+
     /// Takes the "something changed" flag the keyboard's thread set.
     ///
     /// The two threads speak through the pinned handle: the reader marks it
@@ -1524,15 +1540,12 @@ impl Renderer {
             crate::transcript::Kind::ToolOutput,
             format!("shell #{}", short(&call_id)),
         );
+        entry.call_id = Some(call_id);
+        entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
         for row in std::mem::take(&mut self.output_rows) {
             entry.push_line(row);
         }
-        if hidden > 0 {
-            entry.push_inked(
-                crate::transcript::Ink::Yellow,
-                format!("… {hidden} earlier line(s) left out"),
-            );
-        }
+        entry.dropped = hidden;
         self.transcript.push(entry);
         self.output_rows_dropped = 0;
         self.output_line_start = true;

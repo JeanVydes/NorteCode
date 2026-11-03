@@ -8,6 +8,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Sessions have a `plan` tool to propose, list, inspect, update, and delete
+  plans. Plans are editable Markdown files in
+  `~/.local/norte-code/{session_id}/plans/`; each session also gets its local
+  artifacts directory on creation and resume. Plan files store their title
+  (from the first Markdown line), status, creation and modification timestamps,
+  and the provider/model that proposed them. New proposals require explicit
+  user approval.
+
+- Streamed shell output keeps a bounded tail, shows four lines by default, and
+  toggles between the preview and full retained output with Ctrl+O.
+
 - Provider keys come from the environment, then a 0600 `secrets.json` beside the
   configuration. Selecting a model from `/model` or `/models` when the key is
   missing opens a masked prompt and saves it to `secrets.json`. No key ever
