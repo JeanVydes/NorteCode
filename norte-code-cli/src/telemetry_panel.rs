@@ -872,21 +872,64 @@ fn clip(label: &str, width: usize) -> String {
 
 /// A small multi-row plot of a series: `height` rows, one column per point,
 /// so the shape reads as a chart and not as a single line of blocks.
-#[must_use]
+/// Braille base code point (U+2800).
+const BRAILLE_BASE: u32 = 0x2800;
+// Dot positions in a 2x4 grid (col, row) -> bit
+// (0,0)->0x01  (1,0)->0x08
+// (0,1)->0x02  (1,1)->0x10
+// (0,2)->0x04  (1,2)->0x20
+// (0,3)->0x40  (1,3)->0x80
+const BRAILLE_DOTS: [[u32; 2]; 4] = [
+    [0x01, 0x08],
+    [0x02, 0x10],
+    [0x04, 0x20],
+    [0x40, 0x80],
+];
+
+/// A braille-based 2D plot: each terminal cell represents a 2x4 dot grid,
+/// giving much higher resolution than block characters. Multiple series can
+/// be overlaid. Returns `height` rows of braille characters.
 fn plot(points: &[u64], height: usize) -> Vec<String> {
     let peak = points.iter().copied().max().unwrap_or(0);
     let height = height.max(1);
-    if peak == 0 {
-        return vec!["·".repeat(points.len()); height];
+    if peak == 0 || points.is_empty() {
+        return vec!["·".repeat(points.len().div_ceil(2)); height];
     }
-    let mut rows = vec![String::with_capacity(points.len()); height];
-    for point in points {
-        let level = usize::try_from(point.saturating_mul(height as u64) / peak).unwrap_or(0);
-        let level = level.min(height);
-        for (row, line) in rows.iter_mut().enumerate() {
-            // row 0 is the top: a column reaches it only when its level is high.
-            let filled = level > (height - 1 - row);
-            line.push(if filled { '█' } else { ' ' });
+    // Grid dimensions: width = ceil(points.len() / 2), height in cells
+    let grid_w = points.len().div_ceil(2);
+    let grid_h = height;
+    // Dot grid: grid_w*2 columns, grid_h*4 rows
+    let mut dots = vec![vec![false; grid_w * 2]; grid_h * 4];
+
+    for (xi, &val) in points.iter().enumerate() {
+        if val == 0 {
+            continue;
+        }
+        let y_level = usize::try_from(val.saturating_mul((grid_h * 4) as u64) / peak).unwrap_or(0);
+        let y_level = y_level.min(grid_h * 4);
+        for y in 0..y_level {
+            let row = grid_h * 4 - 1 - y;
+            if row < dots.len() {
+                dots[row][xi] = true;
+            }
+        }
+    }
+
+    // Convert dot grid to braille cells
+    let mut rows = vec![String::with_capacity(grid_w); grid_h];
+    for (gy, row) in rows.iter_mut().enumerate().take(grid_h) {
+        for gx in 0..grid_w {
+            let mut code = BRAILLE_BASE;
+            for (dy, _) in (0..4).enumerate() {
+                for (dx, _) in (0..2).enumerate() {
+                    let px = gx * 2 + dx;
+                    let py = gy * 4 + dy;
+                    if py < dots.len() && px < dots[py].len() && dots[py][px] {
+                        code += BRAILLE_DOTS[dy][dx];
+                    }
+                }
+            }
+            row.push(char::from_u32(code).unwrap_or(' '));
         }
     }
     rows
@@ -1397,8 +1440,8 @@ mod tests {
         assert!(text.contains("over time"), "{text}");
         assert!(text.contains("openai/gpt-5"), "{text}");
         assert!(text.contains("openrouter/gpt-5"), "{text}");
-        // A full block for the peak day and a lower step for the smaller one.
-        assert!(text.contains('█') || text.contains('▇'), "{text}");
+        // A braille plot for the peak day and a lower column for the smaller one.
+        assert!(text.contains('⡇') || text.contains('⣿') || text.contains('⣶') || text.contains('⣤') || text.contains('⣀') || text.contains('⠿'), "{text}");
     }
 
     #[test]

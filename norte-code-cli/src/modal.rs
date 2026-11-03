@@ -608,6 +608,21 @@ impl Modal {
             &format!("╰{}╯", self.footer(room, from, shown, width)),
             border,
         );
+        // A subtle shadow to the right and below the panel, so it reads as
+        // floating over the conversation instead of pasted on it.
+        let shadow = style.faint_span();
+        for row in 1..=panel.height.saturating_sub(1) {
+            let x = panel.x + panel.width;
+            if x < area.x + area.width {
+                put(frame, x, panel.y + row, "▌", shadow);
+            }
+        }
+        for col in 1..panel.width {
+            let y = panel.y + panel.height;
+            if y < area.y + area.height {
+                put(frame, panel.x + col, y, "▀", shadow);
+            }
+        }
     }
 
     /// The bottom border: what the panel holds, and what a key does here.
