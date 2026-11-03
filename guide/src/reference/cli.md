@@ -222,7 +222,7 @@ reject unknown values instead of forwarding them to the model.
 | `/tools` | List every tool the model can reach, with how a call to each is decided — `allow`, `deny` or `ask` — and how far its rule reaches. |
 | `/reasoning SETTING [session\|message]` | Set the reasoning override. `SETTING` is `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. The scope defaults to `session`. |
 | `/model PROVIDER/MODEL` | Switch the model at the next turn boundary. |
-| `/models` | Open the provider/model picker: `Enter` expands a provider into its models, and picking one sets both the provider and the model. |
+| `/models` | Open the provider/model picker: typing filters providers and models (case-insensitive), `Enter` expands a provider into its models, and picking one sets both the provider and the model. |
 | `/provider NAME` | Switch provider at the next turn boundary, keeping the model where it has one. |
 | `/sessions` | Open the session picker: start a new session, open the last one, or open a saved session. |
 | `/refresh`, `/reload` | Re-read the configuration, the skills and the MCP servers. |

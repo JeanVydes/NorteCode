@@ -61,7 +61,7 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | `/rename [title]` | Name the session. Bare, it recomputes the name from the first message the session holds. |
 | `/compact` | Summarise and continue on a fresh Norte session. |
 | `/model <model>` | Switch model, keeping the provider. |
-| `/models` | Open the provider/model picker; `Enter` expands a provider, and picking a model sets both. |
+| `/models` | Open the provider/model picker; type to filter providers and models (case-insensitive), `Enter` expands a provider, and picking a model sets both. |
 | `/provider <provider>` | Switch provider, keeping the model. |
 | `/sessions` | Open the session picker: new session, last session, or a saved one. |
 | `/reasoning <setting> [session\|message]` | Set the reasoning effort. |
