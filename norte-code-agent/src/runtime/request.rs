@@ -4,13 +4,12 @@
 //! layers get to change it, and the stream that comes back is accumulated into
 //! the assistant message the turn commits.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, PoisonError};
 
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::Session;
@@ -18,23 +17,22 @@ use crate::runtime::event::{EngineEvent, StreamDelta};
 use norte::domain::continuity::{ContinuityToken, ReplayDecision};
 use norte::domain::media::{MediaPart, MediaSource};
 use norte::domain::message::{FinishReason, Message, MessageOrigin, MessageStatus};
-use norte::domain::part::{Part, ToolCallPart, ToolResultPart};
+use norte::domain::part::Part;
 use norte::domain::role::Role;
 use norte::error::{Error, Result};
-use norte::id::{CallId, Digest, GenerationId, ModelRef, SessionId, ToolName};
+use norte::id::{Digest, GenerationId, ModelRef, SessionId, ToolName};
 use norte::layer::{Continuation, LayerContext};
 use norte::model::{ModelRequest, ModelStream, SESSION_EXTENSION, TurnOptions};
 use norte::preprocess::MediaPayload;
 use norte::stream::{Accumulated, StreamAccumulator, StreamEvent};
 
 use super::{
-    CallSite, Digesting, Harness, PreparedCall, Reconstructed, cache_boundaries, digest_of,
-    execute_call, materialize_message, stream_delta,
+    Digesting, Harness, Reconstructed, cache_boundaries, digest_of, materialize_message,
+    stream_delta,
 };
 
 impl Harness {
-    /// Runs the model and returns the answer, whether it was interrupted, and
-    /// any tool results produced early.
+    /// Runs the model and returns the answer and whether it was interrupted.
     ///
     /// # Errors
     ///
@@ -47,11 +45,15 @@ impl Harness {
         options: &TurnOptions,
         sender: &mpsc::Sender<EngineEvent>,
         cancellation: &CancellationToken,
-    ) -> Result<(Message, bool, Vec<ToolResultPart>)> {
+    ) -> Result<(Message, bool)> {
         let model_ref = self.model.reference().clone();
         let capabilities = self.model.capabilities();
-        let (history, invalidated) = self.preprocess_history(history).await?;
-        if cancellation.is_cancelled() {
+        let prepared = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            result = self.preprocess_history(history) => Some(result?),
+        };
+        let Some((history, invalidated)) = prepared else {
             let message = self
                 .finalize_message(
                     Accumulated::default(),
@@ -60,8 +62,8 @@ impl Harness {
                     Digest::of_json(&serde_json::json!(null)),
                 )
                 .await?;
-            return Ok((message, true, Vec::new()));
-        }
+            return Ok((message, true));
+        };
         if invalidated {
             self.emit(
                 sender,
@@ -72,9 +74,14 @@ impl Harness {
             )
             .await;
         }
-        let reconstructed = self.reconstruct(&history).await?;
-
-        if cancellation.is_cancelled() {
+        // Reconstruction only reads/materializes request media. Unlike output
+        // ingestion and commits, it is safe to drop when cancellation arrives.
+        let reconstructed = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            result = self.reconstruct(&history) => Some(result?),
+        };
+        let Some(reconstructed) = reconstructed else {
             let message = self
                 .finalize_message(
                     Accumulated::default(),
@@ -83,8 +90,8 @@ impl Harness {
                     Digest::of_json(&serde_json::json!(null)),
                 )
                 .await?;
-            return Ok((message, true, Vec::new()));
-        }
+            return Ok((message, true));
+        };
 
         let sent_parts: Vec<Part> = reconstructed
             .messages
@@ -145,7 +152,7 @@ impl Harness {
                         digest_of(&reconstructed),
                     )
                     .await?;
-                return Ok((message, true, Vec::new()));
+                return Ok((message, true));
             }
             stream = self.layered_call(&context, request, &continuation, session.id, sender, cancellation) => {
                 match stream {
@@ -159,7 +166,7 @@ impl Harness {
                                 digest_of(&reconstructed),
                             )
                             .await?;
-                        return Ok((message, true, Vec::new()));
+                        return Ok((message, true));
                     }
                     Err(error) => return Err(error),
                 }
@@ -175,10 +182,11 @@ impl Harness {
         // here, drop the stream (closing the connection) and commit the
         // interrupted, empty assistant message instead of reporting a request.
         if cancellation.is_cancelled() {
+            drop(stream);
             let message = self
                 .finalize_message(Accumulated::default(), true, model_ref, request_digest)
                 .await?;
-            return Ok((message, true, Vec::new()));
+            return Ok((message, true));
         }
         let emit_future = self.emit(
             sender,
@@ -195,6 +203,7 @@ impl Harness {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
+                drop(stream);
                 let message = self
                     .finalize_message(
                         Accumulated::default(),
@@ -203,18 +212,18 @@ impl Harness {
                         request_digest,
                     )
                     .await?;
-                return Ok((message, true, Vec::new()));
+                return Ok((message, true));
             }
             _ = emit_future => {}
         }
-        let (accumulated, interrupted, early_results) = self
+        let (accumulated, interrupted) = self
             .drain_stream(session, sender, cancellation, stream)
             .await?;
 
         let message = self
             .finalize_message(accumulated, interrupted, model_ref, request_digest)
             .await?;
-        Ok((message, interrupted, early_results))
+        Ok((message, interrupted))
     }
 
     /// Assembles the committed assistant message from what the stream
@@ -228,11 +237,11 @@ impl Harness {
         request_digest: Digest,
     ) -> Result<Message> {
         let parts = self.finalize_output(accumulated.parts).await?;
-        let finish_reason = accumulated.finish_reason.unwrap_or(if interrupted {
+        let finish_reason = if interrupted {
             FinishReason::Cancelled
         } else {
-            FinishReason::Stop
-        });
+            accumulated.finish_reason.unwrap_or(FinishReason::Stop)
+        };
         let status = if interrupted {
             MessageStatus::Interrupted
         } else if matches!(finish_reason, FinishReason::Length) {
@@ -252,18 +261,18 @@ impl Harness {
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn drain_stream(
         &self,
         session: &Session,
         sender: &mpsc::Sender<EngineEvent>,
         cancellation: &CancellationToken,
         mut stream: ModelStream,
-    ) -> Result<(Accumulated, bool, Vec<ToolResultPart>)> {
+    ) -> Result<(Accumulated, bool)> {
         let mut accumulator = StreamAccumulator::new(self.config.limits);
         let mut continuity: BTreeMap<u32, ContinuityToken> = BTreeMap::new();
+        let mut incomplete_calls = BTreeSet::new();
         let mut interrupted = false;
-        let mut completed: Vec<Part> = Vec::new();
-        let mut early: Vec<(CallId, JoinHandle<ToolResultPart>)> = Vec::new();
 
         loop {
             let event = tokio::select! {
@@ -296,101 +305,77 @@ impl Harness {
                     index: *index,
                     len: fragment.len(),
                 };
-                if !self.emit_delta(sender, session, delta).await {
+                let delivered = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => false,
+                    delivered = self.emit_delta(sender, session, delta) => delivered,
+                };
+                if !delivered {
                     interrupted = true;
                     break;
                 }
                 continue;
             }
 
-            if let Some(part) = accumulator.apply(event.clone())? {
-                let delivered = self
-                    .emit(
+            let completed = accumulator.apply(event.clone())?;
+            match &event {
+                StreamEvent::ToolCallStart { index, .. }
+                | StreamEvent::ToolCallDelta { index, .. } => {
+                    incomplete_calls.insert(*index);
+                }
+                StreamEvent::ToolCallDone { index } | StreamEvent::Part { index, .. } => {
+                    incomplete_calls.remove(index);
+                }
+                _ => {}
+            }
+            if let Some(part) = completed {
+                let delivered = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => false,
+                    delivered = self.emit(
                         sender,
                         EngineEvent::PartCompleted {
                             session: session.id,
                             turn: session.turn,
-                            part: part.clone(),
+                            part,
                         },
-                    )
-                    .await;
+                    ) => delivered,
+                };
                 if !delivered {
                     interrupted = true;
                     break;
                 }
-                let ready = match &part {
-                    Part::ToolCall(call) => Some(call.clone()),
-                    _ => None,
+            }
+            if let Some(delta) = stream_delta(&event) {
+                let delivered = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => false,
+                    delivered = self.emit_delta(sender, session, delta) => delivered,
                 };
-                completed.push(part);
-                if let Some(call) = ready
-                    && let Some(handle) = self.dispatch_early(session, sender, &call, cancellation)
-                {
-                    early.push((call.call_id, handle));
+                if !delivered {
+                    interrupted = true;
+                    break;
                 }
             }
-            if let Some(delta) = stream_delta(&event)
-                && !self.emit_delta(sender, session, delta).await
-            {
-                interrupted = true;
-                break;
-            }
         }
 
-        let mut results = Vec::with_capacity(early.len());
+        // Close the provider before output ingestion or durable persistence.
+        drop(stream);
         let interrupted = interrupted || cancellation.is_cancelled();
-        for (call_id, handle) in early {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(error) => results.push(ToolResultPart::error(
-                    call_id,
-                    format!("early tool task failed: {error}"),
-                )),
+        if interrupted {
+            // finish() parses open tool arguments as JSON. A cancellation can
+            // cut that JSON anywhere: do not lose the rest of the generation or
+            // invent executable arguments for a call that never completed.
+            for index in incomplete_calls {
+                accumulator.apply(StreamEvent::Part {
+                    index,
+                    part: Part::text(
+                        "Tool call omitted: cancelled before its arguments completed.",
+                    ),
+                })?;
             }
         }
-        Ok((accumulator.finish()?, interrupted, results))
-    }
-
-    /// Dispatches a tool call whose arguments just completed for execution before
-    /// the assistant message finishes, when the host enabled early tool execution
-    /// and the tool policy allows it (FR-STREAM-4).
-    ///
-    /// The policy is evaluated against the assistant message as known so far,
-    /// with no results of its own — nothing has run yet — and the history
-    /// committed up to the previous tool turn. Calls that need approval, are
-    /// denied or are rate limited return `None` and take the normal path.
-    fn dispatch_early(
-        &self,
-        session: &Session,
-        sender: &mpsc::Sender<EngineEvent>,
-        call: &ToolCallPart,
-        cancellation: &CancellationToken,
-    ) -> Option<JoinHandle<ToolResultPart>> {
-        if !(self.config.early_tool_execution) {
-            return None;
-        }
-        let Ok(tool_name) = ToolName::new(call.name.clone()) else {
-            return None;
-        };
-        self.tools.spec(&tool_name)?;
-
-        let metadata = self.call_metadata(session, call, &tool_name, &call.arguments);
-        Some(tokio::spawn(execute_call(
-            Arc::clone(&self.tools),
-            Arc::clone(&self.observers),
-            sender.clone(),
-            CallSite {
-                session: session.id,
-                turn: session.turn,
-            },
-            PreparedCall {
-                call: call.clone(),
-                tool: tool_name,
-                arguments: call.arguments.clone(),
-                metadata,
-            },
-            cancellation.clone(),
-        )))
+        Ok((accumulator.finish()?, interrupted))
     }
 
     /// The reconstructed request: the message sequence plus deterministic cache

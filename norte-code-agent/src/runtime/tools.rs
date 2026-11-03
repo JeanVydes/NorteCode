@@ -19,27 +19,23 @@ use crate::runtime::event::EngineEvent;
 use crate::runtime::interceptor::{ConsultationPoint, Interception, InterceptionContext};
 use norte::domain::message::Message;
 use norte::domain::part::{ToolCallPart, ToolResultPart};
-use norte::error::Result;
+use norte::error::{Error, Result};
 use norte::id::ToolName;
 use norte::tool::ToolCallInfo;
 
-use super::{
-    CALL_CANCELLED_REASON, CallSite, Harness, PreparedCall, ToolTurn, execute_call,
-    results_in_call_order,
-};
+use super::{CALL_CANCELLED_REASON, CallSite, Harness, PreparedCall, ToolTurn, execute_call};
 
 impl Harness {
-    /// Runs the calls of the head message and commits their results.
+    /// Settles every call before returning, including on cancellation/hook error.
     pub(crate) async fn run_tools(
         &self,
-        session: &Session,
+        session: &mut Session,
         sender: &mpsc::Sender<EngineEvent>,
         cancellation: &CancellationToken,
-        early: &[ToolResultPart],
-    ) -> Result<Session> {
-        let Some(head) = session.head else {
-            return Ok(session.clone());
-        };
+    ) -> Result<()> {
+        let head = session
+            .head
+            .ok_or_else(|| Error::InvalidInput("AwaitingTool session has no head".to_owned()))?;
         let head_node = self.store.node(head).await?;
         let calls: Vec<ToolCallPart> = head_node
             .message
@@ -48,73 +44,69 @@ impl Harness {
             .cloned()
             .collect();
         if calls.is_empty() {
-            return Ok(session.clone());
+            return Err(Error::InvalidInput(
+                "AwaitingTool head has no tool calls".to_owned(),
+            ));
         }
 
-        // Everything the stream already produced — a call whose arguments
-        // completed early — seeded in call order, so the tool message lists the
-        // calls the way the assistant message does.
-        let mut results = results_in_call_order(&calls, &[early]);
-        let turn = ToolTurn { session, sender };
-        let history = if self.interceptors.is_empty() {
-            None
-        } else {
-            Some(self.store.history(Some(head)).await?)
-        };
-
-        for call in &calls {
-            if results.iter().any(|result| result.call_id == call.call_id) {
-                continue;
-            }
-            if cancellation.is_cancelled() {
-                break;
-            }
-            // A call the host refused is answered with its reason, and the
-            // turn carries on to the next one: the refusal is about this call,
-            // and a tool result the model can read is what lets it adapt
-            // instead of guessing again.
-            if let Some(reason) = self
-                .refuse_call(session, sender, history.as_deref(), call)
-                .await?
-            {
-                results.push(self.refused_call(session, sender, call, reason).await);
-                continue;
-            }
-            self.run_one_tool(&turn, call, &mut results, cancellation)
-                .await?;
-            if cancellation.is_cancelled() {
-                break;
-            }
-        }
-
-        // A cancellation can land before every call has run. The calls it left
-        // unrun are answered with a cancelled error, so the committed tool
-        // message lists a result for every call of the head — the one invariant
-        // a replay across models and the store's history depend on.
-        if cancellation.is_cancelled() {
+        let mut results = Vec::with_capacity(calls.len());
+        let execution: Result<()> = async {
+            let turn = ToolTurn { session, sender };
+            let history = if self.interceptors.is_empty() || cancellation.is_cancelled() {
+                None
+            } else {
+                Some(self.store.history(Some(head)).await?)
+            };
             for call in &calls {
-                if !results.iter().any(|result| result.call_id == call.call_id) {
-                    results.push(ToolResultPart::error(call.call_id, CALL_CANCELLED_REASON));
+                if cancellation.is_cancelled() {
+                    break;
                 }
+                if let Some(reason) = self
+                    .refuse_call(session, sender, history.as_deref(), call)
+                    .await?
+                {
+                    results.push(self.refused_call(session, sender, call, reason).await);
+                    continue;
+                }
+                // The approval may have waited while cancellation arrived.
+                if cancellation.is_cancelled() {
+                    break;
+                }
+                self.run_one_tool(&turn, call, &mut results, cancellation)
+                    .await?;
             }
+            Ok(())
         }
-        let settled = results_in_call_order(&calls, &[results.as_slice()]);
-        let node = Node::message(Message::tool(settled), Some(head));
+        .await;
+
+        // Preserve completed effects even if a later approval fails. Returning
+        // first would leave AwaitingTool at the old head and execute them again
+        // on resume. Calls not executed receive an explicit error in order.
+        let reason = execution.as_ref().err().map_or_else(
+            || CALL_CANCELLED_REASON.to_owned(),
+            |error| format!("tool call not run: {error}"),
+        );
+        for call in calls.iter().skip(results.len()) {
+            results.push(ToolResultPart::error(call.call_id, reason.clone()));
+        }
+        let node = Node::message(Message::tool(results), Some(head));
         let node_id = node.id;
         let metadata = session.metadata.clone();
-        self.commit(
-            Commit {
-                session_id: session.id,
-                expected_version: Some(session.version),
-                nodes: vec![node],
-                head: Some(node_id),
-                phase: Phase::Idle,
-                turn: session.turn,
-                metadata: Some(metadata),
-            },
-            sender,
-        )
-        .await
+        *session = self
+            .commit(
+                Commit {
+                    session_id: session.id,
+                    expected_version: Some(session.version),
+                    nodes: vec![node],
+                    head: Some(node_id),
+                    phase: Phase::Idle,
+                    turn: session.turn,
+                    metadata: Some(metadata),
+                },
+                sender,
+            )
+            .await?;
+        execution
     }
 
     /// Answers a call the host refused, reported the way a call that ran is.

@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::runtime::EngineEvent;
 use crate::runtime::Harness;
 use norte::{
-    FinishReason, MediaKind, MediaPart, MediaSource, Message, MimeType, Part, ReasoningRequest,
-    Role, SessionId, Usage,
+    FinishReason, MediaKind, MediaPart, MediaSource, Message, MessageStatus, MimeType, Part,
+    ReasoningRequest, Role, SessionId, Usage,
 };
 use norte_code_protocol::costs::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
@@ -100,7 +100,10 @@ impl Service {
             if self.compaction_due(&key, &spec, nid).await? {
                 // The compaction joins what the boundary already reported: a model
                 // switch that landed first must not be dropped.
-                let events = match self.perform_compaction(request_id, &key, "threshold").await {
+                let events = match self
+                    .perform_compaction(request_id, &key, "threshold", None)
+                    .await
+                {
                     Ok(events) => events,
                     Err(error) => vec![ServerEvent::error(
                         request_id,
@@ -404,156 +407,62 @@ impl Service {
             for (key, value) in &self.config().extensions {
                 turn_builder = turn_builder.extension(key.clone(), value.clone());
             }
-            let mut stepped = turn_builder
-                .cancellation(cancellation.clone())
-                .start_stepped();
+            let mut running_turn = turn_builder.cancellation(cancellation.clone()).start();
 
             let mut interrupted = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
-            let mut outcome: Result<crate::runtime::TurnOutcome, norte::Error> =
-                Err(norte::Error::Other("not run".to_owned()));
 
-            'stepping: loop {
-                match stepped.step().await {
-                    Ok(Some(crate::runtime::StepResult {
-                        step: crate::runtime::Step::Tools,
-                        events,
-                    })) => {
-                        current_nid = stepped.session().id;
-                        for event in events {
-                            if is_compaction_abort(&event) {
-                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
-                            }
-                            if !matches!(event, EngineEvent::Error { .. })
-                                && !self
-                                    .handle(
-                                        &engine,
-                                        request_id,
-                                        key,
-                                        current_nid,
-                                        &event,
-                                        &mut stats,
-                                        tx,
-                                        gate.as_deref(),
-                                    )
-                                    .await
-                            {
-                                return Ok(());
-                            }
-                        }
-                        if failure.is_some() {
-                            break 'stepping;
-                        }
-                    }
-                    Ok(Some(crate::runtime::StepResult {
-                        step:
-                            crate::runtime::Step::Generated {
-                                message: _,
-                                interrupted: iv,
-                            },
-                        events,
-                    })) => {
-                        current_nid = stepped.session().id;
-                        interrupted = iv;
-                        for event in events {
-                            if is_compaction_abort(&event) {
-                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
-                            }
-                            if !matches!(event, EngineEvent::Error { .. })
-                                && !self
-                                    .handle(
-                                        &engine,
-                                        request_id,
-                                        key,
-                                        current_nid,
-                                        &event,
-                                        &mut stats,
-                                        tx,
-                                        gate.as_deref(),
-                                    )
-                                    .await
-                            {
-                                return Ok(());
-                            }
-                        }
-                        // The summary belongs under the answer its request
-                        // produced. The step hands its events over only after
-                        // it finishes, so settling earlier -- while the deltas
-                        // are still in this vector -- printed the summary above
-                        // tokens that had not reached the transcript yet.
-                        if !self
-                            .settle(
-                                &engine,
-                                request_id,
-                                key,
-                                current_nid,
-                                &mut stats,
-                                tx,
-                                false,
-                                gate.as_deref(),
-                            )
-                            .await
-                        {
-                            return Ok(());
-                        }
-                        if failure.is_some() || interrupted {
-                            break 'stepping;
-                        }
-                    }
-                    Ok(Some(crate::runtime::StepResult {
-                        step: crate::runtime::Step::Done(o),
-                        events,
-                    })) => {
-                        outcome = Ok(*o);
-                        for event in events {
-                            if is_compaction_abort(&event) {
-                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
-                            }
-                            if !matches!(event, EngineEvent::Error { .. }) {
-                                let _ = self
-                                    .handle(
-                                        &engine,
-                                        request_id,
-                                        key,
-                                        current_nid,
-                                        &event,
-                                        &mut stats,
-                                        tx,
-                                        gate.as_deref(),
-                                    )
-                                    .await;
-                            }
-                        }
-                        break 'stepping;
-                    }
-                    Ok(None) => break 'stepping,
-                    Err(error) => {
-                        failure_code = Some(error_code(&error));
-                        failure = Some(error.to_string());
-                        outcome = Err(error);
-                        for event in stepped.drain_events() {
-                            if is_compaction_abort(&event) {
-                                failure = Some(COMPACTION_SAFE_POINT.to_owned());
-                            }
-                            if !matches!(event, EngineEvent::Error { .. }) {
-                                let _ = self
-                                    .handle(
-                                        &engine,
-                                        request_id,
-                                        key,
-                                        current_nid,
-                                        &event,
-                                        &mut stats,
-                                        tx,
-                                        gate.as_deref(),
-                                    )
-                                    .await;
-                            }
-                        }
-                        break 'stepping;
-                    }
+            while let Some(event) = running_turn.next().await {
+                if is_compaction_abort(&event) {
+                    failure = Some(COMPACTION_SAFE_POINT.to_owned());
                 }
+                if matches!(event, EngineEvent::GenerationCommitted { .. })
+                    && !self
+                        .settle(
+                            &engine,
+                            request_id,
+                            key,
+                            current_nid,
+                            &mut stats,
+                            tx,
+                            false,
+                            gate.as_deref(),
+                        )
+                        .await
+                {
+                    cancellation.cancel();
+                    return Ok(());
+                }
+                if !matches!(event, EngineEvent::Error { .. })
+                    && !self
+                        .handle(
+                            &engine,
+                            request_id,
+                            key,
+                            current_nid,
+                            &event,
+                            &mut stats,
+                            tx,
+                            gate.as_deref(),
+                        )
+                        .await
+                {
+                    cancellation.cancel();
+                    return Ok(());
+                }
+            }
+            let outcome = running_turn.finish().await;
+            if let Ok(result) = &outcome {
+                interrupted = result.message.as_ref().is_some_and(|message| {
+                    message
+                        .origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.status == MessageStatus::Interrupted)
+                });
+            } else if let Err(error) = &outcome {
+                failure_code = Some(error_code(error));
+                failure.get_or_insert_with(|| error.to_string());
             }
 
             let cancelled = cancellation.is_cancelled();
@@ -607,7 +516,10 @@ impl Service {
                 || matches!(&outcome, Err(e) if is_compaction_message(&e.to_string()));
 
             if !cancelled && !interrupted && compaction_abort {
-                match self.perform_compaction(request_id, key, "threshold").await {
+                match self
+                    .perform_compaction(request_id, key, "threshold", Some(tx))
+                    .await
+                {
                     Ok(events) => {
                         for event in events {
                             if !emit(tx, event).await {
@@ -813,7 +725,10 @@ impl Service {
                             .await
                             .unwrap_or(false)
                     {
-                        match self.perform_compaction(request_id, key, "threshold").await {
+                        match self
+                            .perform_compaction(request_id, key, "threshold", Some(tx))
+                            .await
+                        {
                             Ok(events) => {
                                 for event in events {
                                     if !emit(tx, event).await {
