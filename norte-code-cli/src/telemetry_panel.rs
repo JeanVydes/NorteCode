@@ -706,6 +706,80 @@ impl Panel {
         out
     }
 
+    /// Renders a 2D canvas plot of the time series into `area` using ratatui's
+    /// Chart widget with Braille markers for high-resolution plotting.
+    pub(crate) fn draw_chart(&self, frame: &mut crate::terminal::Draw<'_>, area: ratatui::layout::Rect) {
+        if area.width < 10 || area.height < 5 {
+            return;
+        }
+        let series = self.model_series(self.metric);
+        if series.is_empty() {
+            return;
+        }
+        let buckets = report_buckets(&self.scoped(), self.range);
+        let n = buckets.len().max(1);
+        let max_val = series.iter()
+            .flat_map(|(_, pts)| pts.iter())
+            .copied()
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        let colors = [
+            ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2),
+            ratatui::style::Color::Rgb(0xD1, 0x9A, 0x66),
+            ratatui::style::Color::Rgb(0x9A, 0xC2, 0x56),
+            ratatui::style::Color::Rgb(0xC2, 0x56, 0x9A),
+        ];
+        // Collect all data first so it lives long enough for the datasets.
+        let all_data: Vec<Vec<(f64, f64)>> = series
+            .iter()
+            .map(|(_, points)| {
+                points
+                    .iter()
+                    .enumerate()
+                    .map(|(xi, &val)| (xi as f64, val as f64))
+                    .collect()
+            })
+            .collect();
+        let mut datasets: Vec<ratatui::widgets::Dataset> = Vec::new();
+        for (i, (label, _)) in series.iter().enumerate() {
+            let color = colors[i % colors.len()];
+            datasets.push(
+                ratatui::widgets::Dataset::default()
+                    .name(label.clone())
+                    .marker(ratatui::symbols::Marker::Braille)
+                    .graph_type(ratatui::widgets::GraphType::Line)
+                    .style(ratatui::style::Style::default().fg(color))
+                    .data(&all_data[i]),
+            );
+        }
+
+        let x_labels = vec![
+            ratatui::text::Line::from(buckets.first().cloned().unwrap_or_default()),
+            ratatui::text::Line::from(buckets.last().cloned().unwrap_or_default()),
+        ];
+        let y_labels = vec![
+            ratatui::text::Line::from("0"),
+            ratatui::text::Line::from(format!("{max_val}")),
+        ];
+
+        let chart = ratatui::widgets::Chart::new(datasets)
+            .block(ratatui::widgets::Block::default()
+                .title(format!("{} by day", self.metric.label()))
+                .borders(ratatui::widgets::Borders::ALL))
+            .x_axis(ratatui::widgets::Axis::default()
+                .title("day")
+                .bounds([0.0, (n - 1).max(1) as f64])
+                .labels(x_labels))
+            .y_axis(ratatui::widgets::Axis::default()
+                .title(self.metric.label())
+                .bounds([0.0, max_val as f64])
+                .labels(y_labels));
+
+        frame.render_widget(chart, area);
+    }
+
     /// This session's own figures, its own models ranked, and its errors.
     fn session_lines(&self, out: &mut Vec<ViewLine>, report: &Report) {
         if report.total.requests == 0 {
@@ -802,7 +876,7 @@ impl Panel {
         )));
         for (label, points) in &series {
             let peak = points.iter().copied().max().unwrap_or(0);
-            let rows = plot(points, 4);
+            let rows = plot(points, 8);
             for (i, row) in rows.iter().enumerate() {
                 if i == 0 {
                     out.push(ViewLine::plain(format!(
