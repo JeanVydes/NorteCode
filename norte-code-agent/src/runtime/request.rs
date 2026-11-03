@@ -147,8 +147,22 @@ impl Harness {
                     .await?;
                 return Ok((message, true, Vec::new()));
             }
-            stream = self.layered_call(&context, request, &continuation, session.id, sender) => {
-                stream?
+            stream = self.layered_call(&context, request, &continuation, session.id, sender, cancellation) => {
+                match stream {
+                    Ok(stream) => stream,
+                    Err(Error::Cancelled) => {
+                        let message = self
+                            .finalize_message(
+                                Accumulated::default(),
+                                true,
+                                model_ref,
+                                digest_of(&reconstructed),
+                            )
+                            .await?;
+                        return Ok((message, true, Vec::new()));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         };
         let request_digest = wire_digest
@@ -436,25 +450,33 @@ impl Harness {
         continuation: &dyn Continuation,
         session: SessionId,
         sender: &mpsc::Sender<EngineEvent>,
+        cancellation: &CancellationToken,
     ) -> Result<ModelStream> {
-        match self.layers.run(context, request, continuation).await {
-            Ok(stream) => Ok(stream),
-            Err(Error::ShortCircuited { layer, reason }) => {
-                let emitted = self
-                    .emit(
-                        sender,
-                        EngineEvent::LayerShortCircuited {
-                            session,
-                            layer: layer.clone(),
-                            reason: reason.clone(),
-                        },
-                    )
-                    .await;
-                let _ = emitted;
-                Err(Error::ShortCircuited { layer, reason })
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(Error::Cancelled),
+            result = self.layers.run(context, request, continuation) => {
+                match result {
+                    Ok(stream) => Ok(stream),
+                    Err(Error::ShortCircuited { layer, reason }) => {
+                        let emitted = self
+                            .emit(
+                                sender,
+                                EngineEvent::LayerShortCircuited {
+                                    session,
+                                    layer: layer.clone(),
+                                    reason: reason.clone(),
+                                },
+                            )
+                            .await;
+                        let _ = emitted;
+                        Err(Error::ShortCircuited { layer, reason })
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            Err(error) => Err(error),
-        }
+        };
+        outcome
     }
 
     /// Applies output ingestion (URLs and vendor files become blobs) and then
