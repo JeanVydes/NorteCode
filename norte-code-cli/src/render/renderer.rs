@@ -2847,6 +2847,7 @@ impl Renderer {
     /// runs and what it is doing. It is fields and ink like the rest of the row,
     /// so the plain-text footer and the frame build the same head from one place
     /// and neither hands the other a painted string to paint again.
+    #[allow(clippy::items_after_statements)]
     pub(crate) fn head_fields(&self) -> Vec<(crate::render::dial::Ink, String)> {
         use crate::render::dial::Ink;
         let mut head = Vec::new();
@@ -2869,6 +2870,27 @@ impl Renderer {
             head.push((Ink::Faint, " · ".to_owned()));
         }
         head.push(match &self.activity {
+            Some(activity) if activity.starts_with("thinking") || activity.starts_with("waiting") => {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                const THINKING: &[&str] = &[
+                    "Pondering…", "Musing…", "Ruminating…", "Cogitating…",
+                    "Deliberating…", "Contemplating…", "Reflecting…", "Weighing…",
+                ];
+                const WAITING: &[&str] = &[
+                    "Connecting…", "Handshaking…", "Negotiating…", "Establishing…",
+                    "Reaching out…", "Dialing in…", "Waking up…", "Knocking…",
+                ];
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |s| s.as_millis());
+                let step = (now / 2700) as usize; // ~3s per word
+                let words = if activity.starts_with("thinking") {
+                    THINKING
+                } else {
+                    WAITING
+                };
+                (Ink::Yellow, words[step % words.len()].to_owned())
+            }
             Some(activity) => (Ink::Yellow, activity.clone()),
             None => (Ink::Faint, "session".to_owned()),
         });

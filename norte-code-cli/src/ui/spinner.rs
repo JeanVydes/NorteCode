@@ -8,6 +8,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const THINKING_WORDS: &[&str] = &[
+    "Pondering…", "Musing…", "Ruminating…", "Cogitating…",
+    "Deliberating…", "Contemplating…", "Reflecting…", "Weighing…",
+];
+const WAITING_WORDS: &[&str] = &[
+    "Connecting…", "Handshaking…", "Negotiating…", "Establishing…",
+    "Reaching out…", "Dialing in…", "Waking up…", "Knocking…",
+];
+
 pub(crate) struct Spinner {
     pub(crate) waiting: Option<Wait>,
     pub(crate) waiting_since: Option<u128>,
@@ -24,15 +33,21 @@ impl Widget for Spinner {
             return;
         }
         let Some(waiting) = self.waiting else { return };
-        let label = match waiting {
-            Wait::Streaming => "streaming",
-            Wait::Thinking => "thinking",
-            Wait::Waiting => "waiting for the first token",
-        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_millis());
         let step = now / u128::from(metrics::SPINNER_MS);
+        let label = match waiting {
+            Wait::Streaming => "streaming",
+            Wait::Thinking => {
+                let idx = usize::try_from(step / 30).unwrap_or(0) % THINKING_WORDS.len();
+                THINKING_WORDS[idx]
+            }
+            Wait::Waiting => {
+                let idx = usize::try_from(step / 30).unwrap_or(0) % WAITING_WORDS.len();
+                WAITING_WORDS[idx]
+            }
+        };
         let glyph = icon::SPINNER[(step % icon::SPINNER.len() as u128) as usize];
         let since = self
             .waiting_since
