@@ -642,7 +642,12 @@ impl Renderer {
             | ServerEventKind::CostNotReported { .. } => {
                 self.usage_event(&event.kind);
             }
-            ServerEventKind::MessageReplayed { index, role, kind, text } => {
+            ServerEventKind::MessageReplayed {
+                index,
+                role,
+                kind,
+                text,
+            } => {
                 self.replay_message(*index, *role, *kind, text);
             }
             // The list the session already had, sent when a client attaches: the
@@ -2870,15 +2875,29 @@ impl Renderer {
             head.push((Ink::Faint, " · ".to_owned()));
         }
         head.push(match &self.activity {
-            Some(activity) if activity.starts_with("thinking") || activity.starts_with("waiting") => {
+            Some(activity)
+                if activity.starts_with("thinking") || activity.starts_with("waiting") =>
+            {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 const THINKING: &[&str] = &[
-                    "Pondering…", "Musing…", "Ruminating…", "Cogitating…",
-                    "Deliberating…", "Contemplating…", "Reflecting…", "Weighing…",
+                    "Pondering…",
+                    "Musing…",
+                    "Ruminating…",
+                    "Cogitating…",
+                    "Deliberating…",
+                    "Contemplating…",
+                    "Reflecting…",
+                    "Weighing…",
                 ];
                 const WAITING: &[&str] = &[
-                    "Connecting…", "Handshaking…", "Negotiating…", "Establishing…",
-                    "Reaching out…", "Dialing in…", "Waking up…", "Knocking…",
+                    "Connecting…",
+                    "Handshaking…",
+                    "Negotiating…",
+                    "Establishing…",
+                    "Reaching out…",
+                    "Dialing in…",
+                    "Waking up…",
+                    "Knocking…",
                 ];
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)

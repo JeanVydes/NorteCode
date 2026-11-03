@@ -10,12 +10,24 @@ use ratatui::widgets::{Paragraph, Widget as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const THINKING_WORDS: &[&str] = &[
-    "Pondering…", "Musing…", "Ruminating…", "Cogitating…",
-    "Deliberating…", "Contemplating…", "Reflecting…", "Weighing…",
+    "Pondering…",
+    "Musing…",
+    "Ruminating…",
+    "Cogitating…",
+    "Deliberating…",
+    "Contemplating…",
+    "Reflecting…",
+    "Weighing…",
 ];
 const WAITING_WORDS: &[&str] = &[
-    "Connecting…", "Handshaking…", "Negotiating…", "Establishing…",
-    "Reaching out…", "Dialing in…", "Waking up…", "Knocking…",
+    "Connecting…",
+    "Handshaking…",
+    "Negotiating…",
+    "Establishing…",
+    "Reaching out…",
+    "Dialing in…",
+    "Waking up…",
+    "Knocking…",
 ];
 
 pub(crate) struct Spinner {
@@ -67,7 +79,8 @@ impl Widget for Spinner {
         let mut spans: Vec<Span> = Vec::with_capacity(len + 2);
         spans.push(Span::raw("  "));
         for (i, ch) in label_chars.iter().enumerate() {
-            let dist = isize::try_from(i).unwrap_or(0) - spot; let dist = dist.unsigned_abs();
+            let dist = isize::try_from(i).unwrap_or(0) - spot;
+            let dist = dist.unsigned_abs();
             let bg = if dist == 0 {
                 light_bg
             } else if dist == 1 {
@@ -77,10 +90,7 @@ impl Widget for Spinner {
             } else {
                 base_bg
             };
-            spans.push(Span::styled(
-                ch.to_string(),
-                self.style.dim_span().bg(bg),
-            ));
+            spans.push(Span::styled(ch.to_string(), self.style.dim_span().bg(bg)));
         }
         spans.push(Span::styled(
             format!(" · {since_secs}s"),

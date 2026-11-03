@@ -1008,12 +1008,12 @@ impl Service {
                 if layer == "budget" {
                     self.budget_stopped(key)
                         .map(|status| ServerEventKind::BudgetExceeded {
-                    scope: status.scope,
-                    unit: status.unit,
-                    spent: status.spent,
-                    limit: status.limit,
-                    action: status.action,
-                })
+                            scope: status.scope,
+                            unit: status.unit,
+                            spent: status.spent,
+                            limit: status.limit,
+                            action: status.action,
+                        })
                 } else {
                     None
                 }
@@ -1607,11 +1607,14 @@ fn replay_text(message: &Message) -> Vec<(norte_code_protocol::ReplayedKind, Str
                     .filter_map(Part::as_text)
                     .collect::<Vec<_>>()
                     .join("\n");
-                out.push((ReplayedKind::ToolResult, if text.is_empty() {
-                    "(tool result)".to_owned()
-                } else {
-                    text
-                }));
+                out.push((
+                    ReplayedKind::ToolResult,
+                    if text.is_empty() {
+                        "(tool result)".to_owned()
+                    } else {
+                        text
+                    },
+                ));
             }
             _ => {}
         }
