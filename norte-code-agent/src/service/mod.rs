@@ -16,6 +16,7 @@ mod manage;
 mod mapping;
 mod mcp;
 mod models;
+mod plans;
 mod prompt;
 mod questions;
 mod sandbox;
@@ -76,6 +77,7 @@ use manage::ManageJobs;
 use mapping::{BudgetLayer, single};
 use mcp::McpServers;
 use models::resolve_reasoning;
+use plans::{PlanRepository, PlanTool};
 use prompt::{compose_system_prompt, load_project_instructions};
 use questions::DirectoryQuestions;
 use sandbox::sandboxed_command;
@@ -162,6 +164,7 @@ pub struct Service {
     directory: Arc<dyn SessionDirectory>,
     effects: Arc<EffectJournal>,
     activity: Arc<ToolActivity>,
+    plans: Arc<PlanRepository>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
     cancels: Mutex<BTreeMap<SessionKey, CancellationToken>>,
     /// The steering messages the running turns have not reached.
@@ -343,6 +346,7 @@ impl Service {
         );
         let effects = Arc::new(EffectJournal::new(Arc::clone(&directory)));
         let activity = Arc::new(ToolActivity::default());
+        let plans = Arc::new(PlanRepository::new(Arc::clone(&directory)));
         let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
         let service = Self {
             config: RwLock::new(config),
@@ -362,6 +366,7 @@ impl Service {
             directory,
             effects,
             activity,
+            plans,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
             steering: Arc::new(Steering::default()),
@@ -726,6 +731,11 @@ impl Service {
         self.register_tool(&mut tools, &disabled, ReadTool::new().into_declaration())?;
         self.register_tool(&mut tools, &disabled, WriteTool::new().into_declaration())?;
         self.register_tool(&mut tools, &disabled, EditTool::new().into_declaration())?;
+        self.register_tool(
+            &mut tools,
+            &disabled,
+            PlanTool::new(Arc::clone(&self.plans), Arc::clone(&self.questions)).into_declaration(),
+        )?;
         // The browser's capture is promoted into a user message: the tool
         // answers with the PNG as base64 in its result, and a tool result
         // carries text only on the chat completions wire. The wrapper reads the
@@ -1695,6 +1705,10 @@ impl Service {
                 .await
             }
             Kind::Resume { session } => {
+                self.plans
+                    .ensure_session_folder(&session)
+                    .await
+                    .map_err(ServiceError::Plan)?;
                 // A resume exists to show where the conversation was.
                 self.start_turn(
                     request_id,

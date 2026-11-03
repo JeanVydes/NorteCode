@@ -182,6 +182,10 @@ impl Service {
         let mut repaired = Vec::new();
         for entry in stored {
             let key = SessionKey::new(entry.key.clone());
+            self.plans
+                .ensure_session_folder(&key)
+                .await
+                .map_err(ServiceError::Plan)?;
             let spec =
                 // A session saved on a provider the catalogue does not list has
                 // to reopen on it: going straight to the catalogue dropped every
@@ -357,6 +361,10 @@ impl Service {
             workdir: Some(self.workspace_root.display().to_string()),
         });
         if let Some(stored) = stored {
+            self.plans
+                .ensure_session_folder(&SessionKey::new(stored.key.clone()))
+                .await
+                .map_err(ServiceError::Plan)?;
             self.directory.save_session(&stored).await?;
         }
         Ok(())
@@ -553,6 +561,10 @@ impl Service {
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
+        self.plans
+            .copy_session(source, imported.id)
+            .await
+            .map_err(ServiceError::Plan)?;
         Ok(key)
     }
 
@@ -622,6 +634,13 @@ impl Service {
 
     /// Forgets the session and its row.
     pub(super) async fn delete(&self, key: &SessionKey) -> Result<(), ServiceError> {
+        if !self.lock_sessions().contains_key(key) {
+            return Err(ServiceError::UnknownSession(key.to_string()));
+        }
+        self.plans
+            .remove_session_folder(key)
+            .await
+            .map_err(ServiceError::Plan)?;
         self.lock_sessions()
             .remove(key)
             .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;

@@ -1016,6 +1016,8 @@ mod unix {
         Panel(crate::modal::Key),
         /// A printable key for a filterable panel's query.
         Filter(crate::modal::Key),
+        /// Expand or collapse the latest shell output.
+        ToggleOutput,
     }
 
     /// A running input line editor and its channel of lines and actions.
@@ -1900,6 +1902,11 @@ mod unix {
                                             .send(EditorEvent::Action(EditorAction::CancelJobs));
                                         redraw = true;
                                     }
+                                    KeyOutcome::ToggleOutput => {
+                                        let _ = sender
+                                            .send(EditorEvent::Action(EditorAction::ToggleOutput));
+                                        redraw = true;
+                                    }
                                     KeyOutcome::Detach => {
                                         let _ =
                                             sender.send(EditorEvent::Action(EditorAction::Detach));
@@ -2028,6 +2035,8 @@ mod unix {
         CancelTurn,
         /// The user asked to stop the running jobs (Ctrl-C).
         CancelJobs,
+        /// The user asked to expand or collapse shell output (Ctrl+O).
+        ToggleOutput,
         /// The user asked to stop waiting for the running call and leave its
         /// process running (Ctrl-G).
         Detach,
@@ -2163,6 +2172,7 @@ mod unix {
             // nothing at all. Deciding here would need the editor to reach the
             // service, which it cannot.
             KeyCode::Char('c') if control => KeyOutcome::CancelJobs,
+            KeyCode::Char('o' | 'O') if control => KeyOutcome::ToggleOutput,
             KeyCode::Char('l') if control => KeyOutcome::Continue,
             // Ctrl-G stops waiting for the running call and leaves the process
             // running. Ctrl-Shift-B is what it used to be, and stays an alias.
@@ -2626,6 +2636,8 @@ mod fallback {
         Detach,
         /// A printable key for a filterable panel's query.
         Filter(crate::modal::Key),
+        /// Expand or collapse the latest shell output.
+        ToggleOutput,
     }
 
     impl InteractiveInput {

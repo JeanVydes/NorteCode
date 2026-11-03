@@ -49,6 +49,9 @@ pub enum ServiceError {
     /// A reasoning setting is malformed or unsupported by the model.
     #[error("reasoning: {0}")]
     Reasoning(String),
+    /// Plan state could not be read or written.
+    #[error("plan: {0}")]
+    Plan(String),
     /// An approval rule could not be read or written.
     #[error("approval: {0}")]
     Approval(String),

@@ -1197,10 +1197,9 @@ fn a_line_that_never_ends_is_shown_once_it_is_long_enough() {
 }
 
 #[test]
-fn the_output_box_keeps_four_rows_and_the_last_four_are_the_ones_kept() {
-    // The box is a glance at how a call went, not a report: four rows, and the
-    // tail rather than the head. A build that scrolled past four lines is worth
-    // reading at its end, where the failure is.
+fn the_output_box_keeps_a_bounded_tail_for_expansion() {
+    // The screen starts with four rows, but the transcript retains a bounded
+    // tail so the rest can be expanded when it is useful.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     assert_eq!(
@@ -1218,20 +1217,15 @@ fn the_output_box_keeps_four_rows_and_the_last_four_are_the_ones_kept() {
             last: false,
         });
     }
-    assert_eq!(renderer.output_rows_len(), 4, "the box holds four rows");
+    assert_eq!(renderer.output_rows_len(), 40, "the box retains the output");
     assert_eq!(
         renderer.output_rows(),
-        vec![
-            "line 36".to_owned(),
-            "line 37".to_owned(),
-            "line 38".to_owned(),
-            "line 39".to_owned(),
-        ],
-        "and what it holds is the end of the output, not the start"
+        (0..40)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>(),
+        "the retained rows stay in their original order"
     );
-    // The count of what was left out is the box's own, and the rows a person
-    // was shown are four of the forty that arrived.
-    assert_eq!(renderer.output_rows_dropped(), 36);
+    assert_eq!(renderer.output_rows_dropped(), 0);
     renderer.tool_event(&ServerEventKind::ToolOutput {
         turn: 1,
         call_id: "call-1".to_owned(),
@@ -1245,10 +1239,96 @@ fn the_output_box_keeps_four_rows_and_the_last_four_are_the_ones_kept() {
 }
 
 #[test]
-fn a_long_output_is_the_tail_and_not_the_head() {
-    // The bug this pins: the box kept the head while its comment promised the
-    // tail, so a command that failed at the end showed the four lines that
-    // worked and counted the failure away.
+fn shell_output_can_be_expanded_and_collapsed() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    for index in 0..6 {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: OutputStream::Stdout,
+            text: format!("line {index}\n"),
+            last: false,
+        });
+    }
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: OutputStream::Stdout,
+        text: String::new(),
+        last: true,
+    });
+
+    let collapsed = crate::app::transcript_lines(&renderer.transcript, 80);
+    let collapsed_text: Vec<&str> = collapsed.iter().map(|row| row.text.as_str()).collect();
+    assert!(
+        collapsed_text
+            .iter()
+            .any(|line| line.contains("2 line(s) hidden"))
+    );
+    assert!(!collapsed_text.contains(&"line 0"));
+    assert!(collapsed_text.contains(&"line 2"));
+    assert!(collapsed_text.contains(&"line 5"));
+
+    assert!(renderer.toggle_output());
+    let expanded = crate::app::transcript_lines(&renderer.transcript, 80);
+    let expanded_text: Vec<&str> = expanded.iter().map(|row| row.text.as_str()).collect();
+    assert!(expanded_text.contains(&"line 0"));
+    assert!(expanded_text.contains(&"line 5"));
+
+    assert!(renderer.toggle_output());
+    let collapsed_again = crate::app::transcript_lines(&renderer.transcript, 80);
+    assert!(!collapsed_again.iter().any(|row| row.text == "line 0"));
+}
+
+#[test]
+fn greeting_keeps_the_small_norte_mark() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.greet();
+    let rows = crate::app::transcript_lines(&renderer.transcript, 80);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, crate::art::MARK);
+    assert!(!renderer.animating());
+}
+
+#[test]
+fn expanded_output_retains_a_bounded_tail_and_counts_evictions() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    for index in 0..crate::transcript::MAX_ENTRY_LINES + 5 {
+        renderer.tool_event(&ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: OutputStream::Stdout,
+            text: format!("line {index}\n"),
+            last: false,
+        });
+    }
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: OutputStream::Stdout,
+        text: String::new(),
+        last: true,
+    });
+
+    assert!(renderer.toggle_output());
+    let entry = renderer.transcript.entries().last().expect("shell output");
+    assert_eq!(entry.lines.len(), crate::transcript::MAX_ENTRY_LINES);
+    assert_eq!(entry.dropped, 5);
+    assert_eq!(entry.lines[0].text, "line 5");
+    assert_eq!(entry.lines.last().expect("last line").text, "line 1004");
+}
+
+#[test]
+fn a_long_output_retains_all_rows_until_the_bound() {
+    // The rows retained for expansion are kept in order; the initial view can
+    // still choose the useful tail without discarding the head.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     for label in ["first", "second", "third", "fourth", "fifth"] {
@@ -1264,14 +1344,15 @@ fn a_long_output_is_the_tail_and_not_the_head() {
     assert_eq!(
         renderer.output_rows(),
         vec![
+            "first".to_owned(),
             "second".to_owned(),
             "third".to_owned(),
             "fourth".to_owned(),
             "fifth".to_owned(),
         ],
-        "the first line left as the fifth arrived"
+        "all bounded rows stay available for expansion"
     );
-    assert_eq!(renderer.output_rows_dropped(), 1, "and it is counted");
+    assert_eq!(renderer.output_rows_dropped(), 0, "nothing was evicted");
 }
 
 #[test]

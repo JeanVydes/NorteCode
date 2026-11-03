@@ -423,15 +423,13 @@ fn sort_by(rows: &mut [(&str, &Slice)], metric: Metric) {
     });
 }
 
-/// The bucket a record falls in: the hour for a day's range, the day otherwise.
-///
-/// A day read by day is one point, which is no line; the same day read by hour is
-/// the shape of the working day. Everything longer is read by day, because an
-/// hour bucket over a year is thousands of points that say nothing.
+/// The bucket a record falls in: hours for today, days through this year, and
+/// months for all time.
 #[must_use]
 fn bucket_of(at: DateTime<Utc>, range: Range) -> String {
     match range {
         Range::Today => at.format("%Y-%m-%d %H:00").to_string(),
+        Range::All => at.format("%Y-%m").to_string(),
         _ => at.format("%Y-%m-%d").to_string(),
     }
 }
@@ -706,192 +704,6 @@ impl Panel {
         out
     }
 
-    /// Renders a 2D canvas plot of the time series into `area` using ratatui's
-    /// Chart widget with Braille markers for high-resolution plotting.
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::cast_precision_loss)]
-    #[allow(clippy::items_after_statements)]
-    #[allow(clippy::many_single_char_names)]
-    #[allow(unused_variables)]
-    #[allow(clippy::cast_possible_wrap)]
-    pub(crate) fn draw_chart(
-        &self,
-        frame: &mut crate::terminal::Draw<'_>,
-        area: ratatui::layout::Rect,
-    ) {
-        if area.width < 14 || area.height < 8 {
-            return;
-        }
-        let series = self.model_series(self.metric);
-        if series.is_empty() {
-            return;
-        }
-        let buckets = report_buckets(&self.scoped(), self.range);
-        let n_pts = buckets.len().max(1);
-        let max_val = series
-            .iter()
-            .flat_map(|(_, pts)| pts.iter())
-            .copied()
-            .max()
-            .unwrap_or(1)
-            .max(1);
-
-        let colors: [(u8, u8, u8); 4] = [
-            (0x56, 0xB6, 0xC2),
-            (0xD1, 0x9A, 0x66),
-            (0x9A, 0xC2, 0x56),
-            (0xC2, 0x56, 0x9A),
-        ];
-        let all_data: Vec<Vec<(f64, f64)>> = series
-            .iter()
-            .map(|(_, points)| {
-                points
-                    .iter()
-                    .enumerate()
-                    .map(|(xi, &val)| (xi as f64, val as f64))
-                    .collect()
-            })
-            .collect();
-
-        let x_max = (n_pts - 1).max(1) as f64;
-        let y_max = max_val as f64;
-        // Leave room for axes labels
-        let _plot_w = f64::from(area.width.saturating_sub(8));
-        let _plot_h = f64::from(area.height.saturating_sub(4));
-
-        let canvas = ratatui::widgets::canvas::Canvas::default()
-            .block(
-                ratatui::widgets::Block::default()
-                    .title(format!(" {} by day ", self.metric.label()))
-                    .borders(ratatui::widgets::Borders::ALL)
-                    .border_style(
-                        ratatui::style::Style::default()
-                            .fg(ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2)),
-                    ),
-            )
-            .x_bounds([0.0, x_max])
-            .y_bounds([0.0, y_max])
-            .marker(ratatui::symbols::Marker::Braille)
-            .paint(|ctx| {
-                // --- Grid lines (horizontal) with labels ---
-                for i in 0..=4 {
-                    let y = y_max * f64::from(i) / 4.0;
-                    let color = if i == 0 || i == 4 {
-                        ratatui::style::Color::Rgb(0x66, 0x66, 0x66)
-                    } else {
-                        ratatui::style::Color::Rgb(0x2A, 0x2A, 0x2A)
-                    };
-                    ctx.draw(&ratatui::widgets::canvas::Line {
-                        x1: 0.0,
-                        y1: y,
-                        x2: x_max,
-                        y2: y,
-                        color,
-                    });
-                }
-                // --- Grid lines (vertical) ---
-                for i in 0..=4 {
-                    let x = x_max * f64::from(i) / 4.0;
-                    ctx.draw(&ratatui::widgets::canvas::Line {
-                        x1: x,
-                        y1: 0.0,
-                        x2: x,
-                        y2: y_max,
-                        color: ratatui::style::Color::Rgb(0x2A, 0x2A, 0x2A),
-                    });
-                }
-                // --- Draw filled area under each series (gradient) ---
-                for (i, _) in series.iter().enumerate() {
-                    let (r, g, b) = colors[i % colors.len()];
-                    let data = &all_data[i];
-                    // Draw area fill: vertical lines from 0 to data point
-                    for (xi, pt) in data.iter().enumerate() {
-                        let x = pt.0;
-                        let y = pt.1;
-                        if y > 0.0 {
-                            ctx.draw(&ratatui::widgets::canvas::Line {
-                                x1: x,
-                                y1: 0.0,
-                                x2: x,
-                                y2: y,
-                                color: ratatui::style::Color::Rgb(r / 4, g / 4, b / 4),
-                            });
-                        }
-                    }
-                }
-                // --- Draw series lines ---
-                for (i, _) in series.iter().enumerate() {
-                    let (r, g, b) = colors[i % colors.len()];
-                    let color = ratatui::style::Color::Rgb(r, g, b);
-                    let data = &all_data[i];
-                    for w in data.windows(2) {
-                        ctx.draw(&ratatui::widgets::canvas::Line {
-                            x1: w[0].0,
-                            y1: w[0].1,
-                            x2: w[1].0,
-                            y2: w[1].1,
-                            color,
-                        });
-                    }
-                }
-                // --- Draw series points with highlight ---
-                for (i, _) in series.iter().enumerate() {
-                    let (r, g, b) = colors[i % colors.len()];
-                    let color = ratatui::style::Color::Rgb(r, g, b);
-                    let data = &all_data[i];
-                    for &(x, y) in data {
-                        ctx.draw(&ratatui::widgets::canvas::Points {
-                            coords: &[(x, y)],
-                            color,
-                        });
-                    }
-                }
-                // --- Draw peak markers (circles at max points) ---
-                for (i, _) in series.iter().enumerate() {
-                    let (r, g, b) = colors[i % colors.len()];
-                    let color = ratatui::style::Color::Rgb(r, g, b);
-                    let data = &all_data[i];
-                    if let Some(max_pt) = data
-                        .iter()
-                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    {
-                        ctx.draw(&ratatui::widgets::canvas::Circle {
-                            x: max_pt.0,
-                            y: max_pt.1,
-                            radius: 0.3,
-                            color,
-                        });
-                    }
-                }
-            });
-
-        frame.render_widget(canvas, area);
-
-        // Draw legend below the chart
-        let legend_y = area.y + area.height.saturating_sub(1);
-        if legend_y < area.y + area.height {
-            let mut legend = String::new();
-            for (i, (label, _)) in series.iter().enumerate() {
-                let (r, g, b) = colors[i % colors.len()];
-                if i > 0 {
-                    legend.push_str("  ");
-                }
-                legend.push_str(label);
-            }
-            // Draw legend as a dim line
-            let legend_line = ratatui::text::Line::from(legend);
-            let legend_area =
-                ratatui::layout::Rect::new(area.x + 2, legend_y, area.width.saturating_sub(4), 1);
-            use ratatui::widgets::Widget as _;
-            ratatui::widgets::Paragraph::new(legend_line)
-                .style(
-                    ratatui::style::Style::default()
-                        .fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88)),
-                )
-                .render(legend_area, frame.buffer_mut());
-        }
-    }
-
     /// This session's own figures, its own models ranked, and its errors.
     fn session_lines(&self, out: &mut Vec<ViewLine>, report: &Report) {
         if report.total.requests == 0 {
@@ -966,13 +778,10 @@ impl Panel {
         error_section(out, report, self.reveal(BAR_CELLS));
     }
 
-    /// One sparkline per model: its metric across the day buckets of the range.
+    /// One compact trend row per model.
     ///
-    /// The line is a sparkline and not a chart with axes: a terminal has room
-    /// for the shape of the use and not for a plot, and the shape — a trough
-    /// after a key rotated, a spike after a long turn — is what a person reads.
-    /// Each model is its own line, never merged with another provider's model of
-    /// the same name.
+    /// Each model gets one bounded sparkline, so this tab reads as a comparison
+    /// instead of a tall, duplicated plot that pushes its useful data offscreen.
     fn time_lines(&self, out: &mut Vec<ViewLine>) {
         let series = self.model_series(self.metric);
         if series.is_empty() {
@@ -980,26 +789,31 @@ impl Panel {
             return;
         }
         let buckets: Vec<String> = report_buckets(&self.scoped(), self.range);
+        let granularity = match self.range {
+            Range::Today => "hourly",
+            Range::All => "monthly",
+            _ => "daily",
+        };
+        let trend_width = buckets.len().min(MAX_TREND_CELLS);
         out.push(ViewLine::bold(format!(
-            "{} by day, {} to {}",
+            "{} · {granularity} · {} bucket(s) · {} → {}",
             self.metric.label(),
+            buckets.len(),
             buckets.first().map_or("–", String::as_str),
             buckets.last().map_or("–", String::as_str)
         )));
+        out.push(ViewLine::dim(format!(
+            "  {:<20} {:<trend_width$} peak",
+            "model", "trend",
+        )));
         for (label, points) in &series {
             let peak = points.iter().copied().max().unwrap_or(0);
-            let rows = plot(points, 8);
-            for (i, row) in rows.iter().enumerate() {
-                if i == 0 {
-                    out.push(ViewLine::plain(format!(
-                        "{:<LABEL_COLUMN$} {row}  peak {}",
-                        clip(label, LABEL_COLUMN),
-                        metric_scalar(peak, self.metric)
-                    )));
-                } else {
-                    out.push(ViewLine::plain(format!("{:<LABEL_COLUMN$} {row}", "")));
-                }
-            }
+            out.push(ViewLine::plain(format!(
+                "  {:<20} {:<trend_width$}  {}",
+                clip(label, 20),
+                sparkline(points),
+                metric_scalar(peak, self.metric)
+            )));
         }
     }
 
@@ -1042,96 +856,106 @@ impl Panel {
     }
 }
 
-/// Every day bucket the rows fall in, oldest first.
+/// The contiguous time buckets between the first and last request.
 fn report_buckets(rows: &[&RequestRecord], range: Range) -> Vec<String> {
-    let mut buckets: BTreeSet<String> = BTreeSet::new();
-    for record in rows {
-        buckets.insert(bucket_of(record.started_at, range));
+    use chrono::{Datelike, Timelike};
+
+    let Some(first) = rows.iter().map(|record| record.started_at).min() else {
+        return Vec::new();
+    };
+    let Some(last) = rows.iter().map(|record| record.started_at).max() else {
+        return Vec::new();
+    };
+    let mut buckets = Vec::new();
+    if range == Range::Today {
+        let Some(mut bucket) = first
+            .date_naive()
+            .and_hms_opt(first.hour(), 0, 0)
+            .map(|date| date.and_utc())
+        else {
+            return buckets;
+        };
+        let Some(end) = last
+            .date_naive()
+            .and_hms_opt(last.hour(), 0, 0)
+            .map(|date| date.and_utc())
+        else {
+            return buckets;
+        };
+        while bucket <= end {
+            buckets.push(bucket.format("%Y-%m-%d %H:00").to_string());
+            let Some(next) = bucket.checked_add_signed(Duration::hours(1)) else {
+                break;
+            };
+            bucket = next;
+        }
+        return buckets;
     }
-    buckets.into_iter().collect()
+
+    let mut bucket = first.date_naive();
+    let end = last.date_naive();
+    if range == Range::All {
+        let Some(month) = chrono::NaiveDate::from_ymd_opt(bucket.year(), bucket.month(), 1) else {
+            return buckets;
+        };
+        bucket = month;
+        while bucket <= end {
+            buckets.push(bucket.format("%Y-%m").to_string());
+            let Some(next) = bucket.checked_add_months(chrono::Months::new(1)) else {
+                break;
+            };
+            bucket = next;
+        }
+        return buckets;
+    }
+
+    while bucket <= end {
+        buckets.push(bucket.format("%Y-%m-%d").to_string());
+        let Some(next) = bucket.checked_add_signed(Duration::days(1)) else {
+            break;
+        };
+        bucket = next;
+    }
+    buckets
 }
 
-/// A model label with its provider stripped, clipped to a column.
+/// A label clipped to a fixed column.
 fn clip(label: &str, width: usize) -> String {
     label.chars().take(width).collect()
 }
 
-/// A small multi-row plot of a series: `height` rows, one column per point,
-/// so the shape reads as a chart and not as a single line of blocks.
-/// Braille base code point (U+2800).
-const BRAILLE_BASE: u32 = 0x2800;
-// Dot positions in a 2x4 grid (col, row) -> bit
-// (0,0)->0x01  (1,0)->0x08
-// (0,1)->0x02  (1,1)->0x10
-// (0,2)->0x04  (1,2)->0x20
-// (0,3)->0x40  (1,3)->0x80
-const BRAILLE_DOTS: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
-
-/// A braille-based 2D plot: each terminal cell represents a 2x4 dot grid,
-/// giving much higher resolution than block characters. Multiple series can
-/// be overlaid. Returns `height` rows of braille characters.
-fn plot(points: &[u64], height: usize) -> Vec<String> {
-    let peak = points.iter().copied().max().unwrap_or(0);
-    let height = height.max(1);
-    if peak == 0 || points.is_empty() {
-        return vec!["·".repeat(points.len().div_ceil(2)); height];
-    }
-    // Grid dimensions: width = ceil(points.len() / 2), height in cells
-    let grid_w = points.len().div_ceil(2);
-    let grid_h = height;
-    // Dot grid: grid_w*2 columns, grid_h*4 rows
-    let mut dots = vec![vec![false; grid_w * 2]; grid_h * 4];
-
-    for (xi, &val) in points.iter().enumerate() {
-        if val == 0 {
-            continue;
-        }
-        let y_level = usize::try_from(val.saturating_mul((grid_h * 4) as u64) / peak).unwrap_or(0);
-        let y_level = y_level.min(grid_h * 4);
-        for y in 0..y_level {
-            let row = grid_h * 4 - 1 - y;
-            if row < dots.len() {
-                dots[row][xi] = true;
-            }
-        }
-    }
-
-    // Convert dot grid to braille cells
-    let mut rows = vec![String::with_capacity(grid_w); grid_h];
-    for (gy, row) in rows.iter_mut().enumerate().take(grid_h) {
-        for gx in 0..grid_w {
-            let mut code = BRAILLE_BASE;
-            for (dy, _) in (0..4).enumerate() {
-                for (dx, _) in (0..2).enumerate() {
-                    let px = gx * 2 + dx;
-                    let py = gy * 4 + dy;
-                    if py < dots.len() && px < dots[py].len() && dots[py][px] {
-                        code += BRAILLE_DOTS[dy][dx];
-                    }
-                }
-            }
-            row.push(char::from_u32(code).unwrap_or(' '));
-        }
-    }
-    rows
-}
-
 /// The eight-step sparkline of a series, one character per point.
-#[allow(dead_code)]
 fn sparkline(points: &[u64]) -> String {
     const STEPS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let peak = points.iter().copied().max().unwrap_or(0);
     if peak == 0 {
-        return "·".repeat(points.len());
+        return "·".repeat(points.len().min(MAX_TREND_CELLS));
     }
-    points
+    let reduced: Vec<u64> = if points.len() <= MAX_TREND_CELLS {
+        points.to_vec()
+    } else {
+        (0..MAX_TREND_CELLS)
+            .map(|index| {
+                let start = index * points.len() / MAX_TREND_CELLS;
+                let end = (index + 1) * points.len() / MAX_TREND_CELLS;
+                points[start..end].iter().copied().max().unwrap_or(0)
+            })
+            .collect()
+    };
+    reduced
         .iter()
         .map(|point| {
+            if *point == 0 {
+                return '·';
+            }
             let step = usize::try_from(point.saturating_mul(7) / peak).unwrap_or(0);
             STEPS[step.min(7)]
         })
         .collect()
 }
+
+/// The most time buckets shown by each sparkline.
+const MAX_TREND_CELLS: usize = 24;
 
 /// A metric's peak as a short word, for the line that names it.
 fn metric_scalar(value: u64, metric: Metric) -> String {
@@ -1600,9 +1424,9 @@ mod tests {
     }
 
     #[test]
-    fn the_time_tab_draws_a_sparkline_per_model() {
-        // Two models over two days: each gets its own line, and the shape is the
-        // use, not a merged total.
+    fn the_time_tab_draws_a_compact_sparkline_per_model() {
+        // Two models over two days: each gets one compact line, not a tall
+        // multi-row plot that pushes the useful content out of the panel.
         let today = Utc::now();
         let yesterday = today - Duration::days(1);
         let mut a1 = record("openai", "gpt-5", RequestStatus::Ok);
@@ -1617,19 +1441,48 @@ mod tests {
         b.started_at = today;
         let mut panel = Panel::new(vec![a1, a2, b], None);
         panel.tab = Tab::Time;
+        panel.range = Range::Week;
         let text = text_of(&panel);
         assert!(text.contains("over time"), "{text}");
+        assert!(text.contains("daily"), "{text}");
         assert!(text.contains("openai/gpt-5"), "{text}");
         assert!(text.contains("openrouter/gpt-5"), "{text}");
-        // A braille plot for the peak day and a lower column for the smaller one.
+        assert!(text.contains("bucket(s)"), "{text}");
+        assert!(text.contains('█'), "{text}");
         assert!(
-            text.contains('⡇')
-                || text.contains('⣿')
-                || text.contains('⣶')
-                || text.contains('⣤')
-                || text.contains('⣀')
-                || text.contains('⠿'),
-            "{text}"
+            text.lines().count() < 8,
+            "each model should occupy a single row:\n{text}"
+        );
+    }
+
+    #[test]
+    fn time_series_fills_missing_buckets_between_requests() {
+        let now = Utc::now();
+        let mut first = record("openai", "gpt-5", RequestStatus::Ok);
+        first.started_at = now - Duration::days(3);
+        let mut last = record("openai", "gpt-5", RequestStatus::Ok);
+        last.started_at = now;
+        let mut panel = Panel::new(vec![first, last], None);
+        panel.tab = Tab::Time;
+        panel.range = Range::Week;
+
+        let text = text_of(&panel);
+        assert!(text.contains("4 bucket(s)"), "{text}");
+        let trend = text
+            .lines()
+            .find(|line| line.contains("openai/gpt-5"))
+            .expect("model trend");
+        assert_eq!(
+            trend
+                .chars()
+                .filter(|character| "▁▂▃▄▅▆▇█·".contains(*character))
+                .count(),
+            4,
+            "the sparkline includes zero-use days: {trend}"
+        );
+        assert!(
+            trend.contains("█··█"),
+            "idle days remain visibly empty: {trend}"
         );
     }
 
@@ -1641,6 +1494,14 @@ mod tests {
         assert_eq!(chars.len(), 3);
         assert_eq!(chars[1], '█', "the peak is the full block");
         assert!(chars[0] < chars[1], "the small one is shorter");
+    }
+
+    #[test]
+    fn a_long_sparkline_is_bounded_and_keeps_its_peak() {
+        let points: Vec<u64> = (0..100).collect();
+        let line = sparkline(&points);
+        assert_eq!(line.chars().count(), MAX_TREND_CELLS);
+        assert_eq!(line.chars().last(), Some('█'));
     }
 
     #[test]
