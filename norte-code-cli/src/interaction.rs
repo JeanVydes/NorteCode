@@ -1153,7 +1153,7 @@ pub(crate) async fn interactive_loop(
                 renderer.set_title(title);
             }
         }
-        let stream = service
+        let stream = match service
             .submit(ClientRequest {
                 request_id,
                 kind: ClientRequestKind::SendMessage {
@@ -1175,7 +1175,17 @@ pub(crate) async fn interactive_loop(
                 },
             })
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("no model is configured") {
+                    renderer.notice("no model configured: pick one with /models".to_owned());
+                    continue;
+                }
+                return Err(message);
+            }
+        };
         request_id = request_id.saturating_add(1);
         let outcome = drive_turns(
             service,
