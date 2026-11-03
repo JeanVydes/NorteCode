@@ -650,16 +650,34 @@ pub(crate) async fn new_session(
     config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
     let (provider, model) =
         session_choice(choice.as_ref(), args.provider.clone(), args.model.clone());
-    let spec = resolve_spec(
-        &config,
-        &catalog,
-        provider,
-        model,
-        args.endpoint.clone(),
-        args.wire,
-    )?;
-    let model_label = spec.label();
-    let provider = spec.provider.clone();
+    let effective_provider = provider.clone().or_else(|| config.default_provider.clone());
+    let effective_model = model.clone().or_else(|| config.default_model.clone());
+
+    // No model is configured: do not fail here. Reach the interface and let the
+    // person pick one with `/models`; a message sent in the meantime is refused
+    // with a pointer to that command. A placeholder spec is built from the
+    // first catalogue entry so the service can exist, and its name is not shown.
+    let model_unset = effective_provider.is_none() || effective_model.is_none();
+    let spec: Option<ModelSpec> = if model_unset {
+        None
+    } else {
+        if let Some(p) = effective_provider.as_deref() {
+            startup::ensure_provider_key(&config, &catalog, p)?;
+        }
+        Some(resolve_spec(
+            &config,
+            &catalog,
+            provider,
+            model,
+            args.endpoint.clone(),
+            args.wire,
+        )?)
+    };
+    let model_label = spec.as_ref().map(ModelSpec::label);
+    let provider = spec
+        .as_ref()
+        .map(|s| s.provider.clone())
+        .unwrap_or_default();
     CommonOptions {
         max_iterations: args.max_iterations,
         compaction_threshold: args.compaction_threshold,
@@ -676,12 +694,16 @@ pub(crate) async fn new_session(
         .as_deref()
         .map(parse_reasoning_setting)
         .transpose()?;
-    let effective = effective_reasoning(
-        reasoning.as_ref(),
-        &config.reasoning.default,
-        &spec.capabilities.reasoning,
-    )
-    .map_err(|error| error.to_string())?;
+    let effective = if let Some(spec) = &spec {
+        effective_reasoning(
+            reasoning.as_ref(),
+            &config.reasoning.default,
+            &spec.capabilities.reasoning,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        norte_code_protocol::Reasoning::Automatic
+    };
     if let Some(limit) = args.budget
         && (!limit.is_finite() || limit <= 0.0)
     {
@@ -698,13 +720,23 @@ pub(crate) async fn new_session(
     let style = Style::stderr();
     let verbosity = Verbosity::parse(verbosity)?;
     if verbosity.at_least(Verbosity::Medium) {
-        eprintln!(
-            "{} {} {} {}",
-            style.magenta("◆"),
-            style.bold(spec.label()),
-            style.dim("·"),
-            style.dim(format!("catalogue: {} models", catalog.model_count()))
-        );
+        if model_unset {
+            eprintln!(
+                "{} {} {} {}",
+                style.magenta("◆"),
+                style.bold("no model configured"),
+                style.dim("·"),
+                style.dim(format!("catalogue: {} models", catalog.model_count()))
+            );
+        } else if let Some(spec) = &spec {
+            eprintln!(
+                "{} {} {} {}",
+                style.magenta("◆"),
+                style.bold(spec.label()),
+                style.dim("·"),
+                style.dim(format!("catalogue: {} models", catalog.model_count()))
+            );
+        }
     }
     let budget_is_usd = message_budget
         .as_ref()
@@ -717,7 +749,7 @@ pub(crate) async fn new_session(
     let show_cost = config.cost.show;
     // The footer's context dial needs the window and the compaction threshold
     // before the config and spec are moved into the service.
-    let max_context = spec.capabilities.max_context;
+    let max_context = spec.as_ref().and_then(|s| s.capabilities.max_context);
     let compaction_threshold = config.compaction.threshold;
     let database = database_path()?;
     let store = Arc::new(
@@ -756,7 +788,8 @@ pub(crate) async fn new_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
-    renderer.model_name = Some(model_label);
+    renderer.model_name = model_label;
+    renderer.model_unset = model_unset;
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
     // The facts `/debug` reports that only the CLI knows: which file the
@@ -933,28 +966,58 @@ async fn resume_session(
         }
         Some((provider.to_owned(), model.to_owned()))
     });
-    let spec = match saved {
-        Some((provider, model)) => {
-            resolve_spec(&config, &catalog, Some(provider), Some(model), None, None).or_else(
-                |error| {
-                    eprintln!(
-                        "warning: this session was on a model the catalogue does not carry \
-                 ({error}); the configured default is used instead"
-                    );
-                    resolve_spec(&config, &catalog, None, None, None, None)
-                },
-            )?
+    let saved_provider = saved.as_ref().map(|(p, _)| p.clone());
+    let saved_model = saved.as_ref().map(|(_, m)| m.clone());
+    let effective_provider = saved_provider
+        .clone()
+        .or_else(|| config.default_provider.clone());
+    let effective_model = saved_model.clone().or_else(|| config.default_model.clone());
+
+    let model_unset = effective_provider.is_none() || effective_model.is_none();
+
+    // Keys for whichever provider may be used, only when a model is configured.
+    if !model_unset {
+        if let Some(provider) = &saved_provider {
+            startup::ensure_provider_key(&config, &catalog, provider)?;
         }
-        None => resolve_spec(&config, &catalog, None, None, None, None)?,
+        if let Some(provider) = &config.default_provider {
+            startup::ensure_provider_key(&config, &catalog, provider)?;
+        }
+    }
+
+    let spec: Option<ModelSpec> = if model_unset {
+        None
+    } else {
+        match saved {
+            Some((provider, model)) => Some(
+                resolve_spec(&config, &catalog, Some(provider), Some(model), None, None).or_else(
+                    |error| {
+                        eprintln!(
+                            "warning: this session was on a model the catalogue does not carry \
+                      ({error}); the configured default is used instead"
+                        );
+                        resolve_spec(&config, &catalog, None, None, None, None)
+                    },
+                )?,
+            ),
+            None => Some(resolve_spec(&config, &catalog, None, None, None, None)?),
+        }
     };
-    let model_label = spec.label();
-    let provider = spec.provider.clone();
-    let effective = effective_reasoning(
-        None,
-        &config.reasoning.default,
-        &spec.capabilities.reasoning,
-    )
-    .map_err(|error| error.to_string())?;
+    let model_label = spec.as_ref().map(ModelSpec::label);
+    let provider = spec
+        .as_ref()
+        .map(|s| s.provider.clone())
+        .unwrap_or_default();
+    let effective = if let Some(spec) = &spec {
+        effective_reasoning(
+            None,
+            &config.reasoning.default,
+            &spec.capabilities.reasoning,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        norte_code_protocol::Reasoning::Automatic
+    };
     let style = if args.jsonl {
         Style::plain()
     } else {
@@ -980,7 +1043,7 @@ async fn resume_session(
     let show_cost = config.cost.show;
     // The footer's context dial needs the window and the compaction threshold
     // before the config and spec are moved into the service.
-    let max_context = spec.capabilities.max_context;
+    let max_context = spec.as_ref().and_then(|s| s.capabilities.max_context);
     let compaction_threshold = config.compaction.threshold;
     let database = database_path()?;
     let store = Arc::new(
@@ -1022,7 +1085,8 @@ async fn resume_session(
     );
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
-    renderer.model_name = Some(model_label);
+    renderer.model_name = model_label;
+    renderer.model_unset = model_unset;
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
     renderer.host_facts = Some(HostFacts {

@@ -24,6 +24,7 @@
 use std::io::IsTerminal as _;
 use std::path::Path;
 
+use norte_code_protocol::catalog::Catalog;
 use norte_code_protocol::config::{Config, update_user_default};
 use norte_code_protocol::sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
 use norte_code_protocol::{Phase, SessionKey};
@@ -190,22 +191,19 @@ fn row_of(session: StoredSession) -> SessionRow {
 /// whose configuration already names a default, so the question is asked once
 /// and the answer is written where the next run reads it.
 pub(crate) async fn startup(
-    config: &mut Config,
-    catalog: &norte_code_protocol::catalog::Catalog,
+    _config: &mut Config,
+    _catalog: &norte_code_protocol::catalog::Catalog,
     database: &Path,
-    config_path: Option<&Path>,
-    style: Style,
+    _config_path: Option<&Path>,
+    _style: Style,
 ) -> Result<Startup, String> {
     // The default entrypoint is a new session: the session picker moved to
     // the `/sessions` command, so a bare run no longer stops on a menu.
     let _ = session_rows(database).await?;
     let open = Open::New;
-    let saved: Option<ModelChoice> = None;
-    let choice = match saved {
-        Some(choice) => Some(choice),
-        None if config.default_model.is_some() => None,
-        None => Some(choose_model(config, catalog, config_path, style)?),
-    };
+    // No terminal picker any more: when no default is configured the interface
+    // opens without a model and the person chooses one with `/models`.
+    let choice: Option<ModelChoice> = None;
     Ok(Startup { open, choice })
 }
 
@@ -251,8 +249,9 @@ fn session_items(rows: &[SessionRow]) -> Vec<Item> {
 /// The list is what the cursor walks; a name the cursor does not reach is typed
 /// into the filter, which is what narrows the list and, when it matches nothing,
 /// is the name itself. A provider's key is resolved after the choice, from the
-/// environment, the OS keyring or `secrets.json`.
+/// environment or `secrets.json`.
 #[allow(clippy::too_many_lines)] // one arm per question, which is the dialogue.
+#[allow(dead_code)]
 pub(crate) fn choose_model(
     config: &mut Config,
     catalog: &norte_code_protocol::catalog::Catalog,
@@ -421,6 +420,65 @@ pub(crate) fn has_terminal() -> bool {
 /// It is the one question the flow still asks by line, and it has to: a provider
 /// the catalogue does not list has no entries to walk, so the model it serves is
 /// a name nobody could put on a list.
+/// Asks for the key of the provider the run is about to use.
+///
+/// This is the pre-TUI path: there is no question box to draw a bullet in, so
+/// the key is read with no echo. It only asks when a store is installed, the
+/// provider is in the catalogue and none of its sources has a key. A
+/// non-interactive client keeps the old behavior: the resolver reports the
+/// missing variable and the run stops.
+///
+/// # Errors
+///
+/// Returns the resolver's missing-key message when the key is left empty or the
+/// process has no terminal, and the read error when the terminal refuses it.
+pub(crate) fn ensure_provider_key(
+    config: &Config,
+    catalog: &Catalog,
+    provider: &str,
+) -> Result<(), String> {
+    let Some(store) = &config.keys else {
+        return Ok(());
+    };
+    let Some(entry) = catalog.provider(provider) else {
+        return Ok(());
+    };
+    if store.resolve(provider, &entry.environment_keys).is_ok() {
+        return Ok(());
+    }
+    let missing = || {
+        format!(
+            "could not resolve the API key for {provider}: no value in any of: {}",
+            entry.environment_keys.join(", ")
+        )
+    };
+    if !std::io::stdin().is_terminal() {
+        return Err(missing());
+    }
+    let prompt = format!(
+        "API key for {provider} (input is hidden, tried {}): ",
+        entry.environment_keys.join(", ")
+    );
+    let key = rpassword::prompt_password(prompt)
+        .map_err(|error| format!("could not read the API key for {provider}: {error}"))?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(missing());
+    }
+    match store.save(provider, key) {
+        Ok(_) => {
+            eprintln!("saved the key for {provider} in secrets.json (0600)");
+        }
+        Err(error) => {
+            eprintln!(
+                "warning: the key for {provider} could not be saved ({error}); \
+                 it is used for this run only"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn prompt_line(question: &str, style: Style) -> Result<Option<String>, String> {
     use std::io::Write as _;
 

@@ -1,3 +1,7 @@
 - When a plan is already approved and saved to a file, execute it directly: read the plan file first, then implement it step by step, referring back to the plan as you work; never re-enter plan mode or re-present the plan for approval. Confidence: 0.7
 - Prefer the edit tool (`edit_file`) over shell commands with Python/`sed` for modifying files. Confidence: 0.8
 - When making code changes, batch large edits together and run checks/tests once afterward rather than checking after each individual edit. Confidence: 0.8
+- Wants feature parity between in-chat slash commands and CLI subcommands: a new capability should exist in both, with matching argument semantics (e.g. no argument = act on all, a name = act on that one). Confidence: 0.6
+- When a capability gap is explained as a deliberate design choice ("the neutral model is intentionally small", "use the extension escape hatch instead"), treat it as a request to close the gap properly: add first-class fields to the core/neutral model and adapter rather than leaving it reachable only via vendor extensions or declaring it unsupported. Confidence: 0.6
+- Model response stats/footer should be rendered directly under the model's message, not under the user's prompt. Confidence: 0.7
+- When no model is configured, make the model spec genuinely optional/null internally rather than borrowing a real provider/model name as a stand-in (empty strings are not acceptable since they fail identifier validation). Confidence: 0.85

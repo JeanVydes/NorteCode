@@ -84,6 +84,16 @@ pub trait KeyStore: Send + Sync + fmt::Debug {
     /// Returns [`KeyStoreError`] when neither the OS keyring nor the 0600 file
     /// accepted it.
     fn save(&self, provider: &str, key: &str) -> Result<KeyStorage, KeyStoreError>;
+
+    /// Removes a key the person no longer wants stored.
+    ///
+    /// A missing entry is not an error: there is nothing to remove. The
+    /// environment is not touched — a variable set in the shell stays set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyStoreError`] when neither store could be updated.
+    fn delete(&self, provider: &str) -> Result<(), KeyStoreError>;
 }
 
 /// The key in the catalogue's environment variables, or `None`.
@@ -163,6 +173,35 @@ pub fn save_secret(path: &Path, provider: &str, key: &str) -> Result<(), KeyStor
             .map_err(|error| KeyStoreError::File(format!("{}: {error}", parent.display())))?;
     }
     atomic_write_with(path, &body, true).map_err(|error| KeyStoreError::File(error.to_string()))
+}
+
+/// Removes `provider` from the 0600 file, preserving the other entries.
+///
+/// A missing file or a missing entry is not an error: there is nothing to
+/// remove. When no entries remain the file is removed, so an empty
+/// `secrets.json` never lingers.
+///
+/// # Errors
+///
+/// Returns [`KeyStoreError::File`] when the file cannot be read, serialized or
+/// written.
+pub fn delete_secret(path: &Path, provider: &str) -> Result<(), KeyStoreError> {
+    let mut secrets = read_secrets(path);
+    if secrets.remove(provider).is_none() {
+        // Nothing to do: the entry was never there.
+        return Ok(());
+    }
+    if secrets.is_empty() {
+        // Drop the file rather than leaving an empty object behind.
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| KeyStoreError::File(error.to_string()))?;
+        }
+        Ok(())
+    } else {
+        let body = serde_json::to_vec_pretty(&secrets)
+            .map_err(|error| KeyStoreError::File(error.to_string()))?;
+        atomic_write_with(path, &body, true).map_err(|error| KeyStoreError::File(error.to_string()))
+    }
 }
 
 fn read_secrets(path: &Path) -> BTreeMap<String, String> {

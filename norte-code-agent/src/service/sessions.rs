@@ -26,7 +26,7 @@ use crate::provider::ModelSpec as ProviderModelSpec;
 pub(super) struct SessionRecord {
     pub(super) id: norte::SessionId,
     pub(super) title: Option<String>,
-    pub(super) spec: ProviderModelSpec,
+    pub(super) spec: Option<ProviderModelSpec>,
     /// A model switch accepted while the session was busy. It replaces the
     /// current spec at the next idle turn boundary.
     ///
@@ -94,7 +94,7 @@ pub(super) struct SessionRecord {
 /// Builds the record of a stored session.
 fn record_from(
     entry: StoredSession,
-    spec: ProviderModelSpec,
+    spec: Option<ProviderModelSpec>,
     phase: ProtocolPhase,
 ) -> SessionRecord {
     let stats = &entry.stats;
@@ -200,12 +200,9 @@ impl Service {
                             provider = %entry.provider,
                             model = %entry.model,
                             %error,
-                            "stored session model is unavailable; using the default"
+                            "stored session model is unavailable; skipping"
                         );
-                        self.default_spec
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone()
+                        continue;
                     }
                 };
             let (phase, needs_repair) = self.read_phase(&entry).await;
@@ -214,7 +211,7 @@ impl Service {
                 &entry.denied_tools,
                 &entry.allowed_tools,
             );
-            let record = record_from(entry, spec, phase);
+            let record = record_from(entry, Some(spec), phase);
             records.push((key.clone(), record));
             if needs_repair {
                 repaired.push(key);
@@ -320,8 +317,16 @@ impl Service {
             key: key.to_string(),
             north: record.id,
             title: record.title.clone(),
-            model: record.spec.model.clone(),
-            provider: record.spec.provider.clone(),
+            model: record
+                .spec
+                .as_ref()
+                .map(|s| s.model.clone())
+                .unwrap_or_default(),
+            provider: record
+                .spec
+                .as_ref()
+                .map(|s| s.provider.clone())
+                .unwrap_or_default(),
             created_at: record.created_at,
             phase: record.phase,
             stats: serde_json::json!({
@@ -362,12 +367,49 @@ impl Service {
         &self,
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
-        let spec = self
+        // A run with no configured model still needs an engine to create the
+        // session, so the first catalogue model is borrowed for that alone. The
+        // session itself carries no spec (`None`): it is not a model the person
+        // chose, and a message sent on it is refused until one is.
+        let stored_spec = self
             .default_spec
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let engine = self.engine(&spec, None)?;
+        let engine_spec = stored_spec.clone().unwrap_or_else(|| {
+            // Fallback for a session created without a configured model: borrow
+            // the first catalogue entry to build the engine, never to serve a
+            // request.
+            let catalog = self.catalog();
+            let provider = catalog
+                .providers()
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+            let model = catalog
+                .models_of(&provider)
+                .next()
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
+            // Best effort: resolve through the catalogue; if it fails the engine
+            // build below will surface the error.
+            self.default_spec_for(&self.lock_config(), &catalog, &provider, &model)
+                .unwrap_or_else(|_| ProviderModelSpec {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    endpoint: String::new(),
+                    api_key: norte_code_protocol::config::ApiKey::new(String::new()),
+                    schema: norte_code_protocol::catalog::WireSchema::OpenAI,
+                    auth: None,
+                    capabilities: norte_code_protocol::catalog::capabilities(
+                        &norte_code_protocol::catalog::Model::default(),
+                        norte_code_protocol::catalog::WireSchema::OpenAI,
+                    ),
+                    headers: std::collections::BTreeMap::new(),
+                })
+        });
+        let engine = self.engine(&engine_spec, None)?;
         let session = engine.create().await?;
         engine
             .append_history(
@@ -379,7 +421,7 @@ impl Service {
         let record = SessionRecord {
             id: session.id,
             title,
-            spec,
+            spec: stored_spec,
             pending_provider: None,
             pending_model: None,
             created_at: Utc::now(),
@@ -419,6 +461,7 @@ impl Service {
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
         let (source, spec, _) = self.require_record(from)?;
+        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(from.to_string()))?;
         let engine = self.engine(&spec, Some(from))?;
         let mut conversation = engine.export(source).await?;
         // Norte's import preserves the conversation's session id, which is the
@@ -432,7 +475,7 @@ impl Service {
         let record = SessionRecord {
             id: imported.id,
             title,
-            spec,
+            spec: Some(spec),
             pending_provider: None,
             pending_model: None,
             created_at: Utc::now(),
@@ -477,8 +520,8 @@ impl Service {
             .map(|(key, record)| SessionInfo {
                 session: key.clone(),
                 title: record.title.clone(),
-                provider: Some(record.spec.provider.clone()),
-                model: Some(record.spec.model.clone()),
+                provider: record.spec.as_ref().map(|s| s.provider.clone()),
+                model: record.spec.as_ref().map(|s| s.model.clone()),
                 created_at: Some(record.created_at.to_rfc3339()),
                 phase: record.phase,
             })
@@ -513,6 +556,7 @@ impl Service {
     /// cannot be read, or it holds no user message to name it after.
     pub async fn retitle_session(&self, key: &SessionKey) -> Result<String, ServiceError> {
         let (nid, spec, _) = self.require_record(key)?;
+        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
         let history = self.engine(&spec, Some(key))?.history(nid).await?;
         let first = history
             .iter()
@@ -546,7 +590,7 @@ impl Service {
     pub(super) fn require_record(
         &self,
         key: &SessionKey,
-    ) -> Result<(norte::SessionId, ProviderModelSpec, ProtocolPhase), ServiceError> {
+    ) -> Result<(norte::SessionId, Option<ProviderModelSpec>, ProtocolPhase), ServiceError> {
         self.lock_sessions()
             .get(key)
             .map(|record| (record.id, record.spec.clone(), record.phase))
@@ -710,6 +754,7 @@ impl Service {
         reasoning: Reasoning,
     ) -> Result<EventStream, ServiceError> {
         let (_, spec, _) = self.require_record(&key)?;
+        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
         // Validate at the point the setting is chosen, not on the next turn:
         // an effort the selected model does not declare is never downgraded.
         super::resolve_reasoning(

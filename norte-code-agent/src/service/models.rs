@@ -484,7 +484,7 @@ impl Service {
             let record = lock
                 .get_mut(key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
-            record.spec = spec;
+            record.spec = Some(spec);
             record.pending_model = None;
         }
         self.persist(key).await

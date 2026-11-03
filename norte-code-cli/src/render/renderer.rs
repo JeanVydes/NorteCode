@@ -185,6 +185,12 @@ pub(crate) struct Renderer {
     /// The path a `write` or `read` is working on, by call, until it finishes.
     pending_paths: BTreeMap<String, String>,
     pub(crate) model_name: Option<String>,
+    /// Whether no model is configured yet.
+    ///
+    /// A run that started without a default provider/model reaches the
+    /// interface this way; the message is refused until one is chosen with
+    /// `/models`, which clears this flag.
+    pub(crate) model_unset: bool,
     /// The provider `/provider` moved to, when the model did not come with it.
     ///
     /// A provider switch that the current model cannot survive — `exa` does not
@@ -362,6 +368,7 @@ impl Renderer {
             screen: None,
             pending_paths: BTreeMap::new(),
             model_name: None,
+            model_unset: false,
             pending_provider: None,
             models_expanded: None,
             panel_filter: String::new(),

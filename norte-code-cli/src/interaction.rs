@@ -121,6 +121,9 @@ pub(crate) enum ChatCommand {
     /// Delete this session and leave the chat.
     Delete,
 
+    /// Manage a saved provider key: list, add or remove.
+    Connection { action: ConnectionAction },
+
     /// List installed plugins.
     PluginsList,
 
@@ -163,6 +166,17 @@ pub(crate) enum JobListAction {
     Check,
     /// End one job.
     Stop,
+}
+
+/// What `/connection` was asked to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionAction {
+    /// Show which providers have a stored key.
+    List,
+    /// Prompt for and store a key, overwriting any stored one.
+    Add { provider: String },
+    /// Remove the stored key for a provider.
+    Remove { provider: String },
 }
 
 /// Parses one interactive command.
@@ -229,6 +243,10 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
             Err(problem) => return Some(Err(problem)),
         },
         "/jobs" => match parse_jobs(&invocation) {
+            Ok(command) => command,
+            Err(problem) => return Some(Err(problem)),
+        },
+        "/connection" => match parse_connection(&invocation) {
             Ok(command) => command,
             Err(problem) => return Some(Err(problem)),
         },
@@ -344,6 +362,31 @@ fn parse_jobs(invocation: &Invocation) -> Result<ChatCommand, String> {
     }
 }
 
+/// The `/connection` command: list, add or remove a saved provider key.
+fn parse_connection(invocation: &Invocation) -> Result<ChatCommand, String> {
+    let action = invocation.arg("action").unwrap_or("list");
+    match action {
+        "list" => Ok(ChatCommand::Connection {
+            action: ConnectionAction::List,
+        }),
+        "add" | "remove" => {
+            let Some(provider) = invocation.arg("provider") else {
+                return Err(format!("usage: /connection {action} <provider>"));
+            };
+            let provider = provider.to_owned();
+            let action = if action == "add" {
+                ConnectionAction::Add { provider }
+            } else {
+                ConnectionAction::Remove { provider }
+            };
+            Ok(ChatCommand::Connection { action })
+        }
+        other => Err(format!(
+            "unknown /connection action `{other}`; use list, add or remove"
+        )),
+    }
+}
+
 /// The `/reasoning` command, with the scope and the setting resolved.
 fn parse_reasoning(invocation: &Invocation) -> Result<ChatCommand, String> {
     let Some(setting) = invocation.arg("setting") else {
@@ -428,12 +471,14 @@ pub(crate) fn candidates(
     catalogue_candidates(text, cursor, names)
 }
 
-/// The names the two commands that take one from the catalogue offer.
+/// The names the catalogue-backed commands offer.
 ///
-/// The line is a command and one word being typed, which is the shape both
-/// take: `/provider ri` offers the provider ids and `/model deep` the models of
-/// the provider in play. The models are the bare ids, because `/model` takes a
-/// model and the provider comes from the session rather than from the line.
+/// The line is a command and a word being typed. `/provider ri` offers the
+/// provider ids and `/model deep` the models of the provider in play; the
+/// models are the bare ids, because `/model` takes a model and the provider
+/// comes from the session rather than from the line. `/connection add oll` and
+/// `/connection remove oll` offer the provider ids too, for the provider the
+/// key is being saved or removed for.
 fn catalogue_candidates(
     text: &str,
     cursor: usize,
@@ -442,20 +487,21 @@ fn catalogue_candidates(
     if cursor != text.len() {
         return Vec::new();
     }
-    // A command with an argument already finished is not a line to complete:
-    // there is no second provider and no second model, and the registry says
-    // the same about its own arguments.
     let Some(space) = text.find(char::is_whitespace) else {
         return Vec::new();
     };
-    let partial = text[space..].trim_start();
-    if partial.contains(char::is_whitespace) {
+    let command = &text[..space];
+    let rest = &text[space..];
+    // The argument being typed: one word, and nothing after it. A second word
+    // means the argument is finished and there is nothing left to offer.
+    let offered = match command {
+        "/provider" => single_arg(rest, &names.providers, "provider"),
+        "/model" => single_arg(rest, &names.models, "model"),
+        "/connection" => connection_arg(rest, &names.providers),
+        _ => None,
+    };
+    let Some((values, partial, note)) = offered else {
         return Vec::new();
-    }
-    let (values, note) = match &text[..space] {
-        "/provider" => (&names.providers, "provider"),
-        "/model" => (&names.models, "model"),
-        _ => return Vec::new(),
     };
     let prefix = partial.to_lowercase();
     values
@@ -470,6 +516,46 @@ fn catalogue_candidates(
             note: note.to_owned(),
         })
         .collect()
+}
+
+/// One argument being typed after a one-word command.
+///
+/// `rest` starts at the space; the argument is what follows it, and it has to
+/// be the last word on the line. Returns `None` when there is nothing to offer.
+fn single_arg<'a>(
+    rest: &str,
+    values: &'a [String],
+    note: &'static str,
+) -> Option<(&'a [String], String, &'static str)> {
+    let partial = rest.trim_start();
+    if partial.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((values, partial.to_owned(), note))
+}
+
+/// The provider a `/connection add` or `/connection remove` line names.
+///
+/// The action comes between the command and the provider, so the provider is
+/// the third word. Only `add` and `remove` take one; `list` takes nothing, and
+/// an action nobody wrote offers nothing rather than every provider.
+fn connection_arg<'a>(
+    rest: &str,
+    values: &'a [String],
+) -> Option<(&'a [String], String, &'static str)> {
+    let rest = rest.trim_start();
+    let Some((action, provider)) = rest.split_once(char::is_whitespace) else {
+        // No provider being typed yet: the line is still naming the action.
+        return None;
+    };
+    if action != "add" && action != "remove" {
+        return None;
+    }
+    let partial = provider.trim_start();
+    if partial.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((values, partial.to_owned(), "provider"))
 }
 
 /// Records the names the completion offers for the provider in play.
@@ -497,7 +583,7 @@ pub(crate) fn refresh_completions(
         // A process with no session yet completes from the model it would open
         // on, which is the service's default: `/model` before the first message
         // lists that provider's models rather than none.
-        .or_else(|| Some(service.default_spec().provider));
+        .or_else(|| service.default_spec().map(|s| s.provider));
     let mut models: Vec<String> = provider
         .as_deref()
         .map(|provider| {
@@ -922,6 +1008,9 @@ pub(crate) async fn interactive_loop(
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
+                ChatCommand::Connection { action } => {
+                    handle_connection(service, action, renderer, Some(input), style).await;
+                }
                 // Going back to the menu is the startup screen reached from
                 // inside a session: it lists the providers and the models the
                 // way the window before the session does, and the choice is
@@ -933,10 +1022,18 @@ pub(crate) async fn interactive_loop(
                     Some(current) => {
                         renderer.models_expanded = None;
                         renderer.panel_filter.clear();
+                        let (current_provider, current_model) = if renderer.model_unset {
+                            (None, None)
+                        } else {
+                            (
+                                provider_of(service, current),
+                                model_name_of(service, current),
+                            )
+                        };
                         let rows = models_panel(
                             service.catalog().as_ref(),
-                            provider_of(service, current).as_deref(),
-                            model_name_of(service, current).as_deref(),
+                            current_provider.as_deref(),
+                            current_model.as_deref(),
                             None,
                             &renderer.panel_filter,
                         );
@@ -1027,6 +1124,11 @@ pub(crate) async fn interactive_loop(
             renderer.failure(format!(
                 "no model set for `{provider}`; pick one with /model"
             ));
+            continue;
+        }
+        if renderer.model_unset {
+            renderer.said(&text);
+            renderer.failure("no model is set; pick one with /models and try again".to_owned());
             continue;
         }
         // The message is the conversation, so it goes to the transcript and the
@@ -1472,6 +1574,9 @@ async fn handle_live_command(
             }
             None => renderer.notice("no session yet; send a message first"),
         },
+        ChatCommand::Connection { action } => {
+            handle_connection(service, action, renderer, None, style).await;
+        }
         // A restart ends the session, so it cannot wait for the turn; the
         // turn loop does it, where the boundary is known.
         ChatCommand::Rename { title } => match current {
@@ -1777,9 +1882,21 @@ fn report_debug(
     // The session's own spec once it has one: after a `/model` the model in play
     // is the session's, not the one the process started with. Before the first
     // message there is no session, so the default is what the next turn opens on.
-    let spec = session
-        .and_then(|session| service.session_spec(session))
-        .unwrap_or_else(|| service.default_spec());
+    let spec = match session.and_then(|session| service.session_spec(session)) {
+        Some(spec) => spec,
+        None => {
+            if let Some(spec) = service.default_spec() {
+                spec
+            } else {
+                renderer.notice("no model is configured");
+                return;
+            }
+        }
+    };
+    if spec.provider.is_empty() {
+        renderer.notice("no model is configured");
+        return;
+    }
     let host = renderer.host_facts.as_ref();
 
     let mut lines = report_start(
@@ -2023,7 +2140,7 @@ async fn switch_provider(
 /// Makes sure the provider has a key before a model switch is sent.
 ///
 /// The store is asked first: an exported variable, a key saved earlier in this
-/// run, the OS keyring, then the 0600 file. Only a missing key prompts, and only
+/// run, then the 0600 file. Only a missing key prompts, and only
 /// when there is an interactive client to prompt on. Returns whether the switch
 /// may proceed; a cancelled prompt leaves the current model untouched.
 async fn ensure_provider_key(
@@ -2080,10 +2197,7 @@ async fn ensure_provider_key(
                 return false;
             }
             match store.save(provider, &secret) {
-                Ok(norte_code_protocol::keys::KeyStorage::Keyring) => {
-                    renderer.notice(format!("saved the key for {provider} in the OS keyring"));
-                }
-                Ok(norte_code_protocol::keys::KeyStorage::File) => {
+                Ok(_) => {
                     renderer.notice(format!(
                         "saved the key for {provider} in secrets.json (0600)"
                     ));
@@ -2134,6 +2248,7 @@ async fn run_model(
                         // the model is: from here a message has somewhere to go.
                         renderer.pending_provider = None;
                         renderer.model_name = Some(format!("{provider}/{model}"));
+                        renderer.model_unset = false;
                         renderer.notice(format!("model set to {provider}/{model}"));
                         // A new model can refuse the effort in force — the
                         // service downgrades it to one the model declares — so
@@ -2166,6 +2281,127 @@ async fn run_model(
         Err(error) => renderer.failure(format!("could not switch model: {error}")),
     }
     true
+}
+
+/// Manages a saved provider key: lists them, prompts for one, or removes one.
+#[allow(clippy::too_many_lines)]
+async fn handle_connection(
+    service: &Arc<Service>,
+    action: ConnectionAction,
+    renderer: &mut Renderer,
+    input: Option<&mut InteractiveInput>,
+    _style: Style,
+) {
+    match action {
+        ConnectionAction::List => {
+            let catalog = service.catalog();
+            let store = service.key_store();
+            let mut lines = vec!["Provider keys:".to_owned()];
+            let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
+            providers.sort();
+            for provider in &providers {
+                let entry = catalog.provider(provider);
+                let env_keys = entry
+                    .map(|e| e.environment_keys.clone())
+                    .unwrap_or_default();
+                let env_present = norte_code_protocol::keys::environment_value(&env_keys).is_some();
+                let stored_resolves = store
+                    .as_ref()
+                    .is_some_and(|s| s.resolve(provider, &env_keys).is_ok());
+                let status = if env_keys.is_empty() {
+                    "no key needed"
+                } else if env_present {
+                    "env"
+                } else if stored_resolves {
+                    "saved"
+                } else {
+                    "missing"
+                };
+                lines.push(format!("  {provider:<24} {status}"));
+            }
+            if store.is_none() {
+                lines.push(String::new());
+                lines
+                    .push("no key store is installed; only environment variables apply".to_owned());
+            }
+            renderer.open_modal("connections", lines);
+        }
+        ConnectionAction::Add { provider } => {
+            let catalog = service.catalog();
+            let Some(entry) = catalog.provider(&provider) else {
+                renderer.notice(format!("unknown provider `{provider}`; see providers.json"));
+                return;
+            };
+            let env_keys = entry.environment_keys.clone();
+            let Some(store) = service.key_store() else {
+                renderer.notice("no key store is installed; set the environment variable instead");
+                return;
+            };
+            let Some(input) = input else {
+                renderer.notice("adding a key needs an interactive client");
+                return;
+            };
+            let prompt = format!("API key for {provider} (input is hidden): ");
+            let pinned = Arc::clone(&renderer.pinned);
+            let secret =
+                match crate::prompt::ask_secret(&prompt, &pinned, input, &mut || renderer.draw())
+                    .await
+                {
+                    Ok(secret) => secret,
+                    Err(error) => {
+                        renderer.failure(format!("could not read the key: {error}"));
+                        return;
+                    }
+                };
+            let Some(secret) = secret.map(|secret| secret.trim().to_owned()) else {
+                renderer.notice("no key saved");
+                return;
+            };
+            if secret.is_empty() {
+                renderer.notice("no key saved");
+                return;
+            }
+            // `save` writes to secrets.json, overwriting whatever was stored
+            // for this provider before.
+            match store.save(&provider, &secret) {
+                Ok(_) => {
+                    renderer.notice(format!(
+                        "saved the key for {provider} in secrets.json (0600)"
+                    ));
+                }
+                Err(error) => {
+                    renderer.failure(format!("could not save the key: {error}"));
+                }
+            }
+            let _ = env_keys;
+        }
+        ConnectionAction::Remove { provider } => {
+            let env_keys = service
+                .catalog()
+                .provider(&provider)
+                .map(|e| e.environment_keys.clone())
+                .unwrap_or_default();
+            let Some(store) = service.key_store() else {
+                renderer.notice("no key store is installed; nothing to remove");
+                return;
+            };
+            match store.delete(&provider) {
+                Ok(()) => {
+                    if norte_code_protocol::keys::environment_value(&env_keys).is_some() {
+                        renderer.notice(format!(
+                            "removed the stored key for {provider}; an environment variable still provides one"
+                        ));
+                    } else {
+                        renderer.notice(format!("removed the stored key for {provider}"));
+                    }
+                }
+                Err(error) => {
+                    renderer.failure(format!("could not remove the key: {error}"));
+                }
+            }
+        }
+    }
+    let _ = renderer.draw();
 }
 
 /// Reports the session's background jobs: a listing, one job, or a stop.
@@ -2535,7 +2771,9 @@ fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
             // a session switched to a model with a smaller window has a dial
             // that fills faster, and reading it from the startup spec would
             // leave the bar lying about how close the compaction is.
-            renderer.max_context = service.default_spec().capabilities.max_context;
+            if let Some(spec) = service.default_spec() {
+                renderer.max_context = spec.capabilities.max_context;
+            }
             // The dial's colour and the effort bar are the renderer's own state,
             // and no pinned text carries them: without this the new threshold
             // would redraw its colour only on the next keystroke, which is the
@@ -3026,10 +3264,24 @@ pub(crate) async fn drive_turns(
                                         request_id: 0,
                                         kind: ClientRequestKind::CancelTurn { session },
                                     };
-                                    if let Err(error) = service.submit(request).await {
-                                        renderer.notice(format!(
-                                            "warning: could not cancel the turn: {error}"
-                                        ));
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        service.submit(request),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Err(error)) => {
+                                            renderer.notice(format!(
+                                                "warning: could not cancel the turn: {error}"
+                                            ));
+                                        }
+                                        Err(_) => {
+                                            renderer.notice(
+                                                "warning: cancel request timed out; retrying…"
+                                                    .to_owned(),
+                                            );
+                                        }
+                                        Ok(Ok(_)) => {}
                                     }
                                 }
                                 continue;
@@ -3083,8 +3335,21 @@ pub(crate) async fn drive_turns(
                             request_id: 0,
                             kind: ClientRequestKind::CancelTurn { session },
                         };
-                        if let Err(error) = service.submit(request).await {
-                            renderer.notice(format!("warning: could not cancel the turn: {error}"));
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            service.submit(request),
+                        )
+                        .await
+                        {
+                            Ok(Err(error)) => {
+                                renderer.notice(format!("warning: could not cancel the turn: {error}"));
+                            }
+                            Err(_) => {
+                                renderer.notice(
+                                    "warning: cancel request timed out; retrying…".to_owned(),
+                                );
+                            }
+                            Ok(Ok(_)) => {}
                         }
                         continue;
                     }
@@ -3411,6 +3676,46 @@ mod tests {
         // The completion appends only what was not typed, so a name with a
         // slash in it is completed as it is rather than cut at the slash.
         assert_eq!(models.completion, "seek-ai/DeepSeek-V4.1-Flash");
+    }
+
+    #[test]
+    fn the_connection_command_completes_the_provider_it_takes() {
+        // `/connection add` and `/connection remove` name a provider the key is
+        // being saved or removed for, and that name is a catalogue id the
+        // registry cannot hold: the completion offers it for the third word.
+        let names = catalogue();
+        let adding = command_suggestion("/connection add ri", "/connection add ri".len(), &names)
+            .expect("the providers are offered");
+        assert_eq!(adding.completion, "ver", "Tab finishes `ri` into `river`");
+        assert!(adding.hint.contains("river"), "{adding:?}");
+
+        let removing = command_suggestion(
+            "/connection remove ri",
+            "/connection remove ri".len(),
+            &names,
+        )
+        .expect("the providers are offered");
+        assert_eq!(removing.completion, "ver");
+        assert!(removing.hint.contains("river"), "{removing:?}");
+
+        // `list` takes no provider: a word after it is not a name to complete.
+        assert!(
+            command_suggestion("/connection list ri", "/connection list ri".len(), &names)
+                .is_none()
+        );
+        // And a provider already on the line is finished: a second one is a
+        // word the parser refuses.
+        assert!(
+            command_suggestion(
+                "/connection add river ",
+                "/connection add river ".len(),
+                &names
+            )
+            .is_none()
+        );
+        // Before any provider is typed, the action itself is what the registry
+        // completes, and the catalogue does not jump in with every provider.
+        assert!(command_suggestion("/connection add ", "/connection add ".len(), &names).is_some());
     }
 
     #[test]
@@ -4049,7 +4354,7 @@ mod tests {
             Service::new(
                 Config::default(),
                 catalog,
-                spec,
+                Some(spec),
                 Arc::new(Factory(model)),
                 Arc::new(InMemoryStore::new()),
                 Arc::new(InMemoryBlobStore::new()),
@@ -4179,7 +4484,7 @@ mod tests {
             Service::new(
                 Config::default(),
                 catalog,
-                spec,
+                Some(spec),
                 Arc::new(Factory(model)),
                 Arc::new(InMemoryStore::new()),
                 Arc::new(InMemoryBlobStore::new()),
@@ -4252,5 +4557,173 @@ mod tests {
         drop(guard);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn cancel_before_first_token_returns_cli() {
+        use crate::input::{EditorAction, EditorEvent, InteractiveInput};
+        use async_trait::async_trait;
+        use norte::harness::{InMemoryBlobStore, InMemoryStore};
+        use norte::{
+            Capabilities, Model, ModelId, ModelRef, ModelRequest, ModelStream, ProviderId,
+        };
+        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
+        use norte_code_protocol::ClientRequest;
+        use norte_code_protocol::catalog::Catalog;
+        use norte_code_protocol::config::Config;
+        use norte_testing::ScriptedModel;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Factory(Arc<dyn Model>);
+        impl ModelFactory for Factory {
+            fn build(
+                &self,
+                _: &ModelSpec,
+                _: &Capabilities,
+            ) -> Result<Arc<dyn Model>, ServiceError> {
+                Ok(Arc::clone(&self.0))
+            }
+        }
+
+        struct StallingModel {
+            inner: Arc<ScriptedModel>,
+            started: Arc<tokio::sync::Notify>,
+            dropped: Arc<AtomicBool>,
+        }
+        struct DropProbe(Arc<AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        #[async_trait]
+        impl Model for StallingModel {
+            fn reference(&self) -> &ModelRef {
+                self.inner.reference()
+            }
+            fn capabilities(&self) -> &Capabilities {
+                self.inner.capabilities()
+            }
+            fn continuity(&self) -> &dyn norte::ContinuityAdapter {
+                self.inner.continuity()
+            }
+            async fn stream(&self, _request: ModelRequest) -> norte::Result<ModelStream> {
+                let _probe = DropProbe(Arc::clone(&self.dropped));
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+
+        let reference = ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let model = Arc::new(StallingModel {
+            inner: Arc::new(ScriptedModel::new(reference)),
+            started: Arc::clone(&started),
+            dropped: Arc::clone(&dropped),
+        });
+
+        let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
+            r#"{"providers":{"test":{"name":"Test","environment_keys":["PATH"],"wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
+        ).expect("providers");
+        let models: norte_code_protocol::catalog::Models = serde_json::from_str(
+            r#"{"models":[{"id":"scripted","provider_id":"test","name":"S","supported_params":["tools"],"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000,"output":100}}]}"#,
+        ).expect("models");
+        let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
+        let entry = catalog.find("test", "scripted").expect("model");
+        let spec = ModelSpec {
+            provider: "test".to_owned(),
+            model: "scripted".to_owned(),
+            endpoint: "https://example.invalid/v1".to_owned(),
+            api_key: norte_code_protocol::config::ApiKey::new("test"),
+            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
+            auth: None,
+            capabilities: norte_code_protocol::catalog::capabilities(
+                entry,
+                norte_code_protocol::catalog::WireSchema::OpenAI,
+            ),
+            headers: std::collections::BTreeMap::new(),
+        };
+        let service = Arc::new(
+            Service::new(
+                Config::default(),
+                catalog,
+                Some(spec),
+                Arc::new(Factory(model)),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+
+        let pinned = Pinned::new();
+        let mut renderer = Renderer::new(
+            Format::Text,
+            Verbosity::Low,
+            false,
+            Style::plain(),
+            Arc::clone(&pinned),
+        );
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut input = InteractiveInput::from_events(rx);
+
+        // create session
+        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
+            .await
+            .expect("create session");
+        let session = events
+            .iter()
+            .find_map(|e| e.session.clone())
+            .expect("session");
+
+        // send a message to start a turn
+        let stream = service
+            .submit(ClientRequest {
+                request_id: 1,
+                kind: ClientRequestKind::SendMessage {
+                    session: Some(session.clone()),
+                    text: "go".to_owned(),
+                    attachments: Vec::new(),
+                    budget: None,
+                    reasoning: None,
+                    replay: false,
+                },
+            })
+            .await
+            .expect("turn");
+
+        // cancel immediately (before TurnStarted processed)
+        tx.send(EditorEvent::Action(EditorAction::CancelTurn))
+            .expect("send");
+
+        // wait for provider to start (may never if cancelled early)
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(500), started.notified()).await;
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            super::drive_turns(
+                &service,
+                stream,
+                &mut renderer,
+                Style::plain(),
+                Some(session.clone()),
+                Some(&mut input),
+            ),
+        )
+        .await
+        .expect("drive_turns should return within timeout")
+        .expect("no error");
+
+        assert!(dropped.load(Ordering::SeqCst), "provider future dropped");
+        let _ = outcome;
     }
 }

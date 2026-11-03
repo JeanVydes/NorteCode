@@ -70,10 +70,12 @@ impl Service {
     ) -> Result<EventStream, ServiceError> {
         let (key, mut nid, mut spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
+            let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         } else {
             let key = self.create_session(None).await?;
             let (nid, spec, _) = self.require_record(&key)?;
+            let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         };
         // Registered before the first await: a cancel that lands while the
@@ -86,6 +88,8 @@ impl Service {
             if let Some(changed) = self.apply_pending_model(request_id, &key).await? {
                 leading.push(changed);
                 let (new_nid, new_spec, _) = self.require_record(&key)?;
+                let new_spec =
+                    new_spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
                 nid = new_nid;
                 spec = new_spec;
             }
@@ -103,6 +107,8 @@ impl Service {
                 };
                 leading.extend(events);
                 let (new_nid, new_spec, _) = self.require_record(&key)?;
+                let new_spec =
+                    new_spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
                 nid = new_nid;
                 spec = new_spec;
             }
@@ -636,6 +642,8 @@ impl Service {
                     }
                 }
                 let (new_nid, new_spec, _) = self.require_record(key)?;
+                let new_spec =
+                    new_spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
                 if new_nid == current_nid {
                     // The summary failed; the old session is still the active
                     // one and the turn stopped at the safe point.
@@ -796,7 +804,7 @@ impl Service {
                         && !interrupted
                         && outcome.session.phase == norte::harness::Phase::Idle
                         && self.budget_stopped(key).is_none()
-                        && let Ok((current, spec, _)) = self.require_record(key)
+                        && let Ok((current, Some(spec), _)) = self.require_record(key)
                         && self
                             .compaction_due(key, &spec, current)
                             .await
@@ -1185,7 +1193,20 @@ impl Service {
         // own: the label is for people to read, not for the host to take apart.
         let (provider, model) = self.lock_sessions().get(key).map_or_else(
             || (String::new(), String::new()),
-            |record| (record.spec.provider.clone(), record.spec.model.clone()),
+            |record| {
+                (
+                    record
+                        .spec
+                        .as_ref()
+                        .map(|s| s.provider.clone())
+                        .unwrap_or_default(),
+                    record
+                        .spec
+                        .as_ref()
+                        .map(|s| s.model.clone())
+                        .unwrap_or_default(),
+                )
+            },
         );
         norte_code_protocol::sqlite::RequestRecord {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1226,7 +1247,13 @@ impl Service {
     pub(super) fn model_label(&self, key: &SessionKey) -> String {
         self.lock_sessions()
             .get(key)
-            .map_or_else(String::new, |record| record.spec.label())
+            .map_or_else(String::new, |record| {
+                record
+                    .spec
+                    .as_ref()
+                    .map(ModelSpec::label)
+                    .unwrap_or_default()
+            })
     }
 }
 

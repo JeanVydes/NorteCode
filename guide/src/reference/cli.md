@@ -229,6 +229,7 @@ reject unknown values instead of forwarding them to the model.
 | `/restart` | Re-read the configuration and rebuild the engine at the next turn boundary. |
 | `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one off or on. |
 | `/jobs [list\|check\|stop] [ID]` | List the session's background jobs, look at one, or stop one. |
+| `/connection [list\|add\|remove] [PROVIDER]` | List, add or remove a saved provider key. |
 | `/rename [TITLE]` | Name the session. Bare, recompute the name from the first message. |
 | `/debug` | Print what the process knows about itself: paths, model, catalogue, tools, servers. |
 | `/telemetry` | The request ledger: this session, and every provider. |

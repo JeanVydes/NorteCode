@@ -152,6 +152,7 @@ impl Service {
     /// guessing at it.
     pub(super) async fn compact_core(&self, key: &SessionKey) -> Result<Compaction, ServiceError> {
         let (old, spec, _) = self.require_record(key)?;
+        let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
         let engine = self.engine(&spec, Some(key))?;
         let state = engine.session(old).await?;
         if state.phase != norte::harness::Phase::Idle {

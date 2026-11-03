@@ -2063,7 +2063,11 @@ mod tests {
             _provider: &str,
             _key: &str,
         ) -> Result<crate::keys::KeyStorage, crate::keys::KeyStoreError> {
-            Ok(crate::keys::KeyStorage::Keyring)
+            Ok(crate::keys::KeyStorage::File)
+        }
+
+        fn delete(&self, _provider: &str) -> Result<(), crate::keys::KeyStoreError> {
+            Ok(())
         }
     }
 

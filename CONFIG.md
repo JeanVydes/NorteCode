@@ -177,13 +177,11 @@ follows from the schema unless a wire names one — `bearer` is
 `Authorization: Bearer`, `x_api_key` is `x-api-key`, `x_goog_api_key` is
 `x-goog-api-key`, and `disabled` sends none. A key is not written in this file.
 It comes from the environment first, named by `environment_keys` and tried in
-order; if none is set, the client reads the OS keyring (service `norte-code`,
-account the provider id) and then `${XDG_CONFIG_HOME}/norte-code/secrets.json`,
+order; if none is set, the client reads `${XDG_CONFIG_HOME}/norte-code/secrets.json`,
 which is written with mode 0600. Selecting a model from `/model` or `/models`
 when the key is still missing opens a masked prompt and saves what you type to
-the keyring, or to `secrets.json` when no keyring is available. Keys are held in
-the client's redacted `ApiKey` type and never enter a model event, a log or a
-child process.
+`secrets.json`. Keys are held in the client's redacted `ApiKey` type and never
+enter a model event, a log or a child process.
 
 When a provider serves several wires, `--wire` picks one; otherwise the order is
 `openai`, then `anthropic`, then `google`.

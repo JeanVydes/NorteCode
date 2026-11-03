@@ -239,7 +239,7 @@ async fn a_real_mcp_server_publishes_its_tools_into_the_service() {
         Service::with_directory(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -293,7 +293,7 @@ fn service() -> Arc<Service> {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -318,7 +318,7 @@ fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<Scrip
         Service::new(
             config(),
             catalog(),
-            spec,
+            Some(spec),
             Arc::new(ScriptedFactory {
                 model: Arc::clone(&model) as Arc<dyn Model>,
             }),
@@ -530,7 +530,7 @@ async fn persistent_scripted_service(
         Service::with_directory(
             config(),
             catalog(),
-            spec,
+            Some(spec),
             Arc::new(ScriptedFactory { model }),
             store.clone(),
             store.clone(),
@@ -892,6 +892,7 @@ async fn cancelling_immediately_after_a_message_stops_the_turn() {
         "the turn ends cancelled: {rest:?}"
     );
     let (nid, spec, _) = service.require_record(&key).expect("record");
+    let spec = spec.expect("spec");
     let history = service
         .engine(&spec, Some(&key))
         .expect("engine")
@@ -1034,7 +1035,7 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
             Service::with_directory(
                 config(),
                 catalog(),
-                spec("scripted"),
+                Some(spec("scripted")),
                 Arc::new(ScriptedFactory { model }),
                 store.clone(),
                 store.clone(),
@@ -1273,6 +1274,7 @@ async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
         "a failed turn must not leave the session busy: {changed:#?}"
     );
     let (_, spec, _) = service.require_record(&key).expect("record");
+    let spec = spec.expect("spec");
     assert_eq!(spec.model, "other");
 }
 
@@ -1318,7 +1320,7 @@ async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
     let reopened = Service::with_directory(
         config(),
         catalog(),
-        spec("scripted"),
+        Some(spec("scripted")),
         Arc::new(ScriptedFactory {
             model: scripted_model(),
         }),
@@ -1612,7 +1614,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
 
     let (source_id, source_spec, _) = service.require_record(&source_key).expect("source record");
     let exported = service
-        .engine(&source_spec, None)
+        .engine(source_spec.as_ref().expect("spec"), None)
         .expect("engine")
         .export(source_id)
         .await
@@ -1645,7 +1647,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
         None
     );
     let copied = service
-        .engine(&fork_spec, None)
+        .engine(fork_spec.as_ref().expect("spec"), None)
         .expect("engine")
         .export(fork_id)
         .await
@@ -1680,7 +1682,7 @@ async fn two_sessions_run_turns_concurrently() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(FreshFactory { reference }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -1791,6 +1793,7 @@ async fn a_session_can_switch_models_at_a_boundary() {
     assert_eq!(sessions[0].model.as_deref(), Some("other"));
 
     let (nid, spec, _) = service.require_record(&key).expect("record");
+    let spec = spec.expect("spec");
     let history = service
         .engine(&spec, None)
         .expect("engine")
@@ -1854,7 +1857,7 @@ async fn a_stored_session_reopens_on_the_pair_it_was_saved_with() {
     let reopened = Service::with_directory(
         config(),
         catalog(),
-        spec("scripted"),
+        Some(spec("scripted")),
         Arc::new(ScriptedFactory {
             model: Arc::new(ScriptedModel::new(ModelRef::new(
                 ProviderId::new("test").expect("provider"),
@@ -1869,6 +1872,7 @@ async fn a_stored_session_reopens_on_the_pair_it_was_saved_with() {
     .await
     .expect("service");
     let (_, spec, _) = reopened.require_record(&key).expect("record");
+    let spec = spec.expect("spec");
     assert_eq!(spec.provider, "test");
     assert_eq!(spec.model, "other");
 }
@@ -2634,7 +2638,7 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory {
                 model: Arc::clone(&model) as Arc<dyn Model>,
             }),
@@ -2715,7 +2719,7 @@ async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
         Service::with_directory(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory {
                 model: Arc::clone(&model) as Arc<dyn Model>,
             }),
@@ -2822,7 +2826,7 @@ async fn the_budget_stops_the_next_request_every_time() {
         Service::with_directory(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             store.clone(),
             store.clone(),
@@ -2998,7 +3002,7 @@ async fn persistent_service_with_config(
     let service = Service::with_directory(
         config,
         catalog(),
-        spec("scripted"),
+        Some(spec("scripted")),
         Arc::new(ScriptedFactory { model }),
         store.clone(),
         store.clone(),
@@ -3857,7 +3861,7 @@ async fn a_session_budget_stops_the_next_request() {
         Service::with_directory(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             store.clone(),
             store.clone(),
@@ -3949,7 +3953,7 @@ async fn vendor_extensions_reach_the_model_request() {
         Service::new(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -4055,7 +4059,7 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -4136,7 +4140,7 @@ async fn a_global_allow_skips_the_approval_prompt() {
         Service::new(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory {
                 model: write_model(CallId::new(), &target),
             }),
@@ -4186,7 +4190,7 @@ async fn a_global_deny_refuses_without_asking() {
         Service::new(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory {
                 model: write_model(CallId::new(), &target),
             }),
@@ -4244,7 +4248,7 @@ async fn a_session_deny_refuses_only_the_session_it_names() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory {
                 model: Arc::new(
                     ScriptedModel::new(reference)
@@ -4815,7 +4819,7 @@ async fn ask_user_parks_the_turn_until_the_client_answers() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -4902,7 +4906,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory {
                 model: model.clone(),
             }),
@@ -5244,7 +5248,7 @@ async fn sqlite_service(
     let service = Service::with_directory(
         config(),
         catalog(),
-        spec("scripted"),
+        Some(spec("scripted")),
         Arc::new(ScriptedFactory { model }),
         session_store,
         blobs,
@@ -5298,7 +5302,7 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
         Service::new(
             config(),
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -6348,7 +6352,7 @@ fn service_with(config: Config) -> Arc<Service> {
         Service::new(
             config,
             catalog(),
-            spec("scripted"),
+            Some(spec("scripted")),
             Arc::new(ScriptedFactory { model }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),

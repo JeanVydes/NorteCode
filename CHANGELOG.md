@@ -8,12 +8,15 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Provider keys come from the environment, then the OS keyring, then a 0600
-  `secrets.json` beside the configuration. Selecting a model from `/model` or
-  `/models` when the key is missing opens a masked prompt and saves it to the
-  keyring, or to the file when no keyring is available. The keyring account is
-  the provider id (`ollamacloud`), so one entry is one provider and no key ever
-  reaches `config.json`, a session event, a log or a child process.
+- Provider keys come from the environment, then a 0600 `secrets.json` beside the
+  configuration. Selecting a model from `/model` or `/models` when the key is
+  missing opens a masked prompt and saves it to `secrets.json`. No key ever
+  reaches `config.json`, a session event, a log or a child process. A bare
+  `norte-code` whose provider has no key asks for it before the session opens,
+  on the terminal, the same way `/model` does inside the chat. `/connection`
+  lists, adds or removes a saved key. A run with no default model no longer
+  opens the terminal picker; it starts the interface and refuses a message
+  until a model is chosen with `/models`.
 
 - A plugin may offer providers and models of its own. `Plugin::catalogue`
   returns the same two shapes `providers.json` and `models.json` carry, and the

@@ -30,6 +30,9 @@ pub(crate) const TOOL_SCOPES: &[&str] = &["session", "global"];
 /// The actions `/jobs` takes.
 pub(crate) const JOB_ACTIONS: &[&str] = &["list", "check", "stop"];
 
+/// The actions `/connection` takes.
+pub(crate) const CONNECTION_ACTIONS: &[&str] = &["list", "add", "remove"];
+
 /// The actions `/mcp` takes.
 pub(crate) const MCP_ACTIONS: &[&str] = &["list", "add", "enable", "disable", "remove"];
 
@@ -141,6 +144,11 @@ pub(crate) fn built() -> Registry {
         )
         .arg(ArgSpec::optional_choice("action", JOB_ACTIONS))
         .arg(ArgSpec::optional("job-id")),
+    );
+    registry.register(
+        CommandSpec::new("/connection", "list, add or remove a saved provider key")
+            .arg(ArgSpec::optional_choice("action", CONNECTION_ACTIONS))
+            .arg(ArgSpec::optional("provider")),
     );
     registry.register(CommandSpec::new(
         "/restart",

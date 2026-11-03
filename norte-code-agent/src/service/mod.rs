@@ -149,7 +149,7 @@ pub struct ReloadedConfig {
 pub struct Service {
     config: RwLock<Config>,
     catalog: RwLock<Arc<Catalog>>,
-    default_spec: RwLock<ModelSpec>,
+    default_spec: RwLock<Option<ModelSpec>>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
     factory: Arc<dyn ModelFactory>,
@@ -205,7 +205,7 @@ impl Service {
     pub fn new(
         config: Config,
         catalog: Arc<Catalog>,
-        default_spec: ModelSpec,
+        default_spec: Option<ModelSpec>,
         factory: Arc<dyn ModelFactory>,
         store: Arc<dyn Store>,
         blobs: Arc<dyn BlobStore>,
@@ -237,7 +237,7 @@ impl Service {
     pub async fn with_directory(
         config: Config,
         catalog: Arc<Catalog>,
-        default_spec: ModelSpec,
+        default_spec: Option<ModelSpec>,
         factory: Arc<dyn ModelFactory>,
         store: Arc<dyn Store>,
         blobs: Arc<dyn BlobStore>,
@@ -307,7 +307,7 @@ impl Service {
     fn build(
         config: Config,
         catalog: Arc<Catalog>,
-        default_spec: ModelSpec,
+        default_spec: Option<ModelSpec>,
         factory: Arc<dyn ModelFactory>,
         store: Arc<dyn Store>,
         blobs: Arc<dyn BlobStore>,
@@ -379,15 +379,16 @@ impl Service {
             telemetry: Arc::new(Telemetry::default()),
         };
         // Fail at construction, not at the first message, when the model's
-        // provider cannot be built.
-        let _ = service.engine(
-            &service
-                .default_spec
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-            None,
-        )?;
+        // provider cannot be built. A run with no configured model carries an
+        // empty spec and is validated later, when one is chosen.
+        let spec = service
+            .default_spec
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(spec) = spec {
+            let _ = service.engine(&spec, None)?;
+        }
         Ok(service)
     }
 
@@ -406,7 +407,7 @@ impl Service {
         Self::new(
             config,
             catalog,
-            spec.clone(),
+            Some(spec.clone()),
             factory,
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -1183,7 +1184,7 @@ impl Service {
     pub fn session_model(&self, session: &SessionKey) -> Option<String> {
         self.lock_sessions()
             .get(session)
-            .map(|record| record.spec.label())
+            .and_then(|record| record.spec.as_ref().map(ModelSpec::label))
     }
 
     /// The model a session is on right now, with its capabilities.
@@ -1195,7 +1196,7 @@ impl Service {
     pub fn session_spec(&self, session: &SessionKey) -> Option<ModelSpec> {
         self.lock_sessions()
             .get(session)
-            .map(|record| record.spec.clone())
+            .and_then(|record| record.spec.clone())
     }
 
     /// How much of its model's context a session is using.
@@ -1210,7 +1211,10 @@ impl Service {
             .get(session)
             .map_or_else(ContextUsage::default, |record| ContextUsage {
                 used: record.context_used,
-                window: record.spec.capabilities.max_context,
+                window: match &record.spec {
+                    Some(s) => s.capabilities.max_context,
+                    None => None,
+                },
             })
     }
 
@@ -1355,7 +1359,7 @@ impl Service {
         let spec = match (&next.default_provider, &next.default_model) {
             (Some(provider), Some(model)) => {
                 match self.default_spec_for(&next, &catalog, provider, model) {
-                    Ok(spec) => spec,
+                    Ok(spec) => Some(spec),
                     // A default provider that the catalogue no longer carries must
                     // not abort the whole reload: the spec already in force stays,
                     // and a new session will report its own error when it tries to
@@ -1368,9 +1372,10 @@ impl Service {
                     }
                 }
             }
-            // No default: keep the one in force rather than fail, since a config
-            // that only changes unrelated settings must still reload.
-            _ => self.default_spec(),
+            // No default: clear the spec, since a config that only changes
+            // unrelated settings must still reload and there is no model to
+            // open a session on.
+            _ => None,
         };
         let secrets = collect_secrets(&next, &catalog);
         let skills = Arc::new(discover_skills(&next, &self.workspace_root));
@@ -1403,19 +1408,16 @@ impl Service {
             let models: Vec<(SessionKey, String, String)> = self
                 .lock_sessions()
                 .iter()
-                .map(|(key, record)| {
-                    (
-                        key.clone(),
-                        record.spec.provider.clone(),
-                        record.spec.model.clone(),
-                    )
+                .filter_map(|(key, record)| {
+                    let spec = record.spec.as_ref()?;
+                    Some((key.clone(), spec.provider.clone(), spec.model.clone()))
                 })
                 .collect();
             for (key, provider, model) in models {
                 if let Ok(spec) = self.default_spec_for(&next, &catalog, &provider, &model)
                     && let Some(record) = self.lock_sessions().get_mut(&key)
                 {
-                    record.spec = spec;
+                    record.spec = Some(spec);
                 }
             }
         }
@@ -1474,7 +1476,7 @@ impl Service {
     /// The model a new session opens on, and the one `/debug` reports when it
     /// is asked before any message has named a session.
     #[must_use]
-    pub fn default_spec(&self) -> ModelSpec {
+    pub fn default_spec(&self) -> Option<ModelSpec> {
         self.default_spec
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
