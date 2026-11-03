@@ -709,7 +709,7 @@ impl Panel {
     /// Renders a 2D canvas plot of the time series into `area` using ratatui's
     /// Chart widget with Braille markers for high-resolution plotting.
     pub(crate) fn draw_chart(&self, frame: &mut crate::terminal::Draw<'_>, area: ratatui::layout::Rect) {
-        if area.width < 10 || area.height < 5 {
+        if area.width < 12 || area.height < 6 {
             return;
         }
         let series = self.model_series(self.metric);
@@ -717,7 +717,7 @@ impl Panel {
             return;
         }
         let buckets = report_buckets(&self.scoped(), self.range);
-        let n = buckets.len().max(1);
+        let n_pts = buckets.len().max(1);
         let max_val = series.iter()
             .flat_map(|(_, pts)| pts.iter())
             .copied()
@@ -725,13 +725,12 @@ impl Panel {
             .unwrap_or(1)
             .max(1);
 
-        let colors = [
-            ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2),
-            ratatui::style::Color::Rgb(0xD1, 0x9A, 0x66),
-            ratatui::style::Color::Rgb(0x9A, 0xC2, 0x56),
-            ratatui::style::Color::Rgb(0xC2, 0x56, 0x9A),
+        let colors: [(u8, u8, u8); 4] = [
+            (0x56, 0xB6, 0xC2),
+            (0xD1, 0x9A, 0x66),
+            (0x9A, 0xC2, 0x56),
+            (0xC2, 0x56, 0x9A),
         ];
-        // Collect all data first so it lives long enough for the datasets.
         let all_data: Vec<Vec<(f64, f64)>> = series
             .iter()
             .map(|(_, points)| {
@@ -742,42 +741,56 @@ impl Panel {
                     .collect()
             })
             .collect();
-        let mut datasets: Vec<ratatui::widgets::Dataset> = Vec::new();
-        for (i, (label, _)) in series.iter().enumerate() {
-            let color = colors[i % colors.len()];
-            datasets.push(
-                ratatui::widgets::Dataset::default()
-                    .name(label.clone())
-                    .marker(ratatui::symbols::Marker::Braille)
-                    .graph_type(ratatui::widgets::GraphType::Line)
-                    .style(ratatui::style::Style::default().fg(color))
-                    .data(&all_data[i]),
-            );
-        }
 
-        let x_labels = vec![
-            ratatui::text::Line::from(buckets.first().cloned().unwrap_or_default()),
-            ratatui::text::Line::from(buckets.last().cloned().unwrap_or_default()),
-        ];
-        let y_labels = vec![
-            ratatui::text::Line::from("0"),
-            ratatui::text::Line::from(format!("{max_val}")),
-        ];
+        let x_max = (n_pts - 1).max(1) as f64;
+        let y_max = max_val as f64;
 
-        let chart = ratatui::widgets::Chart::new(datasets)
+        let canvas = ratatui::widgets::canvas::Canvas::default()
             .block(ratatui::widgets::Block::default()
-                .title(format!("{} by day", self.metric.label()))
-                .borders(ratatui::widgets::Borders::ALL))
-            .x_axis(ratatui::widgets::Axis::default()
-                .title("day")
-                .bounds([0.0, (n - 1).max(1) as f64])
-                .labels(x_labels))
-            .y_axis(ratatui::widgets::Axis::default()
-                .title(self.metric.label())
-                .bounds([0.0, max_val as f64])
-                .labels(y_labels));
+                .title(format!(" {} by day ", self.metric.label()))
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2))))
+            .x_bounds([0.0, x_max])
+            .y_bounds([0.0, y_max])
+            .marker(ratatui::symbols::Marker::Braille)
+            .paint(|ctx| {
+                // Horizontal grid lines
+                for i in 1..4 {
+                    let y = y_max * f64::from(i) / 4.0;
+                    ctx.draw(&ratatui::widgets::canvas::Line {
+                        x1: 0.0, y1: y, x2: x_max, y2: y,
+                        color: ratatui::style::Color::Rgb(0x33, 0x33, 0x33),
+                    });
+                }
+                // Vertical grid lines
+                for i in 1..4 {
+                    let x = x_max * f64::from(i) / 4.0;
+                    ctx.draw(&ratatui::widgets::canvas::Line {
+                        x1: x, y1: 0.0, x2: x, y2: y_max,
+                        color: ratatui::style::Color::Rgb(0x33, 0x33, 0x33),
+                    });
+                }
+                // Draw each series
+                for (i, _) in series.iter().enumerate() {
+                    let (r, g, b) = colors[i % colors.len()];
+                    let color = ratatui::style::Color::Rgb(r, g, b);
+                    let data = &all_data[i];
+                    for w in data.windows(2) {
+                        ctx.draw(&ratatui::widgets::canvas::Line {
+                            x1: w[0].0, y1: w[0].1, x2: w[1].0, y2: w[1].1,
+                            color,
+                        });
+                    }
+                    for &(x, y) in data {
+                        ctx.draw(&ratatui::widgets::canvas::Points {
+                            coords: &[(x, y)],
+                            color,
+                        });
+                    }
+                }
+            });
 
-        frame.render_widget(chart, area);
+        frame.render_widget(canvas, area);
     }
 
     /// This session's own figures, its own models ranked, and its errors.
