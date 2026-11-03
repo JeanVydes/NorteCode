@@ -642,8 +642,8 @@ impl Renderer {
             | ServerEventKind::CostNotReported { .. } => {
                 self.usage_event(&event.kind);
             }
-            ServerEventKind::MessageReplayed { index, role, text } => {
-                self.replay_message(*index, *role, text);
+            ServerEventKind::MessageReplayed { index, role, kind, text } => {
+                self.replay_message(*index, *role, *kind, text);
             }
             // The list the session already had, sent when a client attaches: the
             // transcript shows messages, and the task list is a widget the turn's
@@ -1321,7 +1321,14 @@ impl Renderer {
     /// A user message keeps the live prompt's `›` marker; an assistant message
     /// is rendered as markdown, like the answer it once was. Tool and system
     /// messages are shown dimmed so they read as context, not as the answer.
-    pub(crate) fn replay_message(&mut self, index: u64, role: MessageRole, text: &str) {
+    pub(crate) fn replay_message(
+        &mut self,
+        index: u64,
+        role: MessageRole,
+        kind: norte_code_protocol::ReplayedKind,
+        text: &str,
+    ) {
+        use norte_code_protocol::ReplayedKind as K;
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
@@ -1329,23 +1336,26 @@ impl Renderer {
         // it before printing, exactly as the reasoning gutter does.
         self.stop_bar();
         self.space();
-        // The replay is the conversation that already happened, so it goes to
-        // the transcript in one piece: a resumed session shows what was said
-        // and not a second rendering of it.
-        let kind = if role == MessageRole::User {
-            crate::transcript::Kind::Said
-        } else {
-            crate::transcript::Kind::Answer
+        // The replay is the conversation that already happened, so each part
+        // keeps the kind it had: reasoning reads as reasoning, a tool call as
+        // a tool, and so on, instead of everything collapsing into one answer.
+        let entry_kind = match kind {
+            K::Reasoning => crate::transcript::Kind::Reasoning,
+            K::ToolCall => crate::transcript::Kind::ToolStarted,
+            K::ToolResult => crate::transcript::Kind::ToolOutput,
+            K::Refusal => crate::transcript::Kind::Answer,
+            K::Text => {
+                if role == MessageRole::User {
+                    crate::transcript::Kind::Said
+                } else {
+                    crate::transcript::Kind::Answer
+                }
+            }
         };
-        let mut entry = crate::transcript::Entry::new(kind);
+        let mut entry = crate::transcript::Entry::new(entry_kind);
         if role != MessageRole::User && role != MessageRole::Assistant {
-            // A role the client does not draw on its own says which it is: a
-            // system or developer message reads as neither side of the
-            // conversation.
             entry.push_line(format!("#{index} {role}"));
         }
-        // The markdown is a way of drawing the answer, and the text is what was
-        // said: what is kept is the text, and the view decides how it looks.
         entry.push_text(&crate::text::terminal(text));
         self.transcript.push(entry);
         self.last_char = Some('\n');

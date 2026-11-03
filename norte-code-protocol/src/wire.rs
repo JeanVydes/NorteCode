@@ -185,6 +185,23 @@ pub enum ClientRequestKind {
     },
 }
 
+/// What a replayed message carries, so the client renders it the way the
+/// conversation originally drew it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayedKind {
+    /// Plain text the model or the human said.
+    Text,
+    /// Reasoning the model produced.
+    Reasoning,
+    /// A tool call the model asked for.
+    ToolCall,
+    /// The result of a tool call.
+    ToolResult,
+    /// A refusal the model produced.
+    Refusal,
+}
+
 /// A service event: a numbered answer to a [`ClientRequest`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,7 +368,10 @@ pub enum ServerEventKind {
         index: u64,
         /// Who spoke.
         role: MessageRole,
-        /// The message's text, with each part on its own line.
+        /// What kind of content this carries, so the client renders it as the
+        /// conversation originally drew it rather than as one block of text.
+        kind: ReplayedKind,
+        /// The content's text.
         text: String,
     },
     /// The session's task list, as the last `todo` call left it.

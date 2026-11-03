@@ -1446,25 +1446,26 @@ async fn replay_events(
         }
     }
     let start = history.len().saturating_sub(REPLAY_MESSAGES);
-    history[start..]
-        .iter()
-        .enumerate()
-        .filter_map(|(offset, message)| {
-            let text = replay_text(message);
-            if text.is_empty() {
-                return None;
-            }
-            Some(ServerEvent::new(
+    let mut out: Vec<ServerEvent> = Vec::new();
+    for (offset, message) in history[start..].iter().enumerate() {
+        let parts = replay_text(message);
+        if parts.is_empty() {
+            continue;
+        }
+        for (kind, text) in parts {
+            out.push(ServerEvent::new(
                 request_id,
                 Some(key.clone()),
                 ServerEventKind::MessageReplayed {
                     index: u64::try_from(offset + 1).unwrap_or(u64::MAX),
                     role: role_name(message.role),
+                    kind,
                     text,
                 },
-            ))
-        })
-        .collect()
+            ));
+        }
+    }
+    out
 }
 
 /// The wire name of a message's role.
@@ -1582,14 +1583,23 @@ fn is_detached(output: &norte::ToolOutput) -> bool {
 
 /// The text of a message for the replay: each text, reasoning, tool call and
 /// tool result part on its own line, so a tool turn still reads.
-fn replay_text(message: &Message) -> String {
-    let mut lines: Vec<String> = Vec::new();
+fn replay_text(message: &Message) -> Vec<(norte_code_protocol::ReplayedKind, String)> {
+    use norte_code_protocol::ReplayedKind;
+    let mut out: Vec<(ReplayedKind, String)> = Vec::new();
     for part in &message.parts {
         match part {
-            Part::Text(text) => lines.push(text.text.clone()),
-            Part::Reasoning(reasoning) => lines.push(reasoning.text.clone()),
-            Part::Refusal(refusal) => lines.push(refusal.text.clone()),
-            Part::ToolCall(call) => lines.push(format!("$ {}", call.name)),
+            Part::Text(text) if !text.text.trim().is_empty() => {
+                out.push((ReplayedKind::Text, text.text.clone()));
+            }
+            Part::Reasoning(reasoning) if !reasoning.text.trim().is_empty() => {
+                out.push((ReplayedKind::Reasoning, reasoning.text.clone()));
+            }
+            Part::Refusal(refusal) if !refusal.text.trim().is_empty() => {
+                out.push((ReplayedKind::Refusal, refusal.text.clone()));
+            }
+            Part::ToolCall(call) => {
+                out.push((ReplayedKind::ToolCall, call.name.clone()));
+            }
             Part::ToolResult(result) => {
                 let text = result
                     .parts
@@ -1597,16 +1607,16 @@ fn replay_text(message: &Message) -> String {
                     .filter_map(Part::as_text)
                     .collect::<Vec<_>>()
                     .join("\n");
-                lines.push(if text.is_empty() {
+                out.push((ReplayedKind::ToolResult, if text.is_empty() {
                     "(tool result)".to_owned()
                 } else {
                     text
-                });
+                }));
             }
             _ => {}
         }
     }
-    lines.join("\n")
+    out
 }
 
 /// The event a budget notice becomes.
