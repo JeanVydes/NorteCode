@@ -53,20 +53,6 @@ pub(crate) async fn answer_if_asked(
             "(no interactive client is attached; continue with your best judgment)".to_owned();
         return submit_answer(service, session, question, answer).await;
     };
-    // No choices: there is nothing to walk, so the box is the whole answer and
-    // it opens at once.
-    if options.is_empty() {
-        eprintln!("? {}", crate::text::terminal(prompt));
-        let answer = match prompt_input("answer> ", input, interrupts).await? {
-            PromptInput::Line(line) => line,
-            PromptInput::Eof => {
-                "(no interactive client is attached; continue with your best judgment)".to_owned()
-            }
-            PromptInput::Cancelled => return Ok(true),
-        };
-        return submit_answer(service, session, question, answer).await;
-    }
-
     // The question is drawn where the draft is drawn: the editor owns those rows
     // and is the only thing that can read a key while a turn runs.
     pinned.ask(
@@ -74,6 +60,13 @@ pub(crate) async fn answer_if_asked(
         options.clone(),
         *multiple,
     );
+    if options.is_empty() {
+        // Nothing to walk: the box is the whole question, and it opens at once
+        // on the same surface "something else" opens. The old path printed a
+        // line prompt and never repainted, so what was typed was sent but not
+        // shown.
+        pinned.type_answer();
+    }
     // The frame has to be written here and on every tick while the question
     // waits. `ask` only marks the block dirty, and nothing else draws while
     // this loop is parked on the answer: without this the question was set and

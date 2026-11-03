@@ -176,9 +176,12 @@ impl State {
                 return 1_u16.saturating_add(u16::from(question.typing));
             }
             let choices = u16::try_from(question.choices.len()).unwrap_or(u16::MAX);
+            // A free-text question opens its box directly, so the row that
+            // would open it is not drawn and takes no room.
+            let other = u16::from(!(question.typing && question.choices.is_empty()));
             1_u16
                 .saturating_add(choices)
-                .saturating_add(1)
+                .saturating_add(other)
                 .saturating_add(u16::from(question.typing))
         });
         // A question holds the draft: the answer is typed into the question's
@@ -1142,7 +1145,7 @@ fn draw_question(
     // model offered nothing: a question with no choices still has to be
     // answerable, and this is the row that makes it so. A secret has no list to
     // open a box from: the box is the question.
-    if !question.masked {
+    if !(question.masked || question.typing && question.choices.is_empty()) {
         let here = question.cursor >= question.choices.len();
         let text = format!(
             "{} {}",
@@ -2052,6 +2055,28 @@ mod tests {
         assert!(screen.contains("API key for ollamacloud"), "{screen}");
         assert!(screen.contains("••••••"), "the masked box: {screen}");
         assert!(!screen.contains("something else"), "no list: {screen}");
+    }
+
+    #[test]
+    fn a_free_text_question_opens_its_box_without_the_other_row() {
+        let mut state = State::new();
+        state.question = Some(Question {
+            prompt: "what now?".to_owned(),
+            choices: Vec::new(),
+            cursor: 0,
+            multiple: false,
+            taken: Vec::new(),
+            typing: true,
+            masked: false,
+        });
+        state.input = "the answer".to_owned();
+        let screen = screen_of(&state, 60, 20).join("\n");
+        assert!(screen.contains("what now?"), "{screen}");
+        assert!(screen.contains("the answer"), "the box: {screen}");
+        assert!(
+            !screen.contains("something else"),
+            "nothing to choose: {screen}"
+        );
     }
 
     #[test]

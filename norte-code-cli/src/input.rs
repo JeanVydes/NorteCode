@@ -524,7 +524,7 @@ impl Pinned {
     }
 
     /// Opens the input box, which is the answer once "something else" is chosen.
-    fn type_answer(&self) {
+    pub(crate) fn type_answer(&self) {
         let mut inner = self.lock();
         let Some(asked) = inner.asked.as_mut() else {
             return;
