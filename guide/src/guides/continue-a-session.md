@@ -58,7 +58,7 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | Command | Effect |
 | --- | --- |
 | `/help` | Show the command list. |
-| `/rename [title]` | Name the session. Bare, the model picks a name from the first message the session holds. |
+| `/rename [title]` | Name the session. Bare, it recomputes the name from the first message the session holds. |
 | `/compact` | Summarise and continue on a fresh Norte session. |
 | `/model <model>` | Switch model, keeping the provider. |
 | `/models` | Open the provider/model picker; `Enter` expands a provider, and picking a model sets both. |
@@ -92,11 +92,11 @@ it is chosen there is no box, because the choices are the answer. `Space` marks
 a choice when the model allows several, and `Escape` leaves the question
 unanswered rather than inventing a selection nobody made.
 
-`/rename` writes a name without calling anything when given one. Bare, it asks
-the model from the first message the session holds, which is how a session
-opened before titling existed gets a name — those sessions keep their key until
-someone names them, since the automatic title is made from the first message and
-they already sent theirs.
+`/rename` writes a name without calling anything when given one. Bare, it
+recomputes the name from the first message the session holds, using the same
+32-character rule a new session gets at creation — which is how a session
+opened before that rule gets a name, since its automatic title was made when it
+was created.
 
 ## Interruption
 

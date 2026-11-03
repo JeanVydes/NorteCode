@@ -43,12 +43,6 @@ or fix.
     "model": null,
     "reasoning": "lowest"
   },
-  "titling": {
-    "enabled": true,
-    "provider": null,
-    "model": null,
-    "max_output": 24
-  },
   "retry": {
     "max_attempts": 4,
     "max_delay_ms": 60000,
@@ -123,7 +117,6 @@ or fix.
 | `default_provider` | string or `null` | `null` | Provider for a new session without `--provider`. |
 | `default_model` | string or `null` | `null` | Model id for a new session without `--model`; an opaque string that may contain slashes. The provider is its own key and never joined with it. Set with `default_provider` or not at all. |
 | `compaction` | object | see below | Automatic context compaction. |
-| `titling` | object | see below | Automatic session titles. |
 | `retry` | object | see below | Bounded retries for transient provider failures. |
 | `reasoning` | object | see below | Default reasoning setting. |
 | `system_prompt` | string or `null` | `null` | Replaces the built-in base prompt. `AGENTS.md` is appended after it. |
@@ -269,21 +262,6 @@ the old history and session id unchanged.
 `provider` and `model` are two keys and never one `provider/model` string: a
 model id may carry slashes of its own, so the two are set apart. Both or neither:
 one without the other cannot be resolved.
-
-## `titling`
-
-Settings for the model-written title. They do **not** control the automatic
-title: a new session's title is the first 32 characters of its first message,
-truncated once and never asked again. These fields are read when a session is
-renamed without a title (a bare `/rename`), which asks the model to name it from
-the first message the session holds.
-
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Allow the model-written title; `false` makes a bare `/rename` fail. |
-| `provider` | string or `null` | `null` | Provider for the title request; the session's own when `null`. Set with `model` or not at all. |
-| `model` | string or `null` | `null` | Model id for the title request; the session's model when `null`. |
-| `max_output` | integer | `24` | Tokens the title request may produce. |
 
 ## `retry`
 

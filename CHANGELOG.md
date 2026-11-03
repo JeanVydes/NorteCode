@@ -106,13 +106,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b` once joined. The pair now
   travels apart wherever it is carried: the session table has a `provider`
   column of its own, `SetModel` and the two events that report a switch carry
-  both halves, `compaction.provider` and `titling.provider` name the provider
-  of the summary and of the title model, and the session list reports the two
-  apart as well. Where a person reads both at once — the footer's model name,
-  the `norte-code models` listing — they are still joined, and that label is
-  never parsed back. A row written before the provider had a column of its own
-  is not migrated: it reopens on the default model, the way a session on a
-  provider the catalogue no longer carries does.
+  both halves, `compaction.provider` names the provider of the summary model,
+  and the session list reports the two apart as well. Where a person reads both
+  at once — the footer's model name, the `norte-code models` listing — they are
+  still joined, and that label is never parsed back. A row written before the
+  provider had a column of its own is not migrated: it reopens on the default
+  model, the way a session on a provider the catalogue no longer carries does.
 
 - A catalogue that is missing is written empty. `providers.json` and
   `models.json` are created beside the configuration when they are not there,
@@ -229,9 +228,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   reads through the envelope too.
 
 - The session title is the first user message truncated to 32 characters, set
-  once and never asked again. Until now the client re-ran the titling model on
-  every first message, which failed silently when the model had no credits and
-  left the session showing its key instead of a name.
+  once and never asked again. Until now the client asked a model for the name
+  on every first message, which failed silently when the model had no credits
+  and left the session showing its key instead of a name.
 
 - Deleting a session takes its conversation with it. The node tree is
   reached by walking back from the head, the only handle a session has on
@@ -695,10 +694,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 - `/rename [title]` names the session. With a title it writes what was typed and
   calls nothing: a person who has already decided what the session is called
-  should not wait for a model to agree. Bare, it asks the model from the first
-  message the session holds, which is the path a session that predates titling
-  takes — the history is read out of the engine, because the transcript belongs
-  to it and not to the client.
+  should not wait for a model to agree. Bare, it recomputes the name from the
+  first message the session holds, using the same 32-character rule a new
+  session gets at creation — the history is read out of the engine, because the
+  transcript belongs to it and not to the client.
 
 ### Fixed
 
@@ -902,14 +901,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   effort climbs to `max`. `auto` and a token budget draw no bar, because neither
   is a rung.
 
-- A session is named after its first message. The title is asked for by a
-  request of its own — a scratch session holding one instruction, no tools, no
-  reasoning, a capped output — so the naming never enters the conversation it is
-  naming, and the model that answers may be a cheaper one (`titling.model`).
-  `titling.enabled = false` turns it off. The reply is sanitised before it is
-  stored: a title reaches a footer and a startup row, so control characters and
-  bidi overrides are dropped, only the first line is kept, and a reply that is
-  not a name leaves the session with its key.
+- A session is named after its first message: the first user message is
+  truncated to 32 characters and written once, when the session is created. No
+  model is asked, so naming costs nothing and cannot fail; a session whose
+  first message is empty keeps its key. A bare `/rename` recomputes the same
+  name from the history.
 
 - The startup menu and the model picker are walked with the arrow keys and
   Enter instead of answered with a number. Typing narrows the list, which is

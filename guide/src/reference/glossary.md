@@ -26,11 +26,10 @@ intent on startup is refused rather than replayed.
 **Engine** — Norte's durable turn machine: one model, one session, tools and a
 commit point.
 
-**Title** — A session's name, written once from the first message the person
-sent. It is asked for in a scratch session of its own — one instruction, no
-tools, a capped output — so the naming never enters the conversation it is
-naming. A session with no title is listed by its key, and `/rename` names one on
-demand.
+**Title** — A session's name: the first user message truncated to 32 characters,
+written once when the session is created. No model is asked. A session with no
+title is listed by its key, and `/rename` names one on demand; bare, it
+recomputes the same name from the first message.
 
 **Event** — A `ServerEvent` on the client wire. It answers a `request_id` and may
 carry a logical session key.

@@ -38,7 +38,6 @@ command tool.
 | `default_provider` | The provider a new session opens on, when no flag names one. |
 | `default_model` | The model id for a new session; an opaque string that may contain slashes. |
 | `compaction` | Threshold, trigger, recent messages and the summary model. |
-| `titling` | Whether a new session is named from its first message, and by which model. |
 | `retry` | Bounded retries for transient provider failures. |
 | `reasoning` | The default reasoning setting. |
 | `system_prompt` | A replacement base prompt; `AGENTS.md` is appended after it. |
