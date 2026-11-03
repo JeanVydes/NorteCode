@@ -2850,14 +2850,6 @@ async fn the_budget_stops_the_next_request_every_time() {
             },
         )
         .await;
-        eprintln!(
-            "DBG {}",
-            events
-                .iter()
-                .map(|event| format!("{:?}", event.kind))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        );
         assert!(
             events
                 .iter()

@@ -413,10 +413,10 @@ impl Service {
             'stepping: loop {
                 match stepped.step().await {
                     Ok(Some(norte::harness::StepResult {
-                        step: norte::harness::Step::Tools { session },
+                        step: norte::harness::Step::Tools,
                         events,
                     })) => {
-                        current_nid = session.id;
+                        current_nid = stepped.session().id;
                         for event in events {
                             if is_compaction_abort(&event) {
                                 failure = Some(COMPACTION_SAFE_POINT.to_owned());
@@ -445,13 +445,12 @@ impl Service {
                     Ok(Some(norte::harness::StepResult {
                         step:
                             norte::harness::Step::Generated {
-                                session,
                                 message: _,
                                 interrupted: iv,
                             },
                         events,
                     })) => {
-                        current_nid = session.id;
+                        current_nid = stepped.session().id;
                         interrupted = iv;
                         for event in events {
                             if is_compaction_abort(&event) {
@@ -1005,15 +1004,20 @@ impl Service {
                     version: *version,
                 })
             }
-            EngineEvent::LayerShortCircuited { layer, .. } if layer == "budget" => self
-                .budget_stopped(key)
-                .map(|status| ServerEventKind::BudgetExceeded {
+            EngineEvent::LayerShortCircuited { layer, .. } => {
+                if layer == "budget" {
+                    self.budget_stopped(key)
+                        .map(|status| ServerEventKind::BudgetExceeded {
                     scope: status.scope,
                     unit: status.unit,
                     spent: status.spent,
                     limit: status.limit,
                     action: status.action,
-                }),
+                })
+                } else {
+                    None
+                }
+            }
             EngineEvent::RequestReconstructed { .. } => {
                 // The summary waits for the commit, but the eager gate has to
                 // see the context this request is about to carry before it is
