@@ -9,12 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::runtime::EngineEvent;
 use async_trait::async_trait;
 use norte::{
-    Continuation, Layer, LayerContext, Message, ModelRequest, ModelStream,
+    Continuation, Layer, LayerContext, Message, MessageStatus, ModelRequest, ModelStream,
     Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role, ShortCircuitReason,
 };
 use norte_code_protocol::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
 
-use super::mapping::reported_cost;
+use super::mapping::{emit, reported_cost};
 use super::{CostRecord, ModelSpec, Service, ServiceError};
 
 impl Service {
@@ -61,20 +61,22 @@ impl Service {
     }
 
     /// Runs one compaction and reports its events, including a failure.
+    ///
+    /// With a sender, the start is emitted before the work and omitted from the
+    /// returned events. Without one, both events are returned for manual replay.
     pub(super) async fn perform_compaction(
         &self,
         request_id: u64,
         key: &SessionKey,
         reason: &str,
+        sender: Option<&tokio::sync::mpsc::Sender<ServerEvent>>,
     ) -> Result<Vec<ServerEvent>, ServiceError> {
         if !self.begin_compaction(key) {
             return Err(ServiceError::Compaction(
                 "another compaction is already running".to_owned(),
             ));
         }
-        let result = self.compact_core(key).await;
-        self.end_compaction(key);
-        let mut events = vec![ServerEvent::new(
+        let started = ServerEvent::new(
             request_id,
             Some(key.clone()),
             ServerEventKind::CompactionStarted {
@@ -83,7 +85,15 @@ impl Service {
                     _ => CompactionReason::Threshold,
                 },
             },
-        )];
+        );
+        let mut events = Vec::new();
+        if let Some(sender) = sender {
+            let _ = emit(sender, started).await;
+        } else {
+            events.push(started);
+        }
+        let result = self.compact_core(key).await;
+        self.end_compaction(key);
         match result {
             Ok(compaction) => events.push(ServerEvent::new(
                 request_id,
@@ -138,7 +148,9 @@ impl Service {
         key: SessionKey,
     ) -> Result<super::EventStream, ServiceError> {
         self.require_record(&key)?;
-        let events = self.perform_compaction(request_id, &key, "manual").await?;
+        let events = self
+            .perform_compaction(request_id, &key, "manual", None)
+            .await?;
         Ok(Box::pin(futures_util::stream::iter(events)))
     }
 
@@ -150,7 +162,9 @@ impl Service {
     /// session was seeded with, and it is the only record of what the history
     /// became, so a client that shows it is showing the replacement rather than
     /// guessing at it.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn compact_core(&self, key: &SessionKey) -> Result<Compaction, ServiceError> {
+        let cancellation = self.lock_cancels().get(key).cloned().unwrap_or_default();
         let (old, spec, _) = self.require_record(key)?;
         let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
         let engine = self.engine(&spec, Some(key))?;
@@ -184,31 +198,34 @@ impl Service {
             &summary_spec.capabilities.reasoning,
             self.config().compaction.reasoning,
         );
-        let mut turn = summary_engine
+        let turn = summary_engine
             .turn(scratch.id)
             .reasoning(reasoning)
             .tools(std::iter::empty::<norte::ToolName>())
-            .start_stepped();
-        let outcome = loop {
-            if let Some(crate::runtime::StepResult {
-                step: crate::runtime::Step::Done(outcome),
-                ..
-            }) = turn.step().await?
-            {
-                break outcome;
-            }
-        };
+            .cancellation(cancellation.clone())
+            .start();
+        let outcome = turn.finish().await?;
         let message = outcome.message.ok_or_else(|| {
             ServiceError::Compaction("the summary request committed no message".to_owned())
         })?;
+        self.record_summary_usage(key, scratch.id, state.turn, &message)
+            .await?;
+        if cancellation.is_cancelled()
+            || message
+                .origin
+                .as_ref()
+                .is_some_and(|origin| origin.status == MessageStatus::Interrupted)
+        {
+            return Err(ServiceError::Compaction(
+                "the summary request was cancelled; the original session is unchanged".to_owned(),
+            ));
+        }
         let summary = message.text();
         if summary.trim().is_empty() {
             return Err(ServiceError::Compaction(
                 "the model returned an empty summary".to_owned(),
             ));
         }
-        self.record_summary_usage(key, scratch.id, state.turn, &message)
-            .await?;
         let start = recent_start(&conversation, self.config().compaction.keep_recent);
         let recent = conversation[start..].to_vec();
         let fresh = engine.create().await?;
@@ -224,6 +241,14 @@ impl Service {
         seed.extend(recent);
         engine.append_history(fresh.id, seed).await?;
         let seeded = engine.history(fresh.id).await?.len();
+        // Seeding may have awaited storage after the summary was accepted. Do
+        // not switch sessions if cancellation landed there; once switched, the
+        // persistence below must finish rather than be cancelled halfway.
+        if cancellation.is_cancelled() {
+            return Err(ServiceError::Compaction(
+                "the summary request was cancelled; the original session is unchanged".to_owned(),
+            ));
+        }
         {
             let mut sessions = self.lock_sessions();
             let record = sessions

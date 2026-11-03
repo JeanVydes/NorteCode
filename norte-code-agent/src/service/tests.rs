@@ -599,6 +599,387 @@ async fn a_turn_streams_text_and_commits() {
         events.first().map(|event| &event.kind),
         Some(ServerEventKind::TurnStarted { .. })
     ));
+    let started = events
+        .iter()
+        .position(|event| matches!(event.kind, ServerEventKind::TurnStarted { .. }))
+        .expect("the prepared turn starts");
+    let first_delta = events
+        .iter()
+        .position(|event| matches!(event.kind, ServerEventKind::Delta { .. }))
+        .expect("the turn streams");
+    assert!(started < first_delta, "the turn starts before its answer");
+}
+
+mod streaming_regressions {
+    use super::*;
+    use crate::runtime::{EngineEvent, Harness, HarnessConfig, StreamDelta};
+    use norte::StreamEvent;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    fn reference() -> ModelRef {
+        ModelRef::new(
+            ProviderId::new("test").expect("provider"),
+            ModelId::new("scripted").expect("model"),
+        )
+    }
+
+    fn streaming_service(model: Arc<dyn Model>) -> Arc<Service> {
+        let mut config = config();
+        // A long answer must exercise streaming, not consume another model turn
+        // in the automatic summariser after the answer finishes.
+        config.compaction.enabled = false;
+        Arc::new(
+            Service::new(
+                config,
+                catalog(),
+                Some(spec("scripted")),
+                Arc::new(ScriptedFactory { model }),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        )
+    }
+
+    fn single_event_buffer_harness(model: Arc<dyn Model>) -> Harness {
+        Harness::builder()
+            .store(Arc::new(InMemoryStore::new()))
+            .blobs(Arc::new(InMemoryBlobStore::new()))
+            .model(model)
+            .config(HarnessConfig {
+                limits: norte::model::StreamLimits {
+                    max_buffered_events: 1,
+                    ..norte::model::StreamLimits::default()
+                },
+                ..HarnessConfig::default()
+            })
+            .build()
+            .expect("harness")
+    }
+
+    struct OneShotStreamModel {
+        inner: ScriptedModel,
+        stream: Mutex<Option<ModelStream>>,
+    }
+
+    impl OneShotStreamModel {
+        fn model(stream: ModelStream) -> Arc<dyn Model> {
+            Arc::new(Self {
+                inner: ScriptedModel::new(reference()),
+                stream: Mutex::new(Some(stream)),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Model for OneShotStreamModel {
+        fn reference(&self) -> &ModelRef {
+            self.inner.reference()
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            self.inner.capabilities()
+        }
+
+        fn continuity(&self) -> &dyn norte::ContinuityAdapter {
+            self.inner.continuity()
+        }
+
+        async fn stream(&self, _request: ModelRequest) -> norte::Result<ModelStream> {
+            self.stream
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .ok_or_else(|| norte::Error::Other("the test stream was already taken".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn service_streams_more_deltas_than_the_event_buffer_without_losing_text() {
+        let count = HarnessConfig::default().limits.max_buffered_events + 17;
+        let chunks: Vec<String> = (0..count).map(|index| format!("{index}:é;")).collect();
+        let expected = chunks.concat();
+        let model = Arc::new(ScriptedModel::new(reference()).turn_deltas(chunks));
+        let service = streaming_service(model);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let events = drain(
+                &service,
+                ClientRequestKind::SendMessage {
+                    session: None,
+                    text: "stream every chunk".to_owned(),
+                    attachments: Vec::new(),
+                    budget: None,
+                    reasoning: None,
+                    replay: false,
+                },
+            )
+            .await;
+            let text: Vec<&str> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    ServerEventKind::Delta {
+                        delta: Delta::Text { text, .. },
+                        ..
+                    } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text.len(), count, "every provider delta reaches the client");
+            assert_eq!(text.concat(), expected, "deltas stay complete and ordered");
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event.kind,
+                        ServerEventKind::TurnFinished {
+                            committed: true,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1,
+                "the turn commits exactly once"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, ServerEventKind::Error { .. })),
+                "streaming succeeds: {events:?}"
+            );
+            let key = events[0].session.as_ref().expect("session");
+            let (nid, spec, _) = service.require_record(key).expect("record");
+            let history = service
+                .engine(&spec.expect("spec"), Some(key))
+                .expect("engine")
+                .history(nid)
+                .await
+                .expect("history");
+            let answers: Vec<_> = history
+                .iter()
+                .filter(|message| message.role == Role::Assistant)
+                .collect();
+            assert_eq!(answers.len(), 1);
+            assert_eq!(answers[0].text(), expected, "the stored answer is complete");
+        })
+        .await
+        .expect("a turn larger than its event buffer must finish");
+    }
+
+    fn pending_text_model() -> (Arc<dyn Model>, Arc<Notify>, Arc<AtomicBool>) {
+        let parked = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let notify = Arc::clone(&parked);
+        let pending = futures_util::stream::unfold(DropProbe(Arc::clone(&dropped)), move |probe| {
+            let notify = Arc::clone(&notify);
+            async move {
+                let _probe = probe;
+                notify.notify_one();
+                std::future::pending::<Option<(norte::Result<StreamEvent>, DropProbe)>>().await
+            }
+        });
+        let provider = futures_util::stream::iter([Ok(StreamEvent::TextDelta {
+            index: 0,
+            text: "first".to_owned(),
+        })])
+        .chain(pending);
+        (
+            OneShotStreamModel::model(Box::pin(provider)),
+            parked,
+            dropped,
+        )
+    }
+
+    #[tokio::test]
+    async fn service_delivers_the_first_delta_while_the_provider_is_pending_and_cancels() {
+        let (model, parked, dropped) = pending_text_model();
+        let service = streaming_service(model);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut events = service
+                .submit(ClientRequest {
+                    request_id: 7,
+                    kind: ClientRequestKind::SendMessage {
+                        session: None,
+                        text: "start streaming".to_owned(),
+                        attachments: Vec::new(),
+                        budget: None,
+                        reasoning: None,
+                        replay: false,
+                    },
+                })
+                .await
+                .expect("turn");
+            let key = loop {
+                let event = events.next().await.expect("the first delta must arrive");
+                assert!(
+                    !matches!(event.kind, ServerEventKind::TurnFinished { .. }),
+                    "the provider has not finished"
+                );
+                if let ServerEventKind::Delta {
+                    delta: Delta::Text { text, .. },
+                    ..
+                } = event.kind
+                {
+                    assert_eq!(text, "first");
+                    break event.session.expect("session");
+                }
+            };
+            parked.notified().await;
+            assert!(!dropped.load(Ordering::SeqCst), "the stream is still live");
+            assert!(service.cancel_turn(&key), "the running token is registered");
+            let rest = events.collect::<Vec<_>>().await;
+            assert_eq!(
+                rest.iter()
+                    .filter(|event| matches!(
+                        event.kind,
+                        ServerEventKind::TurnFinished {
+                            committed: false,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1,
+                "cancellation settles the pending turn: {rest:?}"
+            );
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "the pending stream is dropped"
+            );
+            assert!(
+                !rest
+                    .iter()
+                    .any(|event| matches!(event.kind, ServerEventKind::Error { .. })),
+                "cancellation is not a provider failure: {rest:?}"
+            );
+            let (nid, spec, _) = service.require_record(&key).expect("record");
+            let history = service
+                .engine(&spec.expect("spec"), Some(&key))
+                .expect("engine")
+                .history(nid)
+                .await
+                .expect("history");
+            let answer = history
+                .iter()
+                .find(|message| message.role == Role::Assistant)
+                .expect("the partial answer is persisted");
+            assert_eq!(answer.text(), "first");
+            assert_eq!(
+                answer.origin.as_ref().expect("origin").finish_reason,
+                FinishReason::Cancelled
+            );
+        })
+        .await
+        .expect("the first delta and cancellation must not wait for provider EOF");
+    }
+
+    #[tokio::test]
+    async fn harness_stream_with_a_single_event_buffer_preserves_all_deltas_and_finishes() {
+        let engine = single_event_buffer_harness(Arc::new(
+            ScriptedModel::new(reference()).turn_deltas(["one", "two", "three"]),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let session = engine.create().await.expect("session");
+            let mut turn = engine.send(session.id, Message::user("go"));
+            let events = turn.by_ref().collect::<Vec<_>>().await;
+            let deltas: Vec<&str> = events
+                .iter()
+                .filter_map(|event| match event {
+                    EngineEvent::StreamDelta {
+                        delta: StreamDelta::Text { text, .. },
+                        ..
+                    } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(deltas, ["one", "two", "three"]);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, EngineEvent::GenerationCommitted { .. }))
+                    .count(),
+                1,
+                "the answer commits exactly once"
+            );
+            assert!(turn.next().await.is_none(), "events are not replayed");
+            let outcome = turn.finish().await.expect("finish");
+            assert_eq!(outcome.message.expect("answer").text(), "onetwothree");
+            assert_eq!(outcome.session.phase, crate::runtime::Phase::Idle);
+        })
+        .await
+        .expect("the stream must pump even a single-slot event channel");
+    }
+
+    #[tokio::test]
+    async fn harness_finish_with_a_single_event_buffer_commits_the_complete_answer() {
+        let engine = single_event_buffer_harness(Arc::new(
+            ScriptedModel::new(reference()).turn_deltas(["one", "two", "three"]),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let session = engine.create().await.expect("session");
+            let turn = engine.send(session.id, Message::user("go"));
+            let outcome = turn.finish().await.expect("finish");
+            assert_eq!(outcome.message.expect("answer").text(), "onetwothree");
+            assert_eq!(outcome.session.phase, crate::runtime::Phase::Idle);
+            let history = engine.history(session.id).await.expect("history");
+            assert_eq!(history.len(), 2, "one input and one committed answer");
+            assert_eq!(history[1].text(), "onetwothree");
+        })
+        .await
+        .expect("finish must not require an external event consumer");
+    }
+
+    #[tokio::test]
+    async fn harness_stream_keeps_delta_and_error_events_after_a_stream_failure() {
+        let provider = futures_util::stream::iter([
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                text: "before the error".to_owned(),
+            }),
+            Err(norte::Error::Other("test stream failed".to_owned())),
+        ]);
+        let engine = single_event_buffer_harness(OneShotStreamModel::model(Box::pin(provider)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let session = engine.create().await.expect("session");
+            let mut turn = engine.send(session.id, Message::user("go"));
+            let events = turn.by_ref().collect::<Vec<_>>().await;
+            assert!(turn.next().await.is_none(), "events are not replayed");
+            let error = turn.finish().await.expect_err("the stream fails");
+            assert!(
+                error.to_string().contains("test stream failed"),
+                "unexpected turn error: {error}"
+            );
+            let relevant: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        EngineEvent::StreamDelta { .. } | EngineEvent::Error { .. }
+                    )
+                })
+                .collect();
+            assert!(
+                matches!(
+                    relevant.as_slice(),
+                    [EngineEvent::StreamDelta {
+                        delta: StreamDelta::Text { text, .. },
+                        ..
+                    }, EngineEvent::Error { message, .. }]
+                        if text == "before the error" && message.contains("test stream failed")
+                ),
+                "events survive the error, exactly once and in order: {events:?}"
+            );
+            assert_eq!(
+                engine.session(session.id).await.expect("session").phase,
+                crate::runtime::Phase::Idle,
+                "a failed stream leaves the session settled"
+            );
+        })
+        .await
+        .expect("a stream failure must not block the event pump");
+    }
 }
 
 #[tokio::test]

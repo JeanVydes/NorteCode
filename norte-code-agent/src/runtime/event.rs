@@ -116,6 +116,16 @@ pub enum EngineEvent {
         /// The settled part.
         part: Part,
     },
+    /// An assistant generation and any interrupted-call results are durable.
+    ///
+    /// Emitted after the commit, before executing tools or consulting end-of-turn
+    /// interceptors. The stored head may be a tool result on interruption.
+    GenerationCommitted {
+        /// The session.
+        session: SessionId,
+        /// The turn the generation belongs to.
+        turn: u64,
+    },
     /// A tool call started.
     ToolCallStarted {
         /// The session.
@@ -266,6 +276,7 @@ impl EngineEvent {
             | EngineEvent::PhaseChanged { session, .. }
             | EngineEvent::StreamDelta { session, .. }
             | EngineEvent::PartCompleted { session, .. }
+            | EngineEvent::GenerationCommitted { session, .. }
             | EngineEvent::ToolCallStarted { session, .. }
             | EngineEvent::ToolOutput { session, .. }
             | EngineEvent::ToolCallFinished { session, .. }

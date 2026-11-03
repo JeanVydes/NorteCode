@@ -52,7 +52,7 @@ pub use crate::runtime::interceptor::{
     ConsultationPoint, Interception, InterceptionContext, InterceptorSet, TurnInterceptor,
 };
 pub use crate::runtime::observer::{Observer, ObserverSet, StreamTransform};
-pub use crate::runtime::turn::{Step, StepResult, Turn, TurnPhase};
+pub use crate::runtime::turn::Turn;
 use norte::BlobStore;
 use norte::capability::ReasoningRequest;
 use norte::domain::message::{Message, Usage};
@@ -112,15 +112,6 @@ pub struct HarnessConfig {
     /// must keep counting past it. A coding agent that reads, edits and reads
     /// back raises it.
     pub max_iterations: usize,
-    /// When `true` (and `auto_execute_tools` is also `true`), a tool call whose
-    /// arguments complete mid-stream begins executing before the assistant
-    /// message finishes, subject to the host's tool policy (FR-STREAM-4).
-    ///
-    /// The policy is evaluated against the assistant message as known at that
-    /// point, so a host enables this only when its tool policies do not depend
-    /// on the message tail. Calls that need approval, are denied or are rate
-    /// limited are always deferred to the normal path. Defaults to `false`.
-    pub early_tool_execution: bool,
     /// The host's per-call tool metadata provider (FR-TOOL-7).
     ///
     /// The engine consults it immediately before every execution, including one
@@ -138,7 +129,6 @@ impl Default for HarnessConfig {
             limits: StreamLimits::default(),
             inline_threshold: 64 * 1024,
             max_iterations: 16,
-            early_tool_execution: false,
             tool_metadata: None,
         }
     }
@@ -248,27 +238,6 @@ fn unanswered_call_errors(message: &Message) -> Vec<ToolResultPart> {
 /// the words it reads everything else in: one text part, an error result.
 const CALL_CANCELLED_REASON: &str = "tool call cancelled before it ran";
 
-/// The results the calls of one message already have, in the order the message
-/// lists them, taking the first source that holds a result for a call.
-///
-/// Early dispatch does not produce results in call order — it is shuffled by
-/// completion — and the tool message has to read the way the assistant message
-/// does.
-fn results_in_call_order(
-    calls: &[ToolCallPart],
-    sources: &[&[ToolResultPart]],
-) -> Vec<ToolResultPart> {
-    calls
-        .iter()
-        .filter_map(|call| {
-            sources
-                .iter()
-                .find_map(|source| source.iter().find(|result| result.call_id == call.call_id))
-                .cloned()
-        })
-        .collect()
-}
-
 /// Deterministic cache boundary positions, as exclusive end indices into the
 /// message sequence: after the leading System/Developer run and at the end of
 /// the critical prefix. Never depends on the tail (FR-RECON-7).
@@ -331,15 +300,13 @@ impl Harness {
     }
 
     /// Starts a turn with a new user message, using the inherited options.
-    #[must_use]
     pub fn send(&self, session: SessionId, message: Message) -> turn::Turn {
-        self.turn(session).input(message).start_stepped()
+        self.turn(session).input(message).start()
     }
 
     /// Continues a session from its durable phase, using the inherited options.
-    #[must_use]
     pub fn resume(&self, session: SessionId) -> turn::Turn {
-        self.turn(session).start_stepped()
+        self.turn(session).start()
     }
 
     /// Opens the fluent builder for one turn (FR-ENG-7, FR-ENG-8).
@@ -515,9 +482,6 @@ struct PreparedCall {
 }
 
 /// Executes one prepared tool call and emits its lifecycle events (FR-TOOL-1).
-///
-/// It is a free function so it can run inside a spawned task for early tool
-/// execution (FR-STREAM-4); the engine's tool loop calls it inline.
 async fn execute_call(
     tools: Arc<ToolRegistry>,
     observers: Arc<ObserverSet>,
@@ -554,13 +518,18 @@ async fn execute_call(
     let mut context = ToolContext::new()
         .with_session(site.session)
         .with_call(call.call_id)
-        .with_cancellation(cancellation)
+        .with_cancellation(cancellation.clone())
         .with_progress(progress);
     for (key, value) in metadata {
         context = context.with_metadata(key, value);
     }
     let clock = Instant::now();
-    let output = tools.execute(&context, &tool, arguments).await;
+    // The started event may have waited for channel capacity after approval.
+    let output = if cancellation.is_cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        tools.execute(&context, &tool, arguments).await
+    };
     let duration_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
     let (result, is_error) = match output {
         Ok(output) => {
@@ -722,8 +691,8 @@ pub struct HarnessBuilder {
 
 /// Fluent builder for a single turn (FR-ENG-7, FR-ENG-8).
 ///
-/// It borrows the engine; [`start`](TurnBuilder::start) hands back an
-/// The borrow ends there. Every knob is optional and
+/// It borrows the engine; [`start`](TurnBuilder::start) hands back an owned,
+/// already-running [`Turn`]. The borrow ends there. Every knob is optional and
 /// overlays the inherited defaults per field: what a turn sets replaces that one
 /// field of the effective [`GenerationParams`] and nothing else, so a turn that
 /// only changes the temperature keeps the engine's other parameters.
@@ -731,18 +700,20 @@ pub struct HarnessBuilder {
 /// # Example
 ///
 /// ```ignore
+/// use futures_util::StreamExt;
 /// use norte::{Message, ToolName};
 ///
-/// let outcome = engine
+/// let mut turn = engine
 ///     .turn(session.id)
 ///     .input(Message::user("Summarize src/lib.rs"))
 ///     .temperature(0.2)
 ///     .max_output_tokens(512)
 ///     .tools([ToolName::new("read_file").expect("tool")])
-///     .start()
-///     .finish()
-///     .await
-///     .expect("turn");
+///     .start();
+/// while let Some(event) = turn.next().await {
+///     // Handle each live event.
+/// }
+/// let outcome = turn.finish().await.expect("turn");
 /// ```
 pub struct TurnBuilder<'a> {
     engine: &'a Harness,
@@ -936,18 +907,7 @@ impl<'a> TurnBuilder<'a> {
     }
 
     /// Spawns the turn and returns its event stream.
-    #[must_use]
     pub fn start(self) -> turn::Turn {
-        self.start_stepped()
-    }
-
-    /// Opens a host-driven turn: one iteration per `Turn::step` call.
-    ///
-    /// Unlike `start`, no task is spawned; the host drives the loop and may
-    /// inspect or intervene between steps. Events are pushed to the turn's own
-    /// channel and drained through `Turn::events`.
-    #[must_use]
-    pub fn start_stepped(self) -> turn::Turn {
         let cancellation = self.cancellation.unwrap_or_default();
         turn::Turn::new(
             self.engine.clone(),
@@ -981,7 +941,7 @@ impl HarnessBuilder {
     /// Sets the blob store that holds media bytes and large tool output by
     /// content hash.
     ///
-    /// Required. [`InMemoryBlobStore`](norte_harness::InMemoryBlobStore) is the
+    /// Required. [`InMemoryBlobStore`](crate::runtime::InMemoryBlobStore) is the
     /// reference implementation; the bytes live where the host puts them.
     #[must_use]
     pub fn blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
@@ -1145,24 +1105,6 @@ pub fn usage_of(message: &Message) -> Usage {
 
 pub use norte::blob::InMemoryBlobStore;
 
-/// What the host decided, and what the engine did about it.
-struct Consultation {
-    /// The session after the messages the host added.
-    session: Session,
-    /// Whether the host asked for the turn to end.
-    stop: Option<String>,
-}
-
-impl Consultation {
-    /// A consultation that changed nothing.
-    fn unchanged(session: Session) -> Self {
-        Self {
-            session,
-            stop: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,4 +1206,3 @@ mod tests {
         assert!(chunks[2].1, "the last chunk closes the stream");
     }
 }
-
