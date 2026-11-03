@@ -1877,6 +1877,13 @@ mod unix {
                             // chip: chips carry a label in the draft and this
                             // value must not be read back from the screen.
                             if pinned.asking_masked() {
+                                // The first event of a masked question may be
+                                // the paste itself, before any key cleared the
+                                // old draft.
+                                if !masked {
+                                    buffer = LineBuffer::default();
+                                    masked = true;
+                                }
                                 buffer.insert_text(&text);
                             } else {
                                 buffer.insert_paste(&text);
