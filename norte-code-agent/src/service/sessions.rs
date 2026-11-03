@@ -409,14 +409,30 @@ impl Service {
                     headers: std::collections::BTreeMap::new(),
                 })
         });
-        let engine = self.engine(&engine_spec, None)?;
-        let session = engine.create().await?;
-        engine
-            .append_history(
-                session.id,
-                vec![norte::Message::system(self.system_prompt.clone())],
-            )
-            .await?;
+        // A session can outlive the rest of the engine: it is nothing but a
+        // row and a system message. When no model is configured the borrowed
+        // spec cannot build an engine, so fall back to a direct store commit
+        // and there is no history appended.
+        let engine = self.engine(&engine_spec, None).ok();
+        let session = if let Some(engine) = &engine {
+            let session = engine.create().await?;
+            let _ = engine
+                .append_history(session.id, vec![norte::Message::system(self.system_prompt.clone())])
+                .await;
+            session
+        } else {
+            let session = norte::harness::Session::new();
+            let _ = self.store.commit(norte::harness::Commit {
+                session_id: session.id,
+                expected_version: None,
+                nodes: Vec::new(),
+                head: None,
+                phase: norte::harness::Phase::Idle,
+                turn: 0,
+                metadata: None,
+            }).await;
+            session
+        };
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
         let record = SessionRecord {
             id: session.id,
