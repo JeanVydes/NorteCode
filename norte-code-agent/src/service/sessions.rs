@@ -247,10 +247,10 @@ impl Service {
         let Ok(session) = self.store.load(nid).await else {
             return false;
         };
-        if session.phase != norte::harness::Phase::Streaming {
+        if session.phase != crate::runtime::Phase::Streaming {
             return false;
         }
-        let commit = norte::harness::Commit {
+        let commit = crate::runtime::Commit {
             session_id: nid,
             expected_version: Some(session.version),
             nodes: Vec::new(),
@@ -259,7 +259,7 @@ impl Service {
             // is", which is what this wants — settling a phase does not move
             // the conversation.
             head: None,
-            phase: norte::harness::Phase::Idle,
+            phase: crate::runtime::Phase::Idle,
             turn: session.turn,
             metadata: None,
         };
@@ -286,7 +286,7 @@ impl Service {
     async fn read_phase(&self, entry: &StoredSession) -> (ProtocolPhase, bool) {
         let stored_phase = entry.phase;
         let phase = match self.store.load(entry.north).await {
-            Ok(session) if session.phase == norte::harness::Phase::Streaming => {
+            Ok(session) if session.phase == crate::runtime::Phase::Streaming => {
                 // The store outlived the streaming that wrote it, so the turn
                 // is not coming back in this process: settle it and tell the
                 // caller to rewrite the directory row from the same fact.
@@ -417,20 +417,26 @@ impl Service {
         let session = if let Some(engine) = &engine {
             let session = engine.create().await?;
             let _ = engine
-                .append_history(session.id, vec![norte::Message::system(self.system_prompt.clone())])
+                .append_history(
+                    session.id,
+                    vec![norte::Message::system(self.system_prompt.clone())],
+                )
                 .await;
             session
         } else {
-            let session = norte::harness::Session::new();
-            let _ = self.store.commit(norte::harness::Commit {
-                session_id: session.id,
-                expected_version: None,
-                nodes: Vec::new(),
-                head: None,
-                phase: norte::harness::Phase::Idle,
-                turn: 0,
-                metadata: None,
-            }).await;
+            let session = crate::runtime::Session::new();
+            let _ = self
+                .store
+                .commit(crate::runtime::Commit {
+                    session_id: session.id,
+                    expected_version: None,
+                    nodes: Vec::new(),
+                    head: None,
+                    phase: crate::runtime::Phase::Idle,
+                    turn: 0,
+                    metadata: None,
+                })
+                .await;
             session
         };
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
@@ -478,15 +484,36 @@ impl Service {
     ) -> Result<SessionKey, ServiceError> {
         let (source, spec, _) = self.require_record(from)?;
         let spec = spec.ok_or_else(|| ServiceError::UnknownSession(from.to_string()))?;
-        let engine = self.engine(&spec, Some(from))?;
-        let mut conversation = engine.export(source).await?;
-        // Norte's import preserves the conversation's session id, which is the
-        // right default for a backup/restore and exactly wrong for a fork: the
-        // store would reject it as a conflict with the source. A fork is an
-        // explicit new id, and the engine documents that it misses the provider
-        // cache for the copied prefix.
-        conversation.session = norte::SessionId::new();
-        let imported = engine.import(conversation).await?;
+        // Copy the source's committed history into a fresh session id, so the
+        // fork does not collide with its parent and the provider cache is
+        // rebuilt for the copied prefix.
+        let source_state = self.store.load(source).await.map_err(ServiceError::from)?;
+        let messages = self
+            .store
+            .history(source_state.head)
+            .await
+            .map_err(ServiceError::from)?;
+        let new_id = norte::SessionId::new();
+        let mut parent = None;
+        let mut nodes = Vec::with_capacity(messages.len());
+        for message in messages {
+            let node = crate::runtime::Node::message(message, parent);
+            parent = Some(node.id);
+            nodes.push(node);
+        }
+        let imported = self
+            .store
+            .commit(crate::runtime::Commit {
+                session_id: new_id,
+                expected_version: None,
+                nodes,
+                head: parent,
+                phase: crate::runtime::Phase::Idle,
+                turn: source_state.turn,
+                metadata: Some(source_state.metadata),
+            })
+            .await
+            .map_err(ServiceError::from)?;
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
         let record = SessionRecord {
             id: imported.id,

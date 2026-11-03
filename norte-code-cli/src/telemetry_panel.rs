@@ -714,7 +714,11 @@ impl Panel {
     #[allow(clippy::many_single_char_names)]
     #[allow(unused_variables)]
     #[allow(clippy::cast_possible_wrap)]
-    pub(crate) fn draw_chart(&self, frame: &mut crate::terminal::Draw<'_>, area: ratatui::layout::Rect) {
+    pub(crate) fn draw_chart(
+        &self,
+        frame: &mut crate::terminal::Draw<'_>,
+        area: ratatui::layout::Rect,
+    ) {
         if area.width < 14 || area.height < 8 {
             return;
         }
@@ -724,7 +728,8 @@ impl Panel {
         }
         let buckets = report_buckets(&self.scoped(), self.range);
         let n_pts = buckets.len().max(1);
-        let max_val = series.iter()
+        let max_val = series
+            .iter()
             .flat_map(|(_, pts)| pts.iter())
             .copied()
             .max()
@@ -755,10 +760,15 @@ impl Panel {
         let _plot_h = f64::from(area.height.saturating_sub(4));
 
         let canvas = ratatui::widgets::canvas::Canvas::default()
-            .block(ratatui::widgets::Block::default()
-                .title(format!(" {} by day ", self.metric.label()))
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_style(ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2))))
+            .block(
+                ratatui::widgets::Block::default()
+                    .title(format!(" {} by day ", self.metric.label()))
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .border_style(
+                        ratatui::style::Style::default()
+                            .fg(ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2)),
+                    ),
+            )
             .x_bounds([0.0, x_max])
             .y_bounds([0.0, y_max])
             .marker(ratatui::symbols::Marker::Braille)
@@ -772,7 +782,10 @@ impl Panel {
                         ratatui::style::Color::Rgb(0x2A, 0x2A, 0x2A)
                     };
                     ctx.draw(&ratatui::widgets::canvas::Line {
-                        x1: 0.0, y1: y, x2: x_max, y2: y,
+                        x1: 0.0,
+                        y1: y,
+                        x2: x_max,
+                        y2: y,
                         color,
                     });
                 }
@@ -780,7 +793,10 @@ impl Panel {
                 for i in 0..=4 {
                     let x = x_max * f64::from(i) / 4.0;
                     ctx.draw(&ratatui::widgets::canvas::Line {
-                        x1: x, y1: 0.0, x2: x, y2: y_max,
+                        x1: x,
+                        y1: 0.0,
+                        x2: x,
+                        y2: y_max,
                         color: ratatui::style::Color::Rgb(0x2A, 0x2A, 0x2A),
                     });
                 }
@@ -794,7 +810,10 @@ impl Panel {
                         let y = pt.1;
                         if y > 0.0 {
                             ctx.draw(&ratatui::widgets::canvas::Line {
-                                x1: x, y1: 0.0, x2: x, y2: y,
+                                x1: x,
+                                y1: 0.0,
+                                x2: x,
+                                y2: y,
                                 color: ratatui::style::Color::Rgb(r / 4, g / 4, b / 4),
                             });
                         }
@@ -807,7 +826,10 @@ impl Panel {
                     let data = &all_data[i];
                     for w in data.windows(2) {
                         ctx.draw(&ratatui::widgets::canvas::Line {
-                            x1: w[0].0, y1: w[0].1, x2: w[1].0, y2: w[1].1,
+                            x1: w[0].0,
+                            y1: w[0].1,
+                            x2: w[1].0,
+                            y2: w[1].1,
                             color,
                         });
                     }
@@ -829,9 +851,14 @@ impl Panel {
                     let (r, g, b) = colors[i % colors.len()];
                     let color = ratatui::style::Color::Rgb(r, g, b);
                     let data = &all_data[i];
-                    if let Some(max_pt) = data.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)) {
+                    if let Some(max_pt) = data
+                        .iter()
+                        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    {
                         ctx.draw(&ratatui::widgets::canvas::Circle {
-                            x: max_pt.0, y: max_pt.1, radius: 0.3,
+                            x: max_pt.0,
+                            y: max_pt.1,
+                            radius: 0.3,
                             color,
                         });
                     }
@@ -846,15 +873,21 @@ impl Panel {
             let mut legend = String::new();
             for (i, (label, _)) in series.iter().enumerate() {
                 let (r, g, b) = colors[i % colors.len()];
-                if i > 0 { legend.push_str("  "); }
+                if i > 0 {
+                    legend.push_str("  ");
+                }
                 legend.push_str(label);
             }
             // Draw legend as a dim line
             let legend_line = ratatui::text::Line::from(legend);
-            let legend_area = ratatui::layout::Rect::new(area.x + 2, legend_y, area.width.saturating_sub(4), 1);
+            let legend_area =
+                ratatui::layout::Rect::new(area.x + 2, legend_y, area.width.saturating_sub(4), 1);
             use ratatui::widgets::Widget as _;
             ratatui::widgets::Paragraph::new(legend_line)
-                .style(ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88)))
+                .style(
+                    ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::Rgb(0x88, 0x88, 0x88)),
+                )
                 .render(legend_area, frame.buffer_mut());
         }
     }
@@ -1032,12 +1065,7 @@ const BRAILLE_BASE: u32 = 0x2800;
 // (0,1)->0x02  (1,1)->0x10
 // (0,2)->0x04  (1,2)->0x20
 // (0,3)->0x40  (1,3)->0x80
-const BRAILLE_DOTS: [[u32; 2]; 4] = [
-    [0x01, 0x08],
-    [0x02, 0x10],
-    [0x04, 0x20],
-    [0x40, 0x80],
-];
+const BRAILLE_DOTS: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 /// A braille-based 2D plot: each terminal cell represents a 2x4 dot grid,
 /// giving much higher resolution than block characters. Multiple series can
@@ -1594,7 +1622,15 @@ mod tests {
         assert!(text.contains("openai/gpt-5"), "{text}");
         assert!(text.contains("openrouter/gpt-5"), "{text}");
         // A braille plot for the peak day and a lower column for the smaller one.
-        assert!(text.contains('⡇') || text.contains('⣿') || text.contains('⣶') || text.contains('⣤') || text.contains('⣀') || text.contains('⠿'), "{text}");
+        assert!(
+            text.contains('⡇')
+                || text.contains('⣿')
+                || text.contains('⣶')
+                || text.contains('⣤')
+                || text.contains('⣀')
+                || text.contains('⠿'),
+            "{text}"
+        );
     }
 
     #[test]

@@ -580,7 +580,9 @@ impl Modal {
                 inner.x,
                 inner.y + u16::try_from(shown).unwrap_or(u16::MAX),
                 inner.width,
-                inner.height.saturating_sub(u16::try_from(shown).unwrap_or(u16::MAX)),
+                inner
+                    .height
+                    .saturating_sub(u16::try_from(shown).unwrap_or(u16::MAX)),
             );
             if chart_area.height >= 5 {
                 panel.draw_chart(frame, chart_area);

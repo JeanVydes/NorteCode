@@ -3,11 +3,11 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::runtime::Harness;
+use crate::runtime::StreamDelta;
 use async_trait::async_trait;
 use chrono::Utc;
 use norte::ToolStream;
-use norte::harness::Harness;
-use norte::harness::StreamDelta;
 use norte::{
     CallId, Continuation, Layer, LayerContext, ModelRef, ModelRequest, ModelStream,
     ProviderErrorKind, SessionId, ShortCircuitReason, StreamEvent, Usage,
@@ -306,10 +306,10 @@ pub(super) async fn call_arguments(
         .map(|call| call.arguments.clone())
 }
 
-pub(super) fn to_phase(phase: norte::harness::Phase) -> norte_code_protocol::Phase {
+pub(super) fn to_phase(phase: crate::runtime::Phase) -> norte_code_protocol::Phase {
     match phase {
-        norte::harness::Phase::Streaming => norte_code_protocol::Phase::Streaming,
-        norte::harness::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
+        crate::runtime::Phase::Streaming => norte_code_protocol::Phase::Streaming,
+        crate::runtime::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
         _ => norte_code_protocol::Phase::Idle,
     }
 }

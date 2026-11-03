@@ -18,10 +18,12 @@ pub mod keys;
 pub mod plugins;
 pub mod skills;
 pub mod sqlite;
+pub mod store;
 pub mod tools;
 pub mod types;
 pub mod wire;
 
+pub use store::*;
 pub use types::*;
 pub use wire::*;
 

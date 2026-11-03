@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use crate::runtime::{EngineEvent, Observer};
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
-use norte::harness::{EngineEvent, Observer};
 use norte::{
     Continuation, Layer, LayerContext, ModelRequest, ModelStream, ReasoningRequest, StreamEvent,
     Usage,

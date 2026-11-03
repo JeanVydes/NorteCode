@@ -762,7 +762,7 @@ pub(crate) async fn new_session(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
     );
-    let session_store: Arc<dyn norte::harness::Store> = store.clone();
+    let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
     // Read before the config moves into the service: the renderer draws the diff
@@ -1060,7 +1060,7 @@ async fn resume_session(
         SqliteStore::open(&database)
             .map_err(|error| format!("could not open {}: {error}", database.display()))?,
     );
-    let session_store: Arc<dyn norte::harness::Store> = store.clone();
+    let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
     let blobs: Arc<dyn norte::BlobStore> = store.clone();
     let directory: Arc<dyn SessionDirectory> = store;
     // Read before the config moves into the service: the renderer draws the diff

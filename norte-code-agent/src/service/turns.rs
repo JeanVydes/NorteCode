@@ -11,8 +11,8 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use norte::harness::EngineEvent;
-use norte::harness::Harness;
+use crate::runtime::EngineEvent;
+use crate::runtime::Harness;
 use norte::{
     FinishReason, MediaKind, MediaPart, MediaSource, Message, MimeType, Part, ReasoningRequest,
     Role, SessionId, Usage,
@@ -70,12 +70,16 @@ impl Service {
     ) -> Result<EventStream, ServiceError> {
         let (key, mut nid, mut spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
-            let spec = spec.filter(|s| !s.model.trim().is_empty()).ok_or(ServiceError::Unsupported("no model is configured"))?;
+            let spec = spec
+                .filter(|s| !s.model.trim().is_empty())
+                .ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         } else {
             let key = self.create_session(None).await?;
             let (nid, spec, _) = self.require_record(&key)?;
-            let spec = spec.filter(|s| !s.model.trim().is_empty()).ok_or(ServiceError::Unsupported("no model is configured"))?;
+            let spec = spec
+                .filter(|s| !s.model.trim().is_empty())
+                .ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         };
         // Registered before the first await: a cancel that lands while the
@@ -407,13 +411,13 @@ impl Service {
             let mut interrupted = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
-            let mut outcome: Result<norte::harness::TurnOutcome, norte::Error> =
+            let mut outcome: Result<crate::runtime::TurnOutcome, norte::Error> =
                 Err(norte::Error::Other("not run".to_owned()));
 
             'stepping: loop {
                 match stepped.step().await {
-                    Ok(Some(norte::harness::StepResult {
-                        step: norte::harness::Step::Tools,
+                    Ok(Some(crate::runtime::StepResult {
+                        step: crate::runtime::Step::Tools,
                         events,
                     })) => {
                         current_nid = stepped.session().id;
@@ -442,9 +446,9 @@ impl Service {
                             break 'stepping;
                         }
                     }
-                    Ok(Some(norte::harness::StepResult {
+                    Ok(Some(crate::runtime::StepResult {
                         step:
-                            norte::harness::Step::Generated {
+                            crate::runtime::Step::Generated {
                                 message: _,
                                 interrupted: iv,
                             },
@@ -497,8 +501,8 @@ impl Service {
                             break 'stepping;
                         }
                     }
-                    Ok(Some(norte::harness::StepResult {
-                        step: norte::harness::Step::Done(o),
+                    Ok(Some(crate::runtime::StepResult {
+                        step: crate::runtime::Step::Done(o),
                         events,
                     })) => {
                         outcome = Ok(*o);
@@ -778,7 +782,7 @@ impl Service {
                     // settles the same leftover, and the invariant is one rule
                     // either way: the host never leaves a session it is not
                     // streaming in `Streaming`.
-                    let settled = outcome.session.phase == norte::harness::Phase::Streaming
+                    let settled = outcome.session.phase == crate::runtime::Phase::Streaming
                         && self.settle_streaming_to_idle(current_nid).await;
                     let phase = if settled {
                         norte_code_protocol::Phase::Idle
@@ -801,7 +805,7 @@ impl Service {
                     .await;
                     if !compacted_eagerly
                         && !interrupted
-                        && outcome.session.phase == norte::harness::Phase::Idle
+                        && outcome.session.phase == crate::runtime::Phase::Idle
                         && self.budget_stopped(key).is_none()
                         && let Ok((current, Some(spec), _)) = self.require_record(key)
                         && self

@@ -35,8 +35,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::runtime::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
 use base64::Engine as _;
-use norte::harness::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
 use norte::media::{ImageOutput, ImagePreprocessor};
 use norte::{
     BlobStore, Capabilities, FnExecutor, MediaKind, MediaPart, MediaPayload, MediaPreprocessor,
@@ -277,7 +277,7 @@ pub(super) fn preprocessor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norte::harness::{EngineEvent, EventSink};
+    use crate::runtime::{EngineEvent, EventSink};
     use norte::{InMemoryBlobStore, Role};
 
     /// A one-pixel PNG: small, real, and enough to prove the bytes survive.

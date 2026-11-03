@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::runtime::EngineEvent;
 use async_trait::async_trait;
-use norte::harness::EngineEvent;
 use norte::{
     Continuation, Layer, LayerContext, Message, ModelRequest, ModelStream,
     Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role, ShortCircuitReason,
@@ -43,7 +43,7 @@ impl Service {
         };
         let engine = self.engine(spec, Some(key))?;
         let state = engine.session(nid).await?;
-        if state.phase != norte::harness::Phase::Idle {
+        if state.phase != crate::runtime::Phase::Idle {
             return Ok(false);
         }
         let history = engine.history(nid).await?;
@@ -155,7 +155,7 @@ impl Service {
         let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
         let engine = self.engine(&spec, Some(key))?;
         let state = engine.session(old).await?;
-        if state.phase != norte::harness::Phase::Idle {
+        if state.phase != crate::runtime::Phase::Idle {
             return Err(ServiceError::Compaction(
                 "the Norte session is not idle; resolve the turn first".to_owned(),
             ));
@@ -190,8 +190,8 @@ impl Service {
             .tools(std::iter::empty::<norte::ToolName>())
             .start_stepped();
         let outcome = loop {
-            if let Some(norte::harness::StepResult {
-                step: norte::harness::Step::Done(outcome),
+            if let Some(crate::runtime::StepResult {
+                step: crate::runtime::Step::Done(outcome),
                 ..
             }) = turn.step().await?
             {

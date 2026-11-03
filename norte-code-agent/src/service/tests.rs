@@ -16,15 +16,16 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::runtime::InMemoryBlobStore;
+use crate::runtime::{Interception, InterceptionContext, TurnInterceptor};
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use norte::harness::{InMemoryBlobStore, InMemoryStore};
-use norte::harness::{Interception, InterceptionContext, TurnInterceptor};
 use norte::{
     CallId, Capabilities, Message, ModelId, ModelRef, ModelRequest, ModelStream, ProviderErrorKind,
     ProviderId, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
     ToolContext, Usage,
 };
+use norte_code_protocol::InMemoryStore;
 use norte_code_protocol::catalog::WireSchema;
 use norte_code_protocol::config::{ApiKey, BudgetConfig, CompactionTrigger, RetryConfig};
 use norte_code_protocol::sqlite::{RequestStatus, SqliteStore};
@@ -1060,7 +1061,7 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
     // Write a list the way the model does: a committed `todo` call.
     let call = CallId::new();
     let engine = service.engine(&spec("scripted"), None).expect("engine");
-    let node = norte::harness::Node::message(
+    let node = crate::runtime::Node::message(
         Message::new(
             Role::Assistant,
             vec![norte::Part::ToolCall(norte::ToolCallPart {
@@ -1086,12 +1087,12 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
     // the model already made.
     let head = node.id;
     store
-        .commit(norte::harness::Commit {
+        .commit(crate::runtime::Commit {
             session_id: nid,
             expected_version: Some(session.version),
             nodes: vec![node],
             head: Some(head),
-            phase: norte::harness::Phase::Idle,
+            phase: crate::runtime::Phase::Idle,
             turn: session.turn,
             metadata: None,
         })
@@ -1301,15 +1302,15 @@ async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
     // session already exists (creating it committed once), so the write carries
     // the version it holds.
     let current = store.load(nid).await.expect("session");
-    let node = norte::harness::Node::message(Message::user("committed"), current.head);
+    let node = crate::runtime::Node::message(Message::user("committed"), current.head);
     let head = node.id;
     store
-        .commit(norte::harness::Commit {
+        .commit(crate::runtime::Commit {
             session_id: nid,
             expected_version: Some(current.version),
             nodes: vec![node],
             head: Some(head),
-            phase: norte::harness::Phase::Streaming,
+            phase: crate::runtime::Phase::Streaming,
             turn: 1,
             metadata: None,
         })
@@ -1335,7 +1336,7 @@ async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
     let session = store.load(nid).await.expect("session");
     assert_eq!(
         session.phase,
-        norte::harness::Phase::Idle,
+        crate::runtime::Phase::Idle,
         "reopening must settle a session no process is streaming"
     );
     assert_eq!(
@@ -2760,7 +2761,7 @@ async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
     let (nid, _, _) = service.require_record(&key).expect("record");
     assert_eq!(
         store.load(nid).await.expect("session").phase,
-        norte::harness::Phase::Idle,
+        crate::runtime::Phase::Idle,
         "the store, not just the reported phase, must be idle"
     );
 

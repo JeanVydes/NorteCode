@@ -9,6 +9,7 @@
 
 pub mod error;
 pub mod provider;
+pub mod runtime;
 pub mod service;
 pub mod telemetry;
 

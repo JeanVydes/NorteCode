@@ -4274,11 +4274,11 @@ mod tests {
     async fn a_held_provider_switch_is_taken_by_the_turn_boundary_handler() {
         use std::collections::BTreeMap;
 
-        use norte::harness::{InMemoryBlobStore, InMemoryStore};
         use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
         use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
         use norte_code_protocol::catalog::Catalog;
         use norte_code_protocol::config::{ApiKey, Config};
+        use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
         use norte_testing::ScriptedModel;
 
         struct Factory(Arc<dyn Model>);
@@ -4404,11 +4404,11 @@ mod tests {
     async fn the_catalogue_reaches_the_pinned_handle_the_frame_completes_from() {
         use std::collections::BTreeMap;
 
-        use norte::harness::{InMemoryBlobStore, InMemoryStore};
         use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
         use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
         use norte_code_protocol::catalog::Catalog;
         use norte_code_protocol::config::{ApiKey, Config};
+        use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
         use norte_testing::ScriptedModel;
 
         struct Factory(Arc<dyn Model>);
@@ -4545,7 +4545,6 @@ mod tests {
     async fn cancel_before_first_token_returns_cli() {
         use crate::input::{EditorAction, EditorEvent, InteractiveInput};
         use async_trait::async_trait;
-        use norte::harness::{InMemoryBlobStore, InMemoryStore};
         use norte::{
             Capabilities, Model, ModelId, ModelRef, ModelRequest, ModelStream, ProviderId,
         };
@@ -4553,6 +4552,7 @@ mod tests {
         use norte_code_protocol::ClientRequest;
         use norte_code_protocol::catalog::Catalog;
         use norte_code_protocol::config::Config;
+        use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
         use norte_testing::ScriptedModel;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};

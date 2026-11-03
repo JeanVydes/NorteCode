@@ -18,7 +18,7 @@ authors = ["Jean Vides <j@vyde.dev>"]
 # pulled over git on the `dev` branch and the exact revision is pinned in
 # Cargo.lock, which this application commits.
 [workspace.dependencies]
-norte = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev", features = ["full"] }
+norte = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev", features = ["openai", "anthropic", "gemini", "tools", "media", "mcp", "http"] }
 norte-testing = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
 norte-mcp = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
 norte-tools = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }

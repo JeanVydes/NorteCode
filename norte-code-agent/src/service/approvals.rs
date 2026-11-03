@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use norte::harness::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
+use crate::runtime::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
 use norte::{Result, SessionId};
 use norte_code_protocol::config::ApprovalsConfig;
 

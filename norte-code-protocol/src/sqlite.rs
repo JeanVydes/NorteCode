@@ -1,4 +1,4 @@
-//! A `SQLite` [`norte::harness::Store`] and [`norte::BlobStore`] for Norte Code.
+//! A `SQLite` [`norte_code_protocol::Store`] and [`norte::BlobStore`] for Norte Code.
 //!
 //! Implements Norte's durability contract with compare-and-swap on the session
 //! version and one transaction per commit, and adds Norte Code's own tables
@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::Phase;
 use crate::costs::CostRecord;
+use crate::store::{Commit, Node, Session, Store};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use norte::harness::{Commit, Node, Session, Store};
 use norte::{BlobId, BlobStore, CallId, Error, NodeId, Result, SessionId};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -1942,14 +1942,8 @@ impl SessionDirectory for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norte::harness::Phase as NortePhase;
+    use crate::store::SessionPhase as NortePhase;
     use norte::{CallId, Message};
-
-    #[tokio::test]
-    async fn passes_nortes_store_conformance() {
-        let store = SqliteStore::in_memory().expect("open");
-        norte_testing::store_conformance(&store).await;
-    }
 
     #[tokio::test]
     async fn costs_round_trip_and_replace_by_request_index() {

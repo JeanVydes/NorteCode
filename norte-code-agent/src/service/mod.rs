@@ -32,11 +32,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::runtime::TurnInterceptor;
+use crate::runtime::{Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, Store};
 use futures_core::Stream;
-use norte::harness::TurnInterceptor;
-use norte::harness::{
-    Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, InMemoryStore, Store,
-};
 use norte::http::{HttpClient, HttpMedia};
 use norte::{
     AnyFunction, BlobStore, Layer, LayerStack, MediaAdapter, Model, ToolArgs, ToolDeclaration,
@@ -411,7 +409,7 @@ impl Service {
             catalog,
             Some(spec.clone()),
             factory,
-            Arc::new(InMemoryStore::new()),
+            Arc::new(norte_code_protocol::InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
             system_prompt,
         )
@@ -477,7 +475,7 @@ impl Service {
             })
             .observers(vec![
                 Arc::new(TelemetryObserver::new(Arc::clone(&self.telemetry)))
-                    as Arc<dyn norte::harness::Observer>,
+                    as Arc<dyn crate::runtime::Observer>,
             ])
             .interceptors({
                 // The steering comes first: a message the host holds belongs

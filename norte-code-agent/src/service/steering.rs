@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use norte::harness::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
+use crate::runtime::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
 use norte::{Message, Result, SessionId};
 use serde::{Deserialize, Deserializer, Serialize};
 
