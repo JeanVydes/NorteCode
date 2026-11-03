@@ -182,8 +182,8 @@ account the provider id) and then `${XDG_CONFIG_HOME}/norte-code/secrets.json`,
 which is written with mode 0600. Selecting a model from `/model` or `/models`
 when the key is still missing opens a masked prompt and saves what you type to
 the keyring, or to `secrets.json` when no keyring is available. Keys are held in
-Norte's redacted secret type and never enter a model event, a log or a child
-process.
+the client's redacted `ApiKey` type and never enter a model event, a log or a
+child process.
 
 When a provider serves several wires, `--wire` picks one; otherwise the order is
 `openai`, then `anthropic`, then `google`.
