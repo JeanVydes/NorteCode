@@ -70,12 +70,12 @@ impl Service {
     ) -> Result<EventStream, ServiceError> {
         let (key, mut nid, mut spec) = if let Some(key) = session {
             let (nid, spec, _) = self.require_record(&key)?;
-            let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
+            let spec = spec.filter(|s| !s.model.trim().is_empty()).ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         } else {
             let key = self.create_session(None).await?;
             let (nid, spec, _) = self.require_record(&key)?;
-            let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
+            let spec = spec.filter(|s| !s.model.trim().is_empty()).ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         };
         // Registered before the first await: a cancel that lands while the

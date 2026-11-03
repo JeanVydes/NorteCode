@@ -386,7 +386,9 @@ impl Service {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        if let Some(spec) = spec {
+        if let Some(spec) = spec
+            && !spec.model.trim().is_empty()
+        {
             let _ = service.engine(&spec, None)?;
         }
         Ok(service)
@@ -1464,6 +1466,9 @@ impl Service {
         // does not carry is not resolved from somewhere else: there is nowhere
         // else. A provider is in `providers.json` or it is unknown, and a model
         // is in `models.json` or it is unknown.
+        if provider.trim().is_empty() || model.trim().is_empty() {
+            return Err(ServiceError::Unsupported("no model is configured"));
+        }
         let spec = ModelSpec::from_catalog(config, catalog, provider, model, None)?;
         // The key is in hand now, so it joins the redaction list even when the
         // spec is rebuilt for a session the startup pass never resolved.

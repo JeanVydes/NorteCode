@@ -220,6 +220,9 @@ impl ModelFactory for VendorModels {
         capabilities: &Capabilities,
     ) -> Result<Arc<dyn Model>, ServiceError> {
         let key = spec.api_key.expose().to_owned();
+        if spec.provider.trim().is_empty() || spec.model.trim().is_empty() {
+            return Err(ServiceError::Unsupported("no model is configured"));
+        }
         let provider = ProviderId::new(spec.provider.clone())?;
         let model_id = ModelId::new(spec.model.clone())?;
         let reference = ModelRef::new(provider.clone(), model_id);
