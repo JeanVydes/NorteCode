@@ -634,24 +634,6 @@ fn stream_delta(event: &StreamEvent) -> Option<StreamDelta> {
     }
 }
 
-/// What the host decided, and what the engine did about it.
-struct Consultation {
-    /// The session after the messages the host added.
-    session: Session,
-    /// Whether the host asked for the turn to end.
-    stop: Option<String>,
-}
-
-impl Consultation {
-    /// A consultation that changed nothing.
-    fn unchanged(session: Session) -> Self {
-        Self {
-            session,
-            stop: None,
-        }
-    }
-}
-
 /// The digest of a request, over its canonical JSON text.
 fn digest_of(request: &ModelRequest) -> Digest {
     Digest::of_json(&serde_json::to_value(request).unwrap_or(Value::Null))
@@ -1163,6 +1145,24 @@ pub fn usage_of(message: &Message) -> Usage {
 
 pub use norte::blob::InMemoryBlobStore;
 
+/// What the host decided, and what the engine did about it.
+struct Consultation {
+    /// The session after the messages the host added.
+    session: Session,
+    /// Whether the host asked for the turn to end.
+    stop: Option<String>,
+}
+
+impl Consultation {
+    /// A consultation that changed nothing.
+    fn unchanged(session: Session) -> Self {
+        Self {
+            session,
+            stop: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,3 +1264,4 @@ mod tests {
         assert!(chunks[2].1, "the last chunk closes the stream");
     }
 }
+
