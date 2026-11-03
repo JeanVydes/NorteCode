@@ -3264,25 +3264,13 @@ pub(crate) async fn drive_turns(
                                         request_id: 0,
                                         kind: ClientRequestKind::CancelTurn { session },
                                     };
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_secs(5),
-                                        service.submit(request),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Err(error)) => {
-                                            renderer.notice(format!(
-                                                "warning: could not cancel the turn: {error}"
-                                            ));
-                                        }
-                                        Err(_) => {
-                                            renderer.notice(
-                                                "warning: cancel request timed out; retrying…"
-                                                    .to_owned(),
-                                            );
-                                        }
-                                        Ok(Ok(_)) => {}
-                                    }
+                                    // Fire-and-forget: don't await the cancel request, as it
+                                    // may block if the service is busy. The cancel token is
+                                    // signalled by the server when it processes the request.
+                                    let service = Arc::clone(service);
+                                    tokio::spawn(async move {
+                                        let _ = service.submit(request).await;
+                                    });
                                 }
                                 continue;
                             }
@@ -3335,22 +3323,11 @@ pub(crate) async fn drive_turns(
                             request_id: 0,
                             kind: ClientRequestKind::CancelTurn { session },
                         };
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            service.submit(request),
-                        )
-                        .await
-                        {
-                            Ok(Err(error)) => {
-                                renderer.notice(format!("warning: could not cancel the turn: {error}"));
-                            }
-                            Err(_) => {
-                                renderer.notice(
-                                    "warning: cancel request timed out; retrying…".to_owned(),
-                                );
-                            }
-                            Ok(Ok(_)) => {}
-                        }
+                        // Fire-and-forget: don't await the cancel request.
+                        let service = Arc::clone(service);
+                        tokio::spawn(async move {
+                            let _ = service.submit(request).await;
+                        });
                         continue;
                     }
                     Wake::Line(line, attachments) => {
