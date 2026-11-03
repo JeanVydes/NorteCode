@@ -144,6 +144,47 @@ pub(crate) async fn submit_answer(
     Ok(false)
 }
 
+/// Asks for a secret without ever drawing it.
+///
+/// The box is the one a model question uses, already open and masked. `None`
+/// means the person left it (Escape, Ctrl-C or Ctrl-G), which is a decision and
+/// not an error. The caller owns the value: it is saved to the key store and
+/// never sent as a line or a question.
+pub(crate) async fn ask_secret(
+    prompt: &str,
+    pinned: &Arc<crate::input::Pinned>,
+    input: &mut crate::input::InteractiveInput,
+    draw: &mut impl FnMut() -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    pinned.ask_masked(crate::text::terminal(prompt).into_owned());
+    draw()?;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(QUESTION_TICK_MS));
+    let answer = loop {
+        let next = tokio::select! {
+            biased;
+            event = input.recv() => event,
+            _ = tick.tick() => {
+                draw()?;
+                continue;
+            }
+        };
+        match next {
+            Some(crate::input::EditorEvent::Question(crate::input::Answer::Typed(text))) => {
+                break Some(text);
+            }
+            Some(
+                crate::input::EditorEvent::Question(crate::input::Answer::Left)
+                | crate::input::EditorEvent::End,
+            )
+            | None => break None,
+            _ => {}
+        }
+    };
+    pinned.retire();
+    draw()?;
+    Ok(answer)
+}
+
 /// The three outcomes of waiting for one line of input.
 pub(crate) enum PromptInput {
     /// A line, with its trailing newline removed.

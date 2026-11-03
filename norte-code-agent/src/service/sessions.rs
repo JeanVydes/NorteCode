@@ -187,7 +187,7 @@ impl Service {
                 // to reopen on it: going straight to the catalogue dropped every
                 // such session onto the default model, so a `exa` session came
                 // back as whatever the config's default was.
-                match Service::default_spec_for(
+                match self.default_spec_for(
                     &self.lock_config(),
                     &catalog,
                     &entry.provider,

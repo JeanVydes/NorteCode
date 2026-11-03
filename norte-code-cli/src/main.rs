@@ -16,6 +16,7 @@ mod commands_registry;
 mod input;
 mod installs;
 mod interaction;
+mod keys;
 mod markdown;
 mod modal;
 mod models;
@@ -643,6 +644,10 @@ pub(crate) async fn new_session(
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
+    // Installed before the first spec is resolved: the mask is what lets a key
+    // saved in the OS store answer a model that has no environment variable.
+    let mut config = config;
+    config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
     let (provider, model) =
         session_choice(choice.as_ref(), args.provider.clone(), args.model.clone());
     let spec = resolve_spec(
@@ -655,7 +660,6 @@ pub(crate) async fn new_session(
     )?;
     let model_label = spec.label();
     let provider = spec.provider.clone();
-    let mut config = config;
     CommonOptions {
         max_iterations: args.max_iterations,
         compaction_threshold: args.compaction_threshold,
@@ -859,6 +863,8 @@ async fn resume_session(
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
+    let mut config = config;
+    config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
     let session_key = args
         .session
         .clone()
@@ -899,7 +905,6 @@ async fn resume_session(
             }
         }
     }
-    let mut config = config;
     CommonOptions {
         max_iterations: args.max_iterations,
         compaction_threshold: args.compaction_threshold,

@@ -4,9 +4,11 @@
 //! per-project overlay, where the project wins. Every key has a documented
 //! default, and a validation error names the field that is wrong.
 //!
-//! Secrets are not stored here by default. A provider names an environment
-//! variable (`api_key_env`) or a file (`api_key_file`); the key is resolved on
-//! demand into a [`ApiKey`], whose `Debug` output is redacted.
+//! Secrets are not stored in `config.json`. A provider names the environment
+//! variables it accepts (the catalogue's `environment_keys`); a host may install
+//! a [`KeyStore`](crate::keys::KeyStore) to add the OS keyring and the 0600
+//! `secrets.json` fallback. The key is resolved on demand into an [`ApiKey`],
+//! whose `Debug` output is redacted.
 
 #![forbid(unsafe_code)]
 
@@ -15,8 +17,10 @@ use std::fmt;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::keys::KeyStore;
 use crate::{BudgetAction, BudgetUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -85,6 +89,13 @@ pub struct Config {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    /// The host's provider-key source.
+    ///
+    /// It is installed after loading — the CLI installs the OS keyring and the
+    /// 0600 fallback — and is never serialized, so a key cannot reach a config
+    /// file through it. `None` resolves environment variables only.
+    #[serde(skip)]
+    pub keys: Option<Arc<dyn KeyStore>>,
 }
 
 /// One MCP server the agent may reach.
@@ -199,6 +210,7 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             skills: SkillsConfig::default(),
             mcp_servers: BTreeMap::new(),
+            keys: None,
         }
     }
 }
@@ -910,40 +922,42 @@ impl Config {
         Ok(())
     }
 
-    /// Resolves a provider's API key from the environment.
+    /// Resolves a provider's API key.
     ///
     /// The names come from the catalogue's provider entry (`environment_keys`),
     /// in the order it lists them, and the first one that is set and not empty
-    /// wins. There is no second source: the configuration no longer knows about
-    /// providers, so a key is in the environment or the provider does not have
-    /// one.
+    /// wins. When the host installed a [`KeyStore`], it continues from there:
+    /// its cache, the OS keyring and the 0600 secrets file. Without one, the
+    /// environment is the only source.
     ///
     /// A provider that names no variable is not an error here — it is a
     /// provider that needs no credential, which is what a local endpoint is.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Secret`] when the provider names variables and
-    /// none of them holds a value.
+    /// Returns [`ConfigError::Secret`] when no source holds a value.
     pub fn resolve_api_key(
         &self,
         provider: &str,
         environment_keys: &[String],
     ) -> Result<ApiKey, ConfigError> {
-        for name in environment_keys {
-            if let Ok(value) = std::env::var(name)
-                && !value.trim().is_empty()
-            {
-                return Ok(ApiKey::new(value.trim().to_owned()));
-            }
+        match &self.keys {
+            Some(keys) => keys.resolve(provider, environment_keys),
+            None => crate::keys::environment_key(provider, environment_keys),
         }
-        if environment_keys.is_empty() {
-            return Ok(ApiKey::new(String::new()));
+    }
+
+    /// The key already known without asking the OS keyring.
+    ///
+    /// This is what redaction uses. A host's store contributes its environment,
+    /// cache and 0600-file keys; the OS keyring is deliberately not queried, so
+    /// a startup pass does not unlock a keyring once per provider.
+    #[must_use]
+    pub fn known_api_key(&self, provider: &str, environment_keys: &[String]) -> Option<ApiKey> {
+        match &self.keys {
+            Some(keys) => keys.known(provider, environment_keys),
+            None => crate::keys::environment_value(environment_keys),
         }
-        Err(ConfigError::Secret {
-            provider: provider.to_owned(),
-            message: format!("no value in any of: {}", environment_keys.join(", ")),
-        })
     }
 }
 
@@ -1118,12 +1132,28 @@ pub fn update_user_default(path: &Path, provider: &str, model: &str) -> Result<(
 }
 
 /// Writes a config file atomically, preserving an existing symlink and mode.
+fn atomic_write(path: &Path, body: &[u8]) -> Result<(), ConfigError> {
+    atomic_write_with(path, body, false)
+}
+
+/// Writes a file atomically, preserving an existing symlink and mode.
 ///
 /// A fixed temporary name would race with another Norte Code process, and a
 /// truncating write would lose the file if the process died halfway. Write a
 /// unique sibling with `create_new`, then rename it over the target.
-fn atomic_write(path: &Path, body: &[u8]) -> Result<(), ConfigError> {
+///
+/// `force_private` makes the result mode 0600 even when the target already
+/// existed with broader permissions. The secrets file uses it; a config file
+/// keeps the mode a person gave it.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn atomic_write_with(
+    path: &Path,
+    body: &[u8],
+    force_private: bool,
+) -> Result<(), ConfigError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(not(unix))]
+    let _ = force_private;
     let target = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             fs::canonicalize(path).map_err(|source| ConfigError::Write {
@@ -1195,7 +1225,13 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), ConfigError> {
             let mut file = file;
             file.write_all(body)?;
             file.sync_all()?;
-            if let Some(permissions) = &permissions {
+            if force_private {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+                }
+            } else if let Some(permissions) = &permissions {
                 file.set_permissions(permissions.clone())?;
             }
             drop(file);
@@ -2004,6 +2040,52 @@ mod tests {
             .resolve_api_key("nobody", &["NORTE_CODE_TEST_NOBODY_API_KEY".to_owned()])
             .expect_err("key");
         assert!(error.to_string().contains("NORTE_CODE_TEST_NOBODY_API_KEY"));
+    }
+
+    #[derive(Debug)]
+    struct FakeKeys;
+
+    impl crate::keys::KeyStore for FakeKeys {
+        fn resolve(
+            &self,
+            provider: &str,
+            _environment_keys: &[String],
+        ) -> Result<ApiKey, ConfigError> {
+            Ok(ApiKey::new(format!("{provider}-key")))
+        }
+
+        fn known(&self, provider: &str, _environment_keys: &[String]) -> Option<ApiKey> {
+            Some(ApiKey::new(format!("{provider}-key")))
+        }
+
+        fn save(
+            &self,
+            _provider: &str,
+            _key: &str,
+        ) -> Result<crate::keys::KeyStorage, crate::keys::KeyStoreError> {
+            Ok(crate::keys::KeyStorage::Keyring)
+        }
+    }
+
+    #[test]
+    fn a_host_store_answers_and_is_never_serialized() {
+        let config = Config {
+            keys: Some(Arc::new(FakeKeys)),
+            ..Config::default()
+        };
+        let key = config
+            .resolve_api_key("ollamacloud", &["NORTE_CODE_TEST_ABSENT_KEY".to_owned()])
+            .expect("key");
+        assert_eq!(key.expose(), "ollamacloud-key");
+        assert_eq!(
+            config
+                .known_api_key("ollamacloud", &[])
+                .expect("known")
+                .expose(),
+            "ollamacloud-key"
+        );
+        let value = serde_json::to_value(&config).expect("serialize");
+        assert!(value.get("keys").is_none(), "the store is not a file field");
     }
 }
 

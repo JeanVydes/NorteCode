@@ -246,13 +246,12 @@ fn session_items(rows: &[SessionRow]) -> Vec<Item> {
 
 /// Asks which provider and which model a new session should use.
 ///
-/// The providers a person actually has are the ones named in the configuration:
-/// they carry a key, an endpoint and a wire, so they are listed first and the
-/// catalogue follows. The catalogue is the whole of models.dev — hundreds of
-/// providers — so printing it all would bury the two or three that matter under
-/// a screenful nobody reads. The list is what the cursor walks; a name the cursor
-/// does not reach is typed into the filter, which is what narrows the list and,
-/// when it matches nothing, is the name itself.
+/// The catalogue is the whole of models.dev — hundreds of providers — so printing
+/// it all would bury the two or three that matter under a screenful nobody reads.
+/// The list is what the cursor walks; a name the cursor does not reach is typed
+/// into the filter, which is what narrows the list and, when it matches nothing,
+/// is the name itself. A provider's key is resolved after the choice, from the
+/// environment, the OS keyring or `secrets.json`.
 #[allow(clippy::too_many_lines)] // one arm per question, which is the dialogue.
 pub(crate) fn choose_model(
     config: &mut Config,

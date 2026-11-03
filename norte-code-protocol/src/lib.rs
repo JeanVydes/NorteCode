@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod commands;
 pub mod config;
 pub mod costs;
+pub mod keys;
 pub mod plugins;
 pub mod skills;
 pub mod sqlite;

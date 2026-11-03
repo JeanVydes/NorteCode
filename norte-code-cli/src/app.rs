@@ -143,6 +143,8 @@ pub(crate) struct Question {
     pub(crate) taken: Vec<usize>,
     /// Whether the free-text box is open.
     pub(crate) typing: bool,
+    /// Whether the answer is a secret: no list, and only bullets are drawn.
+    pub(crate) masked: bool,
 }
 
 impl State {
@@ -168,6 +170,11 @@ impl State {
         // opens the box, and the box itself once it is open. Counting it as one
         // row is what once cut the list to the prompt alone.
         let question = self.question.as_ref().map_or(0, |question| {
+            // A secret has no list and no "something else" row: the prompt and
+            // the box are the whole question.
+            if question.masked {
+                return 1_u16.saturating_add(u16::from(question.typing));
+            }
             let choices = u16::try_from(question.choices.len()).unwrap_or(u16::MAX);
             1_u16
                 .saturating_add(choices)
@@ -1133,8 +1140,9 @@ fn draw_question(
     }
     // The row that opens the box is not a choice and is drawn last, even when the
     // model offered nothing: a question with no choices still has to be
-    // answerable, and this is the row that makes it so.
-    {
+    // answerable, and this is the row that makes it so. A secret has no list to
+    // open a box from: the box is the question.
+    if !question.masked {
         let here = question.cursor >= question.choices.len();
         let text = format!(
             "{} {}",
@@ -1998,6 +2006,7 @@ mod tests {
             multiple: false,
             taken: Vec::new(),
             typing: false,
+            masked: false,
         });
         let screen = screen_of(&state, 60, 20).join("\n");
         assert!(screen.contains("which one?"), "{screen}");
@@ -2019,10 +2028,30 @@ mod tests {
             multiple: false,
             taken: Vec::new(),
             typing: false,
+            masked: false,
         });
         let screen = screen_of(&state, 60, 20).join("\n");
         assert!(screen.contains("what now?"), "{screen}");
         assert!(screen.contains("something else"), "{screen}");
+    }
+
+    #[test]
+    fn a_masked_question_is_a_prompt_and_a_box_without_a_list() {
+        let mut state = State::new();
+        state.question = Some(Question {
+            prompt: "API key for ollamacloud".to_owned(),
+            choices: Vec::new(),
+            cursor: 0,
+            multiple: false,
+            taken: Vec::new(),
+            typing: true,
+            masked: true,
+        });
+        state.input = "••••••".to_owned();
+        let screen = screen_of(&state, 60, 20).join("\n");
+        assert!(screen.contains("API key for ollamacloud"), "{screen}");
+        assert!(screen.contains("••••••"), "the masked box: {screen}");
+        assert!(!screen.contains("something else"), "no list: {screen}");
     }
 
     #[test]

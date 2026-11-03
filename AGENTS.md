@@ -163,8 +163,11 @@ feature.
 - Provider-reported cost only. Never derive a price from a list price; the
   catalogue may carry `pricing` for reference and it is never a source of cost.
 - OpenAI, Anthropic, Gemini and OpenRouter (OpenAI-compatible chat) are the v1
-  providers. Keys come from the environment, named by the provider's
-  `environment_keys`, are held in Norte's `Secret`, and never reach a model
-  event, a log or a child process.
+  providers. Keys come from the environment first, named by the provider's
+  `environment_keys`; then the OS keyring (service `norte-code`, account the
+  provider id); then `secrets.json` beside the configuration, written with mode
+  0600. `/model` and `/models` prompt for a missing key in a masked box and save
+  it. Keys are held in Norte's `Secret`, and never reach a model event, a log or
+  a child process.
 - The command tool clears the environment: pass only what is needed, and register
   every configured key with `with_secrets` so it is redacted.

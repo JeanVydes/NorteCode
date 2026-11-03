@@ -90,15 +90,6 @@ impl ModelChoice {
             model: model.into(),
         }
     }
-
-    /// The label a person reads: `provider/model`.
-    ///
-    /// It is what the footer shows and what a report prints. It is never parsed
-    /// back into the two halves.
-    #[must_use]
-    pub(crate) fn label(&self) -> String {
-        format!("{}/{}", self.provider, self.model)
-    }
 }
 
 /// The provider and the model a new session opens on.
@@ -282,7 +273,7 @@ mod tests {
         assert_eq!(choice.model, "nvidia/nemotron-3.5-super-vl-120b-a12b");
         // The label is a label: it is what a person reads, not what is parsed.
         assert_eq!(
-            choice.label(),
+            format!("{}/{}", choice.provider, choice.model),
             "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b"
         );
     }

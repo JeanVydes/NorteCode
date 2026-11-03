@@ -14,16 +14,16 @@ names only which pair a new session opens on:
 
 ## The key
 
-A key comes from the environment, and from the variables the provider names:
+A key comes from the environment, the OS keyring, or a private file:
 
 ```json
 {
   "providers": {
-    "openrouter": {
-      "name": "OpenRouter",
-      "environment_keys": ["OPENROUTER_API_KEY", "OPENAI_API_KEY"],
+    "ollamacloud": {
+      "name": "Ollama Cloud",
+      "environment_keys": ["OLLAMACLOUD_API_KEY"],
       "wires": [
-        { "api": "https://openrouter.ai/api/v1", "schema": "openai" }
+        { "api": "https://ollama.com/v1", "schema": "openai" }
       ]
     }
   }
@@ -34,15 +34,31 @@ A key comes from the environment, and from the variables the provider names:
 wins. It is a list because a gateway often reads its own variable and the one you
 already have exported.
 
-A provider that names none needs no key, which is what a local endpoint is. A
-provider whose variables are all unset is an error naming them:
+If no variable holds a key, the client reads the OS keyring — service
+`norte-code`, account the provider id, so `ollamacloud` above — and then
+`secrets.json` beside the configuration, written with mode 0600:
+
+```json
+{ "ollamacloud": "sk-..." }
+```
+
+The account is always the provider id, never the variable name.
+
+A provider that names none needs no key, which is what a local endpoint is.
+
+Selecting a model from `/model` or `/models` when the key is still missing opens
+a masked prompt. What you type goes to the keyring, or to `secrets.json` when no
+keyring is available, and the switch continues. Escape cancels the prompt and
+leaves the current model in place. A provider whose sources are all empty is an
+error naming the variables tried:
 
 ```text
 could not resolve the API key for openai: no value in any of: OPENAI_API_KEY
 ```
 
-There is no `api_key_file` and no `--api-key-env`: the environment is the one
-source, so there is nothing to keep in step with it.
+There is no `api_key_file`, no `--api-key-env`, and no plaintext key field in
+`config.json`: the environment, the keyring and the 0600 file are the sources, and
+the prompt exists so there is nothing to keep in step with them.
 
 ## Three native providers
 

@@ -251,7 +251,7 @@ impl Service {
             // the catalogue does not list, and a compaction that failed on one
             // would stop the session it was meant to make room for.
             (Some(provider), Some(model)) => {
-                Service::default_spec_for(&self.lock_config(), &self.catalog(), provider, model)
+                self.default_spec_for(&self.lock_config(), &self.catalog(), provider, model)
             }
             _ => Ok(session.clone()),
         }

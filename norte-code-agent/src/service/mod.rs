@@ -56,7 +56,8 @@ use norte_tools::{
 use tokio_util::sync::CancellationToken;
 
 use norte_code_protocol::catalog::{Catalog, load_catalog_files};
-use norte_code_protocol::config::{CompactionTrigger, Config};
+use norte_code_protocol::config::{ApiKey, CompactionTrigger, Config};
+use norte_code_protocol::keys::KeyStore;
 use norte_code_protocol::plugins::ContextUsage;
 use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
@@ -1258,6 +1259,35 @@ impl Service {
         self.lock_config().clone()
     }
 
+    /// The key store the host installed, when it did.
+    ///
+    /// A session asks it before switching to a provider that has no key, so the
+    /// client can prompt for one and save it.
+    #[must_use]
+    pub fn key_store(&self) -> Option<Arc<dyn KeyStore>> {
+        self.lock_config().keys.clone()
+    }
+
+    /// Adds a key resolved after startup to the redaction list.
+    ///
+    /// A provider selected through `/model` never passed `collect_secrets` at
+    /// construction, and its key must still be hidden from a tool's output.
+    fn remember_secret(&self, key: &ApiKey) {
+        let value = key.expose().trim();
+        if value.is_empty() {
+            return;
+        }
+        let mut secrets = self
+            .secrets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if secrets.iter().any(|secret| secret == value) {
+            return;
+        }
+        secrets.push(value.to_owned());
+        secrets.sort();
+    }
+
     /// Replaces the configuration.
     ///
     /// The caller rebuilds what was derived from it; this only swaps the value.
@@ -1295,7 +1325,11 @@ impl Service {
             .map(|dir| dir.join(".norte-code").join("config.json"))
             .find(|candidate| candidate.exists());
         let mut loaded = Config::load(path.as_deref(), project.as_deref())?;
-        let next = loaded.config;
+        // The file never carries the store; the host installed it on the live
+        // config, so a reload has to carry it across or a keyring key would
+        // disappear from every session the reload rebuilds.
+        let mut next = loaded.config;
+        next.keys.clone_from(&self.lock_config().keys);
 
         // Everything that can fail happens before the live service is touched.
         // The catalogue is re-read from disk, so a provider or a model added to
@@ -1320,7 +1354,7 @@ impl Service {
         // every slash it has.
         let spec = match (&next.default_provider, &next.default_model) {
             (Some(provider), Some(model)) => {
-                match Self::default_spec_for(&next, &catalog, provider, model) {
+                match self.default_spec_for(&next, &catalog, provider, model) {
                     Ok(spec) => spec,
                     // A default provider that the catalogue no longer carries must
                     // not abort the whole reload: the spec already in force stays,
@@ -1378,7 +1412,7 @@ impl Service {
                 })
                 .collect();
             for (key, provider, model) in models {
-                if let Ok(spec) = Self::default_spec_for(&next, &catalog, &provider, &model)
+                if let Ok(spec) = self.default_spec_for(&next, &catalog, &provider, &model)
                     && let Some(record) = self.lock_sessions().get_mut(&key)
                 {
                     record.spec = spec;
@@ -1418,6 +1452,7 @@ impl Service {
     /// Returns [`ServiceError`] when the pair names neither a catalogue
     /// provider nor a configured one.
     fn default_spec_for(
+        &self,
         config: &Config,
         catalog: &Catalog,
         provider: &str,
@@ -1427,7 +1462,11 @@ impl Service {
         // does not carry is not resolved from somewhere else: there is nowhere
         // else. A provider is in `providers.json` or it is unknown, and a model
         // is in `models.json` or it is unknown.
-        ModelSpec::from_catalog(config, catalog, provider, model, None)
+        let spec = ModelSpec::from_catalog(config, catalog, provider, model, None)?;
+        // The key is in hand now, so it joins the redaction list even when the
+        // spec is rebuilt for a session the startup pass never resolved.
+        self.remember_secret(&spec.api_key);
+        Ok(spec)
     }
 
     /// The default spec in force.

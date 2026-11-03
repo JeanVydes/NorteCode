@@ -433,33 +433,22 @@ async fn a_session_reports_the_context_the_last_request_carried() {
 }
 
 #[tokio::test]
-async fn a_reload_rebuilds_an_open_sessions_spec_from_the_new_provider_settings() {
-    // A provider's settings are baked into a session's spec when it is resolved:
-    // the endpoint, the wire, whether the prompt cache key is sent. So a config
-    // that changed one of them changed nothing for a session already open — the
-    // record kept the spec it was built with and the next turn used it. This
-    // pins the fix, with the one field that is the difference between a request
-    // that is accepted and one that is refused.
+async fn a_reload_reaches_an_open_sessions_spec() {
+    // A reload rebuilds the spec of every session that is already open, because
+    // the configuration is the authority on the model and its limits. The pair
+    // a session is on does not change under it: the model stays its own.
     let (service, _model) = scripted_service(spec("scripted"), &["hello"]);
     let dir = std::env::temp_dir().join(format!("norte-reload-spec-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("config.json");
-    let key_file = dir.join("test.key");
-    std::fs::write(&key_file, "sk-test\n").expect("key file");
-    // The config names the session's own provider and model, and opts the
-    // cache key *out*: the reload resolves this and the session spec follows.
     std::fs::write(
         &path,
-        format!(
-            r#"{{"default_provider":"test","default_model":"scripted","providers":{{"test":{{"api_key_file":"{}","prompt_cache_key":false}}}}}}"#,
-            key_file.display()
-        ),
+        r#"{"default_provider":"test","default_model":"scripted"}"#,
     )
     .expect("write");
     service.set_config_path(Some(path.clone()));
 
-    // A session is opened with the spec the service was built with, which sends
-    // the cache key.
+    // A session is opened on the spec the service was built with.
     let events = drain(
         &service,
         ClientRequestKind::SendMessage {

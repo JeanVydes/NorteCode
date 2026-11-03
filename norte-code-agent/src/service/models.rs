@@ -430,8 +430,7 @@ impl Service {
         // private endpoint declared in the config and nowhere else — so
         // `/model exa/…` said the provider was unknown while `--provider exa`
         // worked.
-        let spec =
-            Service::default_spec_for(&self.lock_config(), &self.catalog(), provider, model)?;
+        let spec = self.default_spec_for(&self.lock_config(), &self.catalog(), provider, model)?;
         self.ensure_model_supports_reasoning(session, &spec)?;
         self.ensure_model_supports_budget(session, &spec).await?;
         Ok(spec)

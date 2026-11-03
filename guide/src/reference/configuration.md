@@ -50,9 +50,12 @@ names only which pair a new session opens on:
 | `default_provider` | null | The provider a new session opens on. |
 | `default_model` | null | The model a new session opens on; may contain slashes. |
 
-A key comes from the environment, named by the provider's `environment_keys` and
-tried in order. There is no plaintext key field, no file to point at and no
-override to write.
+A key is resolved in this order: the provider's `environment_keys` (the first one
+set and non-blank wins), the OS keyring (service `norte-code`, account the
+provider id), then `secrets.json` beside this file, written with mode 0600. There
+is no plaintext key field in `config.json`. If the key is still missing when
+`/model` or `/models` selects a model, the client asks for it in a masked prompt
+and saves it to the keyring — or to `secrets.json` when no keyring is available.
 
 ## `compaction`
 

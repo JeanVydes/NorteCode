@@ -29,6 +29,16 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 tokio = { workspace = true }
 uuid = { workspace = true }
 libloading = "0.8"
+# The OS credential store: Keychain on macOS, Credential Manager on Windows and
+# Secret Service on Linux. A host without one falls back to the 0600 file in
+# `norte-code-protocol`.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "async-secret-service",
+    "crypto-rust",
+    "tokio",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # Pinned to the version ratatui 0.29 depends on. Two crossterms in one binary

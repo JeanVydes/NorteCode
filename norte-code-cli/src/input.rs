@@ -86,6 +86,11 @@ pub(crate) struct Asked {
     /// Whether the input box is the answer, which it is once "something else"
     /// was chosen.
     pub(crate) typing: bool,
+    /// Whether the typed answer is a secret and must never be drawn.
+    ///
+    /// A masked question opens its box immediately: there are no choices to
+    /// walk, and the answer is the whole point of the prompt.
+    pub(crate) masked: bool,
 }
 
 impl Asked {
@@ -98,6 +103,13 @@ impl Asked {
     pub(crate) fn on_other(&self) -> bool {
         self.cursor >= self.other()
     }
+}
+
+/// One bullet per typed character, keeping newlines where they were.
+fn masked_text(text: &str) -> String {
+    text.chars()
+        .map(|character| if character == '\n' { '\n' } else { '•' })
+        .collect()
 }
 
 /// What the person did with a question.
@@ -438,8 +450,37 @@ impl Pinned {
             multiple,
             taken: Vec::new(),
             typing: false,
+            masked: false,
         });
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Asks for a secret, with the box already open and every character hidden.
+    ///
+    /// This is the provider-key prompt: there are no choices, and the answer
+    /// must not reach the frame, the history or the transcript. The reader
+    /// clears its buffer when the question opens, so nothing typed before it
+    /// can become the key by accident.
+    pub(crate) fn ask_masked(&self, prompt: String) {
+        let mut inner = self.lock();
+        inner.asked = Some(Asked {
+            prompt,
+            choices: Vec::new(),
+            cursor: 0,
+            multiple: false,
+            taken: Vec::new(),
+            typing: true,
+            masked: true,
+        });
+        inner.draft.clear();
+        inner.draft_cursor = 0;
+        inner.draft_anchor = None;
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the question on screen is asking for a secret.
+    pub(crate) fn asking_masked(&self) -> bool {
+        self.lock().asked.as_ref().is_some_and(|asked| asked.masked)
     }
 
     /// Moves the cursor of the question on screen.
@@ -775,6 +816,14 @@ impl Pinned {
     /// is the selection the editor holds.
     pub(crate) fn set_draft(&self, text: String, cursor: usize, anchor: Option<usize>) {
         let mut inner = self.lock();
+        // A secret is masked before it reaches the frame: the copy the renderer
+        // reads holds bullets and never the key. The cursor is a character
+        // index and the mask keeps one character per slot, so it stays valid.
+        let text = if inner.asked.as_ref().is_some_and(|asked| asked.masked) {
+            masked_text(&text)
+        } else {
+            text
+        };
         if inner.draft != text || inner.draft_cursor != cursor || inner.draft_anchor != anchor {
             inner.draft = text;
             inner.draft_cursor = cursor;
@@ -1527,6 +1576,10 @@ mod unix {
         // a draft: what was half-written before the question arrived is not part
         // of the reply, and losing it would punish the person for answering.
         let mut stashed: Option<LineBuffer> = None;
+        // Whether the question on screen was masked on the previous key. The
+        // buffer is cleared on the transition: a draft typed before the prompt
+        // must not become the secret, and a secret must not survive the prompt.
+        let mut masked = false;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -1544,6 +1597,12 @@ mod unix {
                         Ok(Event::Key(key))
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
+                            let now_masked = pinned.asking_masked();
+                            if now_masked && !masked {
+                                buffer = LineBuffer::default();
+                                stashed = None;
+                            }
+                            masked = now_masked;
                             // A panel owns the keyboard while it is up: it is
                             // over the interface, so Escape closes it and the
                             // arrows walk it. A report longer than the screen is
@@ -1673,11 +1732,19 @@ mod unix {
                             // where the line is handled: with a menu open the key
                             // means the row under the cursor, and it means the
                             // line only when there is no menu to choose from.
-                            let rows = crate::interaction::completion_rows(
-                                &buffer.display(),
-                                buffer.cursor,
-                                &pinned.completion_names(),
-                            );
+                            // A secret has no completions: offering the names
+                            // of the catalogue while a key is being typed would
+                            // put a suggestion in front of a value nobody can
+                            // see.
+                            let rows = if pinned.asking_masked() {
+                                0
+                            } else {
+                                crate::interaction::completion_rows(
+                                    &buffer.display(),
+                                    buffer.cursor,
+                                    &pinned.completion_names(),
+                                )
+                            };
                             if rows > 1 {
                                 match key.code {
                                     KeyCode::Up => {
@@ -1736,6 +1803,11 @@ mod unix {
                                     // Leaving is a decision, so the editor
                                     // reports it rather than making it.
                                     AskedKey::Leave => {
+                                        // A cancelled secret is not left in the
+                                        // editor to become the next draft.
+                                        if pinned.asking_masked() {
+                                            buffer = LineBuffer::default();
+                                        }
                                         pinned.retire();
                                         let _ =
                                             sender.send(EditorEvent::Question(super::Answer::Left));
@@ -1801,7 +1873,14 @@ mod unix {
                             }
                         }
                         Ok(Event::Paste(text)) => {
-                            buffer.insert_paste(&text);
+                            // A pasted key is the key, not a path and not a
+                            // chip: chips carry a label in the draft and this
+                            // value must not be read back from the screen.
+                            if pinned.asking_masked() {
+                                buffer.insert_text(&text);
+                            } else {
+                                buffer.insert_paste(&text);
+                            }
                             redraw = true;
                         }
                         // A resize is a change like any other, and the frame
@@ -2758,6 +2837,25 @@ mod pinned_tests {
         let answer = pinned.pick();
         assert_eq!(answer, Some(Answer::Taken(vec![0])));
         assert!(!pinned.is_asking(), "the question left the screen");
+    }
+
+    #[test]
+    fn a_masked_question_never_puts_the_key_on_screen() {
+        let pinned = Pinned::new();
+        pinned.ask_masked("API key for ollamacloud".to_owned());
+        assert!(pinned.asking_masked(), "the prompt is a secret prompt");
+        assert!(pinned.asking(), "the box is open from the start");
+        assert!(
+            pinned.question().expect("a question").masked,
+            "the frame is told to mask it"
+        );
+        pinned.set_draft("sk-secret".to_owned(), 9, None);
+        let (draft, cursor, anchor) = pinned.draft();
+        assert_eq!(draft, "•••••••••", "the renderer never holds the key");
+        assert_eq!(cursor, 9, "the mask keeps one slot per character");
+        assert_eq!(anchor, None);
+        pinned.retire();
+        assert!(!pinned.asking_masked(), "the prompt left the screen");
     }
 
     #[test]

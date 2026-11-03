@@ -875,8 +875,7 @@ pub(crate) async fn interactive_loop(
                         let Some(choice) = choice else {
                             continue;
                         };
-                        renderer.model_name = Some(choice.label());
-                        run_model(service, current, choice, renderer).await;
+                        run_model(service, current, choice, renderer, Some(input)).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -912,7 +911,7 @@ pub(crate) async fn interactive_loop(
                         // pair no provider lists. Left separate once, which is why
                         // the held state never appeared at a turn boundary and
                         // neither half could be moved.
-                        switch_provider(service, &current, &provider, renderer).await;
+                        switch_provider(service, &current, &provider, renderer, Some(input)).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -1404,8 +1403,10 @@ async fn handle_live_command(
             if let Some(session) = current {
                 let choice = pick_model(service, session, &model, renderer);
                 if let Some(choice) = choice {
-                    renderer.model_name = Some(choice.label());
-                    run_model(service, session.clone(), choice, renderer).await;
+                    // Mid-turn there is no prompt surface that can replace the
+                    // running turn, so a missing key is reported by `SetModel`
+                    // and the switch is made from the prompt afterwards.
+                    run_model(service, session.clone(), choice, renderer, None).await;
                 }
             } else {
                 renderer.notice("the session is not ready yet; try again");
@@ -1415,7 +1416,7 @@ async fn handle_live_command(
             if provider.is_empty() {
                 renderer.notice("wait until the current turn finishes, then /provider");
             } else if let Some(session) = current {
-                switch_provider(service, session, &provider, renderer).await;
+                switch_provider(service, session, &provider, renderer, None).await;
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
@@ -1599,6 +1600,7 @@ async fn apply_tool_action(
     style: Style,
     action: crate::modal::Action,
     scope: crate::modal::Scope,
+    input: Option<&mut InteractiveInput>,
 ) -> Option<SessionKey> {
     let global = scope == crate::modal::Scope::Global;
     // A rule is set or forgotten, and which of the two the key asks for is the
@@ -1675,8 +1677,9 @@ async fn apply_tool_action(
                 return None;
             };
             let choice = ModelChoice::new(provider.clone(), model.clone());
-            run_model(service, current.clone(), choice, renderer).await;
-            renderer.close_modal();
+            if run_model(service, current.clone(), choice, renderer, input).await {
+                renderer.close_modal();
+            }
             return None;
         }
     };
@@ -1929,6 +1932,7 @@ async fn switch_provider(
     session: &SessionKey,
     provider: &str,
     renderer: &mut Renderer,
+    input: Option<&mut InteractiveInput>,
 ) {
     let model_name = model_name_of(service, session);
     let catalog = service.catalog();
@@ -1961,8 +1965,7 @@ async fn switch_provider(
         ProviderSwitch::Move(model) => {
             let choice = ModelChoice::new(provider, model);
             renderer.pending_provider = None;
-            renderer.model_name = Some(choice.label());
-            run_model(service, session.clone(), choice, renderer).await;
+            run_model(service, session.clone(), choice, renderer, input).await;
         }
     }
     // The completion follows the session: a `/model` line now offers the models
@@ -1971,12 +1974,98 @@ async fn switch_provider(
     refresh_completions(service, Some(session), renderer);
 }
 
+/// Makes sure the provider has a key before a model switch is sent.
+///
+/// The store is asked first: an exported variable, a key saved earlier in this
+/// run, the OS keyring, then the 0600 file. Only a missing key prompts, and only
+/// when there is an interactive client to prompt on. Returns whether the switch
+/// may proceed; a cancelled prompt leaves the current model untouched.
+async fn ensure_provider_key(
+    service: &Arc<Service>,
+    provider: &str,
+    renderer: &mut Renderer,
+    input: Option<&mut InteractiveInput>,
+) -> bool {
+    let Some(store) = service.key_store() else {
+        // No host store: `SetModel` reports the missing key exactly as before.
+        return true;
+    };
+    let catalog = service.catalog();
+    let Some(entry) = catalog.provider(provider) else {
+        // An unknown provider is the switch's error to report.
+        return true;
+    };
+    match store.resolve(provider, &entry.environment_keys) {
+        Ok(_) => true,
+        Err(norte_code_protocol::config::ConfigError::Secret { message, .. }) => {
+            let Some(input) = input else {
+                renderer.failure(format!(
+                    "could not resolve the API key for {provider}: {message}"
+                ));
+                return false;
+            };
+            if !renderer.can_prompt() {
+                renderer.failure(format!(
+                    "could not resolve the API key for {provider}: {message}"
+                ));
+                return false;
+            }
+            // The models panel is still open behind the question; close it so
+            // the masked prompt is the only thing asking for a decision.
+            renderer.close_modal();
+            let prompt = format!("API key for {provider} (input is hidden): ");
+            let pinned = Arc::clone(&renderer.pinned);
+            let secret =
+                match crate::prompt::ask_secret(&prompt, &pinned, input, &mut || renderer.draw())
+                    .await
+                {
+                    Ok(secret) => secret,
+                    Err(error) => {
+                        renderer.failure(format!("could not read the key: {error}"));
+                        return false;
+                    }
+                };
+            let Some(secret) = secret.map(|secret| secret.trim().to_owned()) else {
+                renderer.notice("no key saved; the model was not switched");
+                return false;
+            };
+            if secret.is_empty() {
+                renderer.notice("no key saved; the model was not switched");
+                return false;
+            }
+            match store.save(provider, &secret) {
+                Ok(norte_code_protocol::keys::KeyStorage::Keyring) => {
+                    renderer.notice(format!("saved the key for {provider} in the OS keyring"));
+                }
+                Ok(norte_code_protocol::keys::KeyStorage::File) => {
+                    renderer.notice(format!(
+                        "saved the key for {provider} in secrets.json (0600)"
+                    ));
+                }
+                Err(error) => {
+                    renderer.failure(format!("could not save the key: {error}"));
+                    renderer.notice("the key is used for this session only");
+                }
+            }
+            true
+        }
+        Err(error) => {
+            renderer.failure(error.to_string());
+            false
+        }
+    }
+}
+
 async fn run_model(
     service: &Arc<Service>,
     session: SessionKey,
     choice: ModelChoice,
     renderer: &mut Renderer,
-) {
+    input: Option<&mut InteractiveInput>,
+) -> bool {
+    if !ensure_provider_key(service, &choice.provider, renderer, input).await {
+        return false;
+    }
     // Cloned: the refresh below needs the key after the request consumed it.
     let key = session.clone();
     match drain_request(
@@ -2030,6 +2119,7 @@ async fn run_model(
         }
         Err(error) => renderer.failure(format!("could not switch model: {error}")),
     }
+    true
 }
 
 /// Reports the session's background jobs: a listing, one job, or a stop.
@@ -2541,8 +2631,16 @@ pub(crate) async fn read_repl_line(
             // the call would be a round trip for something already here.
             Some(EditorEvent::Action(EditorAction::Panel(press))) => {
                 if let Some((decision, scope)) = renderer.modal_key(press)
-                    && let Some(chosen) =
-                        apply_tool_action(service, session, renderer, style, decision, scope).await
+                    && let Some(chosen) = apply_tool_action(
+                        service,
+                        session,
+                        renderer,
+                        style,
+                        decision,
+                        scope,
+                        Some(input),
+                    )
+                    .await
                 {
                     renderer.close_modal();
                     return Ok(ReplInput::Session(chosen));
@@ -2835,6 +2933,7 @@ pub(crate) async fn drive_turns(
                                         style,
                                         decision,
                                         scope,
+                                        None,
                                     )
                                     .await
                                     else {
@@ -3997,7 +4096,7 @@ mod tests {
         // model the session is on, and the completion follows the held provider:
         // the next `/model` line offers `river`'s models, which is the list the
         // notice just told the person to pick from.
-        switch_provider(&service, &session, "river", &mut renderer).await;
+        switch_provider(&service, &session, "river", &mut renderer, None).await;
         assert_eq!(renderer.pending_provider.as_deref(), Some("river"));
         let held = pinned.completion_names();
         assert_eq!(

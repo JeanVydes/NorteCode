@@ -24,12 +24,13 @@ Validation errors stop startup and name the field. `version` must be `1`.
 
 ## Secrets
 
-A provider names a key source, never a plaintext key:
-
-The configuration names no provider: an entry of `providers.json` does, and a
-key comes from the environment, from the names that entry lists. Keys are held in
-Norte's redacted secret type and are registered for output redaction with the
-command tool.
+A provider names its key sources, never a plaintext key. A key comes from the
+provider's `environment_keys` first, then the OS keyring (service `norte-code`,
+account the provider id), then `secrets.json` beside the configuration, written
+with mode 0600. Selecting a model from `/model` or `/models` when the key is
+missing asks for it in a masked prompt and saves it. Keys are held in Norte's
+redacted secret type and are registered for output redaction with the command
+tool.
 
 ## The main sections
 

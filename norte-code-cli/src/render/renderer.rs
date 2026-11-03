@@ -929,6 +929,7 @@ impl Renderer {
                 multiple: asked.multiple,
                 taken: asked.taken.clone(),
                 typing: asked.typing,
+                masked: asked.masked,
             }),
             // The status reaches the frame as spans it already styled, so the
             // dial's colour and the effort bar's survive: a painted string would
