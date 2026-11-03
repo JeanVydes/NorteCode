@@ -46,8 +46,6 @@ pub struct Config {
     pub default_model: Option<String>,
     /// Automatic compaction.
     pub compaction: CompactionConfig,
-    /// Automatic session titles.
-    pub titling: TitlingConfig,
     /// Automatic retries for transient provider failures.
     pub retry: RetryConfig,
     /// The session's default reasoning setting.
@@ -188,7 +186,6 @@ impl Default for Config {
             default_provider: None,
             default_model: None,
             compaction: CompactionConfig::default(),
-            titling: TitlingConfig::default(),
             retry: RetryConfig::default(),
             reasoning: ReasoningConfig::default(),
             system_prompt: None,
@@ -202,44 +199,6 @@ impl Default for Config {
             tools: ToolsConfig::default(),
             skills: SkillsConfig::default(),
             mcp_servers: BTreeMap::new(),
-        }
-    }
-}
-
-/// Session-title settings.
-///
-/// A session is named by its key until it has a title, and a key is not a name:
-/// `55fd07f3` says nothing about what the session was for. The title is written
-/// once, from the first message the person sent, by a request of its own.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TitlingConfig {
-    /// Whether a new session is titled automatically.
-    pub enabled: bool,
-    /// The provider of the model to title with.
-    ///
-    /// It is its own key and the model id is its own string: a model id may
-    /// carry slashes of its own, so the two are never written as one.
-    pub provider: Option<String>,
-    /// The model id to title with, or the session's own.
-    pub model: Option<String>,
-    /// How many tokens the title request may produce.
-    ///
-    /// A title is a handful of words; the cap is what keeps a model that ignores
-    /// the instruction from billing a paragraph. It is also the reason the
-    /// request is cheap enough to send for every session.
-    pub max_output: u64,
-}
-
-impl Default for TitlingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            provider: None,
-            model: None,
-            // An effort a title needs is nothing: the request ships with
-            // reasoning off, and this is the ceiling on what it may write.
-            max_output: 24,
         }
     }
 }
@@ -274,6 +233,10 @@ pub enum CompactionReasoning {
     /// A named effort.
     High,
     /// A named effort.
+    ///
+    /// The same spelling `/reasoning` uses; `x_high` is accepted from files
+    /// written while the enum derived its name.
+    #[serde(rename = "xhigh", alias = "x_high")]
     XHigh,
     /// A named effort.
     Max,
@@ -861,12 +824,6 @@ impl Config {
             "compaction.model",
             self.compaction.provider.as_deref(),
             self.compaction.model.as_deref(),
-        )?;
-        validate_pair(
-            "titling.provider",
-            "titling.model",
-            self.titling.provider.as_deref(),
-            self.titling.model.as_deref(),
         )
     }
 

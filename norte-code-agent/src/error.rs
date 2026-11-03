@@ -56,8 +56,8 @@ pub enum ServiceError {
     #[error("compaction: {0}")]
     Compaction(String),
     /// A session could not be named after its first message.
-    #[error("titling: {0}")]
-    Titling(String),
+    #[error("name: {0}")]
+    Name(String),
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),

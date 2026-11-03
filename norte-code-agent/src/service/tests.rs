@@ -9,7 +9,6 @@ use super::prompt::skills_block;
 use super::prompt::{MAX_PROJECT_INSTRUCTIONS_BYTES, PROJECT_INSTRUCTIONS_FILE};
 use super::sandbox::sandbox_name;
 use super::sandbox::{macos_profile, sandbox_request, sandboxed_arguments};
-use super::titling::TITLE_PROMPT;
 use super::workspace::{PathKind, check_path_kind, transform_path};
 use super::*;
 use norte::{FinishReason, Role};
@@ -1420,39 +1419,6 @@ async fn a_rename_survives_the_process_that_made_it() {
         .find(|row| row.key == key.as_str())
         .expect("the session is in the store");
     assert_eq!(row.title.as_deref(), Some("fix the footer overflow"));
-}
-
-#[tokio::test]
-async fn a_title_from_the_model_is_what_the_store_holds() {
-    // The automatic path and the manual one have to agree: `/rename` uses the
-    // rename request, and `title_session` writes through the same `rename`, so
-    // both end up as the session's `title` rather than two names that disagree
-    // depending on which path set it.
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_text("fix the footer overflow"));
-    let (service, store) = persistent_service(model).await;
-    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
-    let key = created[0].session.clone().expect("session");
-
-    let title = service
-        .title_session(&key, "the footer overflows when the terminal is narrow")
-        .await
-        .expect("a title");
-    assert_eq!(title, "fix the footer overflow");
-
-    let rows = store.sessions().await.expect("sessions");
-    let row = rows
-        .iter()
-        .find(|row| row.key == key.as_str())
-        .expect("the session is in the store");
-    assert_eq!(
-        row.title.as_deref(),
-        Some(title.as_str()),
-        "what the model wrote is what the store holds"
-    );
 }
 
 #[tokio::test]
@@ -6130,123 +6096,6 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
         after >= before,
         "a compaction summarises, it does not un-cache: {after} < {before}"
     );
-}
-
-#[tokio::test]
-async fn a_title_is_asked_for_in_a_session_of_its_own() {
-    // The title comes from a request that is not the conversation: a scratch
-    // session holding one instruction, thrown away after. This is the whole
-    // point of the feature — a session gets a name without the naming being
-    // something the model can see or answer later.
-    let (service, model) = scripted_service(spec("scripted"), &["fix the footer overflow"]);
-    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
-    let key = created[0].session.clone().expect("session");
-
-    let title = service
-        .title_session(&key, "the footer overflows when the terminal is narrow")
-        .await
-        .expect("a title");
-    assert_eq!(title, "fix the footer overflow");
-
-    // The session is named, and the list shows it beside its key.
-    let listed = drain(&service, ClientRequestKind::ListSessions).await;
-    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
-        panic!("expected a list");
-    };
-    assert_eq!(
-        sessions[0].title.as_deref(),
-        Some("fix the footer overflow")
-    );
-
-    // The request went to a session of its own: the one being named is as empty
-    // as it was, and none of the naming is in it.
-    let history = service
-        .engine(&spec("scripted"), None)
-        .expect("engine")
-        .history(service.require_record(&key).expect("record").0)
-        .await
-        .expect("history");
-    assert!(!history.iter().any(|message| {
-        let text = message.text();
-        text.contains(TITLE_PROMPT) || text.contains("fix the footer overflow")
-    }));
-
-    // And what the model was asked is the instruction plus the person's words,
-    // in one user message.
-    let requests = model.requests();
-    assert_eq!(requests.len(), 1, "one request, one title");
-    let asked = &requests[0];
-    assert_eq!(asked.messages.len(), 1, "the scratch holds one message");
-    let text = asked.messages[0].text();
-    assert!(text.contains(TITLE_PROMPT), "the instruction is there");
-    assert!(
-        text.contains("the footer overflows"),
-        "and the message the title is for: {text}"
-    );
-    assert!(
-        asked.tools.is_empty(),
-        "a title needs no tools: {:?}",
-        asked.tools
-    );
-}
-
-#[tokio::test]
-async fn a_title_that_cannot_be_had_leaves_the_session_unnamed() {
-    // The title is best effort by contract: it is asked for beside the turn the
-    // person just started, and a model that answers with nothing is not a reason
-    // to disturb it. The session keeps its key, which is what it had.
-    let (service, _model) = scripted_service(spec("scripted"), &["..."]);
-    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
-    let key = created[0].session.clone().expect("session");
-
-    let error = service
-        .title_session(&key, "do the thing")
-        .await
-        .expect_err("a reply that is not a name is refused");
-    assert!(
-        error.to_string().contains("no usable title"),
-        "the reason names what happened: {error}"
-    );
-    let listed = drain(&service, ClientRequestKind::ListSessions).await;
-    let ServerEventKind::SessionList { sessions } = &listed[0].kind else {
-        panic!("expected a list");
-    };
-    assert_eq!(
-        sessions[0].title, None,
-        "a session nobody could name is not given a name"
-    );
-}
-
-#[tokio::test]
-async fn titling_can_be_turned_off() {
-    // The switch matters: this is a request per session, on a provider the
-    // person pays for, and a host that does not want it must be able to say so.
-    let mut config = config();
-    config.titling.enabled = false;
-    let reference = ModelRef::new(
-        ProviderId::new("test").expect("provider"),
-        ModelId::new("scripted").expect("model"),
-    );
-    let model = Arc::new(ScriptedModel::new(reference).turn_text("a title"));
-    let service = Arc::new(
-        Service::new(
-            config,
-            catalog(),
-            spec("scripted"),
-            Arc::new(ScriptedFactory { model }),
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
-    let key = created[0].session.clone().expect("session");
-    let error = service
-        .title_session(&key, "do the thing")
-        .await
-        .expect_err("disabled");
-    assert!(error.to_string().contains("disabled"), "{error}");
 }
 
 #[tokio::test]

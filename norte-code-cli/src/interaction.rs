@@ -575,7 +575,6 @@ pub(crate) async fn interactive_loop(
     renderer.greet();
     renderer.draw()?;
     // A session that already has a title shows it in the footer instead of its
-    // key, and titling does not run again for it. A session without one gets
     // asked when the first message is sent.
     if let Some(key) = &session
         && let Some(title) = service.session_title(key)
@@ -1479,7 +1478,6 @@ async fn delete_current(service: &Arc<Service>, session: &SessionKey) -> Result<
 /// `/rename fix the footer` writes what was typed and does not call anything:
 /// a person who has already decided what the session is called should not wait
 /// for a model to agree. A bare `/rename` asks the model, from the first message
-/// the session holds, which is the path a session that predates titling takes.
 async fn rename_session(
     service: &Arc<Service>,
     session: SessionKey,
@@ -3348,7 +3346,6 @@ mod tests {
             }))
         );
         // Bare, it is the model that picks, which is the path a session that
-        // predates titling takes.
         assert_eq!(
             parse_chat_command("/rename"),
             Some(Ok(ChatCommand::Rename { title: None }))

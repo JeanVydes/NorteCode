@@ -23,7 +23,6 @@ mod screenshots;
 mod sessions;
 mod skills;
 mod steering;
-mod titling;
 mod tooling;
 mod turns;
 mod workspace;
@@ -1229,8 +1228,7 @@ impl Service {
     /// The title a session has, if one was set.
     ///
     /// `None` means the session is still known by its key alone. The renderer
-    /// reads this so the footer can show the title instead of the key, and so
-    /// titling does not run again for a session that already has a name.
+    /// reads this so the footer can show the title instead of the key.
     #[must_use]
     pub fn session_title(&self, session: &SessionKey) -> Option<String> {
         self.lock_sessions()
