@@ -211,6 +211,10 @@ pub(crate) enum Key {
     Escape,
     /// Copy the panel's text to the terminal clipboard.
     Copy,
+    /// A printable character for a filterable panel's query.
+    Char(char),
+    /// Delete the last character of a filterable panel's query.
+    Backspace,
 }
 
 /// A panel of rows over the interface.
@@ -508,6 +512,11 @@ impl Modal {
                 Choice::None
             }
             Key::Copy => Choice::Copied,
+            // The filter belongs to the list the panel was built from, not to
+            // the panel: the caller owns the catalog and rebuilds the rows.
+            // Reaching here means no filterable panel was open, and the key is
+            // simply not the panel's to act on.
+            Key::Char(_) | Key::Backspace => Choice::None,
         }
     }
 

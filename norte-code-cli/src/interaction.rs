@@ -932,13 +932,15 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::Models => match session.as_ref() {
                     Some(current) => {
                         renderer.models_expanded = None;
+                        renderer.panel_filter.clear();
                         let rows = models_panel(
                             service.catalog().as_ref(),
                             provider_of(service, current).as_deref(),
                             model_name_of(service, current).as_deref(),
                             None,
+                            &renderer.panel_filter,
                         );
-                        renderer.open_editable("models".to_owned(), rows);
+                        renderer.open_filterable(models_panel_title(&renderer.panel_filter), rows);
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
@@ -1162,31 +1164,61 @@ fn models_panel(
     current_provider: Option<&str>,
     current_model: Option<&str>,
     expanded: Option<&str>,
+    filter: &str,
 ) -> Vec<crate::modal::Row> {
     let current_provider = current_provider.map(str::to_owned);
     let current_model = current_model.map(str::to_owned);
+    let query = filter.trim().to_lowercase();
+    let filtering = !query.is_empty();
     let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
     providers.sort();
     let mut rows = Vec::new();
     for provider in &providers {
         let is_current = current_provider.as_deref() == Some(provider.as_str());
-        if expanded == Some(provider.as_str()) {
+        let provider_name = catalog
+            .provider(provider)
+            .map_or(provider.as_str(), |entry| entry.name.as_str());
+        // The query reaches both halves: a provider id, the name a person gave
+        // it, a model id and its name.
+        let provider_matches = provider.to_lowercase().contains(&query)
+            || provider_name.to_lowercase().contains(&query);
+        let mut models: Vec<(String, String)> = catalog
+            .models_of(provider)
+            .map(|entry| (entry.id.clone(), entry.name.clone()))
+            .collect();
+        models.sort_by(|left, right| left.0.cmp(&right.0));
+        let matching: Vec<&(String, String)> = models
+            .iter()
+            .filter(|(id, name)| {
+                id.to_lowercase().contains(&query) || name.to_lowercase().contains(&query)
+            })
+            .collect();
+        if filtering && !provider_matches && matching.is_empty() {
+            continue;
+        }
+        // A filter opens the matching providers: a model found by its name is
+        // one the person can see without expanding the provider first.
+        let expanded_here = filtering || expanded == Some(provider.as_str());
+        if expanded_here {
             let mut heading = provider.clone();
             if is_current {
                 heading.push_str(" (current)");
             }
             rows.push(crate::modal::Row::heading(heading));
-            let mut models: Vec<String> = catalog
-                .models_of(provider)
-                .map(|entry| entry.id.clone())
-                .collect();
-            models.sort();
-            if models.is_empty() {
+            // A provider matched by its own name is the result, so all its
+            // models stay; a provider reached by a model keeps only the models
+            // that match.
+            let shown: Vec<&(String, String)> = if !filtering || provider_matches {
+                models.iter().collect()
+            } else {
+                matching
+            };
+            if shown.is_empty() {
                 let mut row = crate::modal::Row::text("  (no models listed)");
                 row.dim = true;
                 rows.push(row);
             }
-            for model in models {
+            for (model, _) in shown {
                 let note = if is_current && current_model.as_deref() == Some(model.as_str()) {
                     Some("current")
                 } else {
@@ -1216,9 +1248,22 @@ fn models_panel(
         }
     }
     if rows.is_empty() {
-        rows.push(crate::modal::Row::text("no providers configured"));
+        rows.push(crate::modal::Row::text(if filtering {
+            format!("nothing matches \"{}\"", filter.trim())
+        } else {
+            "no providers configured".to_owned()
+        }));
     }
     rows
+}
+
+/// The panel's title, with the query when one is typed.
+fn models_panel_title(filter: &str) -> String {
+    if filter.is_empty() {
+        "models".to_owned()
+    } else {
+        format!("models · filter: {filter}")
+    }
 }
 
 /// Steers a message into the running turn and names it, so the client can
@@ -1666,8 +1711,9 @@ async fn apply_tool_action(
                 provider_of(service, current).as_deref(),
                 model_name_of(service, current).as_deref(),
                 renderer.models_expanded.as_deref(),
+                &renderer.panel_filter,
             );
-            renderer.open_editable("models".to_owned(), rows);
+            renderer.open_filterable(models_panel_title(&renderer.panel_filter), rows);
             return None;
         }
         // A model picked in the panel sets both halves at once.
@@ -2625,6 +2671,30 @@ pub(crate) async fn read_repl_line(
             Some(EditorEvent::End) | None => {
                 return Ok(ReplInput::End);
             }
+            // A filterable panel's query key: the rows are rebuilt from the
+            // catalogue with the query, so the panel never hides a subset of a
+            // list it was given.
+            Some(EditorEvent::Action(EditorAction::Filter(key))) => {
+                match key {
+                    crate::modal::Key::Char(character) => renderer.panel_filter.push(character),
+                    crate::modal::Key::Backspace => {
+                        renderer.panel_filter.pop();
+                    }
+                    _ => {}
+                }
+                let provider = session.and_then(|current| provider_of(service, current));
+                let model = session.and_then(|current| model_name_of(service, current));
+                let rows = models_panel(
+                    service.catalog().as_ref(),
+                    provider.as_deref(),
+                    model.as_deref(),
+                    renderer.models_expanded.as_deref(),
+                    &renderer.panel_filter,
+                );
+                renderer.open_filterable(models_panel_title(&renderer.panel_filter), rows);
+                renderer.draw()?;
+                continue;
+            }
             // A panel key at the prompt: the panel decides what it means and
             // this carries the decision out. It is `async`, so it can: the
             // caller is the loop that owns the service, and asking it to make
@@ -2920,6 +2990,9 @@ pub(crate) async fn drive_turns(
                     // decisions are made here, where that is known.
                     Wake::Action(action) => {
                         match action {
+                            // No filterable panel is open during a turn: the
+                            // key belongs to the prompt between turns.
+                            EditorAction::Filter(_) => continue,
                             // A key the panel owns: the panel decides what it
                             // means and the loop carries the decision out,
                             // because the service is here and the panel has no
@@ -3820,7 +3893,7 @@ mod tests {
         let catalog = Catalog::new(providers, models).expect("catalogue");
 
         // Collapsed: one actable row per provider, each expanding.
-        let rows = models_panel(&catalog, Some("a"), Some("m1"), None);
+        let rows = models_panel(&catalog, Some("a"), Some("m1"), None, "");
         let actables: Vec<_> = rows.iter().filter_map(|row| row.action.clone()).collect();
         assert_eq!(actables.len(), 2, "one row per provider");
         assert!(
@@ -3829,7 +3902,7 @@ mod tests {
         );
 
         // Expanded: the provider is a heading and each model sets both halves.
-        let rows = models_panel(&catalog, Some("a"), Some("m1"), Some("a"));
+        let rows = models_panel(&catalog, Some("a"), Some("m1"), Some("a"), "");
         assert!(rows.iter().any(|row| row.heading), "the provider heads it");
         let set: Vec<_> = rows
             .iter()
@@ -3844,6 +3917,59 @@ mod tests {
                 if provider == "a" && model == "m1"),
             "{set:?}"
         );
+    }
+
+    #[test]
+    fn the_models_panel_filters_by_provider_and_by_model() {
+        use norte_code_protocol::catalog::{Catalog, Models, Providers};
+
+        let providers: Providers = serde_json::from_str(
+            r#"{"providers":{
+                "alpha":{"name":"Alpha Cloud","environment_keys":["K"],
+                    "wires":[{"api":"https://example.invalid/a","schema":"openai"}]},
+                "beta":{"name":"Beta","environment_keys":["K"],
+                    "wires":[{"api":"https://example.invalid/b","schema":"openai"}]}}}"#,
+        )
+        .expect("providers");
+        let models: Models = serde_json::from_str(
+            r#"{"models":[
+                {"id":"m1","provider_id":"alpha","name":"M1","supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}},
+                {"id":"m2","provider_id":"alpha","name":"M2","supported_params":["tools"],
+                    "modalities":{"input":["text"],"output":["text"]},
+                    "limit":{"context":1000,"output":100}}]}"#,
+        )
+        .expect("models");
+        let catalog = Catalog::new(providers, models).expect("catalogue");
+
+        // A model matches: only that model, under its provider.
+        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "m2");
+        assert_eq!(rows.len(), 2, "heading and the matching model: {rows:?}");
+        assert!(rows[0].heading, "the provider is a heading: {rows:?}");
+        assert_eq!(rows[1].text.trim(), "m2");
+        assert!(
+            !rows.iter().any(|row| row.text.contains("beta")),
+            "the provider with no match is gone: {rows:?}"
+        );
+
+        // The provider matches: all of its models stay.
+        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "beta");
+        assert!(rows[0].heading, "the matching provider heads it: {rows:?}");
+        assert_eq!(rows.len(), 2, "heading and its empty note: {rows:?}");
+        assert!(rows[1].dim, "no models listed: {rows:?}");
+
+        // A provider name matches even when the id does not; the query is
+        // case-insensitive, and the name is part of what it reads.
+        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "ALPHA CLOUD");
+        assert_eq!(rows.len(), 3, "provider and both models: {rows:?}");
+
+        // Nothing matches: one quiet row says so, and there is nothing to act
+        // on.
+        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "zzz");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].text.contains("zzz"), "{:?}", rows[0].text);
+        assert!(rows[0].action.is_none(), "no row to act on");
     }
 
     /// The routing that was missing. `/provider` and `/model` reach the

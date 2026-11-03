@@ -204,6 +204,12 @@ pub(crate) struct Renderer {
     /// provider's models stay visible while the cursor moves and a selection
     /// is made.
     pub(crate) models_expanded: Option<String>,
+    /// The query typed into the `/models` filter.
+    ///
+    /// It lives here because the panel is rebuilt from it: every printable key
+    /// narrows the catalogue, and the rows are the filtered ones rather than a
+    /// hidden subset of a longer list.
+    pub(crate) panel_filter: String,
     /// The reasoning effort the session is actually using, as `/reasoning`
     /// names it. `None` until a turn has settled it, because before that the
     /// setting is whatever the next turn resolves.
@@ -358,6 +364,7 @@ impl Renderer {
             model_name: None,
             pending_provider: None,
             models_expanded: None,
+            panel_filter: String::new(),
             reasoning: None,
             waiting: None,
             waiting_since: None,
@@ -688,6 +695,22 @@ impl Renderer {
         self.set_modal(crate::modal::Modal::editable(title, rows));
     }
 
+    /// Opens a panel whose rows are filtered by what a person types.
+    ///
+    /// The rows are rebuilt by the caller on every query key; the panel only
+    /// draws them. `panel_filter` is the query that produced them.
+    pub(crate) fn open_filterable(
+        &mut self,
+        title: impl Into<String>,
+        rows: Vec<crate::modal::Row>,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        self.set_modal(crate::modal::Modal::editable(title, rows));
+        self.pinned.set_modal_filterable(true);
+    }
+
     /// Puts a panel on screen and tells the keyboard it is there.
     fn set_modal(&mut self, mut modal: crate::modal::Modal) {
         // A panel rebuilt in place — the tools list after a rule changes, the
@@ -708,6 +731,7 @@ impl Renderer {
         // still owns its own keys, so the reader has to route them to it.
         self.pinned
             .set_modal_editable(modal.editable || modal.telemetry.is_some());
+        self.pinned.set_modal_filterable(false);
         self.modal = Some(modal);
         // The scroll a person left on the last report is not one they want on
         // this one: a new panel opens at its top.
@@ -767,7 +791,9 @@ impl Renderer {
         let closed = self.modal.take().is_some();
         if closed {
             self.pinned.set_modal_editable(false);
+            self.pinned.set_modal_filterable(false);
             self.pinned.set_modal_open(false);
+            self.panel_filter.clear();
         }
         closed
     }

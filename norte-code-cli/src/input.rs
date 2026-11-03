@@ -250,6 +250,8 @@ pub(crate) struct Pinned {
     modal_open: AtomicBool,
     /// Whether it can be acted on.
     modal_editable: AtomicBool,
+    /// Whether printable keys belong to a filter in the panel.
+    modal_filterable: AtomicBool,
     /// How far the panel is scrolled back from the end, in lines.
     modal_scroll: AtomicUsize,
     /// Whether the left button is down, so a drag is a selection.
@@ -349,6 +351,7 @@ impl Default for Pinned {
             modal_closed: AtomicBool::new(false),
             modal_open: AtomicBool::new(false),
             modal_editable: AtomicBool::new(false),
+            modal_filterable: AtomicBool::new(false),
             modal_scroll: AtomicUsize::new(0),
             selecting: AtomicBool::new(false),
             completion_pick: AtomicUsize::new(0),
@@ -946,6 +949,16 @@ impl Pinned {
         self.modal_editable.load(Ordering::Relaxed)
     }
 
+    /// Whether printable keys are a filter for the panel on screen.
+    pub(crate) fn set_modal_filterable(&self, filterable: bool) {
+        self.modal_filterable.store(filterable, Ordering::Relaxed);
+    }
+
+    /// Whether the panel on screen has a filter the reader owns.
+    pub(crate) fn modal_is_filterable(&self) -> bool {
+        self.modal_filterable.load(Ordering::Relaxed)
+    }
+
     /// Consumes the resize notice, if one is pending.
     pub(crate) fn take_resized(&self) -> bool {
         self.resized.swap(false, Ordering::Acquire)
@@ -1001,6 +1014,8 @@ mod unix {
         /// A key a panel owns: the panel decides what it means, and the loop
         /// that owns the service carries the decision out.
         Panel(crate::modal::Key),
+        /// A printable key for a filterable panel's query.
+        Filter(crate::modal::Key),
     }
 
     /// A running input line editor and its channel of lines and actions.
@@ -1603,6 +1618,27 @@ mod unix {
                                 stashed = None;
                             }
                             masked = now_masked;
+                            // A filterable panel owns printable keys: they are
+                            // its query, not the draft behind it. The arrows,
+                            // Enter and Escape still belong to the panel below.
+                            if pinned.modal_is_filterable() {
+                                let filter = match key.code {
+                                    KeyCode::Char(character)
+                                        if !key.modifiers.intersects(
+                                            KeyModifiers::CONTROL | KeyModifiers::ALT,
+                                        ) =>
+                                    {
+                                        Some(crate::modal::Key::Char(character))
+                                    }
+                                    KeyCode::Backspace => Some(crate::modal::Key::Backspace),
+                                    _ => None,
+                                };
+                                if let Some(filter) = filter {
+                                    let _ = sender
+                                        .send(EditorEvent::Action(EditorAction::Filter(filter)));
+                                    continue;
+                                }
+                            }
                             // A panel owns the keyboard while it is up: it is
                             // over the interface, so Escape closes it and the
                             // arrows walk it. A report longer than the screen is
@@ -2588,6 +2624,8 @@ mod fallback {
         CancelJobs,
         /// Ctrl-G, on a running turn: stop waiting for the call.
         Detach,
+        /// A printable key for a filterable panel's query.
+        Filter(crate::modal::Key),
     }
 
     impl InteractiveInput {
