@@ -650,8 +650,14 @@ pub(crate) async fn new_session(
     config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
     let (provider, model) =
         session_choice(choice.as_ref(), args.provider.clone(), args.model.clone());
-    let effective_provider = provider.clone().or_else(|| config.default_provider.clone());
-    let effective_model = model.clone().or_else(|| config.default_model.clone());
+    let effective_provider = provider
+        .clone()
+        .or_else(|| config.default_provider.clone())
+        .filter(|p| !p.is_empty());
+    let effective_model = model
+        .clone()
+        .or_else(|| config.default_model.clone())
+        .filter(|m| !m.is_empty());
 
     // No model is configured: do not fail here. Reach the interface and let the
     // person pick one with `/models`; a message sent in the meantime is refused
