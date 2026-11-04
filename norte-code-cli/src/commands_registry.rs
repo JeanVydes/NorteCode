@@ -180,8 +180,12 @@ pub(crate) fn built() -> Registry {
     registry.register(CommandSpec::new("/exit", "leave the chat").aliased(&["/quit"]));
     registry.register(CommandSpec::new("/plugins list", "list installed plugins"));
     registry.register(
-        CommandSpec::new("/plugins add", "install a plugin from a git URL")
-            .arg(ArgSpec::required("url")),
+        CommandSpec::new(
+            "/plugins add",
+            "install a plugin from a git URL or workspace",
+        )
+        .arg(ArgSpec::required("url"))
+        .arg(ArgSpec::optional("package")),
     );
     registry.register(
         CommandSpec::new("/plugins rm", "remove an installed plugin")

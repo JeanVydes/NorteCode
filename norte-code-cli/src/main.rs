@@ -159,7 +159,7 @@ struct PluginsArgs {
 
 /// What the plugin commands do.
 ///
-/// The same three the chat offers — `/plugins list`, `/plugins add` and
+/// The same operations the chat offers — `/plugins list`, `/plugins add` and
 /// `/plugins rm` — so a plugin can be installed from a shell, where a build
 /// that takes minutes is something a person can watch, and not only from
 /// inside a session that is waiting for it.
@@ -167,10 +167,13 @@ struct PluginsArgs {
 enum PluginsCommand {
     /// List the installed plugins.
     List,
-    /// Install a plugin from a git URL.
+    /// Install one plugin package from a git URL.
     Add {
         /// The git URL of the plugin's repository.
         url: String,
+        /// Select a package from a multi-plugin Cargo workspace.
+        #[arg(long)]
+        package: Option<String>,
     },
     /// Remove an installed plugin.
     #[command(alias = "remove")]

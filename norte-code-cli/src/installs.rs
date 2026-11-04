@@ -19,14 +19,15 @@ use crate::input::{InstallReport, Pinned};
 ///
 /// Nothing is waited for here. The clone, the build and the copy happen on the
 /// blocking thread, and the outcome reaches the conversation when it is done.
-pub(crate) fn start(url: String, pinned: Arc<Pinned>) {
-    let name = plugin_name(&url);
+pub(crate) fn start(url: String, package: Option<String>, pinned: Arc<Pinned>) {
+    let name = package.clone().unwrap_or_else(|| plugin_name(&url));
     pinned.set_installing(name.clone());
     tokio::spawn(async move {
         let built = url.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || crate::plugin_manager::install_plugin(&built))
-                .await;
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::plugin_manager::install_plugin(&built, package.as_deref())
+        })
+        .await;
         let report = match outcome {
             Ok(Ok(library)) => InstallReport {
                 name,

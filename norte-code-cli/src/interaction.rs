@@ -133,7 +133,10 @@ pub(crate) enum ChatCommand {
     Plans,
 
     /// Install a plugin from a git URL.
-    PluginsAdd { url: String },
+    PluginsAdd {
+        url: String,
+        package: Option<String>,
+    },
 
     /// Rebuild installed plugins from their source, all or one.
     PluginsUpdate { name: Option<String> },
@@ -224,6 +227,7 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         "/plans" => ChatCommand::Plans,
         "/plugins add" => ChatCommand::PluginsAdd {
             url: invocation.arg_or_empty("url").to_owned(),
+            package: invocation.arg("package").map(str::to_owned),
         },
         "/plugins update" => ChatCommand::PluginsUpdate {
             name: invocation.arg("name").map(str::to_owned),
@@ -798,15 +802,17 @@ pub(crate) async fn interactive_loop(
                     }
                 }
 
-                ChatCommand::PluginsAdd { url } => {
+                ChatCommand::PluginsAdd { url, package } => {
                     // The clone and the build take minutes, so they run on
                     // their own thread and the interface stays alive: a person
                     // can keep working while a plugin is installed, and the
                     // screen says what is being waited for.
-                    let name = crate::installs::plugin_name(&url);
+                    let name = package
+                        .clone()
+                        .unwrap_or_else(|| crate::installs::plugin_name(&url));
                     renderer.notice(format!("installing {name}…"));
                     renderer.mark_dirty();
-                    crate::installs::start(url, Arc::clone(&renderer.pinned));
+                    crate::installs::start(url, package, Arc::clone(&renderer.pinned));
                 }
 
                 ChatCommand::PluginsUpdate { name } => {
@@ -1645,13 +1651,15 @@ async fn handle_live_command(
             }
         }
 
-        ChatCommand::PluginsAdd { url } => {
+        ChatCommand::PluginsAdd { url, package } => {
             // The same as at the prompt: the build runs on its own thread and
             // the turn keeps going.
-            let name = crate::installs::plugin_name(&url);
+            let name = package
+                .clone()
+                .unwrap_or_else(|| crate::installs::plugin_name(&url));
             renderer.notice(format!("installing {name}…"));
             renderer.mark_dirty();
-            crate::installs::start(url, Arc::clone(&renderer.pinned));
+            crate::installs::start(url, package, Arc::clone(&renderer.pinned));
         }
 
         ChatCommand::PluginsUpdate { name } => {
@@ -4374,6 +4382,24 @@ mod tests {
             Some(Ok(ChatCommand::PluginsUpdate { name: Some(name) })) if name == "session-info"
         ));
         assert!(offered("/plugins update"));
+    }
+
+    #[test]
+    fn the_plugins_add_command_accepts_a_workspace_package() {
+        assert_eq!(
+            parse_chat_command("/plugins add https://example.invalid/repo plugin-two"),
+            Some(Ok(ChatCommand::PluginsAdd {
+                url: "https://example.invalid/repo".to_owned(),
+                package: Some("plugin-two".to_owned()),
+            }))
+        );
+        assert_eq!(
+            parse_chat_command("/plugins add https://example.invalid/repo"),
+            Some(Ok(ChatCommand::PluginsAdd {
+                url: "https://example.invalid/repo".to_owned(),
+                package: None,
+            }))
+        );
     }
 
     #[test]

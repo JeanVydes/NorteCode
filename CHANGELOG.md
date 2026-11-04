@@ -8,6 +8,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Plugin installation selects one `cdylib` package from a Cargo workspace.
+  Single-plugin repositories remain automatic; when a workspace exposes
+  several plugins, `norte-code plugins add URL --package NAME` or
+  `/plugins add URL NAME` selects one. Updates retain the selected package.
+
 - Sessions have a `plan` tool to propose, list, inspect, update, and delete
   plans. Plans are editable Markdown files in
   `~/.local/norte-code/{session_id}/plans/`; each session also gets its local

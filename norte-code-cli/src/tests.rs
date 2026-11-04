@@ -1,6 +1,6 @@
 use super::{
-    Cli, Command, McpCommand, SandboxOptions, Style, apply_extensions, budget_label,
-    budget_warning, compose_selection, cost_summary, matching_stored_session,
+    Cli, Command, McpCommand, PluginsArgs, PluginsCommand, SandboxOptions, Style, apply_extensions,
+    budget_label, budget_warning, compose_selection, cost_summary, matching_stored_session,
     parse_reasoning_setting, select_system_prompt,
 };
 use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table};
@@ -45,6 +45,25 @@ fn resume_model_lookup_does_not_guess_between_matching_sessions() {
         matching_stored_session(vec![first, second], "12345678").is_none(),
         "an ambiguous prefix must not pick a model from either session"
     );
+}
+
+#[test]
+fn plugin_install_cli_accepts_a_workspace_package() {
+    let cli = Cli::try_parse_from([
+        "norte-code",
+        "plugins",
+        "add",
+        "https://example.invalid/repo",
+        "--package",
+        "plugin-two",
+    ])
+    .expect("plugin command");
+    assert!(matches!(
+        cli.command,
+        Some(Command::Plugins(PluginsArgs {
+            command: PluginsCommand::Add { url, package: Some(package) }
+        })) if url == "https://example.invalid/repo" && package == "plugin-two"
+    ));
 }
 
 /// A request row for the telemetry tests.
