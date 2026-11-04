@@ -16,6 +16,7 @@ use crate::render::{
     report_start, report_tools, scope_name, tools_panel, unit_name,
 };
 use norte_code_protocol::commands::Invocation;
+use norte_code_protocol::plans::read_plan_header;
 /// How often a running turn redraws, in ms.
 ///
 /// It is the clock behind a call's counter and the spinner. Fast enough that a
@@ -1427,6 +1428,7 @@ async fn steer_text(
 }
 
 /// Shows the current session's Markdown plans and their on-disk locations.
+#[allow(clippy::too_many_lines)]
 async fn show_plans(session: Option<&SessionKey>, renderer: &mut Renderer) {
     let Some(session) = session else {
         renderer.notice("start or resume a session before using /plans");
@@ -1469,13 +1471,7 @@ async fn show_plans(session: Option<&SessionKey>, renderer: &mut Renderer) {
             return;
         }
     };
-    let mut lines = vec![
-        format!("Plans directory: {}", directory.display()),
-        String::new(),
-    ];
-    if paths.is_empty() {
-        lines.push("No plans saved for this session.".to_owned());
-    }
+    let mut listed = Vec::new();
     for path in paths {
         let Some(id) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
             renderer.failure(format!(
@@ -1484,15 +1480,38 @@ async fn show_plans(session: Option<&SessionKey>, renderer: &mut Renderer) {
             ));
             return;
         };
-        let contents = match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => contents,
+        let plan = match read_plan_header(&path, id).await {
+            Ok(plan) => plan,
             Err(error) => {
-                renderer.failure(format!("could not read plan {}: {error}", path.display()));
+                renderer.failure(error);
                 return;
             }
         };
-        let status = plan_file_status(&contents);
-        let title = plan_file_title(&contents).unwrap_or(id);
+        listed.push((path, plan));
+    }
+    listed.sort_by(|left, right| {
+        right
+            .1
+            .updated_at
+            .cmp(&left.1.updated_at)
+            .then_with(|| left.1.id.cmp(&right.1.id))
+    });
+
+    let mut lines = vec![
+        format!("Plans directory: {}", directory.display()),
+        String::new(),
+    ];
+    if listed.is_empty() {
+        lines.push("No plans saved for this session.".to_owned());
+    }
+    for (path, plan) in listed {
+        let id = &plan.id;
+        let status = Some(match plan.status {
+            norte_code_protocol::plans::PlanStatus::Active => "active",
+            norte_code_protocol::plans::PlanStatus::Pending => "pending",
+            norte_code_protocol::plans::PlanStatus::Canceled => "canceled",
+        });
+        let title = plan.title.as_deref().unwrap_or(id);
         let (indicator, label) = match status {
             Some("active") => ("🟢", "active"),
             Some("pending") => ("🟡", "pending"),
@@ -1501,23 +1520,18 @@ async fn show_plans(session: Option<&SessionKey>, renderer: &mut Renderer) {
         };
         lines.push(format!("{indicator} {title}  [{label}]"));
         lines.push(format!("  {}", path.display()));
-        if let Some(created_at) = plan_file_metadata(&contents, "created_at") {
+        if let Some(created_at) = plan.created_at {
             lines.push(format!("  created: {created_at}"));
         }
-        if let Some(updated_at) = plan_file_metadata(&contents, "updated_at") {
+        if let Some(updated_at) = plan.updated_at {
             lines.push(format!("  modified: {updated_at}"));
         }
-        if let (Some(provider), Some(model)) = (
-            plan_file_metadata(&contents, "provider"),
-            plan_file_metadata(&contents, "model"),
-        ) {
+        if let (Some(provider), Some(model)) = (plan.provider, plan.model) {
             lines.push(format!("  created by: {provider}/{model}"));
-        }
-        if status.is_none() {
-            lines.push("  Invalid or missing status in Markdown front matter.".to_owned());
         }
         lines.push(String::new());
     }
+
     renderer.open_modal("plans", lines);
 }
 
@@ -1552,33 +1566,30 @@ async fn plan_paths(
     Ok(Some(paths))
 }
 
+#[cfg(test)]
 fn plan_file_status(contents: &str) -> Option<&str> {
-    let metadata = contents.strip_prefix("---\n")?.split_once("\n---\n")?.0;
-    let status = metadata
-        .lines()
-        .find_map(|line| line.strip_prefix("status: "))?;
-    matches!(status, "active" | "pending" | "canceled").then_some(status)
+    let plan = norte_code_protocol::plans::parse_plan("plan", contents).ok()?;
+    Some(match plan.status {
+        norte_code_protocol::plans::PlanStatus::Active => "active",
+        norte_code_protocol::plans::PlanStatus::Pending => "pending",
+        norte_code_protocol::plans::PlanStatus::Canceled => "canceled",
+    })
 }
 
-fn plan_file_title(contents: &str) -> Option<&str> {
-    let markdown = contents
-        .strip_prefix("---\n")?
-        .split_once("\n---\n")?
-        .1
-        .trim_start_matches('\n');
-    let first_line = markdown.lines().next()?.trim();
-    let title = first_line
-        .strip_prefix('#')
-        .map_or(first_line, |line| line.trim_start_matches('#').trim());
-    (!title.is_empty()).then_some(title)
-}
-
+#[cfg(test)]
 fn plan_file_metadata(contents: &str, key: &str) -> Option<String> {
-    let metadata = contents.strip_prefix("---\n")?.split_once("\n---\n")?.0;
-    let value = metadata
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}: ")))?;
-    Some(serde_json::from_str(value).unwrap_or_else(|_| value.to_owned()))
+    let plan = norte_code_protocol::plans::parse_plan("plan", contents).ok()?;
+    match key {
+        "created_at" => plan
+            .created_at
+            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)),
+        "updated_at" => plan
+            .updated_at
+            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)),
+        "provider" => plan.provider,
+        "model" => plan.model,
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2713,7 +2724,7 @@ fn print_job(job: &JobInfo, renderer: &mut Renderer, style: Style) {
 fn job_state_label(state: JobState, style: Style) -> String {
     let word = state.label();
     match state {
-        JobState::Running => style.cyan(word.to_owned()),
+        JobState::Running => style.magenta(word.to_owned()),
         JobState::Finished => style.green(word.to_owned()),
         JobState::Cancelled => style.yellow(word.to_owned()),
     }
@@ -3757,8 +3768,7 @@ mod tests {
         BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
         ReasoningScope, SignalGuard, command_suggestion, interactive_loop, models_panel, mpsc,
         parse_budget_limit, parse_chat_command, plan_file_metadata, plan_file_status,
-        plan_file_title, plan_provider_switch, refresh_completions, refresh_session_model,
-        switch_provider,
+        plan_provider_switch, refresh_completions, refresh_session_model, switch_provider,
     };
     use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
     use crate::render::{Format, Renderer, Verbosity};
@@ -4338,19 +4348,6 @@ mod tests {
         );
         assert_eq!(plan_file_status("---\nstatus: unknown\n---\n"), None);
         assert_eq!(plan_file_status("# No metadata"), None);
-    }
-
-    #[test]
-    fn plan_title_uses_first_markdown_line_without_heading_prefix() {
-        assert_eq!(
-            plan_file_title("---\nstatus: active\n---\n### Add plans command\n\nDetails"),
-            Some("Add plans command")
-        );
-        assert_eq!(
-            plan_file_title("---\nstatus: pending\n---\nPlan title\n\nDetails"),
-            Some("Plan title")
-        );
-        assert_eq!(plan_file_title("---\nstatus: pending\n---\n#"), None);
     }
 
     #[test]

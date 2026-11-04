@@ -75,7 +75,7 @@ pub(crate) async fn answer_if_asked(
             String::new(),
         ];
         lines.extend(crate::text::terminal(plan).lines().map(str::to_owned));
-        renderer.open_modal("proposed plan", lines);
+        renderer.open_markdown_modal("proposed plan", lines);
         pinned.ask("Approve this plan?".to_owned(), options.clone(), *multiple);
     } else {
         // The question is drawn where the draft is drawn: the editor owns
