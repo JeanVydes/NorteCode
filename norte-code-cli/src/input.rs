@@ -2212,28 +2212,16 @@ mod unix {
             KeyCode::Char('c') if control => KeyOutcome::CancelJobs,
             KeyCode::Char('o' | 'O') if control => KeyOutcome::ToggleOutput,
             KeyCode::Char('l') if control => KeyOutcome::Continue,
-            // Ctrl-G stops waiting for the running call and leaves the process
-            // running. Ctrl-Shift-B is what it used to be, and stays an alias.
-            //
-            // Ctrl-Shift-B did nothing here. It arrived as `Char('b')` carrying
-            // SHIFT and CONTROL — the keyboard protocol sends the *unshifted*
-            // codepoint — while the branch looked for `Char('B')`, so the key fell
-            // through to plain Ctrl-B and moved the cursor while the call kept
-            // running. Reading crossterm's parser did not settle whether the
-            // terminal or crossterm dropped the shift, and a key that does nothing
-            // is not something a person can diagnose from the outside. Ctrl-G is
-            // asked for as an ordinary control key, and crossterm reaches
-            // `Char('g')` with CONTROL on both of its paths: the legacy byte
-            // (`\x07`, matched by `b'\x01'..=b'\x1A'` in
-            // `event/sys/unix/parse.rs`) and the keyboard protocol's `CSI 103;5u`.
-            // Neither depends on the shift being reported, and neither does the
-            // pattern below, which is why `'G'` is in it: a terminal that encodes
-            // a modified key with the shifted codepoint reaches the same branch.
-            KeyCode::Char('g' | 'G') if control => KeyOutcome::Detach,
-            // The original binding, kept for a terminal that reports the shift.
-            KeyCode::Char('b' | 'B') if control && key.modifiers.contains(KeyModifiers::SHIFT) => {
-                KeyOutcome::Detach
-            }
+            // Detach the running call and send it to the background: Ctrl-B
+            // (with or without Shift — terminals report both spellings) and
+            // Ctrl-G both reach it. Most terminals report Ctrl-Shift-B as
+            // Char('b') with SHIFT, some as Char('B') with CONTROL — accept
+            // both, because a key that silently moves the cursor instead is
+            // not diagnosable from outside. Ctrl-G is reached as Char('g')
+            // with CONTROL on both crossterm paths (the legacy byte \x07
+            // and the keyboard protocol's CSI 103;5u), and 'G' covers a
+            // terminal that encodes a modified key with the shifted codepoint.
+            KeyCode::Char('g' | 'G' | 'b' | 'B') if control => KeyOutcome::Detach,
             // Ctrl-A selects the whole draft, which is what it means in every
             // editor; a cursor to the start is a plain Home.
             KeyCode::Char('a') if control => {
@@ -2254,10 +2242,6 @@ mod unix {
             }
             KeyCode::Char('w') if control => {
                 buffer.kill_word();
-                KeyOutcome::Continue
-            }
-            KeyCode::Char('b') if control => {
-                buffer.left();
                 KeyOutcome::Continue
             }
             KeyCode::Char('f') if control => {
