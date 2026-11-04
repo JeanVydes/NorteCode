@@ -74,7 +74,7 @@ impl Widget for Spinner {
         let spot = cycle.cast_signed() - 3; // allow off-screen for fade-in/out
 
         let base_bg = Color::Rgb(0x1A, 0x1F, 0x24);
-        let light_bg = Color::Rgb(0x56, 0xB6, 0xC2);
+        let light_bg = Color::Rgb(0xFF, 0x5C, 0xD6);
 
         let mut spans: Vec<Span> = Vec::with_capacity(len + 2);
         spans.push(Span::raw("  "));

@@ -245,18 +245,6 @@ fn effort_ink(effort: &str) -> (usize, Ink) {
     }
 }
 
-/// The ink a reasoning setting is written in.
-///
-/// It is the bar's own colour, exposed for the rows that name a setting without
-/// drawing one: the suggestion above the input says what Tab would write —
-/// `xhigh — setting` — and it means the same thing the bar does, so it reads in
-/// the same colour. A person learning the scale from one row and reading the
-/// other should not have to learn it twice.
-#[must_use]
-pub(crate) fn effort_span(style: Style, effort: &str) -> ratatui::style::Style {
-    effort_ink(effort).1.span(style)
-}
-
 /// The reasoning effort as a bar: its text and the ink it is drawn in.
 ///
 /// The footer used to say `think high`, which is a word a person has to map to

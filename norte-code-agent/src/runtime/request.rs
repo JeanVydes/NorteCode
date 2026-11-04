@@ -31,6 +31,24 @@ use super::{
     stream_delta,
 };
 
+const CONTEXT_SAFETY_MARGIN: u64 = 4096;
+
+fn context_safe_output(
+    requested: Option<u64>,
+    max_context: Option<u64>,
+    messages: &[Message],
+    tools: &[norte::tool::ToolSpec],
+) -> Option<u64> {
+    let requested = requested?;
+    let Some(max_context) = max_context else {
+        return Some(requested);
+    };
+    let prompt_bytes = serde_json::to_vec(&(messages, tools)).unwrap_or_default();
+    let estimated_prompt = (prompt_bytes.len() as u64).div_ceil(4);
+    let available = max_context.saturating_sub(estimated_prompt + CONTEXT_SAFETY_MARGIN);
+    Some(requested.min(available))
+}
+
 impl Harness {
     /// Runs the model and returns the answer and whether it was interrupted.
     ///
@@ -112,7 +130,7 @@ impl Harness {
             SESSION_EXTENSION.to_owned(),
             Value::String(session.id.to_string()),
         );
-        let request = ModelRequest {
+        let mut request = ModelRequest {
             model: model_ref.clone(),
             messages: reconstructed.messages,
             tools,
@@ -122,6 +140,12 @@ impl Harness {
             cache_boundaries: reconstructed.cache_boundaries,
             extensions,
         };
+        request.params.max_output_tokens = context_safe_output(
+            request.params.max_output_tokens,
+            capabilities.max_context,
+            &request.messages,
+            &request.tools,
+        );
         // A layer may alter the request, so the digest must describe the one the
         // model receives (FR-ENG-4). The clone is the fallback for a layer that
         // answers without the model: the request it received is what the digest
@@ -505,6 +529,7 @@ impl Harness {
                 other => externalized.push(other),
             }
         }
+
         Ok(externalized)
     }
 
@@ -512,12 +537,14 @@ impl Harness {
         if self.media.is_none() {
             return Ok((history, false));
         }
+
         let mut processed = Vec::with_capacity(history.len());
         let mut changed = false;
         for mut message in history {
             changed |= self.preprocess_parts(&mut message.parts).await?;
             processed.push(message);
         }
+
         Ok((processed, changed))
     }
 
@@ -547,5 +574,43 @@ impl Harness {
             media.source = MediaSource::Inline(transformed.bytes);
         }
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_requested_output_when_it_fits_context() {
+        let messages = vec![Message::user("hello")];
+        let tools = Vec::new();
+
+        assert_eq!(
+            context_safe_output(Some(8_192), Some(128_000), &messages, &tools),
+            Some(8_192)
+        );
+    }
+
+    #[test]
+    fn clamps_output_to_remaining_context() {
+        let messages = vec![Message::user("x".repeat(40_000))];
+        let tools = Vec::new();
+
+        let output = context_safe_output(Some(100_000), Some(20_000), &messages, &tools)
+            .expect("requested output");
+        assert!(output < 100_000);
+        assert!(output <= 20_000 - CONTEXT_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn leaves_unbounded_output_unset() {
+        let messages = vec![Message::user("hello")];
+        let tools = Vec::new();
+
+        assert_eq!(
+            context_safe_output(None, Some(128_000), &messages, &tools),
+            None
+        );
     }
 }

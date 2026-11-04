@@ -21,7 +21,7 @@ pub(crate) use debug::{
     HostFacts, mcp_panel, report_mcp, report_prompt, report_reasoning, report_start, report_tools,
     tools_panel,
 };
-pub(crate) use dial::{effort_span, reasoning_label, token_ratio};
+pub(crate) use dial::{reasoning_label, token_ratio};
 pub(crate) use helpers::{cache_percent_label, find_project_config, human_tokens};
 #[cfg(test)]
 pub(crate) use labels::budget_label;

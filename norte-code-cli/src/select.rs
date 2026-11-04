@@ -523,7 +523,7 @@ fn draw(
             let list = List::new(listed)
                 .highlight_style(
                     ratatui::style::Style::new()
-                        .bg(ratatui::style::Color::Rgb(0x56, 0xB6, 0xC2))
+                        .bg(ratatui::style::Color::Rgb(0xFF, 0x5C, 0xD6))
                         .fg(ratatui::style::Color::Rgb(0x0B, 0x10, 0x14))
                         .add_modifier(ratatui::style::Modifier::BOLD),
                 )
@@ -594,7 +594,11 @@ fn draw_art(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usize, style: Styl
             .map(|row| {
                 Line::styled(
                     (*row).to_owned(),
-                    style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+                    style.ratatui(
+                        crate::style::PRIMARY,
+                        crate::style::PRIMARY_256,
+                        crate::style::PRIMARY_ANSI,
+                    ),
                 )
             })
             .collect();
@@ -620,7 +624,11 @@ fn draw_art(frame: &mut ratatui::Frame<'_>, area: Rect, tick: usize, style: Styl
             .map(|row| {
                 Line::styled(
                     (*row).to_owned(),
-                    style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+                    style.ratatui(
+                        crate::style::PRIMARY,
+                        crate::style::PRIMARY_256,
+                        crate::style::PRIMARY_ANSI,
+                    ),
                 )
             })
             .collect();

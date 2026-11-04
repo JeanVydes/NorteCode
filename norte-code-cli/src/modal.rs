@@ -26,10 +26,12 @@
 //! denying them for the same scope.
 
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style as RatatuiStyle};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Widget as _};
+use ratatui::widgets::{Axis, Block, Chart, Clear, Dataset, GraphType, Paragraph, Widget as _};
 
-use crate::style::Style;
+use crate::style::{ALTERNATE, GREEN, PRIMARY, Style, YELLOW};
 use crate::terminal::Draw;
 use norte_code_protocol::SessionKey;
 
@@ -248,6 +250,8 @@ pub(crate) struct Modal {
     /// rebuilt from that state on every frame, and the keys move the state and
     /// not a cursor over text.
     pub(crate) telemetry: Option<crate::telemetry_panel::Panel>,
+    /// Whether report rows contain Markdown to render.
+    markdown: bool,
 }
 
 impl Modal {
@@ -262,7 +266,16 @@ impl Modal {
             scope: Scope::Session,
             editable: false,
             telemetry: None,
+            markdown: false,
         }
+    }
+
+    /// A read-only report whose rows contain Markdown.
+    #[must_use]
+    pub(crate) fn markdown_report(title: impl Into<String>, lines: Vec<String>) -> Self {
+        let mut modal = Self::report(title, lines);
+        modal.markdown = true;
+        modal
     }
 
     /// An editor: rows with a cursor, and keys that act on them.
@@ -276,6 +289,7 @@ impl Modal {
             scope: Scope::Session,
             editable: true,
             telemetry: None,
+            markdown: false,
         };
         modal.cursor = modal.first_actable();
         modal
@@ -292,6 +306,7 @@ impl Modal {
             scope: Scope::Session,
             editable: false,
             telemetry: Some(panel),
+            markdown: false,
         }
     }
 
@@ -526,7 +541,11 @@ impl Modal {
     /// reader sends is a number of rows, and what fits on screen is decided
     /// where the height is known.
     pub(crate) fn scroll_by(&mut self, delta: isize, height: usize) {
-        let most = self.rows.len().saturating_sub(height);
+        let most = if self.markdown {
+            usize::MAX
+        } else {
+            self.rows.len().saturating_sub(height)
+        };
         self.top = self.top.saturating_add_signed(delta).min(most);
     }
 
@@ -535,6 +554,7 @@ impl Modal {
     /// It takes the middle of the screen rather than all of it: the
     /// conversation stays visible around the edges, which is what tells a
     /// person the panel can be dismissed instead of being the whole program.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn draw(&self, frame: &mut Draw<'_>, area: Rect, style: Style) {
         if self.is_empty() {
             return;
@@ -552,31 +572,61 @@ impl Modal {
             panel.width.saturating_sub(4),
             panel.height.saturating_sub(2),
         );
-        let room = usize::from(inner.height);
-        let shown = self.rows.len().min(room);
-        // The window follows the cursor when there is one, so the row a person
-        // is walking toward is the row that is on screen. A report has no
-        // cursor and reads from its top.
+        let chart_height = self
+            .telemetry
+            .as_ref()
+            .filter(|panel| panel.tab == crate::telemetry_panel::Tab::Time)
+            .filter(|_| inner.height >= 12)
+            .map_or(0, |_| 9);
+        if chart_height > 0 {
+            let chart_area = Rect::new(inner.x, inner.y, inner.width, chart_height);
+            draw_telemetry_charts(
+                frame,
+                chart_area,
+                self.telemetry.as_ref().expect("telemetry chart"),
+            );
+        }
+        let text_inner = Rect::new(
+            inner.x,
+            inner.y.saturating_add(chart_height),
+            inner.width,
+            inner.height.saturating_sub(chart_height),
+        );
+        let room = usize::from(text_inner.height);
+        let rendered = if self.markdown {
+            markdown_lines(&self.rows, inner.width, style)
+        } else {
+            self.rows
+                .iter()
+                .enumerate()
+                .map(|(offset, row)| {
+                    let under_cursor = self.editable && offset == self.cursor;
+                    row_line(row, under_cursor, style)
+                })
+                .collect()
+        };
+        let total = if self.markdown {
+            rendered.len()
+        } else {
+            self.rows.len()
+        };
+        let shown = total.min(room);
         let from = if self.editable {
             self.top
                 .max(self.cursor.saturating_sub(room.saturating_sub(1)))
-                .min(self.rows.len().saturating_sub(shown))
+                .min(total.saturating_sub(shown))
         } else {
-            self.top.min(self.rows.len().saturating_sub(shown))
+            self.top.min(total.saturating_sub(shown))
         };
-        let rows: Vec<Line> = self.rows[from..from + shown]
-            .iter()
-            .enumerate()
-            .map(|(offset, row)| {
-                let under_cursor = self.editable && from + offset == self.cursor;
-                row_line(row, under_cursor, style)
-            })
-            .collect();
-        Paragraph::new(rows).render(inner, frame.buffer_mut());
+        // The window follows the cursor when there is one, so the row a person
+        // is walking toward is the row that is on screen. A report has no
+        // cursor and reads from its top.
+        let rows: Vec<Line> = rendered.into_iter().skip(from).take(shown).collect();
+        Paragraph::new(rows).render(text_inner, frame.buffer_mut());
 
         // The frame of the panel, drawn after its contents so the corners are
         // not overwritten by a long line.
-        let border = style.blue_span();
+        let border = style.faint_span();
         let width = usize::from(panel.width).saturating_sub(2);
         let title = format!(" {} ", crate::text::terminal(&self.title));
         let title: String = title.chars().take(width).collect();
@@ -605,7 +655,7 @@ impl Modal {
             frame,
             panel.x,
             panel.y + panel.height.saturating_sub(1),
-            &format!("╰{}╯", self.footer(room, from, shown, width)),
+            &format!("╰{}╯", self.footer(room, from, shown, width, total)),
             border,
         );
         // A subtle shadow to the right and below the panel, so it reads as
@@ -626,17 +676,11 @@ impl Modal {
     }
 
     /// The bottom border: what the panel holds, and what a key does here.
-    fn footer(&self, room: usize, from: usize, shown: usize, width: usize) -> String {
+    fn footer(&self, room: usize, from: usize, shown: usize, width: usize, total: usize) -> String {
         let mut hint = String::new();
-        if self.rows.len() > room {
+        if total > room {
             use std::fmt::Write as _;
-            let _ = write!(
-                hint,
-                " {}-{} of {} ",
-                from + 1,
-                from + shown,
-                self.rows.len()
-            );
+            let _ = write!(hint, " {}-{} of {} ", from + 1, from + shown, total);
         }
         if let Some(panel) = self.telemetry.as_ref() {
             use std::fmt::Write as _;
@@ -661,6 +705,111 @@ impl Modal {
 
 /// How far a page key moves the cursor.
 const PAGE: isize = 10;
+
+fn draw_telemetry_charts(frame: &mut Draw<'_>, area: Rect, panel: &crate::telemetry_panel::Panel) {
+    let layout = Layout::vertical([Constraint::Length(5), Constraint::Length(4)]).split(area);
+    let (labels, model_series) = panel.chart_series(panel.metric, 4);
+    let (request_labels, requests) = panel.aggregate_series(crate::telemetry_panel::Metric::Tokens);
+    let max_x = chart_index(labels.len());
+    let max_y = model_series
+        .iter()
+        .flat_map(|series| series.points.iter().map(|(_, value)| *value))
+        .fold(1.0, f64::max);
+    let palette = [PRIMARY, GREEN, YELLOW, ALTERNATE];
+    let datasets = model_series
+        .iter()
+        .enumerate()
+        .map(|(index, series)| {
+            Dataset::default()
+                .name(series.name.clone())
+                .marker(symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(RatatuiStyle::default().fg(ratatui::style::Color::Rgb(
+                    palette[index % palette.len()].0,
+                    palette[index % palette.len()].1,
+                    palette[index % palette.len()].2,
+                )))
+                .data(&series.points)
+        })
+        .collect::<Vec<_>>();
+    let x_labels = chart_labels(&labels);
+    let chart = Chart::new(datasets)
+        .block(Block::bordered().title(format!(" {} by model ", panel.metric.label())))
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, max_x])
+                .labels(x_labels.clone()),
+        )
+        .y_axis(Axis::default().bounds([0.0, max_y]).labels(vec![
+            Span::raw("0"),
+            Span::raw(metric_axis_label(max_y, panel.metric)),
+        ]));
+    frame.render_widget(chart, layout[0]);
+
+    let request_max = requests
+        .points
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(1.0, f64::max);
+    let request_chart = Chart::new(vec![
+        Dataset::default()
+            .name("tokens")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(
+                RatatuiStyle::default()
+                    .fg(ratatui::style::Color::Rgb(PRIMARY.0, PRIMARY.1, PRIMARY.2)),
+            )
+            .data(&requests.points),
+    ])
+    .block(Block::bordered().title(" activity "))
+    .x_axis(
+        Axis::default()
+            .bounds([0.0, chart_index(request_labels.len())])
+            .labels(chart_labels(&request_labels)),
+    )
+    .y_axis(
+        Axis::default()
+            .bounds([0.0, request_max])
+            .labels(vec![Span::raw("0"), Span::raw(human_chart(request_max))]),
+    );
+    frame.render_widget(request_chart, layout[1]);
+}
+
+fn chart_index(length: usize) -> f64 {
+    f64::from(u32::try_from(length.saturating_sub(1).max(1)).unwrap_or(u32::MAX))
+}
+
+fn chart_labels(labels: &[String]) -> Vec<Span<'static>> {
+    match (labels.first(), labels.last()) {
+        (Some(first), Some(last)) if first != last => {
+            vec![Span::raw(first.clone()), Span::raw(last.clone())]
+        }
+        (Some(label), _) => vec![Span::raw(label.clone())],
+        _ => vec![Span::raw("no data")],
+    }
+}
+
+fn human_chart(value: f64) -> String {
+    if value >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("{:.1}k", value / 1_000.0)
+    } else {
+        format!("{value:.0}")
+    }
+}
+
+fn metric_axis_label(value: f64, metric: crate::telemetry_panel::Metric) -> String {
+    match metric {
+        crate::telemetry_panel::Metric::Cost => format!("${:.4}", value / 1_000_000.0),
+        crate::telemetry_panel::Metric::CacheRate => format!("{value:.0}%"),
+        crate::telemetry_panel::Metric::Latency | crate::telemetry_panel::Metric::FirstToken => {
+            format!("{value:.0}ms")
+        }
+        _ => human_chart(value),
+    }
+}
 
 /// One row, as the panel draws it.
 fn row_line(row: &Row, under_cursor: bool, _style: Style) -> Line<'static> {
@@ -699,6 +848,83 @@ fn row_line(row: &Row, under_cursor: bool, _style: Style) -> Line<'static> {
         format!("{lead}{}", crate::text::terminal(&text)),
         ink,
     ))
+}
+
+fn markdown_lines(rows: &[Row], width: u16, style: Style) -> Vec<Line<'static>> {
+    let text = rows
+        .iter()
+        .map(|row| row.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content_width = usize::from(width).saturating_sub(2).max(1);
+    let mut lines = Vec::new();
+    for rendered in crate::markdown::render(&text, content_width) {
+        let indent = rendered.indent.min(crate::markdown::max_indent());
+        let room = content_width.saturating_sub(indent).max(1);
+        let mut wrapped: Vec<Vec<crate::markdown::Run>> = vec![Vec::new()];
+        let mut used = 0;
+        for run in rendered.runs {
+            let mut piece = String::new();
+            for word in run.text.split_inclusive(' ') {
+                let size = word.chars().count();
+                if used > 0 && used + size > room {
+                    if !piece.is_empty() {
+                        wrapped
+                            .last_mut()
+                            .expect("a markdown row")
+                            .push(crate::markdown::Run {
+                                text: std::mem::take(&mut piece),
+                                emphasis: run.emphasis,
+                            });
+                    }
+                    wrapped.push(Vec::new());
+                    used = 0;
+                }
+                piece.push_str(word);
+                used += size;
+            }
+            if !piece.is_empty() {
+                wrapped
+                    .last_mut()
+                    .expect("a markdown row")
+                    .push(crate::markdown::Run {
+                        text: piece,
+                        emphasis: run.emphasis,
+                    });
+            }
+        }
+        for runs in wrapped {
+            let mut spans = vec![Span::raw("  ".to_owned())];
+            spans.push(Span::raw(" ".repeat(indent)));
+            spans.extend(runs.into_iter().map(|run| markdown_span(run, style)));
+            lines.push(Line::from(spans));
+        }
+    }
+    lines
+}
+
+fn markdown_span(run: crate::markdown::Run, style: Style) -> Span<'static> {
+    let mut draw = RatatuiStyle::default();
+    match run.emphasis {
+        crate::markdown::Emphasis::Bold | crate::markdown::Emphasis::TableHead => {
+            draw = draw.add_modifier(Modifier::BOLD);
+        }
+        crate::markdown::Emphasis::Italic => draw = draw.add_modifier(Modifier::ITALIC),
+        crate::markdown::Emphasis::Heading => {
+            draw = draw.add_modifier(Modifier::BOLD).fg(style.cyan_color());
+        }
+        crate::markdown::Emphasis::Code | crate::markdown::Emphasis::Bullet => {
+            draw = draw.fg(style.cyan_color());
+        }
+        crate::markdown::Emphasis::Quote | crate::markdown::Emphasis::Fence => {
+            draw = draw.fg(style.muted_color());
+        }
+        crate::markdown::Emphasis::Link => draw = draw.fg(style.cyan_color()),
+        crate::markdown::Emphasis::Strike => draw = draw.add_modifier(Modifier::CROSSED_OUT),
+        crate::markdown::Emphasis::Underline => draw = draw.add_modifier(Modifier::UNDERLINED),
+        crate::markdown::Emphasis::TableCell | crate::markdown::Emphasis::Plain => {}
+    }
+    Span::styled(run.text, draw)
 }
 
 /// How wide the text column is, so a note on the right lines up.

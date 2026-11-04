@@ -35,12 +35,35 @@ impl Widget for CompletionMenu<'_> {
                 .saturating_sub(metrics::MENU_INDENT + 2)
                 .max(1);
             let shown = clip::clip_text(&row, room);
-            let text = format!("{}{shown}", " ".repeat(metrics::MENU_INDENT));
-            let line = if here {
-                Line::styled(text, Style::selected())
+            let prefix = " ".repeat(metrics::MENU_INDENT);
+            let (command, arguments) = shown
+                .split_once(' ')
+                .map_or((shown.as_str(), ""), |(command, arguments)| {
+                    (command, arguments)
+                });
+            let selection = here.then_some(Style::selected());
+            let mut command_style = if command.starts_with('/') {
+                self.style.accent_span()
             } else {
-                Line::from(Span::styled(text, self.style.dim_span()))
+                self.style.faint_span()
             };
+            let mut argument_style = self.style.faint_span();
+            if let Some(selection) = selection {
+                command_style = command_style.patch(selection);
+                argument_style = argument_style.patch(selection);
+            }
+            let line = Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(command.to_owned(), command_style),
+                Span::styled(
+                    if arguments.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {arguments}")
+                    },
+                    argument_style,
+                ),
+            ]);
             let row_area = Rect::new(
                 area.x,
                 area.y + u16::try_from(offset).unwrap_or(0),
