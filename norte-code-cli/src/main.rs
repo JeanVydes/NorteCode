@@ -874,7 +874,18 @@ async fn stored_session(database: &Path, key: &str) -> Option<StoredSession> {
     }
     let store = SqliteStore::open(database).ok()?;
     let sessions = store.sessions().await.ok()?;
-    sessions.into_iter().find(|session| session.key == key)
+    matching_stored_session(sessions, key)
+}
+
+fn matching_stored_session(sessions: Vec<StoredSession>, key: &str) -> Option<StoredSession> {
+    if let Some(session) = sessions.iter().find(|session| session.key == key) {
+        return Some(session.clone());
+    }
+    let mut matches = sessions
+        .into_iter()
+        .filter(|session| session.key.starts_with(key));
+    let session = matches.next()?;
+    matches.next().is_none().then_some(session)
 }
 
 /// Continues a session named on the command line.
@@ -904,7 +915,7 @@ async fn resume_session(
 ) -> Result<u8, String> {
     let mut config = config;
     config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
-    let session_key = args
+    let mut session_key = args
         .session
         .clone()
         .ok_or("resume needs a session key; run `norte-code` to pick one")?;
@@ -917,6 +928,9 @@ async fn resume_session(
     // A session stored before the field existed has none, and the directory the
     // command was typed in stands — which is what `resume` always did.
     let stored = stored_session(&database_path()?, &session_key).await;
+    if let Some(stored) = &stored {
+        session_key = stored.key.clone();
+    }
     if let Some(dir) = stored
         .as_ref()
         .and_then(|session| session.workdir.clone())

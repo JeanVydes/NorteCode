@@ -680,6 +680,7 @@ pub(crate) async fn interactive_loop(
                     // that was opened, not the one that was left.
                     renderer.begin_session();
                     renderer.session = Some(key.to_string());
+                    refresh_session_model(service, &key, renderer);
                     if let Some(title) = service.session_title(&key) {
                         renderer.set_title(title);
                     }
@@ -2181,6 +2182,14 @@ pub(crate) fn refresh_effort(
     if let Some(label) = label {
         renderer.set_reasoning(label);
     }
+}
+
+/// Refreshes the model details shown for the session the client just opened.
+fn refresh_session_model(service: &Arc<Service>, session: &SessionKey, renderer: &mut Renderer) {
+    let spec = service.session_spec(session);
+    renderer.model_name = spec.as_ref().map(norte_code_agent::ModelSpec::label);
+    renderer.model_unset = spec.is_none();
+    renderer.max_context = spec.and_then(|spec| spec.capabilities.max_context);
 }
 
 /// The provider and the model a `/model` names, given the half the person did
@@ -3740,7 +3749,8 @@ mod tests {
         BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
         ReasoningScope, SignalGuard, command_suggestion, interactive_loop, models_panel, mpsc,
         parse_budget_limit, parse_chat_command, plan_file_metadata, plan_file_status,
-        plan_file_title, plan_provider_switch, refresh_completions, switch_provider,
+        plan_file_title, plan_provider_switch, refresh_completions, refresh_session_model,
+        switch_provider,
     };
     use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
     use crate::render::{Format, Renderer, Verbosity};
@@ -4593,6 +4603,13 @@ mod tests {
             .iter()
             .find_map(|event| event.session.clone())
             .expect("session key");
+        let other_session =
+            drain_request(&service, ClientRequestKind::CreateSession { title: None })
+                .await
+                .expect("create another session")
+                .into_iter()
+                .find_map(|event| event.session)
+                .expect("second session key");
 
         // Drive the loop the way a person does: `/provider`, then `/model`, then
         // `/exit`. There is no terminal in a test, so the lines come from a
@@ -4624,6 +4641,14 @@ mod tests {
             Some("second/other".to_owned()),
             "both halves moved through the turn-boundary handler"
         );
+        refresh_session_model(&service, &other_session, &mut renderer);
+        assert_eq!(
+            renderer.model_name.as_deref(),
+            Some("first/shared"),
+            "opening another session restores its own model in the footer"
+        );
+        assert_eq!(renderer.max_context, Some(1_000));
+        assert!(!renderer.model_unset);
     }
 
     /// The wiring the completion depends on, driven through the real loop.
