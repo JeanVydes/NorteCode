@@ -17,7 +17,11 @@ mod colors;
 mod theme;
 
 pub(crate) use colors::Colors;
-pub(crate) use theme::{ACCENT, ACCENT_256, ACCENT_ANSI, RULE, Theme, icon, metrics};
+pub(crate) use theme::{
+    ALTERNATE, ALTERNATE_256, ALTERNATE_ANSI, GREEN, OUTPUT_BACKGROUND, PRIMARY, PRIMARY_256,
+    PRIMARY_ANSI, RED, RULE, SECONDARY, SECONDARY_256, SECONDARY_ANSI, Theme, YELLOW, icon,
+    metrics,
+};
 
 /// How a styled run ends its SGR sequence.
 ///
@@ -38,14 +42,7 @@ pub struct Style {
 }
 
 /// One Dark foreground colours, visible on both dark and light themes.
-const GREEN: (u8, u8, u8) = (0x98, 0xC3, 0x79);
-const RED: (u8, u8, u8) = (0xE0, 0x6C, 0x75);
-const YELLOW: (u8, u8, u8) = (0xE5, 0xC0, 0x7B);
-const CYAN: (u8, u8, u8) = (0x56, 0xB6, 0xC2);
-const BLUE: (u8, u8, u8) = (0x61, 0xAF, 0xEF);
-const MAGENTA: (u8, u8, u8) = (0xC6, 0x78, 0xDD);
 const ORANGE: (u8, u8, u8) = (0xD1, 0x9A, 0x66);
-const MUTED: (u8, u8, u8) = (0x9A, 0xA0, 0xA6);
 const FAINT: (u8, u8, u8) = (0x7A, 0x78, 0x74);
 impl Style {
     /// Styling that never emits escape sequences.
@@ -182,26 +179,16 @@ impl Style {
         ratatui::style::Style::new().fg(color)
     }
 
-    /// The colour of the frame's own ink, for a widget that sets its own.
-    ///
-    /// A markdown run is drawn on the ink of the thing it belongs to and
-    /// overrides the colour and not the whole style: a heading is the answer's
-    /// ink plus a colour, and replacing the style would drop the row's own.
-    #[must_use]
-    pub(crate) fn blue_color(self) -> ratatui::style::Color {
-        self.pick_color(BLUE, 39, "34")
-    }
-
     /// The colour of a code span and a list's bullet.
     #[must_use]
     pub(crate) fn cyan_color(self) -> ratatui::style::Color {
-        self.pick_color(CYAN, 44, "36")
+        self.pick_color(PRIMARY, PRIMARY_256, PRIMARY_ANSI)
     }
 
     /// The colour of a quote, a fence and anything read past.
     #[must_use]
     pub(crate) fn muted_color(self) -> ratatui::style::Color {
-        self.pick_color(MUTED, 245, "2")
+        self.pick_color(SECONDARY, SECONDARY_256, SECONDARY_ANSI)
     }
 
     /// The palette's answer for one named colour at this depth.
@@ -221,7 +208,7 @@ impl Style {
     /// The widget style for a border, which is the frame's own ink.
     #[must_use]
     pub(crate) fn blue_span(self) -> ratatui::style::Style {
-        self.ratatui(BLUE, 39, "34")
+        self.ratatui(SECONDARY, SECONDARY_256, SECONDARY_ANSI)
     }
 
     /// The widget style for something that wants attention.
@@ -251,19 +238,19 @@ impl Style {
     /// The widget style for the brand: the spinner, the prompt, a live rule.
     #[must_use]
     pub(crate) fn accent_span(self) -> ratatui::style::Style {
-        self.ratatui(ACCENT, ACCENT_256, ACCENT_ANSI)
+        self.ratatui(PRIMARY, PRIMARY_256, PRIMARY_ANSI)
     }
 
     /// The widget style for the model identity.
     #[must_use]
     pub(crate) fn magenta_span(self) -> ratatui::style::Style {
-        self.ratatui(MAGENTA, 141, "35")
+        self.ratatui(PRIMARY, PRIMARY_256, PRIMARY_ANSI)
     }
 
     /// The widget style for tools, prompts and a session's title.
     #[must_use]
     pub(crate) fn cyan_span(self) -> ratatui::style::Style {
-        self.ratatui(CYAN, 44, "36")
+        self.ratatui(PRIMARY, PRIMARY_256, PRIMARY_ANSI)
     }
 
     /// The widget style for a heading, which is the bold default ink.
@@ -275,13 +262,26 @@ impl Style {
     /// The widget style for dimmed text, which is the muted colour.
     #[must_use]
     pub(crate) fn dim_span(self) -> ratatui::style::Style {
-        self.ratatui(MUTED, 245, "2")
+        self.ratatui(SECONDARY, SECONDARY_256, SECONDARY_ANSI)
     }
 
     /// The widget style for faint text, a step quieter than dim.
     #[must_use]
     pub(crate) fn faint_span(self) -> ratatui::style::Style {
         self.ratatui(FAINT, 244, "90")
+    }
+
+    /// The alternate text style used for thinking and tool output.
+    #[must_use]
+    pub(crate) fn alternate_span(self) -> ratatui::style::Style {
+        self.ratatui(ALTERNATE, ALTERNATE_256, ALTERNATE_ANSI)
+    }
+
+    /// The background style for tool output panels.
+    #[must_use]
+    pub(crate) fn output_background(self) -> ratatui::style::Style {
+        self.ratatui(OUTPUT_BACKGROUND, 235, "40")
+            .bg(self.pick_color(OUTPUT_BACKGROUND, 235, "40"))
     }
 
     /// The widget style for a selected row.
@@ -313,7 +313,7 @@ impl Style {
     /// Dim, for secondary detail.
     #[must_use]
     pub fn dim(self, text: impl Display) -> String {
-        self.color(MUTED, 245, "2", text)
+        self.color(SECONDARY, SECONDARY_256, SECONDARY_ANSI, text)
     }
 
     /// Green, for a successful action.
@@ -337,19 +337,19 @@ impl Style {
     /// Cyan, for tools and prompts.
     #[must_use]
     pub fn cyan(self, text: impl Display) -> String {
-        self.color(CYAN, 44, "36", text)
+        self.color(PRIMARY, PRIMARY_256, PRIMARY_ANSI, text)
     }
 
     /// Blue, for usage and secondary labels.
     #[must_use]
     pub fn blue(self, text: impl Display) -> String {
-        self.color(BLUE, 75, "34", text)
+        self.color(SECONDARY, SECONDARY_256, SECONDARY_ANSI, text)
     }
 
     /// Magenta, for the model identity.
     #[must_use]
     pub fn magenta(self, text: impl Display) -> String {
-        self.color(MAGENTA, 141, "35", text)
+        self.color(PRIMARY, PRIMARY_256, PRIMARY_ANSI, text)
     }
 
     /// Orange, for an effort above the middle.
@@ -376,7 +376,7 @@ impl Style {
         let codes = match self.colors {
             Colors::None => return self.decorate("", text),
             Colors::True => {
-                let (r, g, b) = BLUE;
+                let (r, g, b) = PRIMARY;
                 format!("1;38;2;{r};{g};{b}")
             }
             Colors::Ansi256 => "1;38;5;75".to_owned(),
@@ -414,8 +414,8 @@ mod tests {
     #[test]
     fn truecolor_uses_rgb_instead_of_the_remapped_palette() {
         let style = styled(Colors::True);
-        assert_eq!(style.cyan("x"), "\x1b[38;2;86;182;194mx\x1b[0m");
-        assert_eq!(style.tool("x"), "\x1b[1;38;2;97;175;239mx\x1b[0m");
+        assert_eq!(style.cyan("x"), "\x1b[38;2;255;92;214mx\x1b[0m");
+        assert_eq!(style.tool("x"), "\x1b[1;38;2;255;92;214mx\x1b[0m");
     }
 
     #[test]
@@ -430,7 +430,7 @@ mod tests {
         let injected = "safe\x1b[2Jowned";
         assert_eq!(
             styled(Colors::True).cyan(injected),
-            "\x1b[38;2;86;182;194msafe\\u{1b}[2Jowned\x1b[0m"
+            "\x1b[38;2;255;92;214msafe\\u{1b}[2Jowned\x1b[0m"
         );
         assert_eq!(styled(Colors::None).dim(injected), "safe\\u{1b}[2Jowned");
     }

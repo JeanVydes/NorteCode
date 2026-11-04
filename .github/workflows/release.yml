@@ -31,6 +31,8 @@ jobs:
             runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +57,8 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --locked --bin norte-code
 
-      - name: Package
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -72,10 +75,28 @@ jobs:
           tar -czf "norte-code-$target.tar.gz" -C dist "norte-code"
           rm -rf dist
 
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = "${{ matrix.target }}"
+          $staging = "dist/norte-code"
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item LICENSE, README.md $staging
+          $binary = "target/$target/release/norte-code.exe"
+          if (!(Test-Path $binary)) { throw "binary not found: $binary" }
+          Copy-Item $binary "$staging/norte-code.exe"
+          Compress-Archive -Path dist/norte-code -DestinationPath "norte-code-$target.zip"
+          Remove-Item -Recurse -Force dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
-          path: norte-code-*.tar.gz
+          path: |
+            norte-code-*.tar.gz
+            norte-code-*.zip
 
   release:
     name: Publish
@@ -90,7 +111,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum norte-code-*.tar.gz > SHA256SUMS
+          sha256sum norte-code-*.tar.gz norte-code-*.zip > SHA256SUMS
           cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
@@ -99,4 +120,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/norte-code-*.tar.gz
+            dist/norte-code-*.zip
             dist/SHA256SUMS

@@ -1081,7 +1081,7 @@ pub(crate) fn telemetry_table(
             Some(percent) => format!("{percent}%"),
             None => "–".to_owned(),
         };
-        let mut line = vec![style.cyan(pad_right(label, label_width)), bar];
+        let mut line = vec![style.magenta(pad_right(label, label_width)), bar];
         if show_provider {
             line.push(style.dim(pad_right(&summary.provider_label(), provider_width)));
         }

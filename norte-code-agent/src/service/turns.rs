@@ -1517,7 +1517,12 @@ fn replay_text(message: &Message) -> Vec<(norte_code_protocol::ReplayedKind, Str
                 out.push((ReplayedKind::Refusal, refusal.text.clone()));
             }
             Part::ToolCall(call) => {
-                out.push((ReplayedKind::ToolCall, call.name.clone()));
+                let arguments = serde_json::to_string_pretty(&call.arguments)
+                    .unwrap_or_else(|_| call.arguments.to_string());
+                out.push((
+                    ReplayedKind::ToolCall,
+                    format!("{} {}", call.name, arguments),
+                ));
             }
             Part::ToolResult(result) => {
                 let text = result
@@ -1526,14 +1531,16 @@ fn replay_text(message: &Message) -> Vec<(norte_code_protocol::ReplayedKind, Str
                     .filter_map(Part::as_text)
                     .collect::<Vec<_>>()
                     .join("\n");
-                out.push((
-                    ReplayedKind::ToolResult,
-                    if text.is_empty() {
-                        "(tool result)".to_owned()
-                    } else {
-                        text
-                    },
-                ));
+                let text = if text.is_empty() {
+                    result
+                        .structured
+                        .as_ref()
+                        .and_then(|value| serde_json::to_string_pretty(value).ok())
+                        .unwrap_or_else(|| "(tool result)".to_owned())
+                } else {
+                    text
+                };
+                out.push((ReplayedKind::ToolResult, text));
             }
             _ => {}
         }

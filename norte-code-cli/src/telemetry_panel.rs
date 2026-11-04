@@ -348,6 +348,15 @@ pub(crate) struct Report {
     pub(crate) buckets: BTreeMap<String, Slice>,
 }
 
+/// A named line for the ratatui telemetry charts.
+#[derive(Clone, Debug)]
+pub(crate) struct ChartSeries {
+    /// The model or aggregate name.
+    pub(crate) name: String,
+    /// Points in bucket order, as `(bucket_index, value)`.
+    pub(crate) points: Vec<(f64, f64)>,
+}
+
 impl Report {
     /// Rolls every record into the report.
     #[must_use]
@@ -788,6 +797,7 @@ impl Panel {
             out.push(ViewLine::dim("nothing recorded, in this range"));
             return;
         }
+
         let buckets: Vec<String> = report_buckets(&self.scoped(), self.range);
         let granularity = match self.range {
             Range::Today => "hourly",
@@ -815,6 +825,76 @@ impl Panel {
                 metric_scalar(peak, self.metric)
             )));
         }
+    }
+
+    /// Returns bounded model series for a chart, keeping the busiest models.
+    pub(crate) fn chart_series(
+        &self,
+        metric: Metric,
+        limit: usize,
+    ) -> (Vec<String>, Vec<ChartSeries>) {
+        let rows = self.scoped();
+        let buckets = report_buckets(&rows, self.range);
+        let mut series = self.model_series(metric);
+        series.truncate(limit);
+        let labels = buckets
+            .iter()
+            .map(|bucket| {
+                bucket
+                    .rsplit_once(' ')
+                    .map_or_else(|| bucket.clone(), |(_, label)| label.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let chart = series
+            .into_iter()
+            .map(|(name, values)| ChartSeries {
+                name,
+                points: values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| (index as f64, value as f64))
+                    .collect(),
+            })
+            .collect();
+        (labels, chart)
+    }
+
+    /// Returns one aggregate series for request volume or another metric.
+    pub(crate) fn aggregate_series(&self, metric: Metric) -> (Vec<String>, ChartSeries) {
+        let rows = self.scoped();
+        let buckets = report_buckets(&rows, self.range);
+        let values = buckets
+            .iter()
+            .map(|bucket| {
+                rows.iter()
+                    .filter(|record| bucket_of(record.started_at, self.range) == *bucket)
+                    .fold(Slice::default(), |mut slice, record| {
+                        slice.add_within(record, self.now);
+                        slice
+                    })
+            })
+            .map(|slice| metric_total(&slice, metric) as f64)
+            .collect::<Vec<_>>();
+        let labels = buckets
+            .iter()
+            .map(|bucket| {
+                bucket
+                    .rsplit_once(' ')
+                    .map_or_else(|| bucket.clone(), |(_, label)| label.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let points = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| (index as f64, value))
+            .collect();
+        (
+            labels,
+            ChartSeries {
+                name: metric.label().to_owned(),
+                points,
+            },
+        )
     }
 
     /// One point per bucket, per model, for the metric in force.
@@ -964,7 +1044,7 @@ fn metric_scalar(value: u64, metric: Metric) -> String {
         Metric::Output => format!("{} output", human(value)),
         Metric::CacheRate => format!("{value}%"),
         Metric::Latency | Metric::FirstToken => format!("{value}ms"),
-        Metric::Cost => format!("{value}µ$"),
+        Metric::Cost => format!("${:.6}", value as f64 / 1_000_000.0),
         Metric::Errors => format!("{value} errors"),
     }
 }
@@ -1199,6 +1279,28 @@ fn summary_facts(slice: &Slice) -> Vec<(&'static str, String)> {
     if let Some(rate) = slice.cache_rate() {
         facts.push(("cache", format!("{rate}% of the prompt")));
     }
+    if slice.requests > 0 {
+        let success = slice
+            .requests
+            .saturating_sub(slice.errors + slice.cancelled)
+            .saturating_mul(100)
+            .checked_div(slice.requests)
+            .unwrap_or(0);
+        facts.push(("success", format!("{success}%")));
+        facts.push((
+            "per request",
+            format!(
+                "{} tokens",
+                human(slice.tokens().checked_div(slice.requests).unwrap_or(0))
+            ),
+        ));
+        let throughput = slice
+            .tokens()
+            .saturating_mul(1_000)
+            .checked_div(slice.durations.iter().sum::<u64>().max(1))
+            .unwrap_or(0);
+        facts.push(("throughput", format!("{throughput} tok/s")));
+    }
     facts.push((
         "cost",
         if slice.unpriced == slice.requests && slice.requests > 0 {
@@ -1207,6 +1309,12 @@ fn summary_facts(slice: &Slice) -> Vec<(&'static str, String)> {
             format!("${:.4}", slice.cost_usd)
         },
     ));
+    if slice.cost_usd > 0.0 && slice.tokens() > 0 {
+        facts.push((
+            "cost / 1k",
+            format!("${:.6}", slice.cost_usd * 1_000.0 / slice.tokens() as f64),
+        ));
+    }
     if slice.errors + slice.cancelled > 0 {
         facts.push((
             "errors",

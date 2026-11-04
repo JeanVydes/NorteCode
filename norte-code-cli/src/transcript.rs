@@ -61,10 +61,10 @@ pub const MAX_ENTRY_LINES: usize = 1_000;
 pub enum Ink {
     /// Quiet, for context that is read past rather than read.
     Faint,
+    /// Alternate text, used for thinking and tool output.
+    Alternate,
     /// A step louder than faint: a label or a number.
     Dim,
-    /// A section name inside a result.
-    Cyan,
     /// What arrived.
     Green,
     /// What left.
@@ -178,6 +178,12 @@ pub struct Entry {
     pub collapsed_lines: Option<usize>,
     /// Whether a bounded output entry is currently expanded.
     pub expanded: bool,
+    /// Whether this entry was loaded from durable history rather than streamed.
+    ///
+    /// Replayed reasoning must remain complete: the live spinner keeps only a
+    /// short tail while it is being generated, but a resumed session is a
+    /// finished transcript and should not silently lose its older thinking.
+    pub replayed: bool,
 }
 
 impl Entry {
@@ -194,6 +200,7 @@ impl Entry {
             title: None,
             collapsed_lines: None,
             expanded: false,
+            replayed: false,
         }
     }
 
@@ -246,16 +253,19 @@ impl Entry {
     /// The newest are the ones worth keeping: a tool's output is read from its
     /// end, and what a person scrolls to is what just happened.
     fn trim(&mut self) {
-        let bound = match self.kind {
-            Kind::Reasoning => MAX_THOUGHT_LINES,
-            _ => MAX_ENTRY_LINES,
-        };
+        let bound = MAX_ENTRY_LINES;
         if self.lines.len() <= bound {
             return;
         }
         let excess = self.lines.len() - bound;
         self.lines.drain(..excess);
         self.dropped += excess;
+    }
+
+    /// Marks the entry as durable replay before adding its complete contents.
+    pub fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
     }
 }
 
@@ -400,7 +410,11 @@ impl Transcript {
     pub fn append(&mut self, kind: Kind, text: &str) {
         let same = self.open && self.entries.last().is_some_and(|last| last.kind == kind);
         if !same {
-            self.entries.push(Entry::new(kind));
+            let mut entry = Entry::new(kind);
+            if kind == Kind::Reasoning {
+                entry.collapsed_lines = Some(MAX_THOUGHT_LINES);
+            }
+            self.entries.push(entry);
             self.open = true;
         }
         let Some(last) = self.entries.last_mut() else {
@@ -674,6 +688,16 @@ mod tests {
             [Kind::Said, Kind::Answer, Kind::ToolStarted],
             "the order is the conversation"
         );
+    }
+
+    #[test]
+    fn replayed_reasoning_keeps_the_full_history_bound() {
+        let mut entry = Entry::new(Kind::Reasoning).replayed();
+        for line in 0..=MAX_THOUGHT_LINES {
+            entry.push_line(format!("thought {line}"));
+        }
+        assert_eq!(entry.lines.len(), MAX_THOUGHT_LINES + 1);
+        assert_eq!(entry.dropped, 0);
     }
 
     #[test]

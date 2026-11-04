@@ -279,6 +279,9 @@ pub(crate) struct Renderer {
     /// which is what a terminal shows.
     output_gutter: Option<String>,
 
+    /// The compact command description for streamed shell output headers.
+    output_commands: BTreeMap<String, String>,
+
     /// Whether the open output block has written a row yet.
     output_line_start: bool,
 
@@ -318,6 +321,7 @@ pub(crate) fn call_ending(
     is_error: bool,
     detached: bool,
     duration_ms: u64,
+    command: Option<&str>,
 ) -> String {
     let (mark, word) = if detached {
         (style.yellow("◌"), format!("let go of in {duration_ms} ms"))
@@ -326,7 +330,8 @@ pub(crate) fn call_ending(
     } else {
         (style.green("✓"), format!("in {duration_ms} ms"))
     };
-    format!("{mark} {} {}", style.bold(tool), style.dim(word))
+    let command = command.map_or_else(String::new, |command| format!(" $ {command}"));
+    format!("{mark} {} {}{command}", style.bold(tool), style.dim(word))
 }
 
 impl Renderer {
@@ -391,6 +396,7 @@ impl Renderer {
             streamed_calls: BTreeSet::new(),
             closed_calls: BTreeSet::new(),
             output_gutter: None,
+            output_commands: BTreeMap::new(),
             output_line_start: true,
             output_pending: BTreeMap::new(),
             output_rows_dropped: 0,
@@ -454,6 +460,11 @@ impl Renderer {
                     Entry::ToolStarted,
                     Self::doing(tool, arguments.as_ref()),
                 );
+                if tool == "shell"
+                    && let Some(command) = Self::command_summary(arguments.as_ref())
+                {
+                    self.output_commands.insert(call_id.clone(), command);
+                }
                 entry.started = Some(std::time::Instant::now());
                 entry.call_id = Some(call_id.clone());
                 self.transcript.push(entry);
@@ -678,6 +689,18 @@ impl Renderer {
         self.set_modal(crate::modal::Modal::report(title, lines));
     }
 
+    /// Opens a read-only modal with Markdown content.
+    pub(crate) fn open_markdown_modal(&mut self, title: impl Into<String>, lines: Vec<String>) {
+        let lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| crate::select::strip_style(&line))
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        self.set_modal(crate::modal::Modal::markdown_report(title, lines));
+    }
+
     /// Opens the telemetry panel.
     ///
     /// It is its own entry point and not `open_editable`: the panel draws charts
@@ -862,25 +885,31 @@ impl Renderer {
         }
     }
 
-    /// Toggles the most recent expandable output entry.
+    /// Toggles every expandable output and thinking entry.
     ///
-    /// Ctrl+O toggles the latest output that has hidden rows; the retained tail
-    /// stays bounded regardless of how much a command writes.
+    /// Ctrl+O uses one global state so all shell outputs and all thinking blocks
+    /// expand or collapse together. Every entry remains bounded.
     pub(crate) fn toggle_output(&mut self) -> bool {
-        let Some(entry) = self
-            .transcript
-            .entries_mut()
-            .iter_mut()
-            .rev()
-            .find(|entry| {
+        let entries = self.transcript.entries_mut();
+        let expandable = entries
+            .iter()
+            .filter(|entry| {
                 entry
                     .collapsed_lines
                     .is_some_and(|limit| entry.lines.len() > limit || entry.dropped > 0)
             })
-        else {
+            .collect::<Vec<_>>();
+        if expandable.is_empty() {
             return false;
-        };
-        entry.expanded = !entry.expanded;
+        }
+        let expand = expandable.iter().any(|entry| !entry.expanded);
+        for entry in entries.iter_mut().filter(|entry| {
+            entry.collapsed_lines.is_some()
+                && (entry.kind == crate::transcript::Kind::ToolOutput
+                    || entry.kind == crate::transcript::Kind::Reasoning)
+        }) {
+            entry.expanded = expand;
+        }
         self.mark_dirty();
         true
     }
@@ -1373,11 +1402,62 @@ impl Renderer {
                 }
             }
         };
-        let mut entry = crate::transcript::Entry::new(entry_kind);
+        if kind == K::ToolCall {
+            let (tool, arguments) = text
+                .split_once(' ')
+                .map_or((text, None), |(tool, arguments)| {
+                    (tool, serde_json::from_str(arguments).ok())
+                });
+            let description = Self::doing(tool, arguments.as_ref());
+            let mut call =
+                crate::transcript::Entry::line(crate::transcript::Kind::ToolStarted, description)
+                    .replayed();
+            if role != MessageRole::User && role != MessageRole::Assistant {
+                call.push_line(format!("#{index} {role}"));
+            }
+            self.transcript.push(call);
+            if let Some(arguments) = arguments {
+                let mut block = crate::transcript::Entry::bordered(
+                    crate::transcript::Kind::ToolOutput,
+                    format!("{tool} arguments"),
+                )
+                .replayed();
+                block.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
+                block.push_line("```json");
+                let arguments = serde_json::to_string_pretty(&arguments)
+                    .unwrap_or_else(|_| arguments.to_string());
+                block.push_text(&arguments);
+                block.push_line("```");
+                self.transcript.push(block);
+            }
+            self.last_char = Some('\n');
+            return;
+        }
+        let mut entry = if kind == K::ToolResult {
+            let mut entry = crate::transcript::Entry::bordered(
+                crate::transcript::Kind::ToolOutput,
+                "tool output",
+            );
+            entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
+            entry
+        } else {
+            crate::transcript::Entry::new(entry_kind)
+        };
+        entry = entry.replayed();
+        if kind == K::Reasoning {
+            entry.collapsed_lines = Some(crate::transcript::MAX_THOUGHT_LINES);
+        }
         if role != MessageRole::User && role != MessageRole::Assistant {
             entry.push_line(format!("#{index} {role}"));
         }
-        entry.push_text(&crate::text::terminal(text));
+        let text = crate::text::terminal(text);
+        if kind == K::ToolResult {
+            entry.push_line("```text");
+            entry.push_text(&text);
+            entry.push_line("```");
+        } else {
+            entry.push_text(&text);
+        }
         self.transcript.push(entry);
         self.last_char = Some('\n');
     }
@@ -1536,10 +1616,8 @@ impl Renderer {
         };
         self.flush_output_pending();
         let hidden = self.output_rows_dropped;
-        let mut entry = crate::transcript::Entry::bordered(
-            crate::transcript::Kind::ToolOutput,
-            format!("shell #{}", short(&call_id)),
-        );
+        let mut entry = crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, "");
+        entry.title = None;
         entry.call_id = Some(call_id);
         entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
         for row in std::mem::take(&mut self.output_rows) {
@@ -1610,7 +1688,9 @@ impl Renderer {
     /// is text a person reads, and it is drawn where it happened.
     pub(crate) fn code_block(&mut self, language: &str, text: &str) {
         let text = crate::text::terminal(text);
-        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
+        let mut entry =
+            crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, "tool output");
+        entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
         entry.push_line(format!("```{language}"));
         if text.is_empty() {
             entry.push_line("(empty)");
@@ -1732,12 +1812,14 @@ impl Renderer {
                     // it went, on the line it already occupied. The two used to
                     // be separate rows, so a call was two lines and the reader
                     // had to pair them by the id beside them.
+                    let command = self.output_commands.remove(call_id);
                     let text = call_ending(
                         crate::style::Style::plain(),
                         tool,
                         *is_error,
                         *detached,
                         *duration_ms,
+                        command.as_deref(),
                     );
                     let kind = if *is_error {
                         crate::transcript::Kind::Failure
@@ -1980,7 +2062,7 @@ impl Renderer {
             }
             first = false;
             if labelled && let Some(name) = &section.name {
-                entry.push_inked(crate::transcript::Ink::Cyan, name.clone());
+                entry.push_inked(crate::transcript::Ink::Alternate, name.clone());
             }
             let mut kept = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
             let hidden = tool_lines(&mut kept, &section.lines);
@@ -2194,10 +2276,15 @@ impl Renderer {
             "grep" => {
                 text("pattern").map_or_else(|| tool.to_owned(), |pattern| format!("grep {pattern}"))
             }
-            "shell" => match Self::command_summary(arguments) {
-                Some(command) => format!("shell $ {command}"),
-                None => tool.to_owned(),
-            },
+            "shell" => format!(
+                "shell $ {}",
+                Self::command_summary(arguments).unwrap_or_else(|| {
+                    arguments.map_or_else(
+                        || "(command unavailable)".to_owned(),
+                        |value| clip_command(&value.to_string(), 160),
+                    )
+                })
+            ),
             _ => tool.to_owned(),
         }
     }
@@ -2215,6 +2302,11 @@ impl Renderer {
         // The flat form first, which is what the tool sends now.
         if let Some(script) = arguments.get("script").and_then(serde_json::Value::as_str) {
             return Some(clip_command(script, 160));
+        }
+        for key in ["cmd", "command_line", "shell", "input"] {
+            if let Some(command) = arguments.get(key).and_then(serde_json::Value::as_str) {
+                return Some(clip_command(command, 160));
+            }
         }
         let command = arguments.get("command")?;
         if let Some(text) = command.as_str() {

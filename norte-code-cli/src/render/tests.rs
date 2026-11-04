@@ -70,10 +70,53 @@ fn the_command_that_ran_is_shown_under_the_call() {
     // with no line saying what produced it.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
-    renderer.tool_event(&shell_started(
+    let started_event = shell_started(
         "call-1",
         serde_json::json!({ "script": "cargo test --workspace", "shell": "sh" }),
-    ));
+    );
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: started_event.clone(),
+        })
+        .expect("started event");
+    let started = renderer.transcript.entries().last().expect("started entry");
+    assert_eq!(started.lines[0].text, "shell $ cargo test --workspace");
+
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        stream: OutputStream::Stdout,
+        text: "ok\n".to_owned(),
+        last: false,
+    });
+    renderer.tool_event(&ServerEventKind::ToolFinished {
+        turn: 1,
+        call_id: "call-1".to_owned(),
+        tool: "shell".to_owned(),
+        is_error: false,
+        error: None,
+        output: Some("ok".to_owned()),
+        detached: false,
+        truncated: false,
+        duration_ms: 10,
+    });
+    let output = renderer
+        .transcript
+        .entries()
+        .iter()
+        .find(|entry| entry.boxed)
+        .expect("output entry");
+    assert_eq!(output.title, None);
+    let ending = renderer
+        .transcript
+        .entries()
+        .iter()
+        .find(|entry| entry.kind == crate::transcript::Kind::ToolOutput && !entry.boxed)
+        .expect("ending entry");
+    assert!(ending.lines[0].text.contains("$ cargo test --workspace"));
 
     assert_eq!(
         Renderer::command_summary(Some(&serde_json::json!({
@@ -416,9 +459,9 @@ fn a_detached_call_is_not_drawn_as_a_failure() {
     // `✗ failed` reads as something having gone wrong at the moment something
     // went right, and it is the one ending a person would act on by mistake.
     let style = Style::plain();
-    let detached = call_ending(style, "shell", true, true, 1200);
-    let failed = call_ending(style, "shell", true, false, 1200);
-    let done = call_ending(style, "shell", false, false, 1200);
+    let detached = call_ending(style, "shell", true, true, 1200, None);
+    let failed = call_ending(style, "shell", true, false, 1200, None);
+    let done = call_ending(style, "shell", false, false, 1200, None);
 
     assert!(
         detached.contains("let go of"),

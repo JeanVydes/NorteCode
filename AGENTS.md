@@ -14,7 +14,8 @@ and that code disagree, the code is right.
 
 ## Git workflow
 
-- `dev` is the working branch. Never create `main`; it is reserved for releases.
+- `dev` is the working branch. `main` is reserved for releases; do not develop
+  directly on it or create release-only work there.
 - Remote `origin` is `https://github.com/JeanVydes/NorteCode`.
 - Never force-push, and never rewrite history that has been pushed.
 - Commits are [Conventional Commits](https://www.conventionalcommits.org/) scoped
@@ -75,6 +76,11 @@ feature.
 
 - Update `CHANGELOG.md` (Keep a Changelog) in the commit that adds a
   user-visible change.
+- Release builds publish tarballs for Unix targets and a ZIP for
+  `x86_64-pc-windows-msvc`; keep `scripts/install.sh` and
+  `.github/workflows/release.yml` in sync. `SHA256SUMS` detects corruption or
+  an incomplete download, but it is not a signature and does not authenticate
+  the release source.
 - Commit each finished, verified step. Larger or risky work goes on a
   short-lived `feat/<name>` or `spike/<name>` branch cut from `dev`, merged with
   `--no-ff` once the checks pass, then deleted. Small steps commit straight to
@@ -125,13 +131,29 @@ feature.
   the whole reason the enum exists.
 - `#![forbid(unsafe_code)]`; typed errors; no panics on external input, including
   the catalogue and config files.
-- `missing_docs` is denied workspace-wide: document every public item.
+- `missing_docs` is denied workspace-wide: document every public item. Existing
+  narrow `allow` attributes are exceptions being paid down, not a pattern for
+  new code; do not add broad file-level allows for missing docs, dead code or
+  unused imports.
 - Library crates never write to stdout; the CLI and TUI own output.
 - Prefer hermetically testable code. Tests use `norte-testing` (`ScriptedModel`,
   `ProbeModel`, `RecordingObserver`) instead of the network; live-provider tests
   are `#[ignore]`d and key-gated.
-- Keep the protocol crate free of Norte types: the wire is versioned serde types,
-  mapped in one place.
+- The protocol crate owns versioned serde wire types, but it currently depends
+  on Norte for catalog capability mapping and adjacent adapters. Keep Norte
+  engine types out of the wire structs and map between the two worlds in one
+  place; do not describe the protocol crate as engine-free until that
+  dependency is actually removed.
+- `tools.confinement.sandbox.enabled` defaults to `false`: the default is an
+  argument gate, not OS isolation, and the shell may reach outside the
+  workspace. The first-use guide must keep this limitation prominent.
+- `skills.allow_scripts` defaults to `false`; when enabled, `skill_script`
+  executes outside the command sandbox. Treat enabling it as an explicit trust
+  decision.
+- Installing a plugin clones and builds untrusted repository code, including
+  its `build.rs`, before loading the resulting shared library. Plugin
+  installation is arbitrary code execution by design and must remain explicit
+  in CLI help and documentation.
 - Anything that reaches a prompt is bounded **and says what it left out.** A
   model cannot ask for what it cannot see, so a truncated list that hides the
   truncation is worse than a short one.

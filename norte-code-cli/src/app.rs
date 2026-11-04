@@ -328,12 +328,7 @@ impl State {
             // reasoning setting it means the same thing the bar in the status
             // does: it reads in the same colour, so the scale is learned once.
             if areas.suggestion.height > 0 {
-                draw_row(
-                    frame,
-                    areas.suggestion,
-                    &self.suggestion,
-                    suggestion_ink(self, style),
-                );
+                draw_suggestion(frame, areas.suggestion, &self.suggestion, style);
             }
             if areas.rule.height > 0 {
                 draw_chrome_rule(frame, areas.rule, style);
@@ -425,32 +420,25 @@ const SPINNER_MS: u64 = metrics::SPINNER_MS;
 /// The frames of the spinner, in the order they turn.
 const SPINNER: [&str; 4] = icon::SPINNER;
 
-/// The ink the suggestion row is written in.
-///
-/// A reasoning hint is written in the colour of the rung it names — `xhigh` in
-/// the red the bar would draw — and everything else stays quiet, because a hint
-/// is an aside and the eye should skip it.
-fn suggestion_ink(state: &State, style: Style) -> ratatui::style::Style {
-    let hint = state.suggestion.as_str();
-    for rung in [
-        "xhigh", "max", "high", "medium", "minimal", "low", "off", "auto",
-    ] {
-        // The hint is `word — setting` or a list of candidates, so the word has
-        // to be matched as a word and not found inside another one.
-        if hint
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .any(|word| word.eq_ignore_ascii_case(rung))
-        {
-            return crate::render::effort_span(style, rung);
-        }
-    }
-    style.faint_span()
-}
-
-/// Draws one row of chrome, clipped to its area.
-fn draw_row(frame: &mut Draw<'_>, area: Rect, text: &str, style: ratatui::style::Style) {
-    // One bounded-row helper for every widget: see `crate::ui::clip`.
-    crate::ui::clip::paint_text(frame, area, text, style);
+/// Draws a completion hint with the command name prominent and its arguments
+/// quiet, so `/model` and the value it suggests are not one indistinguishable
+/// colour.
+fn draw_suggestion(frame: &mut Draw<'_>, area: Rect, text: &str, style: Style) {
+    let (name, arguments) = text
+        .split_once(' ')
+        .map_or((text, ""), |(name, arguments)| (name, arguments));
+    let line = Line::from(vec![
+        Span::styled(name.to_owned(), style.accent_span()),
+        Span::styled(
+            if arguments.is_empty() {
+                String::new()
+            } else {
+                format!(" {arguments}")
+            },
+            style.faint_span(),
+        ),
+    ]);
+    Paragraph::new(line).render(area, frame.buffer_mut());
 }
 
 /// The bar in front of a row, which is what says who is talking.
@@ -481,12 +469,8 @@ pub(crate) const MARGIN_COLS: u16 = metrics::MARGIN_COLS;
 /// inside of without taking the edges with them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Frame {
-    /// The rule that opens the box, carrying its title.
-    Top,
     /// A row between the rules.
     Inside,
-    /// The rule that closes it.
-    Bottom,
 }
 
 /// One row of the conversation, as the view draws it.
@@ -625,40 +609,21 @@ fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
         |ink| match ink {
             Ink::Faint => style.faint_span(),
             Ink::Dim => style.dim_span(),
-            Ink::Cyan => style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
-            Ink::Green => style.ratatui((0x98, 0xC3, 0x79), 71, "32"),
-            Ink::Red => style.ratatui((0xE0, 0x6C, 0x75), 203, "31"),
-            Ink::Yellow => style.ratatui((0xE5, 0xC0, 0x7B), 180, "33"),
+            Ink::Alternate => style.alternate_span(),
+            Ink::Green => style.green_span(),
+            Ink::Red => style.red_span(),
+            Ink::Yellow => style.yellow_span(),
         },
     );
     match row.frame {
-        Some(Frame::Top) => {
-            // The title leads, and the rule fills what is left of the row.
-            let label = format!("{} {} ", icon::RULE, row.text);
-            let room = usize::from(width).saturating_sub(3);
-            let label: String = label.chars().take(room).collect();
-            let fill = room.saturating_sub(label.chars().count());
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled(icon::BOX_TOP.to_owned(), style.blue_span()),
-                Span::styled(label.clone(), Style::bold_span()),
-                Span::styled(icon::RULE.repeat(fill), style.blue_span()),
-                Span::styled("╮", style.blue_span()),
-            ])
-        }
-        Some(Frame::Bottom) => Line::from(vec![
-            Span::raw("  "),
-            Span::styled(icon::BOX_BOTTOM.to_owned(), style.blue_span()),
-            Span::styled(
-                icon::RULE.repeat(usize::from(width).saturating_sub(2)),
-                style.blue_span(),
-            ),
-            Span::styled("╯", style.blue_span()),
-        ]),
-        // Inside a box the text keeps its own indent and nothing else: the row
-        // is the output, and a bar in front of it is a bar in the copy.
         Some(Frame::Inside) => {
-            Line::from(vec![Span::raw("  "), Span::styled(row.text.clone(), ink)])
+            // Tool output is a panel, not a collection of ASCII rules. The
+            // background is the boundary; its content remains clean to copy.
+            let room = usize::from(width);
+            let text = format!("  {:<width$}  ", row.text, width = room.saturating_sub(4));
+            let mut line = Line::from(vec![Span::styled(text, ink)]);
+            line.style = style.output_background();
+            line
         }
         None => {
             // The margin is what says who is talking. One column, before every
@@ -668,7 +633,7 @@ fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
             // costs a column and reads at a glance.
             let bar_ink = match row.kind {
                 Kind::Said => style.accent_span(),
-                Kind::Reasoning => style.faint_span(),
+                Kind::Reasoning => style.alternate_span(),
                 _ => style.dim_span(),
             };
             let bar = margin(row.kind);
@@ -719,7 +684,7 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
                 crate::markdown::Emphasis::Quote | crate::markdown::Emphasis::Fence => {
                     draw = draw.fg(style.muted_color());
                 }
-                crate::markdown::Emphasis::Link => draw = draw.fg(style.blue_color()),
+                crate::markdown::Emphasis::Link => draw = draw.fg(style.cyan_color()),
                 // A strike is the line-through and nothing else: it is an
                 // emphasis on the text, not a different kind of text.
                 crate::markdown::Emphasis::Strike => {
@@ -750,6 +715,16 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
 ///
 /// The wrap happens here and not in the data: a wrapped line is only correct at
 /// the width it was wrapped for, and the width is the terminal's right now.
+fn shell_command_runs(text: &str) -> Vec<crate::markdown::Run> {
+    let Some((prefix, command)) = text.split_once("$ ") else {
+        return Vec::new();
+    };
+    vec![
+        crate::markdown::Run::plain(format!("{prefix}$ ")),
+        crate::markdown::Run::styled(crate::markdown::Emphasis::Bold, command),
+    ]
+}
+
 #[must_use]
 pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> {
     let mut out = Vec::new();
@@ -763,13 +738,16 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         // A boxed entry opens with its rule, whatever it holds: the rule is what
         // says where the output begins, and an entry with no rows at all is one
         // the rule and the closing rule already describe.
-        if entry.boxed {
+        if entry.boxed
+            && let Some(title) = &entry.title
+        {
+            let runs = shell_command_runs(title);
             out.push(Row {
-                ink: None,
+                ink: Some(Ink::Alternate),
                 kind: entry.kind,
-                text: entry.title.clone().unwrap_or_default(),
-                frame: Some(Frame::Top),
-                runs: Vec::new(),
+                text: title.clone(),
+                frame: Some(Frame::Inside),
+                runs,
             });
         }
         // A model's answer is markdown, and it is rendered as a whole and not a
@@ -851,12 +829,13 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
             };
             let wrapped = wrap(&text, width);
             for text in wrapped {
+                let runs = shell_command_runs(&text);
                 out.push(Row {
                     ink,
                     kind: entry.kind,
                     text,
                     frame,
-                    runs: Vec::new(),
+                    runs,
                 });
             }
         }
@@ -868,15 +847,6 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
                 kind: Kind::Notice,
                 text: format!("… {} earlier line(s) left out", entry.dropped),
                 frame: entry.boxed.then_some(Frame::Inside),
-                runs: Vec::new(),
-            });
-        }
-        if entry.boxed {
-            out.push(Row {
-                ink: None,
-                kind: entry.kind,
-                text: String::new(),
-                frame: Some(Frame::Bottom),
                 runs: Vec::new(),
             });
         }
@@ -1132,12 +1102,12 @@ pub(crate) fn ink(kind: Kind, style: Style) -> ratatui::style::Style {
     // purpose: a notice and the model's thought are both asides, and the eye
     // is meant to skip them at the same speed.
     match kind {
-        Kind::Said => style.ratatui((0x56, 0xB6, 0xC2), 44, "36"),
+        Kind::Said => style.cyan_span(),
         Kind::Answer => ratatui::style::Style::new(),
-        Kind::Reasoning | Kind::Notice => style.dim_span(),
-        Kind::ToolStarted => style.ratatui((0x61, 0xAF, 0xEF), 39, "34"),
-        Kind::ToolOutput => style.faint_span(),
-        Kind::Failure => style.ratatui((0xE0, 0x6C, 0x75), 204, "31"),
+        Kind::Reasoning | Kind::ToolOutput => style.alternate_span(),
+        Kind::Notice => style.dim_span(),
+        Kind::ToolStarted => style.accent_span(),
+        Kind::Failure => style.red_span(),
     }
 }
 
@@ -1164,7 +1134,7 @@ fn draw_question(
     let mut rows: Vec<Line> = Vec::new();
     rows.push(Line::from(Span::styled(
         crate::text::terminal(&question.prompt).into_owned(),
-        style.ratatui((0xE5, 0xC0, 0x7B), 180, "33"),
+        style.yellow_span(),
     )));
     for (index, choice) in question.choices.iter().enumerate() {
         let here = index == question.cursor;
@@ -1474,27 +1444,25 @@ mod tests {
     }
 
     #[test]
-    fn a_boxed_entry_draws_its_rules_and_carries_no_bars_inside() {
-        // The frame says where the output begins and ends. What it must not do
-        // is put a bar on every row of the content: those bars are what a person
-        // selects along with the output they meant to copy, and a box drawn with
-        // sides is a box whose inside cannot be copied cleanly.
+    fn a_boxed_entry_uses_a_background_without_ascii_rules() {
         let mut transcript = Transcript::new();
         let mut entry = Entry::bordered(Kind::ToolOutput, "shell #abc");
         entry.push_line("one");
         entry.push_line("two");
         transcript.push(entry);
         let rows = transcript_lines(&transcript, 80);
-        assert_eq!(rows[0].frame, Some(Frame::Top));
+        assert_eq!(rows[0].frame, Some(Frame::Inside));
         assert_eq!(rows[0].text, "shell #abc");
         assert_eq!(rows[1].frame, Some(Frame::Inside));
         assert_eq!(rows[1].text, "one");
         assert_eq!(rows[2].frame, Some(Frame::Inside));
-        assert_eq!(rows[3].frame, Some(Frame::Bottom));
-        for row in &rows[1..4] {
+        assert_eq!(rows[2].text, "two");
+        for row in &rows[..] {
             assert!(
-                !row.text.contains('│'),
-                "the content carries no bar: {:?}",
+                !row.text
+                    .chars()
+                    .any(|character| matches!(character, '│' | '─' | '╭' | '╮' | '╰' | '╯')),
+                "the content carries no ASCII-style frame: {:?}",
                 row.text
             );
         }
@@ -2391,7 +2359,6 @@ mod tests {
         // `Notice` and `ToolOutput` are both quiet on purpose: they are the
         // same kind of thing to a reader, which is not the case for the rest.
         let distinct: Vec<ratatui::style::Style> = vec![
-            ink(Kind::Said, style),
             ink(Kind::Answer, style),
             ink(Kind::Reasoning, style),
             ink(Kind::ToolStarted, style),
