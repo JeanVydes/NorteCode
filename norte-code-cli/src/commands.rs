@@ -240,10 +240,12 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
             }
             u8::from(failed)
         }
-        PluginsCommand::Add { url } => {
-            let name = crate::installs::plugin_name(url);
+        PluginsCommand::Add { url, package } => {
+            let name = package
+                .clone()
+                .unwrap_or_else(|| crate::installs::plugin_name(url));
             eprintln!("installing {name}…");
-            match crate::plugin_manager::install_plugin(url) {
+            match crate::plugin_manager::install_plugin(url, package.as_deref()) {
                 Ok(name) => {
                     println!("plugin {name} installed — restart norte-code to apply it");
                     0

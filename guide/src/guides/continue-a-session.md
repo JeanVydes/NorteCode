@@ -70,7 +70,7 @@ The prompt keeps the same session open after each turn. The chat commands are:
 | `/mcp [list\|enable\|disable] [server]` | List the MCP servers, or switch one. |
 | `/jobs [list\|check\|stop] [id]` | List the background jobs, read one, or stop one. |
 | `/plugins list` | List installed plugins and their state. |
-| `/plugins add <url>` | Install a plugin from a git URL. |
+| `/plugins add <url> [package]` | Install a plugin from a git URL; name the workspace package when the repository has multiple plugins. |
 | `/plugins update [name]` | Rebuild one plugin, or all of them. |
 | `/plugins enable <name>` / `/plugins disable <name>` | Load or skip a plugin at the next start. |
 | `/debug` | Report what the process knows: model, tools, paths. |

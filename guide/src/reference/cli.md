@@ -187,7 +187,7 @@ refused with both numbers named, never loaded on a guess.
 
 ```text
 norte-code plugins list
-norte-code plugins add URL
+norte-code plugins add URL [--package PACKAGE]
 norte-code plugins rm NAME
 norte-code plugins update [NAME]
 norte-code plugins enable NAME
@@ -197,14 +197,14 @@ norte-code plugins disable NAME
 | Subcommand | Meaning |
 | --- | --- |
 | `list` | Every installed file, enabled or disabled, with its reported name and why it did not load when it did not. |
-| `add URL` | Clone, build as a `cdylib` and copy the library into the plugin directory. The source URL is recorded beside it for updates. |
+| `add URL [--package PACKAGE]` | Clone the repository and install one `cdylib` plugin package. A workspace with one plugin is selected automatically; when it has several, choose one with `--package`. Its URL and package are recorded for updates. |
 | `rm NAME` | Remove the library and its recorded source. |
 | `update [NAME]` | Rebuild one plugin, or every plugin with a recorded source, from the URL it came from. |
 | `enable NAME` / `disable NAME` | Rename the library between `.so` and `.so.disabled`. The loader only opens `.so`/`.dll`/`.dylib`, so a disabled plugin is skipped at the next start. |
 
 Installing, removing, updating and toggling take effect at the next start;
-plugins are loaded once, before the catalogue is read. The chat has the same
-commands under `/plugins …`.
+plugins are loaded once, before the catalogue is read. The chat has the same commands under `/plugins …`; use
+`/plugins add URL PACKAGE` to choose a workspace plugin.
 
 ## Chat commands
 
@@ -235,7 +235,7 @@ reject unknown values instead of forwarding them to the model.
 | `/telemetry` | The request ledger: this session, and every provider. |
 | `/menu`, `/back` | Show every provider and the models each lists, with the session's own marked. Pick one with `/provider` and `/model`. |
 | `/plugins list` | List installed plugins and whether each is loaded, waiting for a restart, disabled, or why it failed. |
-| `/plugins add URL` | Clone, build and install a plugin from a git URL. |
+| `/plugins add URL [PACKAGE]` | Clone and install a plugin from a git URL. Select a package by name when the repository has multiple workspace plugins. |
 | `/plugins rm NAME` | Remove an installed plugin. |
 | `/plugins update [NAME]` | Rebuild one plugin, or every plugin with a recorded source. |
 | `/plugins enable NAME` / `/plugins disable NAME` | Rename a plugin between `.so` and `.so.disabled`, so the next start loads it or skips it. |
