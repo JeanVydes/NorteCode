@@ -49,6 +49,19 @@ fn context_safe_output(
     Some(requested.min(available))
 }
 
+/// The interrupted message every cancellation path commits: an empty
+/// assistant message marked `Interrupted`, with the digest of the request
+/// that was about to go out (or the one that never formed).
+async fn interrupted_message(
+    harness: &Harness,
+    model: ModelRef,
+    digest: Digest,
+) -> Result<Message> {
+    harness
+        .finalize_message(Accumulated::default(), true, model, digest)
+        .await
+}
+
 impl Harness {
     /// Runs the model and returns the answer and whether it was interrupted.
     ///
@@ -72,14 +85,9 @@ impl Harness {
             result = self.preprocess_history(history) => Some(result?),
         };
         let Some((history, invalidated)) = prepared else {
-            let message = self
-                .finalize_message(
-                    Accumulated::default(),
-                    true,
-                    model_ref,
-                    Digest::of_json(&serde_json::json!(null)),
-                )
-                .await?;
+            let message =
+                interrupted_message(self, model_ref, Digest::of_json(&serde_json::json!(null)))
+                    .await?;
             return Ok((message, true));
         };
         if invalidated {
@@ -100,14 +108,9 @@ impl Harness {
             result = self.reconstruct(&history) => Some(result?),
         };
         let Some(reconstructed) = reconstructed else {
-            let message = self
-                .finalize_message(
-                    Accumulated::default(),
-                    true,
-                    model_ref,
-                    Digest::of_json(&serde_json::json!(null)),
-                )
-                .await?;
+            let message =
+                interrupted_message(self, model_ref, Digest::of_json(&serde_json::json!(null)))
+                    .await?;
             return Ok((message, true));
         };
 
@@ -168,28 +171,14 @@ impl Harness {
                 // when it is cancelled before its first part; there is no
                 // request to report and no stream to drain. Dropping the other
                 // future closes the HTTP connection.
-                let message = self
-                    .finalize_message(
-                        Accumulated::default(),
-                        true,
-                        model_ref,
-                        digest_of(&reconstructed),
-                    )
-                    .await?;
+                let message = interrupted_message(self, model_ref, digest_of(&reconstructed)).await?;
                 return Ok((message, true));
             }
             stream = self.layered_call(&context, request, &continuation, session.id, sender, cancellation) => {
                 match stream {
                     Ok(stream) => stream,
                     Err(Error::Cancelled) => {
-                        let message = self
-                            .finalize_message(
-                                Accumulated::default(),
-                                true,
-                                model_ref,
-                                digest_of(&reconstructed),
-                            )
-                            .await?;
+                        let message = interrupted_message(self, model_ref, digest_of(&reconstructed)).await?;
                         return Ok((message, true));
                     }
                     Err(error) => return Err(error),
@@ -228,14 +217,7 @@ impl Harness {
             biased;
             () = cancellation.cancelled() => {
                 drop(stream);
-                let message = self
-                    .finalize_message(
-                        Accumulated::default(),
-                        true,
-                        model_ref,
-                        request_digest,
-                    )
-                    .await?;
+                let message = interrupted_message(self, model_ref, request_digest).await?;
                 return Ok((message, true));
             }
             _ = emit_future => {}

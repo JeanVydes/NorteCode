@@ -36,6 +36,7 @@ use super::mapping::{
     tool_result_text,
 };
 use super::models::resolve_reasoning;
+
 use super::tooling::output_text;
 use super::{EventStream, Service, ServiceError, Stats};
 
@@ -467,32 +468,16 @@ impl Service {
 
             let cancelled = cancellation.is_cancelled();
             if interrupted || cancelled {
-                let phase = norte_code_protocol::Phase::Idle;
-                self.set_phase(key, phase).await;
-                let _ = self
-                    .settle(
-                        &engine,
-                        request_id,
-                        key,
-                        current_nid,
-                        &mut stats,
-                        tx,
-                        true,
-                        gate.as_deref(),
-                    )
-                    .await;
-                self.store_stats(key, &stats).await;
-                emit(
+                self.set_phase(key, norte_code_protocol::Phase::Idle).await;
+                self.finish_turn(
+                    &engine,
+                    request_id,
+                    key,
+                    current_nid,
+                    &mut stats,
                     tx,
-                    ServerEvent::new(
-                        request_id,
-                        Some(key.clone()),
-                        ServerEventKind::TurnFinished {
-                            turn,
-                            phase,
-                            committed: false,
-                        },
-                    ),
+                    gate.as_deref(),
+                    false,
                 )
                 .await;
                 return Ok(());
@@ -528,8 +513,7 @@ impl Service {
                         }
                     }
                     Err(error) => {
-                        let phase = norte_code_protocol::Phase::Idle;
-                        self.set_phase(key, phase).await;
+                        self.set_phase(key, norte_code_protocol::Phase::Idle).await;
                         emit(
                             tx,
                             ServerEvent::error(
@@ -540,17 +524,15 @@ impl Service {
                             ),
                         )
                         .await;
-                        emit(
+                        self.finish_turn(
+                            &engine,
+                            request_id,
+                            key,
+                            current_nid,
+                            &mut stats,
                             tx,
-                            ServerEvent::new(
-                                request_id,
-                                Some(key.clone()),
-                                ServerEventKind::TurnFinished {
-                                    turn,
-                                    phase,
-                                    committed: false,
-                                },
-                            ),
+                            gate.as_deref(),
+                            false,
                         )
                         .await;
                         return Ok(());
@@ -562,19 +544,16 @@ impl Service {
                 if new_nid == current_nid {
                     // The summary failed; the old session is still the active
                     // one and the turn stopped at the safe point.
-                    let phase = norte_code_protocol::Phase::Idle;
-                    self.set_phase(key, phase).await;
-                    emit(
+                    self.set_phase(key, norte_code_protocol::Phase::Idle).await;
+                    self.finish_turn(
+                        &engine,
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
                         tx,
-                        ServerEvent::new(
-                            request_id,
-                            Some(key.clone()),
-                            ServerEventKind::TurnFinished {
-                                turn,
-                                phase,
-                                committed: false,
-                            },
-                        ),
+                        gate.as_deref(),
+                        false,
                     )
                     .await;
                     return Ok(());
@@ -650,17 +629,15 @@ impl Service {
                         .await
                         .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
                     self.set_phase(key, phase).await;
-                    emit(
+                    self.finish_turn(
+                        &engine,
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
                         tx,
-                        ServerEvent::new(
-                            request_id,
-                            Some(key.clone()),
-                            ServerEventKind::TurnFinished {
-                                turn,
-                                phase,
-                                committed: false,
-                            },
-                        ),
+                        gate.as_deref(),
+                        false,
                     )
                     .await;
                     return Ok(());
@@ -702,17 +679,15 @@ impl Service {
                         to_phase(outcome.session.phase)
                     };
                     self.set_phase(key, phase).await;
-                    emit(
+                    self.finish_turn(
+                        &engine,
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
                         tx,
-                        ServerEvent::new(
-                            request_id,
-                            Some(key.clone()),
-                            ServerEventKind::TurnFinished {
-                                turn,
-                                phase,
-                                committed: outcome.message.is_some(),
-                            },
-                        ),
+                        gate.as_deref(),
+                        outcome.message.is_some(),
                     )
                     .await;
                     if !compacted_eagerly
@@ -781,17 +756,15 @@ impl Service {
                         ServerEvent::error(request_id, Some(key.clone()), code, message),
                     )
                     .await;
-                    emit(
+                    self.finish_turn(
+                        &engine,
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
                         tx,
-                        ServerEvent::new(
-                            request_id,
-                            Some(key.clone()),
-                            ServerEventKind::TurnFinished {
-                                turn,
-                                phase,
-                                committed: false,
-                            },
-                        ),
+                        gate.as_deref(),
+                        false,
                     )
                     .await;
                 }
@@ -799,6 +772,39 @@ impl Service {
             break;
         }
         Ok(())
+    }
+
+    /// The epilogue every turn exit shares: settle the stats, store them and
+    /// emit `TurnFinished`. Returns false when the client stopped reading.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_turn(
+        &self,
+        engine: &Harness,
+        request_id: u64,
+        key: &SessionKey,
+        current_nid: SessionId,
+        stats: &mut Stats,
+        tx: &mpsc::Sender<ServerEvent>,
+        gate: Option<&CompactionGate>,
+        committed: bool,
+    ) -> bool {
+        let _ = self
+            .settle(engine, request_id, key, current_nid, stats, tx, true, gate)
+            .await;
+        self.store_stats(key, stats).await;
+        emit(
+            tx,
+            ServerEvent::new(
+                request_id,
+                Some(key.clone()),
+                ServerEventKind::TurnFinished {
+                    turn: stats.turn,
+                    phase: norte_code_protocol::Phase::Idle,
+                    committed,
+                },
+            ),
+        )
+        .await
     }
 
     /// Maps one engine event and answers whether to keep going (the client is
