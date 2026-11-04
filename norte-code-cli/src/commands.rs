@@ -240,19 +240,45 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
             }
             u8::from(failed)
         }
-        PluginsCommand::Add { url, package } => {
+        PluginsCommand::Add { url, package, all } => {
             let name = package
                 .clone()
                 .unwrap_or_else(|| crate::installs::plugin_name(url));
-            eprintln!("installing {name}…");
-            match crate::plugin_manager::install_plugin(url, package.as_deref()) {
-                Ok(name) => {
-                    println!("plugin {name} installed — restart norte-code to apply it");
-                    0
+            if *all {
+                eprintln!("installing all plugins from {name}…");
+                let result =
+                    crate::plugin_manager::install_all_plugins(url, &|index, count, label| {
+                        eprintln!("[{index}/{count}] installing {label}…");
+                    });
+                match result {
+                    Ok(stems) => {
+                        println!(
+                            "installed {} plugin(s): {} — restart norte-code to apply them",
+                            stems.len(),
+                            stems.join(", ")
+                        );
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("could not install plugins: {error}");
+                        1
+                    }
                 }
-                Err(error) => {
-                    eprintln!("could not install plugin: {error}");
-                    1
+            } else {
+                eprintln!("installing {name}…");
+                let result =
+                    crate::plugin_manager::install_plugin(url, package.as_deref(), &|s, t, l| {
+                        eprintln!("[{s}/{t}] {l}");
+                    });
+                match result {
+                    Ok(name) => {
+                        println!("plugin {name} installed — restart norte-code to apply it");
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("could not install plugin: {error}");
+                        1
+                    }
                 }
             }
         }

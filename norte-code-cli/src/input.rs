@@ -39,6 +39,23 @@ pub(crate) struct InstallReport {
     pub(crate) updated: bool,
 }
 
+/// Where a plugin install stands, as the footer shows it.
+///
+/// A build takes minutes and the screen has to say more than that it is
+/// waiting: which step it is on, and how many there are. `step` is 1-based;
+/// `label` names the step (`cloning`, `building`, …).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InstallStep {
+    /// The plugin being installed, or every plugin when several are.
+    pub(crate) name: String,
+    /// The step number, 1-based.
+    pub(crate) step: usize,
+    /// The total number of steps.
+    pub(crate) total: usize,
+    /// What the step is doing.
+    pub(crate) label: String,
+}
+
 /// One item in the session's todo list, as the footer renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TodoItem {
@@ -307,7 +324,7 @@ struct PinnedInner {
     /// says nothing while a clone and a compile run reads as a client that
     /// stopped answering, and the person has no way to tell it apart from one
     /// that is broken.
-    installing: Vec<String>,
+    installing: Vec<InstallStep>,
     /// The plugin installs that finished, waiting to be reported.
     ///
     /// The install runs on a task of its own and the frame cannot be reached
@@ -411,8 +428,29 @@ impl Pinned {
     /// stopped answering.
     pub(crate) fn set_installing(&self, name: String) {
         let mut inner = self.lock();
-        if !inner.installing.contains(&name) {
-            inner.installing.push(name);
+        if !inner.installing.iter().any(|step| step.name == name) {
+            inner.installing.push(InstallStep {
+                name,
+                step: 1,
+                total: 4,
+                label: "cloning".to_owned(),
+            });
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Records where a plugin install stands.
+    ///
+    /// The build reports each step as it reaches it, so the footer can show
+    /// `building (2/4)` instead of a bare ellipsis. A step for a name nobody
+    /// started is ignored: the start and the finish are the only moments a
+    /// name is added or removed.
+    pub(crate) fn set_install_step(&self, name: &str, step: usize, total: usize, label: &str) {
+        let mut inner = self.lock();
+        if let Some(current) = inner.installing.iter_mut().find(|entry| entry.name == name) {
+            current.step = step;
+            current.total = total;
+            label.clone_into(&mut current.label);
         }
         self.dirty.store(true, Ordering::Relaxed);
     }
@@ -424,13 +462,13 @@ impl Pinned {
     /// conversation.
     pub(crate) fn finish_install(&self, report: InstallReport) {
         let mut inner = self.lock();
-        inner.installing.retain(|name| name != &report.name);
+        inner.installing.retain(|step| step.name != report.name);
         inner.installs_done.push(report);
         self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// The plugin installs running right now.
-    pub(crate) fn installing(&self) -> Vec<String> {
+    pub(crate) fn installing(&self) -> Vec<InstallStep> {
         self.lock().installing.clone()
     }
 

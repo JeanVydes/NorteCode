@@ -197,19 +197,69 @@ pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
 /// The clone never asks for credentials: a build that stops to ask is a build
 /// a person cannot get out of, and the answer to a private repository is to
 /// use one that can be read.
-pub(crate) fn install_plugin(url: &str, package: Option<&str>) -> Result<String, String> {
+///
+/// `on_progress` is called with the step number, the total step count and a
+/// short label, so a caller can show where the install stands.
+pub(crate) fn install_plugin(
+    url: &str,
+    package: Option<&str>,
+    on_progress: &dyn Fn(usize, usize, &str),
+) -> Result<String, String> {
     let tmp_dir = std::env::temp_dir().join(format!(
         "norte-code-plugin-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    let installed = build_plugin(url, package, &tmp_dir);
+    let installed = build_plugin_inner(url, package, &tmp_dir, on_progress);
     // The temporary directory goes either way: a failed build leaves a
     // directory with a whole `target/` in it, and nobody asked for that.
     let _ = std::fs::remove_dir_all(&tmp_dir);
     let (stem, package) = installed?;
     remember_source(&stem, url, &package);
     Ok(stem)
+}
+
+/// Installs every plugin package in a workspace, one after another.
+///
+/// Each package is built and installed on its own, and its outcome is
+/// reported, so one failure does not stop the rest. Returns the installed
+/// library stems, or an error when the workspace holds no plugin package.
+///
+/// # Errors
+///
+/// Returns an error when the workspace has no plugin package, or when every
+/// package failed to install.
+pub(crate) fn install_all_plugins(
+    url: &str,
+    on_progress: &dyn Fn(usize, usize, &str),
+) -> Result<Vec<String>, String> {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "norte-code-plugin-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let installed = build_all_plugins(url, &tmp_dir, on_progress);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let results = installed?;
+    let mut stems = Vec::new();
+    let mut first_error = None;
+    for (package, result) in results {
+        match result {
+            Ok(stem) => {
+                remember_source(&stem, url, &package);
+                stems.push(stem);
+            }
+            Err(error) => {
+                first_error.get_or_insert(format!("{package}: {error}"));
+            }
+        }
+    }
+    if stems.is_empty() {
+        return Err(
+            first_error.unwrap_or_else(|| "no plugin package could be installed".to_owned())
+        );
+    }
+    Ok(stems)
 }
 
 /// Rebuilds installed plugins from the repositories they came from.
@@ -249,7 +299,7 @@ pub(crate) fn update_plugins(
         if target.as_deref().is_some_and(|target| target != stem) {
             continue;
         }
-        let result = install_plugin(&source.url, source.package.as_deref());
+        let result = install_plugin(&source.url, source.package.as_deref(), &|_, _, _| {});
         // A crate that renamed its library leaves the old stem pointing at a
         // file that is gone; the install recorded the new one.
         if let Ok(new_stem) = &result
@@ -278,11 +328,141 @@ struct PluginPackage {
     targets: Vec<String>,
 }
 
-/// Clone, build and install one workspace plugin into the plugin directory.
-fn build_plugin(
+/// Clone, inspect, build and install every plugin package in a workspace.
+///
+/// The repository is cloned and inspected once; each package is then built
+/// and installed on its own, so one failure does not stop the rest.
+/// `on_progress` receives the package index, the package count and the
+/// package name, once per package.
+///
+/// # Errors
+///
+/// Returns an error when the workspace has no plugin package.
+#[allow(clippy::type_complexity)]
+fn build_all_plugins(
+    url: &str,
+    tmp_dir: &Path,
+    on_progress: &dyn Fn(usize, usize, &str),
+) -> Result<Vec<(String, Result<String, String>)>, String> {
+    if Command::new("git").arg("--version").output().is_err() {
+        return Err("git is not installed".to_owned());
+    }
+    if Command::new("cargo").arg("--version").output().is_err() {
+        return Err("cargo is not installed".to_owned());
+    }
+    let clone = Command::new("git")
+        .args(["clone", "--depth", "1", url])
+        .arg(tmp_dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "/bin/true")
+        .env("SSH_ASKPASS", "/bin/true")
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if !clone.status.success() {
+        return Err(format!(
+            "git clone failed: {}",
+            tail(&clone.stderr, BUILD_ERROR_LINES)
+        ));
+    }
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(tmp_dir)
+        .output()
+        .map_err(|error| format!("could not inspect the workspace with cargo: {error}"))?;
+    if !metadata.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            tail(&metadata.stderr, BUILD_ERROR_LINES)
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| format!("cargo metadata returned invalid JSON: {error}"))?;
+    let packages = plugin_packages(&metadata)?;
+    if packages.is_empty() {
+        return Err(
+            "the repository has no cdylib plugin package; a plugin must expose a cdylib target"
+                .to_owned(),
+        );
+    }
+    let total = packages.len();
+    let mut results = Vec::new();
+    for (index, package) in packages.iter().enumerate() {
+        on_progress(index + 1, total, &package.name);
+        let result =
+            build_and_install_package(tmp_dir, package).map(|stem| (stem, package.name.clone()));
+        results.push((package.name.clone(), result.map(|(stem, _)| stem)));
+    }
+    Ok(results)
+}
+
+/// Builds one already-inspected package and installs its library.
+fn build_and_install_package(tmp_dir: &Path, package: &PluginPackage) -> Result<String, String> {
+    let build = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--message-format=json",
+            "--package",
+            &package.name,
+        ])
+        .current_dir(tmp_dir)
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}"))?;
+    if !build.status.success() {
+        return Err(format!(
+            "cargo build failed: {}",
+            tail(&build.stderr, BUILD_ERROR_LINES)
+        ));
+    }
+    let library = cdylib(&build.stdout, &package.id).ok_or_else(|| {
+        format!(
+            "package '{}' built no cdylib plugin; check its workspace target",
+            package.name
+        )
+    })?;
+    install_library(&library)
+}
+
+/// Copies a built library into the plugin directory, atomically.
+///
+/// Write beside the destination and rename over it. Copying in place
+/// truncates the file the process may still have mapped — the update path
+/// resolves a plugin by name, which loads it to read its name — and a
+/// shared library rewritten under its own mapping crashes on unload. A
+/// rename swaps the directory entry and leaves the old mapping intact.
+fn install_library(library: &Path) -> Result<String, String> {
+    let plugin_dir = plugin_dir();
+    std::fs::create_dir_all(&plugin_dir)
+        .map_err(|e| format!("could not create {}: {e}", plugin_dir.display()))?;
+    let file_name = library
+        .file_name()
+        .ok_or_else(|| "the built library has no name".to_owned())?;
+    let dest = plugin_dir.join(file_name);
+    let staging = plugin_dir.join(format!(".{}.new", file_name.to_string_lossy()));
+    std::fs::copy(library, &staging)
+        .map_err(|e| format!("could not copy the plugin library: {e}"))?;
+    std::fs::rename(&staging, &dest)
+        .map_err(|e| format!("could not install the plugin library: {e}"))?;
+    Ok(dest
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map_or_else(|| "plugin".to_owned(), std::borrow::ToOwned::to_owned))
+}
+
+/// Clone, inspect, build and install one workspace plugin.
+///
+/// `on_progress` receives the step number, the total step count and a short
+/// label, so a caller can show where the install stands.
+///
+/// # Errors
+///
+/// Returns an error when git or cargo is missing, the clone or build fails,
+/// or the package cannot be selected or installed.
+fn build_plugin_inner(
     url: &str,
     selected_package: Option<&str>,
     tmp_dir: &Path,
+    on_progress: &dyn Fn(usize, usize, &str),
 ) -> Result<(String, String), String> {
     if Command::new("git").arg("--version").output().is_err() {
         return Err("git is not installed".to_owned());
@@ -292,6 +472,7 @@ fn build_plugin(
     }
 
     // Clone the repository.
+    on_progress(1, 4, "cloning");
     let clone = Command::new("git")
         .args(["clone", "--depth", "1", url])
         .arg(tmp_dir)
@@ -322,59 +503,12 @@ fn build_plugin(
     }
     let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)
         .map_err(|error| format!("cargo metadata returned invalid JSON: {error}"))?;
+    on_progress(2, 4, "inspecting the workspace");
     let packages = plugin_packages(&metadata)?;
     let package = select_plugin_package(&packages, selected_package)?;
-
-    // Building the selected package, rather than the whole workspace, keeps
-    // other plugins and their cdylibs out of this install.
-    let build = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "--message-format=json",
-            "--package",
-            &package.name,
-        ])
-        .current_dir(tmp_dir)
-        .output()
-        .map_err(|e| format!("could not run cargo: {e}"))?;
-    if !build.status.success() {
-        return Err(format!(
-            "cargo build failed: {}",
-            tail(&build.stderr, BUILD_ERROR_LINES)
-        ));
-    }
-
-    let library = cdylib(&build.stdout, &package.id).ok_or_else(|| {
-        format!(
-            "package '{}' built no cdylib plugin; check its workspace target",
-            package.name
-        )
-    })?;
-
-    let plugin_dir = plugin_dir();
-    std::fs::create_dir_all(&plugin_dir)
-        .map_err(|e| format!("could not create {}: {e}", plugin_dir.display()))?;
-
-    let file_name = library
-        .file_name()
-        .ok_or_else(|| "the built library has no name".to_owned())?;
-    let dest = plugin_dir.join(file_name);
-    // Write beside the destination and rename over it. Copying in place
-    // truncates the file the process may still have mapped — the update path
-    // resolves a plugin by name, which loads it to read its name — and a
-    // shared library rewritten under its own mapping crashes on unload. A
-    // rename swaps the directory entry and leaves the old mapping intact.
-    let staging = plugin_dir.join(format!(".{}.new", file_name.to_string_lossy()));
-    std::fs::copy(&library, &staging)
-        .map_err(|e| format!("could not copy the plugin library: {e}"))?;
-    std::fs::rename(&staging, &dest)
-        .map_err(|e| format!("could not install the plugin library: {e}"))?;
-
-    let stem = dest
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map_or_else(|| "plugin".to_owned(), std::borrow::ToOwned::to_owned);
+    on_progress(3, 4, &format!("building {}", package.name));
+    let stem = build_and_install_package(tmp_dir, &package)?;
+    on_progress(4, 4, "installing");
     Ok((stem, package.name))
 }
 
@@ -438,7 +572,7 @@ fn select_plugin_package(
                     .to_owned(),
             ),
             _ => Err(format!(
-                "workspace has multiple plugin packages ({}); select one with --package <name>",
+                "workspace has multiple plugin packages ({}); select one with --package <name> or install them all with --all",
                 plugin_package_names(packages)
             )),
         };

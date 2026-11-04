@@ -19,13 +19,53 @@ use crate::input::{InstallReport, Pinned};
 ///
 /// Nothing is waited for here. The clone, the build and the copy happen on the
 /// blocking thread, and the outcome reaches the conversation when it is done.
-pub(crate) fn start(url: String, package: Option<String>, pinned: Arc<Pinned>) {
+///
+/// When `all` is true, every plugin package in the workspace is installed,
+/// one after another; the outcome is one report per library.
+pub(crate) fn start(url: String, package: Option<String>, all: bool, pinned: Arc<Pinned>) {
     let name = package.clone().unwrap_or_else(|| plugin_name(&url));
     pinned.set_installing(name.clone());
     tokio::spawn(async move {
+        if all {
+            let built = url.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::plugin_manager::install_all_plugins(&built, &|_, _, _| {})
+            })
+            .await;
+            match outcome {
+                Ok(Ok(stems)) => {
+                    for stem in stems {
+                        pinned.finish_install(InstallReport {
+                            name: stem.clone(),
+                            result: Ok(stem),
+                            updated: false,
+                        });
+                    }
+                }
+                Ok(Err(error)) => pinned.finish_install(InstallReport {
+                    name,
+                    result: Err(error),
+                    updated: false,
+                }),
+                Err(error) => pinned.finish_install(InstallReport {
+                    name,
+                    result: Err(format!("the build stopped before it finished: {error}")),
+                    updated: false,
+                }),
+            }
+            return;
+        }
         let built = url.clone();
+        let progress_name = name.clone();
+        let progress_pinned = Arc::clone(&pinned);
         let outcome = tokio::task::spawn_blocking(move || {
-            crate::plugin_manager::install_plugin(&built, package.as_deref())
+            crate::plugin_manager::install_plugin(
+                &built,
+                package.as_deref(),
+                &|step, total, label| {
+                    progress_pinned.set_install_step(&progress_name, step, total, label);
+                },
+            )
         })
         .await;
         let report = match outcome {

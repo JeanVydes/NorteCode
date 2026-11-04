@@ -174,6 +174,9 @@ enum PluginsCommand {
         /// Select a package from a multi-plugin Cargo workspace.
         #[arg(long)]
         package: Option<String>,
+        /// Install every plugin package in the workspace.
+        #[arg(long, conflicts_with = "package")]
+        all: bool,
     },
     /// Remove an installed plugin.
     #[command(alias = "remove")]

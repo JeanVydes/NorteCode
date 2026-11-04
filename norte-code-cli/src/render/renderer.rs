@@ -2973,10 +2973,17 @@ impl Renderer {
         // answering.
         let installing = self.pinned.installing();
         if !installing.is_empty() {
-            head.push((
-                Ink::Yellow,
-                format!("installing {}…", installing.join(", ")),
-            ));
+            let shown = installing
+                .iter()
+                .map(|step| {
+                    format!(
+                        "{} ({}/{}) {}",
+                        step.name, step.step, step.total, step.label
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            head.push((Ink::Yellow, format!("installing {shown}…")));
             head.push((Ink::Faint, " · ".to_owned()));
         }
         head.push(match &self.activity {

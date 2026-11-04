@@ -185,7 +185,8 @@ pub(crate) fn built() -> Registry {
             "install a plugin from a git URL or workspace",
         )
         .arg(ArgSpec::required("url"))
-        .arg(ArgSpec::optional("package")),
+        .arg(ArgSpec::optional("package"))
+        .arg(ArgSpec::optional_choice("all", &["--all"])),
     );
     registry.register(
         CommandSpec::new("/plugins rm", "remove an installed plugin")

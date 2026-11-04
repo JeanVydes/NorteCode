@@ -61,7 +61,7 @@ fn plugin_install_cli_accepts_a_workspace_package() {
     assert!(matches!(
         cli.command,
         Some(Command::Plugins(PluginsArgs {
-            command: PluginsCommand::Add { url, package: Some(package) }
+            command: PluginsCommand::Add { url, package: Some(package), all: false }
         })) if url == "https://example.invalid/repo" && package == "plugin-two"
     ));
 }
