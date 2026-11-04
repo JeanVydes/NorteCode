@@ -271,7 +271,12 @@ impl JobState {
 pub struct JobInfo {
     /// The id the model was given.
     pub id: String,
-    /// The script, clipped to one line.
+    /// The label, clipped to one line: a shell's script, a subagent's title.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// The script, clipped to one line. Kept on the wire for one release so
+    /// a client that still reads it stops getting a parse error.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub script: String,
     /// Where it stands.
     pub state: JobState,

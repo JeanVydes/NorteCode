@@ -24,6 +24,7 @@ mod screenshots;
 mod sessions;
 mod skills;
 mod steering;
+mod subagents;
 mod tooling;
 mod turns;
 mod workspace;
@@ -67,6 +68,7 @@ use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 use self::screenshots::{ScreenshotInterceptor, Screenshots, publishing_tool};
 use self::sessions::SessionRecord;
 use self::steering::{Steered, Steering, SteeringInterceptor};
+use self::subagents::{SubagentOutcome, SubagentRunner, SubagentTool};
 use approvals::{ApprovalRules, ToolRuleInterceptor};
 use background::ShellCalls;
 use compaction::{CompactionGate, CompactionLayer};
@@ -180,6 +182,8 @@ pub struct Service {
     interceptors: Vec<Arc<dyn TurnInterceptor>>,
     /// The MCP servers that connected, and the tools they published.
     mcp_servers: RwLock<McpServers>,
+    /// The runner the `subagent` tool asks, set once the service is built.
+    subagent_runner: RwLock<Option<Arc<dyn SubagentRunner>>>,
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
@@ -376,6 +380,7 @@ impl Service {
             interceptors: Vec::new(),
             // Connected in `with_directory`, which can await; `new` cannot.
             mcp_servers: RwLock::new(McpServers::none()),
+            subagent_runner: RwLock::new(None),
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
             config_path: Mutex::new(norte_code_protocol::config::user_config_path()),
@@ -725,6 +730,7 @@ impl Service {
     ///
     /// Returns [`ServiceError`] when a declaration is invalid or a name is
     /// already taken.
+    #[allow(clippy::too_many_lines)]
     pub fn tools(&self, session: Option<&SessionKey>) -> Result<ToolRegistry, ServiceError> {
         let disabled = self.disabled_for(session);
         let mut tools = ToolRegistry::new();
@@ -770,6 +776,30 @@ impl Service {
             &disabled,
             AskUserTool::new(Arc::clone(&self.questions)).into_declaration(),
         )?;
+        if self.config().tools.subagent.enabled {
+            let max_concurrent = self.config().tools.subagent.max_concurrent;
+            let runner: Arc<dyn SubagentRunner> = self
+                .subagent_runner
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| {
+                    Arc::new(SubagentRunnerImpl::new(None)) as Arc<dyn SubagentRunner>
+                });
+            self.register_tool(
+                &mut tools,
+                &disabled,
+                SubagentTool::new(
+                    runner,
+                    Arc::clone(&self.jobs),
+                    Arc::clone(&self.steering),
+                    Arc::clone(&self.detaches),
+                    max_concurrent,
+                )
+                .into_declaration(),
+            )?;
+        }
+
         if self.config().tools.web_fetch {
             self.register_tool(
                 &mut tools,
@@ -1915,6 +1945,147 @@ impl Service {
 
     fn lock_skills_write(&self) -> RwLockWriteGuard<'_, Arc<SkillRegistry>> {
         self.skills.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Installs the runner the `subagent` tool asks, once the service
+    /// exists as an `Arc`.
+    ///
+    /// `tools` is a `&self` method and cannot produce the `Arc<Self>` the
+    /// runner needs; the host that builds the service through
+    /// `Service::new` (which returns the service) installs one here.
+    pub fn install_subagent_runner(self: &Arc<Self>) {
+        *self
+            .subagent_runner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(SubagentRunnerImpl::new(Some(Arc::clone(self)))) as _);
+    }
+}
+
+/// Runs a subagent's turn on a child session.
+///
+/// The child is created with the same rules as any other session, except
+/// its tool list is frozen without `subagent`: it starts blank and cannot
+/// spawn another one, so the depth is one and the recursion is impossible.
+struct SubagentRunnerImpl {
+    service: Option<Arc<Service>>,
+}
+
+impl SubagentRunnerImpl {
+    fn new(service: Option<Arc<Service>>) -> Self {
+        Self { service }
+    }
+}
+
+#[async_trait::async_trait]
+impl SubagentRunner for SubagentRunnerImpl {
+    async fn run(
+        &self,
+        prompt: &str,
+        parent: norte::SessionId,
+        label: &str,
+        cancel: &norte::Cancellation,
+    ) -> SubagentOutcome {
+        let _ = label;
+        let Some(service) = self.service.clone() else {
+            return SubagentOutcome {
+                text: "subagent: no runner installed".to_owned(),
+                is_error: true,
+            };
+        };
+        // The parent's key, so the child inherits its model. The parent's
+        // session id is a `SessionId`; the service maps it back to the key
+        // it holds.
+        let parent_key = {
+            let sessions = service.lock_sessions();
+            sessions
+                .iter()
+                .find(|(_, record)| record.id == parent)
+                .map(|(key, _)| key.clone())
+        };
+        let Some(parent_key) = parent_key else {
+            return SubagentOutcome {
+                text: "subagent: parent session is unknown".to_owned(),
+                is_error: true,
+            };
+        };
+        let child_key = match service.create_session_child(&parent_key).await {
+            Ok(key) => key,
+            Err(error) => {
+                return SubagentOutcome {
+                    text: format!("subagent: could not create child session: {error}"),
+                    is_error: true,
+                };
+            }
+        };
+        let (nid, spec, _) = match service.require_record(&child_key) {
+            Ok(found) => found,
+            Err(error) => {
+                return SubagentOutcome {
+                    text: format!("subagent: child session is unknown: {error}"),
+                    is_error: true,
+                };
+            }
+        };
+        let Some(spec) = spec else {
+            return SubagentOutcome {
+                text: "subagent: no model is configured".to_owned(),
+                is_error: true,
+            };
+        };
+        let engine = match service.engine(&spec, Some(&child_key)) {
+            Ok(engine) => engine,
+            Err(error) => {
+                return SubagentOutcome {
+                    text: format!("subagent: could not build engine: {error}"),
+                    is_error: true,
+                };
+            }
+        };
+        // One turn on the child. Cancellation is the job's own token: a
+        // `/jobs stop` cancels this `cancel`, and the turn builder takes it.
+        let token = tokio_util::sync::CancellationToken::new();
+        if cancel.is_cancelled() {
+            token.cancel();
+        }
+        let child = engine
+            .turn(nid)
+            .input(norte::Message::user(prompt))
+            .cancellation(token)
+            .start();
+        let outcome = child.finish().await;
+        match outcome {
+            Ok(outcome) => match outcome.message {
+                Some(message) => {
+                    let text = message
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            norte::Part::Text(text) => Some(text.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let text = if text.trim().is_empty() {
+                        "(the child said nothing)".to_owned()
+                    } else {
+                        text
+                    };
+                    SubagentOutcome {
+                        text,
+                        is_error: false,
+                    }
+                }
+                None => SubagentOutcome {
+                    text: "(the child committed no message)".to_owned(),
+                    is_error: false,
+                },
+            },
+            Err(error) => SubagentOutcome {
+                text: error.to_string(),
+                is_error: true,
+            },
+        }
     }
 }
 

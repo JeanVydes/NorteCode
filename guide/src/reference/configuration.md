@@ -89,6 +89,23 @@ What the client shows, as opposed to what the engine does.
 diff in two shapes: `unified` (patch, fits narrow terminals) and `split`
 (before/after side by side, shows changes inside a line).
 
+## `tools.subagent`
+
+Settings for the `subagent` tool. A subagent is a new session that runs one
+turn and answers; the model delegates a task to it and reads back what it
+said. The child starts blank, so the prompt carries everything it needs, and
+a child never has `subagent` — nesting stops at one.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Register the `subagent` tool. Spawning agents spends tokens on its own, so it is off until it is turned on. |
+| `max_concurrent` | int | `3` | How many subagents may run at once. Past the cap a spawn is refused, not queued. |
+| `max_iterations` | int or null | `null` | How many model iterations one child turn may run. `null` inherits the session's limit. |
+
+With `detach: true` the call becomes a job (`job-N`), like a detached shell:
+`manage_jobs` reads and stops it, and its result arrives as a message when it
+ends.
+
 ## `budgets`
 
 `message`, `session` and `global_daily` each accept null or:

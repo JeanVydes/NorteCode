@@ -484,6 +484,8 @@ pub struct ToolsConfig {
     pub confinement: ConfinementConfig,
     /// How a browser screenshot reaches the model.
     pub screenshots: ScreenshotConfig,
+    /// Whether the `subagent` tool is registered.
+    pub subagent: SubagentConfig,
     /// Tools a new session does not get, by the name the model would call them.
     ///
     /// A tool named here is never registered: it is not in the schema the model
@@ -508,8 +510,67 @@ impl Default for ToolsConfig {
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
             confinement: ConfinementConfig::default(),
             screenshots: ScreenshotConfig::default(),
+            subagent: SubagentConfig::default(),
             disabled: Vec::new(),
         }
+    }
+}
+
+/// Settings for the `subagent` tool.
+///
+/// A subagent is a session of its own with one turn, started by the model to
+/// do one delegated task. Spawning agents is a cost and trust decision —
+/// every child spends tokens on its own — so it is off by default and turning
+/// it on is deliberate, the same way `skills.allow_scripts` is.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubagentConfig {
+    /// Whether the `subagent` tool is registered.
+    pub enabled: bool,
+    /// How many subagents may run at once.
+    ///
+    /// A semaphore: past this many, a new spawn is refused with an error the
+    /// model reads rather than queued. Queuing would let one turn hold every
+    /// provider slot behind an unbounded fan-out.
+    pub max_concurrent: usize,
+    /// How many model iterations one subagent turn may run.
+    ///
+    /// `None` inherits the session's own `max_iterations`: a child cannot run
+    /// longer than its parent can.
+    pub max_iterations: Option<usize>,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_concurrent: DEFAULT_SUBAGENT_MAX_CONCURRENT,
+            max_iterations: None,
+        }
+    }
+}
+
+/// Default cap on subagents running at once.
+pub const DEFAULT_SUBAGENT_MAX_CONCURRENT: usize = 3;
+
+/// Validate the subagent settings.
+impl Config {
+    fn validate_subagent(&self) -> Result<(), ConfigError> {
+        if self.tools.subagent.max_concurrent == 0 {
+            return Err(invalid(
+                "tools.subagent.max_concurrent",
+                "must be at least 1",
+            ));
+        }
+        if let Some(max_iterations) = self.tools.subagent.max_iterations
+            && max_iterations == 0
+        {
+            return Err(invalid(
+                "tools.subagent.max_iterations",
+                "must be at least 1 when set",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -857,6 +918,7 @@ impl Config {
         if self.max_iterations == Some(0) {
             return Err(invalid("max_iterations", "must be at least 1"));
         }
+        self.validate_subagent()?;
         self.validate_model_pairs()?;
         if self.skills.max_skills == 0 {
             return Err(invalid("skills.max_skills", "must be at least 1"));
@@ -2179,5 +2241,55 @@ mod ui_tests {
             loaded.config.tools.disabled
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+
+    #[test]
+    fn subagent_is_off_and_capped_by_default() {
+        // Spawning agents costs tokens on its own, so it is off until a
+        // person turns it on — the same posture as `skills.allow_scripts`.
+        let loaded = Config::from_json("{}").expect("empty config");
+        let config = loaded.config;
+        assert!(!config.tools.subagent.enabled, "off by default");
+        assert_eq!(
+            config.tools.subagent.max_concurrent, DEFAULT_SUBAGENT_MAX_CONCURRENT,
+            "three at once, no more"
+        );
+        assert_eq!(
+            config.tools.subagent.max_iterations, None,
+            "inherits the session's limit"
+        );
+    }
+
+    #[test]
+    fn subagent_settings_round_trip() {
+        let loaded = Config::from_json(
+            r#"{"tools":{"subagent":{"enabled":true,"max_concurrent":5,"max_iterations":12}}}"#,
+        )
+        .expect("config");
+        let config = loaded.config;
+        assert!(config.tools.subagent.enabled);
+        assert_eq!(config.tools.subagent.max_concurrent, 5);
+        assert_eq!(config.tools.subagent.max_iterations, Some(12));
+    }
+
+    #[test]
+    fn subagent_limits_must_be_positive() {
+        let error = Config::from_json(r#"{"tools":{"subagent":{"max_concurrent":0}}}"#)
+            .expect_err("zero concurrency is refused");
+        assert!(
+            error.to_string().contains("tools.subagent.max_concurrent"),
+            "the error names the field: {error}"
+        );
+        let error = Config::from_json(r#"{"tools":{"subagent":{"max_iterations":0}}}"#)
+            .expect_err("zero iterations is refused");
+        assert!(
+            error.to_string().contains("tools.subagent.max_iterations"),
+            "the error names the field: {error}"
+        );
     }
 }

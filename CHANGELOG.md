@@ -74,6 +74,17 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   person can watch from a terminal instead of only from inside a session that
   is waiting for it.
 
+### Added
+
+- The model can delegate one turn to a subagent. The `subagent` tool starts
+  a new session, runs one turn on it, and returns what it said; the child
+  starts blank, so the prompt carries everything it needs. With
+  `detach: true` the run becomes a job the registry holds, like a detached
+  shell: `manage_jobs` reads and stops it, and its result arrives as a
+  message when it ends. A child never has `subagent`, so nesting stops at
+  one. It is off by default and capped at three concurrent runs; both are
+  configured under `tools.subagent`.
+
 ### Fixed
 
 - The edit diff colours each panel by its own side. A split row carried one

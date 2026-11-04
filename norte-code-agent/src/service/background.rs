@@ -392,7 +392,7 @@ pub(super) fn describe(job: &JobSummary) -> String {
         "`{}` {} — {}{} ({} ms)",
         job.id,
         job.state.label(),
-        job.script,
+        job.label,
         match job.exit_code {
             Some(code) => format!(", exit {code}"),
             None => String::new(),

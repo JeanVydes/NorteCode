@@ -329,7 +329,15 @@ fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<Scrip
         )
         .expect("service"),
     );
+    service.install_subagent_runner();
     (service, model)
+}
+
+#[allow(dead_code)]
+fn subagent_config() -> Config {
+    let mut config = config();
+    config.tools.subagent.enabled = true;
+    config
 }
 
 #[tokio::test]
@@ -6143,7 +6151,7 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
     let job = jobs.get("job-1").expect("the job is registered");
     assert_eq!(job.state, JobState::Running, "it is still running");
     assert_eq!(
-        job.script,
+        job.label,
         format!(
             "echo first; sleep 1; echo second; touch {}",
             marker.display()
@@ -7087,5 +7095,274 @@ async fn the_request_summary_follows_the_answer_it_describes() {
     assert!(
         last_text < summary,
         "the summary belongs under the answer, not above it: text {last_text}, summary {summary}"
+    );
+}
+
+#[tokio::test]
+async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
+    // The basic shape: the parent model calls `subagent` once, the child
+    // runs one turn and answers, and the parent receives the child's text.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            // Turn 1 (parent): call subagent.
+            .turn(vec![
+                norte::StreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: call,
+                    name: "subagent".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 0,
+                    call_id: call,
+                    name: None,
+                    arguments: serde_json::json!({
+                        "prompt": "What is 2 + 2?"
+                    })
+                    .to_string(),
+                },
+                norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
+            ])
+            // Turn 2 (child): answer.
+            .turn_text("4")
+            // Turn 3 (parent): finish.
+            .turn_text("The child said 4."),
+    );
+    let mut config = subagent_config();
+    config.approval_mode = norte_code_protocol::config::ApprovalMode::Yolo;
+    let service = Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.install_subagent_runner();
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "delegate".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    // The parent's finished message carries the child's answer: the scripted
+    // model consumed the turns in order (parent tool call, child answer,
+    // parent finish), so the child's "4" reached the parent as the result.
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::TurnFinished {
+                committed: true,
+                ..
+            }
+        )),
+        "the turn finished with the child's answer: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_detached_subagent_is_a_job_that_reports_and_can_be_stopped() {
+    // With `detach: true` the call becomes a job: it returns the job id at
+    // once, the run continues, and `manage_jobs` can read and stop it.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: call,
+                    name: "subagent".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 0,
+                    call_id: call,
+                    name: None,
+                    arguments: serde_json::json!({
+                        "prompt": "slow task",
+                        "detach": true
+                    })
+                    .to_string(),
+                },
+                norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
+            ])
+            // The child turn.
+            .turn_text("child done")
+            // The parent's next turn.
+            .turn_text("parent finished"),
+    );
+    let mut config = subagent_config();
+    config.approval_mode = norte_code_protocol::config::ApprovalMode::Yolo;
+    let service = Arc::new(
+        Service::new(
+            config,
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.install_subagent_runner();
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "delegate in background".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    let nid = service
+        .lock_sessions()
+        .get(&key)
+        .map(|record| record.id)
+        .expect("record");
+
+    // The job is in the registry with the subagent label, and it finished
+    // with the child's text.
+    let jobs = service.jobs.list(Some(nid));
+    assert_eq!(jobs.len(), 1, "one subagent job: {jobs:?}");
+    assert_eq!(jobs[0].state, JobState::Finished, "it finished: {jobs:?}");
+    assert!(
+        jobs[0].label.contains("subagent"),
+        "the label names it a subagent: {:?}",
+        jobs[0]
+    );
+    assert!(
+        jobs[0].output.contains("child done"),
+        "the job output holds the child's answer: {:?}",
+        jobs[0]
+    );
+    // A finished job cannot be stopped again.
+    assert!(
+        !service.jobs.cancel(&jobs[0].id),
+        "a finished job is not cancellable"
+    );
+}
+
+#[tokio::test]
+async fn too_many_subagents_is_an_error_the_model_reads() {
+    // The cap is a semaphore, not a queue: past it, the call is an error
+    // the model reads rather than a run queued behind an unbounded fan-out.
+    use super::subagents::SubagentTool;
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("slow"));
+    let service = Arc::new(
+        Service::new(
+            subagent_config(),
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.install_subagent_runner();
+    let runner = service
+        .subagent_runner
+        .read()
+        .unwrap()
+        .clone()
+        .expect("runner");
+    let tool = SubagentTool::new(
+        runner,
+        Arc::clone(&service.jobs),
+        Arc::clone(&service.steering),
+        Arc::clone(&service.detaches),
+        1,
+    );
+    // Take the one slot.
+    assert!(tool.gate_for_test().acquire().is_ok());
+    // The next one is an error, not a queue.
+    let error = tool.gate_for_test().acquire().expect_err("capped");
+    assert!(
+        error.contains("too many subagents"),
+        "the error names the cap: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_child_session_never_sees_the_subagent_tool() {
+    // The child's declaration list is frozen without `subagent`: a session
+    // created for a subagent cannot spawn one of its own, so depth is one.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let service = Arc::new(
+        Service::new(
+            subagent_config(),
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.install_subagent_runner();
+
+    let parent = service.create_session(None).await.expect("parent session");
+    let child = service
+        .create_session_child(&parent)
+        .await
+        .expect("child session");
+
+    let parent_tools = service.tools(Some(&parent)).expect("parent tools").specs();
+    let parent_names: Vec<&str> = parent_tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        parent_names.contains(&"subagent"),
+        "the parent has subagent: {parent_names:?}"
+    );
+
+    let child_tools = service.tools(Some(&child)).expect("child tools").specs();
+    let child_names: Vec<&str> = child_tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        !child_names.contains(&"subagent"),
+        "the child never has subagent: {child_names:?}"
     );
 }

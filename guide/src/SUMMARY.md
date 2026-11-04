@@ -3,6 +3,7 @@
 - [Norte Code](index.md)
 - [Getting started](getting-started.md)
 - [Plans](plans.md)
+- [Subagents](subagents.md)
 
 # Guides
 

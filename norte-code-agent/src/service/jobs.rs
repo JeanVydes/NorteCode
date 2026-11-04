@@ -1,22 +1,24 @@
-//! Background jobs: a shell call that is not waited for.
+//! Background jobs: work that is not waited for.
 //!
 //! A call is a job when nobody is left waiting for it, which happens two ways.
 //! It asked to be detached — `detach: true`, or a `Ctrl-G` on a call that was
-//! being waited for — and so answered before the process had anything to show.
-//! A call nobody detached is not a job at all, and its result is its own answer.
+//! being waited for — and so answered before it had anything to show. A call
+//! nobody detached is not a job at all, and its result is its own answer.
 //!
-//! The registry is what makes the difference visible: it is where a job's
-//! output is accumulated while it runs, so `manage_jobs` can read it, and where
-//! its cancellation token lives, so `Ctrl-C` and `/jobs stop` can end it.
-//! Nothing else needs to know whether a call was waited for.
+//! A job is whatever work can be left running: a shell process, a subagent's
+//! session converting. The registry does not know which. It is where a job's
+//! output is accumulated while it runs, so `manage_jobs` can read it, and
+//! where its cancellation token lives, so `Ctrl-C` and `/jobs stop` can end
+//! it. Nothing else needs to know whether a call was waited for.
 //!
-//! That is what makes the end of a job unambiguous: it is the closing of its
-//! streams, never the finishing of its call, which for a call that let go
-//! happens at the very start.
+//! That is what makes the end of a job unambiguous: the job ends when it says
+//! it has ended (the streams closed, the child turn settled), never when
+//! the call that started it finished — for a call that let go happens at
+//! the very start.
 //!
-//! The job ends when its process does. There is no unbounded job: the shell
-//! executor applies the request's timeout either way, so a background call is
-//! killed at the same bound a waited one is.
+//! There is no unbounded job: the executor that runs the work applies its
+//! own bound either way (a shell timeout, a subagent's max iterations), so
+//! a background job is killed at the same bound a waited one is.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,8 +50,11 @@ pub(super) struct JobSummary {
     pub(super) session: SessionId,
     /// The call it came from, so its output can be found among the events.
     pub(super) call_id: CallId,
-    /// The script, clipped to one line for a listing.
-    pub(super) script: String,
+    /// The label, clipped to one line for a listing.
+    ///
+    /// A shell's label is its script; a subagent's is its title. The registry
+    /// does not know which: it is the one line a listing has for the job.
+    pub(super) label: String,
     /// Where it stands.
     pub(super) state: JobState,
     /// The exit code, once it ended on its own.
@@ -103,7 +108,7 @@ impl JobRegistry {
         &self,
         session: SessionId,
         call_id: CallId,
-        script: &str,
+        label: &str,
         cancel: Arc<Cancellation>,
     ) -> String {
         let number = self.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -112,7 +117,7 @@ impl JobRegistry {
             id: id.clone(),
             session,
             call_id,
-            script: one_line(script),
+            label: one_line(label),
             state: JobState::Running,
             exit_code: None,
             timed_out: false,
@@ -136,7 +141,9 @@ impl JobRegistry {
     ///
     /// Chunks arrive for every tool call, so this is a no-op for a call that is
     /// not a job — which is what keeps the registry out of the way of the
-    /// waited path.
+    /// waited path. Callers that hold no call id (a subagent job, whose
+    /// session is the child's) use [`JobRegistry::write_id`].
+    /// Writers that do hold the job's id use that directly.
     pub(super) fn write(&self, call_id: CallId, text: &str) {
         let mut jobs = self.jobs();
         let Some(job) = jobs
@@ -160,6 +167,59 @@ impl JobRegistry {
             job.summary.output.drain(..drop_to);
             job.bytes -= drop_to;
             job.summary.dropped = true;
+        }
+    }
+
+    /// Appends to a job by its id.
+    ///
+    /// For writers without streams, whose job they hold by the id they were
+    /// handed: a subagent writes its final message when the child's turn
+    /// settles, not a stream of chunks.
+    pub(super) fn write_id(&self, id: &str, text: &str) {
+        let mut jobs = self.jobs();
+        let Some(job) = jobs.get_mut(id) else {
+            return;
+        };
+        if job.summary.state.is_done() {
+            return;
+        }
+        job.summary.output.push_str(text);
+        job.bytes += text.len();
+        // Keep the tail: the most recent output is what a reader wants.
+        if job.bytes > JOB_BUFFER_BYTES {
+            let overflow = job.bytes - JOB_BUFFER_BYTES;
+            let drop_to = job
+                .summary
+                .output
+                .char_indices()
+                .map(|(index, _)| index)
+                .find(|index| *index >= overflow)
+                .unwrap_or(0);
+            job.summary.output.drain(..drop_to);
+            job.bytes -= drop_to;
+            job.summary.dropped = true;
+        }
+    }
+
+    /// Marks a job as having ended by id, recording its exit code when it has one.
+    ///
+    /// For writers without streams: the child turn settled, and the job is
+    /// over. A shell's `close` does the same thing from a stream close.
+    pub(super) fn finish(&self, id: &str, exit_code: Option<i32>) {
+        let mut jobs = self.jobs();
+        let Some(job) = jobs.get_mut(id) else {
+            return;
+        };
+        if job.summary.state == JobState::Cancelled {
+            return;
+        }
+        if job.summary.state.is_done() {
+            return;
+        }
+        job.summary.elapsed_ms = millis(job.started.elapsed());
+        job.summary.state = JobState::Finished;
+        if let Some(code) = exit_code {
+            job.summary.exit_code = Some(code);
         }
     }
 
@@ -283,7 +343,11 @@ impl JobRegistry {
 pub(super) fn job_info(job: &JobSummary) -> JobInfo {
     JobInfo {
         id: job.id.clone(),
-        script: job.script.clone(),
+        label: job.label.clone(),
+        // The wire carries the label under its old name too until clients
+        // stop reading one: an old payload reader has `deny_unknown_fields`
+        // and an extra field is a parse error, not a silent miss.
+        script: job.label.clone(),
         state: job.state,
         exit_code: job.exit_code,
         timed_out: job.timed_out,
@@ -297,9 +361,9 @@ fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The script as one line, for a listing that has one line per job.
-fn one_line(script: &str) -> String {
-    let mut line: String = script.split_whitespace().collect::<Vec<_>>().join(" ");
+/// The label as one line, for a listing that has one line per job.
+fn one_line(label: &str) -> String {
+    let mut line: String = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() > 80 {
         line = line.chars().take(77).collect::<String>() + "...";
     }

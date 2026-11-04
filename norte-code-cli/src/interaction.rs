@@ -2677,7 +2677,7 @@ async fn report_jobs(
                         "  {} {} {}",
                         crate::text::terminal(&job.id),
                         job_state_label(job.state, crate::style::Style::plain()),
-                        job.script
+                        job.label
                     ));
                 }
                 renderer.open_modal("background jobs", lines);
@@ -2699,7 +2699,7 @@ fn print_job(job: &JobInfo, renderer: &mut Renderer, style: Style) {
         },
         job.elapsed_ms
     )];
-    lines.push(format!("  {}", job.script));
+    lines.push(format!("  {}", job.label));
     if job.timed_out {
         lines.push("  it reached its time bound".to_owned());
     }

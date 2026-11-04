@@ -1,6 +1,7 @@
 //! The tools that Norte does not ship.
 //!
-//! `glob` / `list_dir`, `grep`, `todo`, `ask_user` and the opt-in `web_fetch`.
+//! `glob` / `list_dir`, `grep`, `todo`, `ask_user`, `subagent` and the
+//! opt-in `web_fetch`.
 //! They follow Norte's conventions: strict arguments, bounded output, failures
 //! returned as an error tool result rather than an engine error, and no path may
 //! silently escape the workspace through `..`.
@@ -285,6 +286,30 @@ impl TodoStatus {
             Self::Completed => "[x]",
         }
     }
+}
+
+/// Arguments for the `subagent` tool.
+///
+/// The args are what the model writes; the engine drives them like any other
+/// tool's. What a job does with them is the host's business —
+/// `service::subagents` registers one when `detach` says to.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentArgs {
+    /// The one task, with everything the child needs. The child starts blank.
+    pub prompt: String,
+    /// The child session's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The provider the model asks for, or none to inherit the parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The model the model asks for, or none to inherit the parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Let the run go as a job rather than waiting for it.
+    #[serde(default)]
+    pub detach: bool,
 }
 
 /// Arguments for `todo`.
