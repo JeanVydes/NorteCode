@@ -2604,8 +2604,6 @@ mod fallback {
 
     use tokio::sync::mpsc;
 
-    use crate::style::Style;
-
     /// A plain line reader for platforms without the Unix terminal editor.
     pub(crate) struct InteractiveInput {
         events: mpsc::UnboundedReceiver<EditorEvent>,
@@ -2618,6 +2616,13 @@ mod fallback {
         Line(String, Vec<Attachment>),
         /// A keystroke asked for something that is not a line.
         Action(EditorAction),
+        /// The question on screen was answered. Never sent here: there is no
+        /// question box on a plain line reader, but the repl is one body for
+        /// both builds, so the variant has to exist.
+        Question(crate::input::Answer),
+        /// A selection was copied, with the text that went to the clipboard.
+        /// Never sent here, for the same reason as `Question`.
+        Copied(String),
         /// The editor ended: end of input.
         End,
     }
@@ -2634,6 +2639,10 @@ mod fallback {
         CancelJobs,
         /// Ctrl-G, on a running turn: stop waiting for the call.
         Detach,
+        /// A key a panel owns: the panel decides what it means, and the loop
+        /// that owns the service carries the decision out. Never sent here,
+        /// but the repl is one body for both builds.
+        Panel(crate::modal::Key),
         /// A printable key for a filterable panel's query.
         Filter(crate::modal::Key),
         /// Expand or collapse the latest shell output.
@@ -2642,7 +2651,7 @@ mod fallback {
 
     impl InteractiveInput {
         /// Starts a blocking line reader on stdin.
-        pub(crate) fn start(_style: Style, _pinned: Arc<super::Pinned>) -> Result<Self, String> {
+        pub(crate) fn start(_pinned: Arc<super::Pinned>) -> Result<Self, String> {
             let (sender, events) = mpsc::unbounded_channel();
             std::thread::spawn(move || {
                 loop {
