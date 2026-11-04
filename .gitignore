@@ -5,6 +5,7 @@
 *.pdb
 
 # Local state, caches and databases (never committed)
+.commandcode
 *.db
 *.db-shm
 *.db-wal
