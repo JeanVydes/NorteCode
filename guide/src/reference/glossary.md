@@ -1,73 +1,48 @@
 # Glossary
 
-**Agent loop** — The host loop that decides when to call the engine again after
-a tool result. Norte owns one engine turn; Norte Code owns the iterations around
-it.
+**Budget** — A message, session or daily limit in USD, tokens or requests.
+`warn` continues, `stop` ends the turn uncommitted, `ask` asks for a new
+limit first.
 
-**Budget** — A message, session or daily limit in USD, tokens or requests. `warn`
-continues, `stop` ends the turn uncommitted, `ask` currently behaves like a stop.
+**Catalogue** — The two files that say who serves models and what each one
+can do: `providers.json` and `models.json`. Never a source of prices.
 
-**Catalogue** — The two files that say who serves models and what each one can
-do: `providers.json` and `models.json`. It supplies capabilities and endpoints,
-and it is never a source of prices for the ledger.
+**Compaction** — Summarising a long transcript into a fresh engine session
+while keeping the same session key. The old session stays for audit.
 
-**Compaction** — Summarising a long transcript into a fresh Norte session while
-keeping the logical session key. The old session stays for audit.
+**Directory** — The root the file tools resolve against. It starts as the
+process's current directory; a leading argument to `norte-code` moves the
+process there before config is read. The footer names it.
 
-**Directory** — The root the file tools resolve against and the sandbox confines
-to. It starts as the process's current directory and a leading argument to
-`norte-code` moves the process before the configuration is read. The footer names
-it; there is no `/workdir`, because the root is inside the tool registry and the
-sandbox declaration, both built per turn.
+**Effect journal** — Intent/finish records for effectful tools. A call
+still at intent on startup is refused rather than replayed.
 
-**Effect journal** — Intent/finish records for effectful tools. A call still at
-intent on startup is refused rather than replayed.
+**Plan** — A Markdown proposal saved under
+`~/.local/norte-code/<session>/plans/`, approved by a person before it
+becomes `active`. See [Plans](../plans.md).
 
-**Engine** — Norte's durable turn machine: one model, one session, tools and a
-commit point.
+**Prompt** — The base system prompt plus the workspace's `AGENTS.md`,
+appended. The latter is untrusted and capped at 64 KiB.
 
-**Title** — A session's name: the first user message truncated to 32 characters,
-written once when the session is created. No model is asked. A session with no
-title is listed by its key, and `/rename` names one on demand; bare, it
-recomputes the same name from the first message.
+**Provider / model** — Two values, never one string. Where both are shown
+they are joined as `provider/model` — a label, never parsed back.
 
-**Event** — A `ServerEvent` on the client wire. It answers a `request_id` and may
-carry a logical session key.
+**Request** — A `ClientRequest` to the service. Not a provider HTTP
+request; telemetry records those separately.
 
-**Logical session** — Norte Code's stable `SessionKey`. It survives model
-switches and compaction.
+**Sandbox** — Wraps `shell` in bubblewrap or `sandbox-exec`. Opt-in, not a
+virtual machine, no unsandboxed fallback.
 
-**Norte** — The provider-agnostic agent engine this host depends on. It is not
-forked here.
+**Session** — What the client sees (a stable key). Behind it sits the
+durable transcript; compaction is where the two diverge.
 
-**Prompt** — The base system prompt plus project `AGENTS.md` instructions. The
-latter is untrusted and capped.
+**Skill** — An Agent Skills directory with `SKILL.md`. Discovery is
+passive; scripts are opt-in and run outside the sandbox.
 
-**Provider** — A key source, endpoint and wire selected by the catalogue entry.
-A provider and a model are two values and never one string; where both are
-shown at once they are joined as `provider/model`.
+**Telemetry** — Local request rows with latency, tokens, cache, tools and
+status. Not remote analytics, not the money ledger.
 
-**Request** — A `ClientRequest` sent to the service. It is not a provider HTTP
-request; telemetry records provider attempts separately.
+**Turn** — One model round trip and its commit.
 
-**Sandbox** — An executor wrapper that launches `shell` under bubblewrap or
-`sandbox-exec`. It is not a virtual machine and has no unsandboxed fallback.
-
-**Session** — Ambiguous by design: a logical session is what the client sees; a
-Norte session is the durable transcript behind it. Compaction is the case where
-they diverge.
-
-**Skill** — An Agent Skills directory with `SKILL.md` and optional resources.
-Discovery is passive; scripts are opt-in.
-
-**Tab** — A named view the client shows in the row above the input: `stats`,
-`todo`, `tools` and `mcp`. One row each, so the tabs that count things count and
-the names are a command away. It is not part of the protocol.
-
-**Telemetry** — Local request rows with latency, tokens, cache, tools and status.
-It is not remote analytics and not the money ledger.
-
-**Turn** — One model round trip and its commit. A tool loop spans several turns.
-
-**Workspace** — The canonicalized directory that bounds file tools. It is a
+**Workspace** — The canonicalized directory that bounds file tools. A
 policy boundary, not an OS jail.

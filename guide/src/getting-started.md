@@ -3,11 +3,10 @@
 ## Prerequisites
 
 - Rust 1.88 or newer.
-- Linux or macOS for the supported command sandbox. The rest of the host builds
-  on other platforms, but the sandbox fails closed when its platform binary is
-  missing.
-- An API key for at least one provider, or an OpenAI-compatible endpoint you can
-  reach.
+- An API key for at least one provider, or an OpenAI-compatible endpoint you
+  can reach.
+- Linux or macOS if you want the command sandbox (it needs `bwrap` on Linux or
+  `sandbox-exec` on macOS; without them the sandbox fails closed).
 
 ## Build
 
@@ -15,15 +14,11 @@
 cargo build
 ```
 
-The binary is `target/debug/norte-code`. During development the same command is
-available through Cargo:
+The binary is `target/debug/norte-code`. During development:
 
 ```sh
 cargo run -p norte-code-cli -- --help
 ```
-
-`norte-code` is the headless client. It builds the service in the same process;
-there is no daemon to start first.
 
 ## Name a model and a key
 
@@ -45,54 +40,46 @@ Then export the key:
 export OPENROUTER_API_KEY=sk-or-...
 ```
 
-Replace the model with one the catalogue actually knows:
+Check the catalogue knows the model:
 
 ```sh
 norte-code models --provider openrouter --tools
 ```
 
-The full schema, including file-based keys, endpoint overrides, budgets,
-compaction and the sandbox, is in the [configuration reference](reference/configuration.md).
-The repository also keeps the longer [`CONFIG.md`](https://github.com/JeanVydes/NorteCode/blob/dev/CONFIG.md).
+The catalogue is two files you own beside the config — `providers.json` (who
+serves models) and `models.json` (the models). Nothing is fetched or bundled:
+if a file is missing it is written empty and the error names it. See
+[Configure a provider](guides/configure-a-provider.md) for the full shapes
+and where keys come from, and the
+[configuration reference](reference/configuration.md) for every config key.
 
-## Run one prompt
+## Run your first prompt
 
 ```sh
 norte-code new
 ```
 
-Text goes to stdout. Reasoning, tool activity and usage go to stderr when they
-are enabled. The command prints the session key, so the next command can
-continue the same conversation:
-
-```sh
-norte-code resume <key>
-```
-
-`--model` overrides the default for this run:
+`new` creates a session and stays in it: the first line you type is the first
+message. Speech-to-text style one-liners do not exist here — to send one
+message and exit, use the protocol (see
+[Script against the protocol](guides/script-with-jsonl.md)).
 
 ```sh
 norte-code new --model openrouter/anthropic/claude-sonnet-4
 ```
 
+It prints the session key, so the next command can continue it:
+
+```sh
+norte-code resume <key>
+```
+
 ## Stay in the session
 
-```sh
-norte-code new
-```
-
-The prompt keeps the same session open. It is a line editor: the arrow keys,
-Home/End, Delete and paste work. Your message is echoed above the pinned footer;
-while a turn streams, the text you type is steered into that turn and reaches
-the request it is about to make, and the commands you type are handled straight
-away. The footer shows the todo widget (completed count, current item and
-pending items), the running session totals and a dimmed suggestion for the
-command or argument you are typing. Type `/help` to see the chat commands,
-`/exit` or Ctrl-D to leave. A first prompt is optional with `--interactive`:
-
-```sh
-norte-code
-```
+While a turn streams, text you type is steered into that turn and reaches the
+request it is about to make. The footer shows the todo list, the running
+session totals and a suggestion for the command you are typing. Type `/help`
+for the chat commands, `/exit` or Ctrl-D to leave.
 
 ## Inspect what happened
 
@@ -103,33 +90,14 @@ norte-code telemetry --bucket day
 norte-code skills list
 ```
 
-`cost` reports provider-reported money; `telemetry` reports local request
-counts, tokens, cache, tools and latency. Neither leaves the machine.
-
-## Offline and tests
-
-The catalogue can be read from its cache or bundled snapshot:
-
-```sh
-norte-code models
-```
-
-The workspace checks are:
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-```
-
-Hermetic tests use `norte-testing` scripted models and in-memory stores. Live
-provider tests are ignored and key-gated. See
-[Test without a network](guides/test-without-a-network.md).
+`cost` is provider-reported money; `telemetry` is local request counts,
+tokens, cache, tools and latency. Neither leaves the machine.
 
 ## Where data lives
 
-Sessions, pending questions, effect intents, costs and request
-telemetry live in SQLite under the platform data directory, normally
+Sessions, pending questions, plans, costs and telemetry live in SQLite under
+the platform data directory (normally
 `$XDG_DATA_HOME/norte-code/sessions.db` or
-`~/.local/share/norte-code/sessions.db`. Deleting that file deletes the local
-history; it is not a cache.
+`~/.local/share/norte-code/sessions.db`). Plans also live as Markdown under
+`~/.local/norte-code/<session>/plans/`. Deleting the database deletes the
+local history; it is not a cache.

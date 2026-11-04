@@ -1,8 +1,7 @@
 # Configuration
 
-This is a compact reference. The full field-by-field version, including every
-validation range, is the repository's
-[`CONFIG.md`](https://github.com/JeanVydes/NorteCode/blob/dev/CONFIG.md).
+The full field-by-field version, including every validation range, is the
+repository's [`CONFIG.md`](https://github.com/JeanVydes/NorteCode/blob/dev/CONFIG.md).
 
 ## Files and precedence
 
@@ -10,8 +9,9 @@ validation range, is the repository's
    `~/.config/norte-code/config.json` or `%APPDATA%\norte-code\config.json`.
 2. Project overlay: `.norte-code/config.json` in the workspace or nearest parent.
 
-The project overlay wins key by key. `--config PATH` replaces the user path.
-`version` must be `1`. Unknown keys are reported as warnings, not applied.
+The overlay wins key by key (deep merge; arrays and scalars replace).
+`--config PATH` replaces the user path. `version` must be `1`. Unknown keys
+are reported as warnings, not applied. Validation errors name the field.
 
 ## Top level
 
@@ -20,11 +20,10 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `version` | integer | `1` | Schema revision. |
 | `default_provider` | string or null | null | Provider for new sessions. |
 | `default_model` | string or null | null | Model id for new sessions; may contain slashes. |
-| `catalog` | — | — | Removed. Providers and models are `providers.json` and `models.json` beside this file. |
 | `compaction` | object | see below | Automatic compaction. |
 | `retry` | object | see below | Transient retry policy. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
-| `system_prompt` | string or null | null | Base prompt replacement. |
+| `system_prompt` | string or null | null | Base prompt replacement; `AGENTS.md` is appended after it. |
 | `approval_mode` | `ask`, `auto-edit`, `yolo` | `ask` | When tools ask. |
 | `approvals` | object | empty lists | Global allow/deny rules. |
 | `max_iterations` | integer or null | null | Model iterations per turn. |
@@ -32,29 +31,15 @@ The project overlay wins key by key. `--config PATH` replaces the user path.
 | `ui` | object | see below | What the client shows. |
 | `cost` | object | `{"show":true}` | Cost display. |
 | `budgets` | object | all null | Message, session, daily limits. |
-| `tools` | object | see below | Web fetch and sandbox. |
-| `skills` | object | see below | Skill discovery. |
+| `tools` | object | see below | Web fetch, output cap and sandbox. |
+| `skills` | object | see below | Skill discovery and scripts. |
 
 Session titles are not configured: a new session's title is its first user
 message truncated to 32 characters, written once.
 
-## `providers` and `catalog`
-
-Both are gone. A provider is an entry of `providers.json` and a model is an
-entry of `models.json`, beside this file — see
-[Configure a provider](../guides/configure-a-provider.md). The configuration
-names only which pair a new session opens on:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `default_provider` | null | The provider a new session opens on. |
-| `default_model` | null | The model a new session opens on; may contain slashes. |
-
-A key is resolved in this order: the provider's `environment_keys` (the first one
-set and non-blank wins), then `secrets.json` beside this file, written with mode
-0600. There is no plaintext key field in `config.json`. If the key is still
-missing when `/model` or `/models` selects a model, the client asks for it in a
-masked prompt and saves it to `secrets.json`.
+Keys resolve from the provider's `environment_keys` (first set and
+non-blank wins), then `secrets.json` beside the config (mode 0600). There
+is no plaintext key field in `config.json`.
 
 ## `compaction`
 
@@ -64,7 +49,7 @@ masked prompt and saves it to `secrets.json`.
 | `threshold` | `0.90` | Context fraction in `(0, 1]`. |
 | `trigger` | `idle` | `idle` or `eager`. |
 | `keep_recent` | `6` | Recent messages kept verbatim. |
-| `provider` | null | Provider of the summary model; set with `model` or not at all. |
+| `provider` | null | Summary model provider; set with `model` or not at all. |
 | `model` | null | Summary model id; null uses the session model. |
 | `reasoning` | `lowest` | Summary reasoning effort. |
 
@@ -74,53 +59,35 @@ masked prompt and saves it to `secrets.json`.
 | --- | --- | --- |
 | `max_attempts` | `4` | Retries after the first failure; `0` disables. |
 | `max_delay_ms` | `60000` | Upper bound for one wait. |
-| `backoff_ms` | `5000` | First fallback wait; doubles. |
+| `backoff_ms` | `5000` | First wait; doubles. |
 
 Only rate limits, overload, server errors and transport errors are retried.
 
 ## `reasoning`
 
-`default` is `auto`, `off`, an effort name (`minimal`, `low`, `medium`, `high`)
-or `{"budget": N}`. It is checked against the selected model.
+`default` is `auto`, `off`, an effort name (`minimal`, `low`, `medium`,
+`high`) or `{"budget": N}`. It is checked against the selected model.
 
 ## `approval_mode` and `approvals`
 
-`ask` asks for `write`, `edit`, `shell` and `skill_script`. `auto-edit` lets
-edits run and still asks for commands and scripts. `yolo` runs everything.
-`approvals.allow` and `approvals.deny` are tool-wide; denial wins. `/allow` and
-`/deny` edit the same rules; `global` writes the user config.
+`ask` asks for `write`, `edit`, `shell` and `skill_script`. `auto-edit`
+lets edits run and still asks for commands and scripts. `yolo` runs
+everything. `approvals.allow` / `approvals.deny` are tool-wide; denial
+wins. `/allow` and `/deny` edit the same rules; `global` writes the user
+config.
 
 ## `ui`
 
-What the client shows, as opposed to what the engine does. A host with no
-interface ignores the block; the engine never reads it.
+What the client shows, as opposed to what the engine does.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `verbosity` | string | `medium` | How much of the conversation to show: `low` (the answer alone), `medium` (also that tools run and that the model is thinking) or `high` (the reasoning, what each tool was asked and what it returned). |
-| `diff_style` | `unified`, `split` | `unified` | How an `edit` call's diff is drawn. |
+| `verbosity` | string | `medium` | `low` (answer alone), `medium` (also tools and thinking), `high` (also arguments and results). |
+| `diff_style` | `unified`, `split` | `unified` | How an `edit` diff is drawn. |
 
-`--verbose` overrides `ui.verbosity` for one run. A config that says nothing
-keeps `medium`, which is what the client shows with no file at all.
-
-`diff_style` names two shapes of the same box, both carrying the same edit
-number and line ranges:
-
-- `unified` writes a patch: one column, `-` for a line that left and `+` for a
-  line that arrived, with one row of context per unchanged line. It is the
-  default because it fits a terminal that is not wide — the side-by-side view
-  needs two panels of at least ten columns each and draws nothing below that.
-- `split` shows the file before and after, side by side. Wider, and the only
-  shape that shows a change inside a line rather than the two whole lines.
-
-```json
-{
-  "ui": {
-    "verbosity": "high",
-    "diff_style": "split"
-  }
-}
-```
+`--verbose` overrides `ui.verbosity` for one run. `diff_style` is the same
+diff in two shapes: `unified` (patch, fits narrow terminals) and `split`
+(before/after side by side, shows changes inside a line).
 
 ## `budgets`
 
@@ -132,18 +99,19 @@ number and line ranges:
 | `limit` | A positive number. |
 | `action` | `warn`, `ask` or `stop`. |
 
-`ask` is currently a resumable stop with a notice. See
-[Cost and budgets](../concepts/cost-and-budgets.md).
+`ask` is a resumable stop with a notice. See [Set a budget](../guides/set-a-budget.md).
 
 ## `tools`
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `web_fetch` | `false` | Register `web_fetch`. |
-| `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; the rest is elided. Range `1024`–`1048576`. |
-| `sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
-| `sandbox.network` | `false` | Allow network in the sandbox. |
-| `sandbox.writable` | `[]` | Extra writable roots. |
+| `disabled` | `[]` | Tools a new session does not get, by model name; frozen at creation. |
+| `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; range `1024`–`1048576`. |
+| `confinement.workspace_only` | `false` | Confine tool paths to the workspace. |
+| `confinement.sandbox.enabled` | `false` | Wrap commands in the OS sandbox. |
+| `confinement.sandbox.network` | `false` | Allow network in the sandbox. |
+| `confinement.sandbox.writable` | `[]` | Extra writable roots. |
 
 ## `skills`
 
@@ -156,13 +124,7 @@ number and line ranges:
 | `honor_allowed_tools` | `false` | Let a skill pre-approve calls. |
 | `max_skills` | `128` | Maximum valid skills. |
 
-## `providers.<id>.models.<model-id>`
-
-Removed. A model's limits, modalities and reasoning are facts about the model,
-and they live in the entry that describes it — `models.json` — where they can be
-edited without a second file having a say.
-
 ## `extensions`
 
-Keys are `<wire-family>:<dotted.path>`, values are JSON. A key whose wire family
-does not match the active model is ignored.
+Keys are `<wire-family>:<dotted.path>`, values are JSON. A key whose wire
+family does not match the active model is ignored.
