@@ -5,44 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use norte::{FnExecutor, Result, SessionId, ToolContext, ToolOutput};
 use norte_code_protocol::SessionKey;
+use norte_code_protocol::plans::{Plan, PlanStatus, parse_plan, read_plan_header};
 use norte_code_protocol::sqlite::{SessionDirectory, StoredSession};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// The lifecycle state of one plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(rename_all = "snake_case")]
-pub enum PlanStatus {
-    /// The user approved this plan.
-    Active,
-    /// The plan is awaiting the user's decision.
-    Pending,
-    /// The user rejected or canceled this plan.
-    Canceled,
-}
-
-/// A plan saved as a Markdown file in its session directory.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Plan {
-    /// Stable plan identifier, also used as the Markdown filename.
-    pub id: String,
-    /// The plan text, editable by the user.
-    pub content: String,
-    /// Current approval state, stored in the file's front matter.
-    pub status: PlanStatus,
-    /// When the plan was first saved.
-    pub created_at: Option<DateTime<Utc>>,
-    /// When the plan was last changed.
-    pub updated_at: Option<DateTime<Utc>>,
-    /// Provider selected when the proposal was created.
-    pub provider: Option<String>,
-    /// Model selected when the proposal was created.
-    pub model: Option<String>,
-}
 
 /// Filesystem access to plans. Session records remain in the database; plans
 /// live separately so they can be opened and edited as Markdown.
@@ -119,7 +88,10 @@ impl PlanRepository {
         Ok(self.root()?.join(stored.key).join("plans"))
     }
 
-    pub(super) async fn list(&self, session: SessionId) -> std::result::Result<Vec<Plan>, String> {
+    pub(super) async fn list(
+        &self,
+        session: SessionId,
+    ) -> std::result::Result<Vec<(Plan, PathBuf)>, String> {
         let directory = self.plan_directory(session).await?;
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
@@ -156,9 +128,16 @@ impl PlanRepository {
                 })?
                 .to_owned();
             validate_component(&id, "plan id")?;
-            plans.push(read_plan(entry.path(), id).await?);
+            let path = entry.path();
+            plans.push((read_plan_header(path.clone(), &id).await?, path));
         }
-        plans.sort_by(|left, right| left.id.cmp(&right.id));
+        plans.sort_by(|left, right| {
+            right
+                .0
+                .updated_at
+                .cmp(&left.0.updated_at)
+                .then_with(|| left.0.id.cmp(&right.0.id))
+        });
         Ok(plans)
     }
 
@@ -219,6 +198,26 @@ impl PlanRepository {
         plan.status = status;
         plan.updated_at = Some(Utc::now());
         self.write(session, &plan).await
+    }
+
+    pub(super) async fn revise(
+        &self,
+        session: SessionId,
+        id: &str,
+        content: String,
+    ) -> std::result::Result<Plan, String> {
+        let _guard = self.writes.lock().await;
+        let mut plan = self
+            .get(session, id)
+            .await?
+            .ok_or_else(|| format!("no plan `{id}` in this session"))?;
+        plan.content = content;
+        plan.title = plan_title(&plan.content).map(str::to_owned);
+        plan.status = PlanStatus::Pending;
+        plan.revision = plan.revision.saturating_add(1);
+        plan.updated_at = Some(Utc::now());
+        self.write(session, &plan).await?;
+        Ok(plan)
     }
 
     pub(super) async fn delete(
@@ -359,6 +358,7 @@ fn plan_front_matter(plan: &Plan) -> String {
         )
         .expect("writing to a string cannot fail");
     }
+    writeln!(front_matter, "revision: {}", plan.revision).expect("writing to a string cannot fail");
     front_matter.push_str("---");
     front_matter
 }
@@ -375,65 +375,6 @@ fn plan_markdown(plan: &Plan) -> String {
     format!("{}\n{}", plan_front_matter(plan), plan.content)
 }
 
-async fn read_plan(path: PathBuf, id: String) -> std::result::Result<Plan, String> {
-    let contents = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    parse_plan(&id, &contents)
-        .map_err(|error| format!("invalid Markdown plan {}: {error}", path.display()))
-}
-
-fn parse_plan(id: &str, contents: &str) -> std::result::Result<Plan, String> {
-    let front_matter = contents
-        .strip_prefix("---\n")
-        .ok_or_else(|| "missing YAML front matter".to_owned())?;
-    let (metadata, content) = front_matter
-        .split_once("\n---\n")
-        .ok_or_else(|| "unterminated YAML front matter".to_owned())?;
-    let status = metadata
-        .lines()
-        .find_map(|line| line.strip_prefix("status: "))
-        .ok_or_else(|| "front matter has no `status`".to_owned())?;
-    let status = match status {
-        "active" => PlanStatus::Active,
-        "pending" => PlanStatus::Pending,
-        "canceled" => PlanStatus::Canceled,
-        other => return Err(format!("unknown plan status `{other}`")),
-    };
-    let optional_value = |key: &str| {
-        metadata
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}: ")))
-    };
-    let optional_datetime = |key: &str| -> std::result::Result<Option<DateTime<Utc>>, String> {
-        optional_value(key)
-            .map(|value| {
-                DateTime::parse_from_rfc3339(value)
-                    .map(|timestamp| timestamp.with_timezone(&Utc))
-                    .map_err(|error| format!("invalid `{key}` timestamp: {error}"))
-            })
-            .transpose()
-    };
-    let optional_string = |key: &str| -> std::result::Result<Option<String>, String> {
-        optional_value(key)
-            .map(|value| {
-                serde_json::from_str(value)
-                    .or_else(|_| Ok::<_, serde_json::Error>(value.to_owned()))
-                    .map_err(|error| format!("invalid `{key}` value: {error}"))
-            })
-            .transpose()
-    };
-    Ok(Plan {
-        id: id.to_owned(),
-        content: content.strip_prefix('\n').unwrap_or(content).to_owned(),
-        status,
-        created_at: optional_datetime("created_at")?,
-        updated_at: optional_datetime("updated_at")?,
-        provider: optional_string("provider")?,
-        model: optional_string("model")?,
-    })
-}
-
 /// Operations exposed by the model's `plan` tool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -441,6 +382,8 @@ fn parse_plan(id: &str, contents: &str) -> std::result::Result<Plan, String> {
 enum PlanAction {
     /// Submit a plan for explicit user approval.
     Propose,
+    /// Replace an existing plan and submit the revision for approval.
+    Revise,
     /// List this session's plans without their full contents.
     List,
     /// Read one plan.
@@ -492,6 +435,46 @@ impl PlanTool {
             Arc::new(self),
         )
     }
+
+    async fn review(
+        &self,
+        context: &ToolContext,
+        session: SessionId,
+        id: &str,
+        plan_content: &str,
+    ) -> ToolOutput {
+        let answer = self
+            .questions
+            .ask(
+                context,
+                format!("NORTE_CODE_PLAN_REVIEW\n{plan_content}"),
+                vec!["Approve".to_owned(), "Reject".to_owned()],
+                false,
+            )
+            .await;
+        match answer.as_deref() {
+            Ok("Approve") => match self.plans.set_status(session, id, PlanStatus::Active).await {
+                Ok(()) => {
+                    plan_output(&self.plans, session, id, "Plan approved and activated.").await
+                }
+                Err(error) => ToolOutput::error(format!("could not approve the plan: {error}")),
+            },
+            Ok("Reject") => match self
+                .plans
+                .set_status(session, id, PlanStatus::Canceled)
+                .await
+            {
+                Ok(()) => plan_output(&self.plans, session, id, "Plan rejected.").await,
+                Err(error) => ToolOutput::error(format!("could not reject the plan: {error}")),
+            },
+            Ok(other) => ToolOutput::error(format!(
+                "unexpected plan approval response `{other}`; the plan remains pending"
+            )),
+            Err(error) => ToolOutput::error(format!(
+                "could not get approval: {error}; the plan remains pending"
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -511,77 +494,46 @@ impl FnExecutor<PlanArgs, ToolOutput> for PlanTool {
         Ok(match args.action {
             PlanAction::Propose => {
                 if let Some(content) = args.content.filter(|content| !content.trim().is_empty()) {
-                    let plan = Plan {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        content: content.trim().to_owned(),
-                        status: PlanStatus::Pending,
-                        created_at: None,
-                        updated_at: None,
-                        provider: None,
-                        model: None,
-                    };
+                    let plan =
+                        Plan::pending(uuid::Uuid::new_v4().to_string(), content.trim().to_owned());
                     if let Err(error) = self.plans.add(session, &plan).await {
                         ToolOutput::error(format!("could not save the plan: {error}"))
                     } else {
-                        let answer = self
-                            .questions
-                            .ask(
-                                context,
-                                format!("NORTE_CODE_PLAN_REVIEW\n{}", plan.content),
-                                vec!["Approve".to_owned(), "Reject".to_owned()],
-                                false,
-                            )
-                            .await;
-                        match answer.as_deref() {
-                            Ok("Approve") => match self
-                                .plans
-                                .set_status(session, &plan.id, PlanStatus::Active)
-                                .await
-                            {
-                                Ok(()) => {
-                                    plan_output(
-                                        &self.plans,
-                                        session,
-                                        &plan.id,
-                                        "Plan approved and activated.",
-                                    )
-                                    .await
-                                }
-                                Err(error) => ToolOutput::error(format!(
-                                    "could not approve the plan: {error}"
-                                )),
-                            },
-                            Ok("Reject") => match self
-                                .plans
-                                .set_status(session, &plan.id, PlanStatus::Canceled)
-                                .await
-                            {
-                                Ok(()) => {
-                                    plan_output(&self.plans, session, &plan.id, "Plan rejected.")
-                                        .await
-                                }
-                                Err(error) => {
-                                    ToolOutput::error(format!("could not reject the plan: {error}"))
-                                }
-                            },
-                            Ok(other) => ToolOutput::error(format!(
-                                "unexpected plan approval response `{other}`; the plan remains pending"
-                            )),
-                            Err(error) => ToolOutput::error(format!(
-                                "could not get approval: {error}; the plan remains pending"
-                            )),
-                        }
+                        self.review(context, session, &plan.id, &plan.content).await
                     }
                 } else {
                     ToolOutput::error("`propose` needs non-empty `content`")
                 }
             }
+            PlanAction::Revise => match (args.id.as_deref(), args.content) {
+                (Some(id), Some(revised_content)) if !revised_content.trim().is_empty() => {
+                    match self
+                        .plans
+                        .revise(session, id, revised_content.trim().to_owned())
+                        .await
+                    {
+                        Ok(plan) => self.review(context, session, &plan.id, &plan.content).await,
+                        Err(error) => {
+                            ToolOutput::error(format!("could not revise the plan: {error}"))
+                        }
+                    }
+                }
+                (None, _) => ToolOutput::error("`revise` needs an `id`"),
+                (_, None | Some(_)) => ToolOutput::error("`revise` needs non-empty `content`"),
+            },
             PlanAction::List => match self.plans.list(session).await {
                 Ok(plans) if plans.is_empty() => ToolOutput::text("No plans in this session."),
                 Ok(plans) => ToolOutput::text(
                     plans
                         .iter()
-                        .map(|plan| format!("{}\n{}", plan.id, plan_front_matter(plan)))
+                        .map(|(plan, path)| {
+                            format!(
+                                "{}\n{}\npath: {}",
+                                plan.id,
+                                plan_front_matter(plan),
+                                path.display()
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join("\n\n"),
                 ),
@@ -672,15 +624,12 @@ mod tests {
 
     #[test]
     fn markdown_round_trip_preserves_content_and_status() {
-        let plan = Plan {
-            id: "plan-1".to_owned(),
-            content: "# Plan\n\nInspect, implement, test.\n".to_owned(),
-            status: PlanStatus::Pending,
-            created_at: Some(Utc::now()),
-            updated_at: Some(Utc::now()),
-            provider: Some("test".to_owned()),
-            model: Some("model/with:punctuation".to_owned()),
-        };
+        let mut plan = Plan::pending("plan-1", "# Plan\n\nInspect, implement, test.\n");
+        plan.created_at = Some(Utc::now());
+        plan.updated_at = Some(Utc::now());
+        plan.provider = Some("test".to_owned());
+        plan.model = Some("model/with:punctuation".to_owned());
+        plan.title = Some("Plan".to_owned());
         let document = plan_markdown(&plan);
         assert_eq!(parse_plan(&plan.id, &document).expect("valid plan"), plan);
         assert!(plan_front_matter(&plan).contains("title: \"Plan\""));
@@ -719,15 +668,7 @@ mod tests {
             .ensure_session_folder(&SessionKey::new(logical_id))
             .await
             .expect("create session artifact folder");
-        let plan = Plan {
-            id: "plan-1".to_owned(),
-            content: "# Inspect\n\nImplement and test.".to_owned(),
-            status: PlanStatus::Pending,
-            created_at: None,
-            updated_at: None,
-            provider: None,
-            model: None,
-        };
+        let plan = Plan::pending("plan-1", "# Inspect\n\nImplement and test.");
         plans.add(session, &plan).await.expect("save plan");
 
         let path = root.join(logical_id).join("plans").join("plan-1.md");
@@ -740,7 +681,21 @@ mod tests {
         assert!(metadata.updated_at.is_some());
         assert_eq!(metadata.provider.as_deref(), Some("test"));
         assert_eq!(metadata.model.as_deref(), Some("test-model"));
+        assert_eq!(metadata.revision, 0);
         let created_at = metadata.created_at.expect("creation timestamp");
+        let revised = plans
+            .revise(
+                session,
+                "plan-1",
+                "# Revised\n\nImplement the updated approach.".to_owned(),
+            )
+            .await
+            .expect("revise plan");
+        assert_eq!(revised.revision, 1);
+        assert_eq!(revised.status, PlanStatus::Pending);
+        assert_eq!(revised.created_at, Some(created_at));
+        assert_eq!(revised.provider.as_deref(), Some("test"));
+        assert_eq!(revised.model.as_deref(), Some("test-model"));
         plans
             .set_status(session, "plan-1", PlanStatus::Active)
             .await
