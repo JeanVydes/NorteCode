@@ -48,10 +48,24 @@ norte-code models --provider openrouter --tools
 
 The catalogue is two files you own beside the config — `providers.json` (who
 serves models) and `models.json` (the models). Nothing is fetched or bundled:
-if a file is missing it is written empty and the error names it. See
-[Configure a provider](guides/configure-a-provider.md) for the full shapes
-and where keys come from, and the
-[configuration reference](reference/configuration.md) for every config key.
+if a file is missing it is written empty and the error names it.
+
+**Not maintaining those files?** Install the
+[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead — it
+offers a ready-made catalogue as a plugin, no files to write:
+
+```sh
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+```
+
+It loads before the catalogue is read, so its providers and models appear in
+`norte-code models` and `/model` for that run, and your files stay untouched.
+(Installing a plugin clones and builds untrusted code — including its
+`build.rs` — so only do it for sources you trust.)
+
+See [Configure a provider](guides/configure-a-provider.md) for the full shapes
+and where keys come from, [Plugins](guides/plugins.md) for how plugins work,
+and the [configuration reference](reference/configuration.md) for every config key.
 
 ## Run your first prompt
 

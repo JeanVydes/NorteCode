@@ -23,6 +23,7 @@ in that directory — with your approval rules, your budgets and your model.
 - [Set a budget](guides/set-a-budget.md) — stop or warn when a run costs too
   much.
 - [Use the sandbox](guides/use-the-sandbox.md) — contain what `shell` can reach.
+- [Plugins](guides/plugins.md) — install, update and trust third-party plugins, including the catalogue plugin.
 
 ## Reference
 

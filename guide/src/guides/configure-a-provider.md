@@ -15,6 +15,24 @@ says which pair a new session opens on:
 A provider and a model are two values, never one string: a model id may carry
 slashes of its own, so `provider/model` is a display label only.
 
+## Or skip the files: the catalogue plugin
+
+If you do not want to own `providers.json` and `models.json`, install the
+[catalog-plugin](https://github.com/JeanVydes/catalog-plugin):
+
+```sh
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+```
+
+Plugins load before the catalogue is read, so what the plugin offers is in
+the catalogue for that run — its providers and models show up in
+`norte-code models` and `/model` — while the files you own are not written.
+See [Plugins](plugins.md) for how installation, updates and trust work.
+
+(Installing a plugin clones and builds untrusted repository code,
+including its `build.rs`, before loading the resulting library. That is
+arbitrary code execution by design: only install sources you trust.)
+
 ## The two catalogue files
 
 Both live beside `config.json` and are yours to edit. Nothing is fetched or
