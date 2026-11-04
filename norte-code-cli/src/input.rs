@@ -2713,7 +2713,12 @@ mod fallback {
             loop {
                 match self.events.recv().await {
                     Some(EditorEvent::Line(line, _)) => return Some(Some(line)),
-                    Some(EditorEvent::Action(_) | EditorEvent::Copied(_)) => continue,
+                    // A question answered while another prompt wanted a line:
+                    // the answer is not that line, and dropping it would leave
+                    // the question on screen with nothing driving it.
+                    Some(
+                        EditorEvent::Question(_) | EditorEvent::Action(_) | EditorEvent::Copied(_),
+                    ) => {}
                     Some(EditorEvent::End) | None => return Some(None),
                 }
             }
