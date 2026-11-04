@@ -49,6 +49,21 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// The state one turn carries through its event loop.
+///
+/// `handle`, `settle` and `finish_turn` all took the same eight parameters;
+/// grouping them here makes the next field a one-line change instead of a
+/// signature update in three places.
+struct TurnContext<'a> {
+    engine: &'a Harness,
+    request_id: u64,
+    key: &'a SessionKey,
+    nid: SessionId,
+    stats: &'a mut Stats,
+    tx: &'a mpsc::Sender<ServerEvent>,
+    gate: Option<&'a CompactionGate>,
+}
+
 impl Service {
     /// Starts a turn (or a resume) and returns the stream of its events.
     ///
@@ -421,14 +436,16 @@ impl Service {
                 if matches!(event, EngineEvent::GenerationCommitted { .. })
                     && !self
                         .settle(
-                            &engine,
-                            request_id,
-                            key,
-                            current_nid,
-                            &mut stats,
-                            tx,
+                            &mut TurnContext {
+                                engine: &engine,
+                                request_id,
+                                key,
+                                nid: current_nid,
+                                stats: &mut stats,
+                                tx,
+                                gate: gate.as_deref(),
+                            },
                             false,
-                            gate.as_deref(),
                         )
                         .await
                 {
@@ -438,14 +455,16 @@ impl Service {
                 if !matches!(event, EngineEvent::Error { .. })
                     && !self
                         .handle(
-                            &engine,
-                            request_id,
-                            key,
-                            current_nid,
+                            &mut TurnContext {
+                                engine: &engine,
+                                request_id,
+                                key,
+                                nid: current_nid,
+                                stats: &mut stats,
+                                tx,
+                                gate: gate.as_deref(),
+                            },
                             &event,
-                            &mut stats,
-                            tx,
-                            gate.as_deref(),
                         )
                         .await
                 {
@@ -468,15 +487,17 @@ impl Service {
 
             let cancelled = cancellation.is_cancelled();
             if interrupted || cancelled {
-                self.set_phase(key, norte_code_protocol::Phase::Idle).await;
                 self.finish_turn(
-                    &engine,
-                    request_id,
-                    key,
-                    current_nid,
-                    &mut stats,
-                    tx,
-                    gate.as_deref(),
+                    &mut TurnContext {
+                        engine: &engine,
+                        request_id,
+                        key,
+                        nid: current_nid,
+                        stats: &mut stats,
+                        tx,
+                        gate: gate.as_deref(),
+                    },
+                    norte_code_protocol::Phase::Idle,
                     false,
                 )
                 .await;
@@ -485,14 +506,16 @@ impl Service {
 
             let _ = self
                 .settle(
-                    &engine,
-                    request_id,
-                    key,
-                    current_nid,
-                    &mut stats,
-                    tx,
+                    &mut TurnContext {
+                        engine: &engine,
+                        request_id,
+                        key,
+                        nid: current_nid,
+                        stats: &mut stats,
+                        tx,
+                        gate: gate.as_deref(),
+                    },
                     true,
-                    gate.as_deref(),
                 )
                 .await;
             self.store_stats(key, &stats).await;
@@ -502,18 +525,41 @@ impl Service {
 
             if !cancelled && !interrupted && compaction_abort {
                 match self
-                    .perform_compaction(request_id, key, "threshold", Some(tx))
+                    .compact_and_rebuild(
+                        &mut engine,
+                        budget.clone(),
+                        request_id,
+                        key,
+                        current_nid,
+                        &mut stats,
+                        Some(tx),
+                    )
                     .await
                 {
-                    Ok(events) => {
-                        for event in events {
-                            if !emit(tx, event).await {
-                                return Ok(());
-                            }
-                        }
+                    Ok(Some(new_nid)) => {
+                        current_nid = new_nid;
+                        *current_nid_cell
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = new_nid;
+                    }
+                    Ok(None) => {
+                        self.finish_turn(
+                            &mut TurnContext {
+                                engine: &engine,
+                                request_id,
+                                key,
+                                nid: current_nid,
+                                stats: &mut stats,
+                                tx,
+                                gate: gate.as_deref(),
+                            },
+                            norte_code_protocol::Phase::Idle,
+                            false,
+                        )
+                        .await;
+                        return Ok(());
                     }
                     Err(error) => {
-                        self.set_phase(key, norte_code_protocol::Phase::Idle).await;
                         emit(
                             tx,
                             ServerEvent::error(
@@ -525,59 +571,22 @@ impl Service {
                         )
                         .await;
                         self.finish_turn(
-                            &engine,
-                            request_id,
-                            key,
-                            current_nid,
-                            &mut stats,
-                            tx,
-                            gate.as_deref(),
+                            &mut TurnContext {
+                                engine: &engine,
+                                request_id,
+                                key,
+                                nid: current_nid,
+                                stats: &mut stats,
+                                tx,
+                                gate: gate.as_deref(),
+                            },
+                            norte_code_protocol::Phase::Idle,
                             false,
                         )
                         .await;
                         return Ok(());
                     }
                 }
-                let (new_nid, new_spec, _) = self.require_record(key)?;
-                let new_spec =
-                    new_spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
-                if new_nid == current_nid {
-                    // The summary failed; the old session is still the active
-                    // one and the turn stopped at the safe point.
-                    self.set_phase(key, norte_code_protocol::Phase::Idle).await;
-                    self.finish_turn(
-                        &engine,
-                        request_id,
-                        key,
-                        current_nid,
-                        &mut stats,
-                        tx,
-                        gate.as_deref(),
-                        false,
-                    )
-                    .await;
-                    return Ok(());
-                }
-                if let Some(record) = self.lock_sessions().get(key) {
-                    stats.billed = record.billed;
-                    stats.requests = record.requests;
-                    stats.cost = record.cost;
-                    stats.unpriced = record.unpriced;
-                    stats.input_tokens = record.input_tokens;
-                    stats.output_tokens = record.output_tokens;
-                    // The cache counters come across too. A compaction replaces
-                    // the session behind the record and the counters are reloaded
-                    // from it, so leaving these two out reset the session's cache
-                    // share to zero at every compaction — and a turn that
-                    // compacted kept reporting it as zero afterwards.
-                    stats.cache_read_tokens = record.cache_read_tokens;
-                    stats.cache_write_tokens = record.cache_write_tokens;
-                }
-                engine = self.engine_with_budget(&new_spec, Some(key), budget.clone(), None)?;
-                current_nid = new_nid;
-                *current_nid_cell
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = new_nid;
                 input = None;
                 gate = None;
                 compacted_eagerly = true;
@@ -628,15 +637,17 @@ impl Service {
                         .session(current_nid)
                         .await
                         .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
-                    self.set_phase(key, phase).await;
                     self.finish_turn(
-                        &engine,
-                        request_id,
-                        key,
-                        current_nid,
-                        &mut stats,
-                        tx,
-                        gate.as_deref(),
+                        &mut TurnContext {
+                            engine: &engine,
+                            request_id,
+                            key,
+                            nid: current_nid,
+                            stats: &mut stats,
+                            tx,
+                            gate: gate.as_deref(),
+                        },
+                        phase,
                         false,
                     )
                     .await;
@@ -678,15 +689,17 @@ impl Service {
                     } else {
                         to_phase(outcome.session.phase)
                     };
-                    self.set_phase(key, phase).await;
                     self.finish_turn(
-                        &engine,
-                        request_id,
-                        key,
-                        current_nid,
-                        &mut stats,
-                        tx,
-                        gate.as_deref(),
+                        &mut TurnContext {
+                            engine: &engine,
+                            request_id,
+                            key,
+                            nid: current_nid,
+                            stats: &mut stats,
+                            tx,
+                            gate: gate.as_deref(),
+                        },
+                        phase,
                         outcome.message.is_some(),
                     )
                     .await;
@@ -701,16 +714,23 @@ impl Service {
                             .unwrap_or(false)
                     {
                         match self
-                            .perform_compaction(request_id, key, "threshold", Some(tx))
+                            .compact_and_rebuild(
+                                &mut engine,
+                                budget.clone(),
+                                request_id,
+                                key,
+                                current,
+                                &mut stats,
+                                Some(tx),
+                            )
                             .await
                         {
-                            Ok(events) => {
-                                for event in events {
-                                    if !emit(tx, event).await {
-                                        break;
-                                    }
-                                }
+                            Ok(Some(new_nid)) => {
+                                *current_nid_cell
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner) = new_nid;
                             }
+                            Ok(None) => {}
                             Err(error) => {
                                 let _ = emit(
                                     tx,
@@ -750,20 +770,22 @@ impl Service {
                         .session(current_nid)
                         .await
                         .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
-                    self.set_phase(key, phase).await;
                     emit(
                         tx,
                         ServerEvent::error(request_id, Some(key.clone()), code, message),
                     )
                     .await;
                     self.finish_turn(
-                        &engine,
-                        request_id,
-                        key,
-                        current_nid,
-                        &mut stats,
-                        tx,
-                        gate.as_deref(),
+                        &mut TurnContext {
+                            engine: &engine,
+                            request_id,
+                            key,
+                            nid: current_nid,
+                            stats: &mut stats,
+                            tx,
+                            gate: gate.as_deref(),
+                        },
+                        phase,
                         false,
                     )
                     .await;
@@ -774,32 +796,89 @@ impl Service {
         Ok(())
     }
 
-    /// The epilogue every turn exit shares: settle the stats, store them and
-    /// emit `TurnFinished`. Returns false when the client stopped reading.
+    /// Runs a compaction and rebuilds the engine on the new session.
+    ///
+    /// The eight parameters are the turn's state; grouping them would be a
+    /// bigger change than this extraction.
+    ///
+    /// The mid-turn abort and the post-turn threshold both compact; the
+    /// differences (whether events are emitted to `tx`, whether the engine
+    /// is rebuilt) used to be copied at each site. This is the one place
+    /// that compacts, reloads the stats the compaction replaced, rebuilds
+    /// the engine and reports the new session id.
+    ///
+    /// Returns `None` when the compaction failed or left the session
+    /// unchanged — the caller finishes the turn in that case.
     #[allow(clippy::too_many_arguments)]
-    async fn finish_turn(
+    async fn compact_and_rebuild(
         &self,
-        engine: &Harness,
+        engine: &mut Harness,
+        budget: Option<Arc<Mutex<BudgetBook>>>,
         request_id: u64,
         key: &SessionKey,
         current_nid: SessionId,
         stats: &mut Stats,
-        tx: &mpsc::Sender<ServerEvent>,
-        gate: Option<&CompactionGate>,
+        tx: Option<&mpsc::Sender<ServerEvent>>,
+    ) -> Result<Option<SessionId>, ServiceError> {
+        let events = self
+            .perform_compaction(request_id, key, "threshold", tx)
+            .await
+            .map_err(|error| ServiceError::Compaction(format!("compaction failed: {error}")))?;
+        if let Some(tx) = tx {
+            for event in events {
+                if !emit(tx, event).await {
+                    return Ok(None);
+                }
+            }
+        }
+        let (new_nid, new_spec, _) = self.require_record(key)?;
+        let new_spec = new_spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
+        if new_nid == current_nid {
+            return Ok(None);
+        }
+        if let Some(record) = self.lock_sessions().get(key) {
+            stats.billed = record.billed;
+            stats.requests = record.requests;
+            stats.cost = record.cost;
+            stats.unpriced = record.unpriced;
+            stats.input_tokens = record.input_tokens;
+            stats.output_tokens = record.output_tokens;
+            // The cache counters come across too. A compaction replaces
+            // the session behind the record and the counters are reloaded
+            // from it, so leaving these two out reset the session's cache
+            // share to zero at every compaction — and a turn that
+            // compacted kept reporting it as zero afterwards.
+            stats.cache_read_tokens = record.cache_read_tokens;
+            stats.cache_write_tokens = record.cache_write_tokens;
+        }
+        *engine = self.engine_with_budget(&new_spec, Some(key), budget, None)?;
+        Ok(Some(new_nid))
+    }
+
+    /// The epilogue every turn exit shares: settle the stats, store them,
+    /// set the session phase and emit `TurnFinished`. Returns false when
+    /// the client stopped reading.
+    ///
+    /// The phase is the only thing exits disagree on (a parked turn keeps
+    /// its phase, a settled one goes `Idle`), so it travels as a parameter
+    /// instead of living in each call site.
+    async fn finish_turn(
+        &self,
+        ctx: &mut TurnContext<'_>,
+        phase: norte_code_protocol::Phase,
         committed: bool,
     ) -> bool {
-        let _ = self
-            .settle(engine, request_id, key, current_nid, stats, tx, true, gate)
-            .await;
-        self.store_stats(key, stats).await;
+        self.set_phase(ctx.key, phase).await;
+        let _ = self.settle(ctx, true).await;
+        self.store_stats(ctx.key, ctx.stats).await;
         emit(
-            tx,
+            ctx.tx,
             ServerEvent::new(
-                request_id,
-                Some(key.clone()),
+                ctx.request_id,
+                Some(ctx.key.clone()),
                 ServerEventKind::TurnFinished {
-                    turn: stats.turn,
-                    phase: norte_code_protocol::Phase::Idle,
+                    turn: ctx.stats.turn,
+                    phase,
                     committed,
                 },
             ),
@@ -809,18 +888,17 @@ impl Service {
 
     /// Maps one engine event and answers whether to keep going (the client is
     /// still reading).
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    async fn handle(
-        &self,
-        engine: &Harness,
-        request_id: u64,
-        key: &SessionKey,
-        nid: SessionId,
-        event: &EngineEvent,
-        stats: &mut Stats,
-        tx: &mpsc::Sender<ServerEvent>,
-        gate: Option<&CompactionGate>,
-    ) -> bool {
+    #[allow(clippy::too_many_lines)]
+    async fn handle(&self, ctx: &mut TurnContext<'_>, event: &EngineEvent) -> bool {
+        let (engine, request_id, key, nid, tx, gate) = (
+            ctx.engine,
+            ctx.request_id,
+            ctx.key,
+            ctx.nid,
+            ctx.tx,
+            ctx.gate,
+        );
+        let stats = &mut *ctx.stats;
         let kind = match event {
             EngineEvent::StreamDelta { delta, .. } => {
                 to_delta(delta).map(|delta| ServerEventKind::Delta {
@@ -983,17 +1061,16 @@ impl Service {
 
     /// Reports every model request committed since the last look.
     #[allow(clippy::too_many_arguments)]
-    async fn settle(
-        &self,
-        engine: &Harness,
-        request_id: u64,
-        key: &SessionKey,
-        nid: SessionId,
-        stats: &mut Stats,
-        tx: &mpsc::Sender<ServerEvent>,
-        final_check: bool,
-        gate: Option<&CompactionGate>,
-    ) -> bool {
+    async fn settle(&self, ctx: &mut TurnContext<'_>, final_check: bool) -> bool {
+        let (engine, request_id, key, nid, tx, gate) = (
+            ctx.engine,
+            ctx.request_id,
+            ctx.key,
+            ctx.nid,
+            ctx.tx,
+            ctx.gate,
+        );
+        let stats = &mut *ctx.stats;
         let Ok(history) = engine.history(nid).await else {
             return true;
         };

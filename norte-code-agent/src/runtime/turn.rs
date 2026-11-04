@@ -142,23 +142,24 @@ impl Harness {
                 Phase::AwaitingTool => {
                     // Even a cancelled turn must settle every committed call.
                     self.run_tools(session, sender, cancellation).await?;
-                    if !cancellation.is_cancelled() {
-                        let history = self.store.history(session.head).await?;
-                        stopped = self
-                            .consult(
-                                session,
-                                sender,
-                                Some(&history),
-                                ConsultationPoint::PostTools,
-                            )
-                            .await?
-                            .is_some();
-                    }
+                    stopped = self
+                        .consult_with_history(
+                            session,
+                            sender,
+                            ConsultationPoint::PostTools,
+                            cancellation,
+                        )
+                        .await?
+                        .is_some();
                     // Visit the input branch before observing stop/cancellation:
                     // a new input must follow, never split, the call/result pair.
                 }
                 Phase::Idle | Phase::Streaming => {
-                    if input.is_some() && self.append_input(session, input, sender).await? {
+                    if input.is_some()
+                        && self
+                            .append_input(session, input, sender, cancellation)
+                            .await?
+                    {
                         return Ok(last);
                     }
                     if stopped || cancellation.is_cancelled() {
@@ -169,13 +170,12 @@ impl Harness {
                         let message = self.store.node(head).await?.message;
                         if message.role == Role::Assistant {
                             let before = session.head;
-                            let history = self.store.history(before).await?;
                             let stop = self
-                                .consult(
+                                .consult_with_history(
                                     session,
                                     sender,
-                                    Some(&history),
                                     ConsultationPoint::EndOfTurn,
+                                    cancellation,
                                 )
                                 .await?;
                             if stop.is_some() || session.head == before {
@@ -259,17 +259,16 @@ impl Harness {
         session: &mut Session,
         input: &mut Option<Message>,
         sender: &mpsc::Sender<EngineEvent>,
+        cancellation: &CancellationToken,
     ) -> Result<bool> {
-        if session.phase == Phase::Idle {
-            let history = self.store.history(session.head).await?;
-            if self
-                .consult(session, sender, Some(&history), ConsultationPoint::PreInput)
+        if session.phase == Phase::Idle
+            && self
+                .consult_with_history(session, sender, ConsultationPoint::PreInput, cancellation)
                 .await?
                 .is_some()
-            {
-                drop(input.take());
-                return Ok(true);
-            }
+        {
+            drop(input.take());
+            return Ok(true);
         }
         if let Some(message) = input.take() {
             *session = self.append_turn(session, message, sender).await?;
@@ -359,6 +358,28 @@ impl Harness {
             _ => self.store.history(Some(head)).await?,
         };
         Ok(Some((head, history)))
+    }
+
+    /// Consults the host with the current history, loading it when the
+    /// consultation needs it.
+    ///
+    /// Every consultation point wants the history unless cancellation has
+    /// already been requested; the pattern was repeated at each point, and
+    /// this is the one place that decides whether to load it.
+    async fn consult_with_history(
+        &self,
+        session: &mut Session,
+        sender: &mpsc::Sender<EngineEvent>,
+        point: ConsultationPoint,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<String>> {
+        let history = if self.interceptors.is_empty() || cancellation.is_cancelled() {
+            None
+        } else {
+            Some(self.store.history(session.head).await?)
+        };
+        self.consult(session, sender, history.as_deref(), point)
+            .await
     }
 
     /// Persists consumed injections even if a subsequent interceptor fails.
