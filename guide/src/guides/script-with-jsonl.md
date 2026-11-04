@@ -1,13 +1,10 @@
 # Script against the protocol
 
-## One event per frame
+`new` and `resume` keep the terminal, so they carry no event stream. A
+script speaks the protocol instead: one serialized `ServerEvent` per frame,
+stable to parse because frames are tagged serde JSON.
 
-The `new` and `resume` commands read the terminal, so they carry no event stream.
-A script drives the same protocol through the `Service` API, and this is the shape
-of what it reads: one serialized `ServerEvent` per frame, stable enough to parse
-because request and event frames use tagged serde JSON and deny unknown fields.
-
-A successful turn contains frames like:
+## A successful turn
 
 ```json
 {"request_id":1,"session":"…","kind":{"event":"turn_started","turn":1}}
@@ -17,9 +14,7 @@ A successful turn contains frames like:
 {"request_id":1,"session":"…","kind":{"event":"turn_finished","turn":1,"phase":"idle","committed":true}}
 ```
 
-## Read the terminal state
-
-The useful terminal frames are:
+## Terminal frames
 
 | Event | Meaning |
 | --- | --- |
@@ -27,27 +22,26 @@ The useful terminal frames are:
 | `error` | The request failed terminally. |
 | `question_asked` | The turn is parked until a client answers. |
 
-A script that only reads stdout cannot influence a tool call. If stdin is not a
-terminal, the CLI leaves the session parked rather than guessing. Use the
-`Service` API directly for a fully programmatic client.
+If stdin is not a terminal, the CLI leaves the session parked rather than
+guessing. For a fully programmatic client, use the `Service` API directly
+(`norte_code_agent::Service` + `ClientRequest`) — full API in rustdoc.
 
 ## Keep the session
 
-The `session` field is the logical key. A client stores it and passes it back on
-the next request, or a person continues it with `norte-code resume <key>`. The
-key is shown in the footer while the session runs and listed by
-`norte-code sessions --json`; do not parse human output for it.
+The `session` field is the logical key. Store it and pass it back on the
+next request, or a person continues it with `norte-code resume <key>`. It is
+shown in the footer and listed by `norte-code sessions --json`; do not parse
+human output for it.
 
 ## Errors and exit codes
 
-A terminal `error` frame is a failed turn, not a successful one. A
-command-line or configuration error exits `2` and writes a diagnostic to stderr.
+A terminal `error` frame is a failed turn. A command-line or configuration
+error exits `2` with a diagnostic on stderr.
 
-## What not to do
+## What not to assume
 
-- Do not assume every line is a turn event; `session_created`, `model_list` and
+- Not every line is a turn event: `session_created`, `model_list` and
   `cost_updated` can appear.
-- Do not assume `delta` text is the whole answer; concatenate text deltas in
-  order.
-- Do not treat an unpriced request as free. `cost_usd` is absent or `null` when
-  the provider reported no cost.
+- `delta` text is not the whole answer: concatenate text deltas in order.
+- An unpriced request is not free: `cost_usd` is absent or `null` when the
+  provider reported no cost.

@@ -1,10 +1,7 @@
 # CLI
 
-The binary is `norte-code`. It is a client of the in-process `Service`; it does
-not start a daemon.
-
-Run with no arguments it opens a session: a menu of the saved sessions, and then
-the editor.
+The binary is `norte-code`. Run with no arguments it opens a session: a menu
+of the saved sessions, then the editor.
 
 ```text
 norte-code [OPTIONS] [DIR] [COMMAND]
@@ -18,20 +15,17 @@ A leading directory is where the work happens:
 norte-code ~/src/thing
 ```
 
-It is a positional and not a flag, because it is the one thing a person names
-when they name anything: `norte-code ~/src/thing` means what every other command
-line means by a leading path. The process itself moves there, before the
-configuration is read, so the project config that applies is the named
-directory's own. A directory that does not exist is refused with its path rather
-than silently ignored. The footer names it in front of the session line, with
-the home abbreviated to `~`.
+It is a positional, not a flag. The process moves there before reading
+config, so the project config that applies is that directory's own. A
+directory that does not exist is refused with its path. The footer names it
+in front of the session line.
 
 ## Global options
 
 | Option | Meaning |
 | --- | --- |
-| `--config PATH` | Use this user config file instead of the platform path. A `default_provider`/`default_model` chosen at startup is written here. |
-| `--verbose LEVEL` | How much to show: `low` (the answer alone), `medium` (the default) or `high` (reasoning, tool arguments and results, every counter). |
+| `--config PATH` | Use this user config file instead of the platform path. |
+| `--verbose LEVEL` | `low` (answer alone), `medium` (default), `high` (reasoning, tool arguments and results). |
 | `--debug` | Print startup details, model metadata, paths and extensions. |
 
 ## `new`
@@ -40,51 +34,34 @@ the home abbreviated to `~`.
 norte-code new [OPTIONS]
 ```
 
-Starts a session and stays in it: the first line typed is the first message.
-There is no prompt argument and no `--session`, because the session is read
-rather than handed a message; a client that wants to send one message and exit
-speaks the protocol.
+Creates a session and stays in it: the first line typed is the first message.
+There is no prompt argument — a session is read, not handed a message.
 
 | Option | Meaning |
 | --- | --- |
-| `-m, --model MODEL` | The model id, overriding `default_model`. It is opaque and may contain slashes. |
-| `--provider PROVIDER` | Override the provider id (e.g. `openai`, `groq`, `disabled`). |
+| `-m, --model MODEL` | Model id, overriding `default_model`. Opaque; may contain slashes. |
+| `--provider PROVIDER` | Override the provider id. |
 | `--system-prompt TEXT` | Replace the base system prompt for this session. |
 | `--endpoint URL` | Override the provider endpoint. |
-| `--wire SCHEMA` | Pick among the wires the provider serves: `openai`, `anthropic` or `google`. Left out, the provider's preferred one. |
+| `--wire SCHEMA` | `openai`, `anthropic` or `google`. Default: the provider's preferred. |
 | `--budget LIMIT` | A limit for the first message. |
 | `--budget-unit usd\|tokens\|requests` | What the limit measures. Default `usd`. |
-| `--budget-action warn\|ask\|stop` | What to do at the limit. Default `stop` for `--budget`. |
+| `--budget-action warn\|ask\|stop` | What to do at the limit. |
 | `--compaction-threshold FRACTION` | Override the compaction threshold in `(0, 1]`. |
 | `--sandbox` / `--no-sandbox` | Override `tools.confinement.sandbox.enabled`. |
 | `--sandbox-network on\|off` | Override sandbox networking; requires the sandbox. |
 | `--reasoning SETTING` | `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. |
-| `--approval-mode ask\|auto-edit\|yolo` | Override the approval mode. |
 | `--max-iterations N` | Cap model iterations for this session. |
-| `--extension KEY=JSON` | Add a vendor request field; repeatable. |
+| `--extension KEY=JSON` | Vendor request field; repeatable. |
 
-Without `--model` or `--provider` the session opens on `default_provider` and
-`default_model`, and when
-that is not configured the startup flow asks which provider and model to use and
-writes the answer to the config file as `default_provider`/`default_model`.
+Without `--model`/`--provider`, the session opens on the config defaults —
+and if those are unset, startup asks once and writes the answer to the config.
 
 ## The startup menu
 
-A bare `norte-code`, and `resume` with no key, open the same menu: *New
-session*, *Last session*, then the saved sessions newest first. The arrow keys
-walk it, `Enter` opens the row under the cursor and `Escape` leaves. Typing
-narrows the list, and a name that matches no row is passed through as the entry
-it names — a session key off an older footer, a provider the catalogue does not
-list — so a bounded list never puts an entry out of reach. The list scrolls
-around the cursor and says how many entries it left out.
-
-When no `default_provider`/`default_model` is configured, the same menu asks
-which provider and
-which model. The providers named in the configuration come first, and the
-catalogue's follow; the choice is written to the config file the process was
-started with (`--config FILE`, else the platform user path), as
-`default_provider`/`default_model`,
-so the question is asked once.
+A bare `norte-code` and `resume` with no key open the same menu: *New
+session*, *Last session*, then saved sessions newest first. Arrow keys walk
+it, `Enter` opens, `Escape` leaves, typing narrows.
 
 ## `resume`
 
@@ -92,36 +69,31 @@ so the question is asked once.
 norte-code resume [OPTIONS] [SESSION]
 ```
 
-Continues a session. With no `SESSION` the startup menu asks which one to open.
+Continues a session (key or prefix). With no `SESSION`, the menu asks.
 
 | Option | Meaning |
 | --- | --- |
-| `SESSION` | The session key, or a prefix of it. |
 | `--system-prompt TEXT` | Replace the base prompt for this resume. |
-| `--model MODEL` | Resume with this model, replacing the one the session holds. |
+| `--model MODEL` | Resume with this model. |
 | `--budget LIMIT` | Replace the session budget before resuming. |
 | `--budget-unit`, `--budget-action` | Unit and action for that budget. |
 | `--compaction-threshold FRACTION` | Override the threshold for this resume. |
 | `--sandbox`, `--no-sandbox`, `--sandbox-network` | Sandbox overrides. |
-| `--max-iterations N` | Keep the config limit when omitted. |
+| `--max-iterations N` | Iteration cap. |
 | `--extension KEY=JSON` | Vendor request field; repeatable. |
 | `-i, --interactive` | Keep the session open after each turn. |
 
-A resume of a session whose turn is over replays the transcript and makes no
-request; one that was interrupted continues where it stopped.
+A resume whose turn is over replays the transcript; an interrupted one
+continues where it stopped.
 
 ## `models`
 
 ```text
-norte-code models [OPTIONS]
+norte-code models [--provider ID] [--tools] [--reasoning] [--json]
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `--provider ID` | Only this provider. |
-| `--tools` | Only models that call tools. |
-| `--reasoning` | Only models that reason. |
-| `--json` | One JSON object per line. |
+Lists what the catalogue knows. `--tools`/`--reasoning` filter to models
+that call tools / reason.
 
 ## `skills`
 
@@ -130,8 +102,8 @@ norte-code skills list [--json]
 norte-code skills check
 ```
 
-`list` prints the valid skills; `check` validates every skill and reports the
-ones that were skipped and why.
+`list` prints valid skills; `check` validates every skill and reports the
+skipped ones and why.
 
 ## `sessions`
 
@@ -139,8 +111,7 @@ ones that were skipped and why.
 norte-code sessions [--json]
 ```
 
-Lists the logical sessions in the local database, including the key, title,
-model, creation time and phase.
+Lists logical sessions: key, title, model, creation time and phase.
 
 ## `cost`
 
@@ -148,42 +119,39 @@ model, creation time and phase.
 norte-code cost [--session KEY] [--daily] [--json]
 ```
 
-Reports the provider-reported cost ledger. `--session` adds the session's turns;
+The provider-reported cost ledger. `--session` adds the session's turns;
 `--daily` groups by UTC day.
 
 ## `telemetry`
 
 ```text
-norte-code telemetry [OPTIONS]
+norte-code telemetry [--session KEY] [--provider ID] [--model ID] [--bucket hour|day|week|month|year|total] [--json]
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `--session KEY` | Only this logical session. |
-| `--provider ID` | Only this provider. |
-| `--model ID` | Only this model. |
-| `--bucket hour\|day\|week\|month\|year\|total` | The time bucket. Default `day`. |
-| `--json` | One JSON object. |
+Local request data — counts, tokens, cache, tools, latency, status. Not the
+money ledger. Default bucket is `day`.
 
-Telemetry is local request data: counts, tokens, cache, tools, latency and
-status. It is not the money ledger. The report is a table: a bar shows how
-many tokens each group moved against the busiest one, coloured by the cache —
-green for the prompt the provider served from its cache, red for the part it
-had to read — and the columns carry the requests, the tokens in and out, the
-reasoning tokens, the cache hit rate weighted by tokens, the time to the first
-token, the latency and the cost. The groups are ordered by volume, and the
-time groups are named after `--bucket` (`by day`, `by week`, `by hour`, …). A
-session that moved less than one percent of the total is left out of the
-session table, and the report says how many. `--json` carries the same
-numbers.
+## `mcp`
+
+```text
+norte-code mcp list
+norte-code mcp add NAME COMMAND [ARGS...]
+norte-code mcp enable NAME
+norte-code mcp disable NAME
+norte-code mcp remove NAME
+```
+
+Manages the MCP servers in the config file: list them, add or replace one
+by name, switch one on/off, or remove it.
 
 ## `plugins`
 
-Plugins are shared libraries in `~/.config/norte-code/plugins/` (or
-`$NORTE_CODE_PLUGINS`). A plugin adds commands, a status line, or providers and
-models to the catalogue. The host checks the library's
-`norte_plugin_abi_version` against its own before loading it; a mismatch is
-refused with both numbers named, never loaded on a guess.
+Plugins are shared libraries under `~/.config/norte-code/plugins/` (or
+`$NORTE_CODE_PLUGINS`). A plugin adds slash commands, a status line, or
+providers and models to the catalogue. Installing a plugin clones and
+builds untrusted repository code — including its `build.rs` — before
+loading the resulting library. That is explicit by design: only do it for
+sources you trust.
 
 ```text
 norte-code plugins list
@@ -194,24 +162,13 @@ norte-code plugins enable NAME
 norte-code plugins disable NAME
 ```
 
-| Subcommand | Meaning |
-| --- | --- |
-| `list` | Every installed file, enabled or disabled, with its reported name and why it did not load when it did not. |
-| `add URL [--package PACKAGE]` | Clone the repository and install one `cdylib` plugin package. A workspace with one plugin is selected automatically; when it has several, choose one with `--package`. Its URL and package are recorded for updates. |
-| `rm NAME` | Remove the library and its recorded source. |
-| `update [NAME]` | Rebuild one plugin, or every plugin with a recorded source, from the URL it came from. |
-| `enable NAME` / `disable NAME` | Rename the library between `.so` and `.so.disabled`. The loader only opens `.so`/`.dll`/`.dylib`, so a disabled plugin is skipped at the next start. |
-
-Installing, removing, updating and toggling take effect at the next start;
-plugins are loaded once, before the catalogue is read. The chat has the same commands under `/plugins …`; use
-`/plugins add URL PACKAGE` to choose a workspace plugin.
+Changes take effect at the next start; plugins load once, before the
+catalogue is read. The chat has the same commands under `/plugins …`.
 
 ## Chat commands
 
-A session opened by `norte-code`, `norte-code new` or `norte-code resume` reads
-commands from the same line editor. A command is recognised as soon as it
-starts with `/`; anything else is a message. Commands that take arguments
-reject unknown values instead of forwarding them to the model.
+A session reads commands from the same line editor. A command is recognised
+as soon as it starts with `/`; anything else is a message.
 
 | Command | Meaning |
 | --- | --- |
@@ -219,44 +176,33 @@ reject unknown values instead of forwarding them to the model.
 | `/compact` | Summarise the session and continue on a new one. |
 | `/allow TOOL [session\|global]` | Allow a tool without asking. |
 | `/deny TOOL [session\|global]` | Refuse a tool without asking. |
-| `/tools` | List every tool the model can reach, with how a call to each is decided — `allow`, `deny` or `ask` — and how far its rule reaches. |
-| `/reasoning SETTING [session\|message]` | Set the reasoning override. `SETTING` is `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. The scope defaults to `session`. |
+| `/tools` | List every tool the model can reach, with its rule state. |
+| `/reasoning SETTING [session\|message]` | Set the reasoning override. |
 | `/model PROVIDER/MODEL` | Switch the model at the next turn boundary. |
-| `/models` | Open the provider/model picker: typing filters providers and models (case-insensitive), `Enter` expands a provider into its models, and picking one sets both the provider and the model. |
-| `/provider NAME` | Switch provider at the next turn boundary, keeping the model where it has one. |
-| `/sessions` | Open the session picker: start a new session, open the last one, or open a saved session. |
-| `/refresh`, `/reload` | Re-read the configuration, the skills and the MCP servers. |
-| `/restart` | Re-read the configuration and rebuild the engine at the next turn boundary. |
-| `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one off or on. |
-| `/jobs [list\|check\|stop] [ID]` | List the session's background jobs, look at one, or stop one. |
+| `/models` | Provider/model picker; typing filters, `Enter` expands, picking sets both. |
+| `/provider NAME` | Switch provider, keeping the model where it has one. |
+| `/sessions` | Session picker: new, last, or a saved one. |
+| `/refresh`, `/reload` | Re-read config, skills and MCP servers. |
+| `/restart` | Re-read config and rebuild the engine at the next turn boundary. |
+| `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one. |
+| `/jobs [list\|check\|stop] [ID]` | Background jobs: list, inspect, or stop one. |
 | `/connection [list\|add\|remove] [PROVIDER]` | List, add or remove a saved provider key. |
-| `/rename [TITLE]` | Name the session. Bare, recompute the name from the first message. |
-| `/debug` | Print what the process knows about itself: paths, model, catalogue, tools, servers. |
-| `/telemetry` | The request ledger: this session, and every provider. |
-| `/menu`, `/back` | Show every provider and the models each lists, with the session's own marked. Pick one with `/provider` and `/model`. |
-| `/plugins list` | List installed plugins and whether each is loaded, waiting for a restart, disabled, or why it failed. |
-| `/plugins add URL [PACKAGE]` | Clone and install a plugin from a git URL. Select a package by name when the repository has multiple workspace plugins. |
-| `/plugins rm NAME` | Remove an installed plugin. |
-| `/plugins update [NAME]` | Rebuild one plugin, or every plugin with a recorded source. |
-| `/plugins enable NAME` / `/plugins disable NAME` | Rename a plugin between `.so` and `.so.disabled`, so the next start loads it or skips it. |
-| `/delete` | Delete this session, with its cost and telemetry, and leave. |
+| `/rename [TITLE]` | Name the session; bare recomputes from the first message. |
+| `/debug` | Paths, model, catalogue, tools, servers. Never keys or URLs. |
+| `/telemetry` | Request ledger: this session, and every provider. |
+| `/menu`, `/back` | Every provider and its models, the session's own marked. |
+| `/plans` | List the session's saved plans. |
+| `/plugins …` | The plugin commands, same as the subcommands above. |
+| `/delete` | Delete this session, with cost and telemetry, and leave. |
 | `/exit`, `/quit` | Leave the chat. |
 
-The footer holds the session line, the task list and the session totals; the
-tabs that used to share it were removed.
-
-The editor suggests the command names and their arguments in dimmed text as
-you type, and Tab accepts the suggestion.
-
-While a turn is running, the commands that make sense there are handled
-immediately (`/allow`, `/deny`, `/reasoning`, `/model`, `/refresh`, `/help`,
-`/plugins …`). `/compact`, `/models`, `/menu` and `/exit` wait for the turn to
-finish. Any other text is steered into that turn: it reaches the request the
-turn is about to make, and it stays durable until the engine reports it
-applied.
+The editor suggests command names and arguments in dimmed text; Tab
+accepts. While a turn runs, `/allow`, `/deny`, `/reasoning`, `/model`,
+`/refresh`, `/help` and `/plugins …` act immediately; `/compact`,
+`/models`, `/menu` and `/exit` wait for the turn to finish. Any other text
+is steered into the running turn.
 
 ## Exit status
 
-`0` means success. A failed turn exits with `1`. `skills check` also exits with
-`1` when it finds warnings. A usage or configuration error exits with `2` and a
-message on stderr.
+`0` success, `1` failed turn (`skills check` also exits `1` on warnings),
+`2` usage or configuration error.

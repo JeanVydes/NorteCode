@@ -1,51 +1,42 @@
 # Norte Code
 
-**A terminal-based agentic coding tool in Rust.** Norte Code is a host around
-[Norte](https://github.com/JeanVydes/Norte): Norte owns the durable session, the
-turn, streaming, tool dispatch and the commit point; Norte Code owns the agent
-loop, the model catalogue, approval rules, compaction, budgets and the terminal
-experience.
+**A terminal-based agentic coding tool.** You open a session in a directory,
+ask for work in plain language, and the model reads, writes and runs commands
+in that directory — with your approval rules, your budgets and your model.
 
-Nothing in this repository forks Norte. If a change belongs in the engine, it is
-reported upstream instead of patched around here.
+## Start here
 
-## The mental model
+1. [Getting started](getting-started.md) — build it, name a model, run your
+   first prompt.
+2. [Configure a provider](guides/configure-a-provider.md) — the two catalogue
+   files and where your API key goes.
+3. [Start a session](guides/run-a-prompt.md) — the flags that shape a run.
 
-Five ideas hold the host together.
+## Everyday use
 
-- **The service is in-process.** `Service` is a library, not a daemon. A client
-  submits `ClientRequest` values and consumes a stream of `ServerEvent` values.
-  The CLI is the only client. There is no port to open.
-- **A logical session survives its engine.** A `SessionKey` stays stable while
-  the Norte `SessionId` behind it may change. Compaction is the clearest case:
-  the transcript is summarised into a fresh Norte session, but the client keeps
-  the same key, title and history of decisions.
-- **Norte owns the commit; the host owns the loop.** A turn is one engine round
-  trip and one commit. The host decides when to call the engine again after a
-  tool call, when to ask a human, when to compact and when a retry is safe.
-- **Effects are governed and journaled.** Tools see only the configured
-  workspace, effectful calls pass an approval rule, and an intent is written
-  before a write or command runs so a crash cannot silently repeat it.
-- **Cost is what the provider reported.** Norte Code never derives a dollar
-  amount from a catalogue list price. An unreported cost is `NULL`, not zero.
+- [Continue a session](guides/continue-a-session.md) — resume, the chat
+  commands, Ctrl-C, compaction.
+- [Plans](plans.md) — how the model proposes work for your approval, and how
+  to read and edit those proposals.
+- [Approve a tool](guides/approve-a-tool.md) — `/allow`, `/deny`, and what
+  happens when a call is refused.
+- [Set a budget](guides/set-a-budget.md) — stop or warn when a run costs too
+  much.
+- [Use the sandbox](guides/use-the-sandbox.md) — contain what `shell` can reach.
+
+## Reference
+
+- [CLI](reference/cli.md) — every subcommand and flag.
+- [Configuration](reference/configuration.md) — every config key.
+- [Protocol](reference/protocol.md) — the request/event stream, for scripts.
+- [Script against the protocol](guides/script-with-jsonl.md) — drive it from
+  another program.
+- [FAQ](faq.md) — server, TUI, costs, sandbox defaults.
 
 ## What it is not
 
-- Not a separate server. The protocol is transport-agnostic, but v1 ships only
-  the in-process tokio transport.
-- Not a model catalogue of its own. Models come from two files you own,
-  `providers.json` and `models.json`; nothing is fetched and no price table is
-  baked in.
-- Not a fork of Norte. Sessions, history, policies and commits are Norte's.
-- Not finished. The service and CLI are usable.
-
-## Where to go
-
-- New here: [Getting started](getting-started.md).
-- Want the vocabulary first: [The service and the wire](concepts/service-and-protocol.md),
-  then [Sessions and turns](concepts/sessions-and-turns.md).
-- Solving something concrete: the [guides](guides/run-a-prompt.md).
-- Looking for a type or a command: [Crates](reference/crates.md) and the
-  [CLI reference](reference/cli.md). The full Rust API is rustdoc
-  (`cargo doc --workspace --no-deps --open`).
-- Auditing what has actually been exercised: [Status and verification](reference/status.md).
+- Not a daemon: there is no server to start. The CLI builds the service in
+  the same process.
+- Not a model catalogue of its own: models come from two files you own,
+  `providers.json` and `models.json`. Nothing is fetched or baked in.
+- Not a fork of its engine: if a change belongs in the engine, it goes there.
