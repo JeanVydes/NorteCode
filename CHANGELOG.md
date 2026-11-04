@@ -71,6 +71,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Opening a saved session from `/sessions` restores that session's model in the
+  footer, and `resume` resolves a unique session-key prefix before choosing the
+  saved model. The history already ran on its stored spec; the client had kept
+  the previous session's label or fallen back to the configured default when
+  it looked up only an exact key.
+
 - The plugin sidebar is redrawn after a turn. A plugin that shows a number
   there kept the one it had at startup, because the frame that carried the
   change was never drawn; the rows are asked again and the frame is woken.

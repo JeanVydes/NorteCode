@@ -1,6 +1,7 @@
 use super::{
     Cli, Command, McpCommand, SandboxOptions, Style, apply_extensions, budget_label,
-    budget_warning, compose_selection, cost_summary, parse_reasoning_setting, select_system_prompt,
+    budget_warning, compose_selection, cost_summary, matching_stored_session,
+    parse_reasoning_setting, select_system_prompt,
 };
 use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table};
 use crate::preview::{PreviewLine, argument_preview};
@@ -9,8 +10,42 @@ use clap::Parser;
 use norte_code_protocol::catalog::WireSchema;
 use norte_code_protocol::config::{BudgetConfig, Config};
 use norte_code_protocol::costs::CostSummary;
-use norte_code_protocol::sqlite::{RequestRecord, RequestStatus};
+use norte_code_protocol::sqlite::{RequestRecord, RequestStatus, StoredSession};
 use norte_code_protocol::{Budget, BudgetAction, BudgetUnit};
+
+fn stored_session(key: &str) -> StoredSession {
+    StoredSession {
+        key: key.to_owned(),
+        north: norte::SessionId::new(),
+        title: None,
+        provider: "saved-provider".to_owned(),
+        model: "saved-model".to_owned(),
+        created_at: Utc::now(),
+        phase: norte_code_protocol::Phase::Idle,
+        stats: serde_json::Value::Null,
+        denied_tools: Vec::new(),
+        allowed_tools: Vec::new(),
+        compacted_from: None,
+        workdir: None,
+    }
+}
+
+#[test]
+fn resume_model_lookup_accepts_a_unique_session_prefix() {
+    let session = stored_session("12345678-full-session-key");
+    let found = matching_stored_session(vec![session.clone()], "12345678").expect("unique prefix");
+    assert_eq!(found, session);
+}
+
+#[test]
+fn resume_model_lookup_does_not_guess_between_matching_sessions() {
+    let first = stored_session("12345678-first");
+    let second = stored_session("12345678-second");
+    assert!(
+        matching_stored_session(vec![first, second], "12345678").is_none(),
+        "an ambiguous prefix must not pick a model from either session"
+    );
+}
 
 /// A request row for the telemetry tests.
 fn telemetry_record(
