@@ -499,7 +499,9 @@ pub(crate) struct Row {
     /// Empty for a row that is one piece of text, which is most of them: a
     /// tool's output, a notice, a message. A model's answer is markdown, and it
     /// arrives with a heading, a list and a fenced block in it, so it is a run
-    /// per emphasis — and the view is what turns an emphasis into a colour.
+    /// per emphasis — and the view is what turns an emphasis into a colour. A
+    /// split diff row is one run per panel: the left in the ink of what left,
+    /// the right in the ink of what arrived, which a single ink cannot say.
     pub(crate) runs: Vec<crate::markdown::Run>,
 }
 
@@ -705,6 +707,22 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
                 // fight the prose around it. So it takes the same arm as plain
                 // text, which is what it is.
                 crate::markdown::Emphasis::TableCell | crate::markdown::Emphasis::Plain => {}
+                // A panel of a split diff is its own ink, carried in the row
+                // it came from: the left in the ink of what left, the right in
+                // the ink of what arrived. The row's ink is the fallback for a
+                // panel that carries none of its own.
+                crate::markdown::Emphasis::Panel => {
+                    if let Some(panel_ink) = run.ink {
+                        draw = match panel_ink {
+                            Ink::Faint => style.faint_span(),
+                            Ink::Dim => style.dim_span(),
+                            Ink::Alternate => style.alternate_span(),
+                            Ink::Green => style.green_span(),
+                            Ink::Red => style.red_span(),
+                            Ink::Yellow => style.yellow_span(),
+                        };
+                    }
+                }
             }
             Span::styled(run.text.clone(), draw)
         })
@@ -760,15 +778,12 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         // run the widget draws: the data holds what arrived, and how it is drawn
         // is the view's.
         if entry.kind == Kind::Answer {
-            for rendered in crate::markdown::render(
-                &entry
-                    .lines
-                    .iter()
-                    .map(|line| line.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                usize::from(width),
-            ) {
+            let body: Vec<String> = entry
+                .lines
+                .iter()
+                .map(crate::transcript::Line::text)
+                .collect();
+            for rendered in crate::markdown::render(&body.join("\n"), usize::from(width)) {
                 push_rendered(&mut out, entry.kind, &rendered, width);
             }
             if entry.dropped > 0 {
@@ -800,9 +815,9 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
             // fitted was re-flowed around codes the reader never sees.
             let text = if counting && index == 0 {
                 let at = entry.started.unwrap_or_else(std::time::Instant::now);
-                format!("{}  {}", line.text, elapsed(at.elapsed()))
+                format!("{}  {}", line.text(), elapsed(at.elapsed()))
             } else {
-                line.text.clone()
+                line.text()
             };
             let text = crate::select::strip_style(&text);
             let text = crate::text::terminal(&text).into_owned();
@@ -825,8 +840,12 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
             let ink = if counting && index == 0 {
                 Some(Ink::Dim)
             } else {
-                line.ink
+                line.ink()
             };
+            if line.parts.len() > 1 {
+                out.push(panels_row(entry.kind, line, text, frame));
+                continue;
+            }
             let wrapped = wrap(&text, width);
             for text in wrapped {
                 let runs = shell_command_runs(&text);
@@ -852,6 +871,36 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         }
     }
     out
+}
+
+/// One row of a split diff, as the view draws it: one run per panel.
+///
+/// Laid out from the panels and not from a joined string: the bound that
+/// cut the row already cut each panel, and a wrap that re-joined them
+/// would misplace every panel after the first. These rows are built at
+/// the width the panels were laid out for, so the panels are the columns
+/// the split view draws.
+fn panels_row(
+    kind: Kind,
+    line: &crate::transcript::Line,
+    text: String,
+    frame: Option<Frame>,
+) -> Row {
+    let parts: Vec<(Option<Ink>, String)> = line
+        .parts
+        .iter()
+        .map(|(ink, text)| (*ink, crate::select::strip_style(text).clone()))
+        .collect();
+    Row {
+        ink: None,
+        kind,
+        text,
+        frame,
+        runs: parts
+            .into_iter()
+            .map(|(ink, text)| crate::markdown::Run::panel(ink.unwrap_or(Ink::Faint), text))
+            .collect(),
+    }
 }
 
 /// Adds the collapsed-output hint and returns the rows the view should draw.
@@ -947,6 +996,7 @@ fn push_rendered(out: &mut Vec<Row>, kind: Kind, rendered: &crate::markdown::Ren
                     rows.last_mut().expect("a row").push(crate::markdown::Run {
                         text: std::mem::take(&mut piece),
                         emphasis: run.emphasis,
+                        ink: run.ink,
                     });
                 }
                 rows.push(Vec::new());
@@ -959,6 +1009,7 @@ fn push_rendered(out: &mut Vec<Row>, kind: Kind, rendered: &crate::markdown::Ren
             rows.last_mut().expect("a row").push(crate::markdown::Run {
                 text: piece,
                 emphasis: run.emphasis,
+                ink: run.ink,
             });
         }
     }

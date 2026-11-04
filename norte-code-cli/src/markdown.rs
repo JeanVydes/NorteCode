@@ -56,6 +56,10 @@ pub(crate) enum Emphasis {
     /// A table's body cell.
     #[allow(dead_code)]
     TableCell,
+    /// Text whose ink is its own rather than the row's: a panel of a split
+    /// diff. An emphasis shapes text the row's ink already colours; a panel
+    /// is a different thing, and `row_spans` draws it in [`crate::transcript::Ink`].
+    Panel,
 }
 
 /// One run of text in one emphasis.
@@ -65,6 +69,8 @@ pub(crate) struct Run {
     pub text: String,
     /// How it is written.
     pub emphasis: Emphasis,
+    /// The panel ink, when this is a [`Emphasis::Panel`] run.
+    pub ink: Option<crate::transcript::Ink>,
 }
 
 impl Run {
@@ -74,6 +80,7 @@ impl Run {
         Self {
             text: text.into(),
             emphasis: Emphasis::Plain,
+            ink: None,
         }
     }
 
@@ -83,6 +90,17 @@ impl Run {
         Self {
             text: text.into(),
             emphasis,
+            ink: None,
+        }
+    }
+
+    /// A run of a panel in its own ink.
+    #[must_use]
+    pub fn panel(ink: crate::transcript::Ink, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            emphasis: Emphasis::Panel,
+            ink: Some(ink),
         }
     }
 }

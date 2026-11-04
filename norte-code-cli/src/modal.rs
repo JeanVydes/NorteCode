@@ -875,6 +875,7 @@ fn markdown_lines(rows: &[Row], width: u16, style: Style) -> Vec<Line<'static>> 
                             .push(crate::markdown::Run {
                                 text: std::mem::take(&mut piece),
                                 emphasis: run.emphasis,
+                                ink: run.ink,
                             });
                     }
                     wrapped.push(Vec::new());
@@ -890,6 +891,7 @@ fn markdown_lines(rows: &[Row], width: u16, style: Style) -> Vec<Line<'static>> 
                     .push(crate::markdown::Run {
                         text: piece,
                         emphasis: run.emphasis,
+                        ink: run.ink,
                     });
             }
         }
@@ -922,7 +924,9 @@ fn markdown_span(run: crate::markdown::Run, style: Style) -> Span<'static> {
         crate::markdown::Emphasis::Link => draw = draw.fg(style.cyan_color()),
         crate::markdown::Emphasis::Strike => draw = draw.add_modifier(Modifier::CROSSED_OUT),
         crate::markdown::Emphasis::Underline => draw = draw.add_modifier(Modifier::UNDERLINED),
-        crate::markdown::Emphasis::TableCell | crate::markdown::Emphasis::Plain => {}
+        crate::markdown::Emphasis::TableCell
+        | crate::markdown::Emphasis::Plain
+        | crate::markdown::Emphasis::Panel => {}
     }
     Span::styled(run.text, draw)
 }

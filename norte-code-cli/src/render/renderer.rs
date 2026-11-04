@@ -2067,7 +2067,7 @@ impl Renderer {
             let mut kept = crate::transcript::Entry::new(crate::transcript::Kind::ToolOutput);
             let hidden = tool_lines(&mut kept, &section.lines);
             for line in kept.lines {
-                entry.push_line(line.text);
+                entry.push_line(line.text());
             }
             if hidden > 0 {
                 entry.push_inked(
@@ -2148,24 +2148,30 @@ impl Renderer {
             crate::transcript::Kind::ToolOutput,
             Self::edit_title(path, edit),
         );
-        for (ink, text) in Self::split_lines(edit, width) {
-            entry.push_inked(ink, text);
+        for parts in Self::split_lines(edit, width) {
+            entry.push_inked_parts(parts);
         }
         self.transcript.push(entry);
     }
 
-    /// The rows of a side-by-side diff, each with the ink it is written in.
+    /// The rows of a side-by-side diff, each with the ink of each panel.
     ///
     /// The two panels are sized independently so the right one ends where it
-    /// should on an odd terminal width.
+    /// should on an odd terminal width. Each row carries two inks: the panel on
+    /// the left in the ink of what left, the panel on the right in the ink of
+    /// what arrived — one ink per row would paint the addition with the removal
+    /// it sits beside, which is what made the whole split row red.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn split_lines(edit: &EditBox, width: usize) -> Vec<(Ink, String)> {
+    pub(crate) fn split_lines(edit: &EditBox, width: usize) -> Vec<Vec<(Ink, String)>> {
         let panel_left = width.saturating_sub(4) / 2;
         let panel_right = width.saturating_sub(4).saturating_sub(panel_left);
         if panel_left < 10 || panel_right < 10 {
             // A terminal too narrow for two columns gets the unified shape,
             // which is the one that fits: half a diff is worse than a patch.
-            return Self::unified_lines(Style::plain(), "", edit, width);
+            return Self::unified_lines(Style::plain(), "", edit, width)
+                .into_iter()
+                .map(|(ink, text)| vec![(ink, text)])
+                .collect();
         }
         let digits = edit
             .rows
@@ -2176,32 +2182,41 @@ impl Renderer {
             .max()
             .unwrap_or(3)
             .clamp(3, 6);
-        let mut lines = vec![(
+        let mut lines = vec![vec![(
             Ink::Dim,
             format!(
                 "{:<panel_left$}  {}",
                 clip_plain("original", panel_left),
                 clip_plain("result", panel_right)
             ),
-        )];
+        )]];
         for row in &edit.rows {
             // The panel text is plain: the panels are laid out as text and the
             // frame draws them, because painting here would put the escape
             // sequences on screen as the characters they are.
-            // kind so a removal reads red on both sides of the pair.
             let left = render_panel_plain(row.left.as_ref(), Side::Left, panel_left, digits);
             let right = render_panel_plain(row.right.as_ref(), Side::Right, panel_right, digits);
-            let ink = if row.left.as_ref().is_some_and(|cell| cell.changed) {
+            let left_ink = if row.left.as_ref().is_some_and(|cell| cell.changed) {
                 Ink::Red
-            } else if row.right.as_ref().is_some_and(|cell| cell.changed) {
+            } else {
+                Ink::Faint
+            };
+            let right_ink = if row.right.as_ref().is_some_and(|cell| cell.changed) {
                 Ink::Green
             } else {
                 Ink::Faint
             };
-            lines.push((ink, format!("{left}  {right}")));
+            lines.push(vec![
+                (left_ink, left),
+                (Ink::Faint, "  ".to_owned()),
+                (right_ink, right),
+            ]);
         }
         if edit.omitted > 0 {
-            lines.push((Ink::Yellow, format!("… {} more line(s) …", edit.omitted)));
+            lines.push(vec![(
+                Ink::Yellow,
+                format!("… {} more line(s) …", edit.omitted),
+            )]);
         }
         lines
     }

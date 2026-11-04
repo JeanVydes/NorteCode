@@ -478,30 +478,46 @@ impl UnifiedKind {
 /// side a panel left empty is the row the other panel added or removed, which
 /// is exactly what a patch's `-` and `+` lines are.
 ///
+/// A run of removals followed by a run of additions is shown as one patch
+/// hunk: all the `-` lines first, then all the `+` lines. The row-by-row fold
+/// interleaves them — `-` on one row, `+` on the next — and on a multi-line
+/// replacement that reads as a jagged alternation instead of the old block
+/// and the new block a patch draws.
+///
 /// It is a fold rather than a diff of its own on purpose: the boxes already
 /// decided which lines changed and which are context, and a second diff would
 /// be a second answer to the same question.
 pub(crate) fn unify(rows: &[DiffRow]) -> Vec<UnifiedRow> {
     let mut unified = Vec::with_capacity(rows.len());
+    let mut removed: Vec<UnifiedRow> = Vec::new();
+    let mut added: Vec<UnifiedRow> = Vec::new();
+    let flush = |unified: &mut Vec<UnifiedRow>,
+                 removed: &mut Vec<UnifiedRow>,
+                 added: &mut Vec<UnifiedRow>| {
+        unified.append(removed);
+        unified.append(added);
+    };
     for row in rows {
         match (&row.left, &row.right) {
             (Some(left), Some(right)) => {
                 // Both sides hold a line. An unchanged row is the same line in
-                // both files and is shown once; a changed one is shown twice —
-                // the old above the new — so the reader sees what was there and
-                // what is there now.
+                // both files and is shown once; a changed one is one removal
+                // and one addition, held until its block has ended — the old
+                // above the new — so the reader sees what was there and what
+                // is there now.
                 if left.changed || right.changed {
-                    unified.push(UnifiedRow {
+                    removed.push(UnifiedRow {
                         kind: UnifiedKind::Removed,
                         number: left.number,
                         text: left.text.clone(),
                     });
-                    unified.push(UnifiedRow {
+                    added.push(UnifiedRow {
                         kind: UnifiedKind::Added,
                         number: right.number,
                         text: right.text.clone(),
                     });
                 } else {
+                    flush(&mut unified, &mut removed, &mut added);
                     unified.push(UnifiedRow {
                         kind: UnifiedKind::Context,
                         number: right.number.or(left.number),
@@ -509,12 +525,12 @@ pub(crate) fn unify(rows: &[DiffRow]) -> Vec<UnifiedRow> {
                     });
                 }
             }
-            (Some(left), None) => unified.push(UnifiedRow {
+            (Some(left), None) => removed.push(UnifiedRow {
                 kind: UnifiedKind::Removed,
                 number: left.number,
                 text: left.text.clone(),
             }),
-            (None, Some(right)) => unified.push(UnifiedRow {
+            (None, Some(right)) => added.push(UnifiedRow {
                 kind: UnifiedKind::Added,
                 number: right.number,
                 text: right.text.clone(),
@@ -522,6 +538,7 @@ pub(crate) fn unify(rows: &[DiffRow]) -> Vec<UnifiedRow> {
             (None, None) => {}
         }
     }
+    flush(&mut unified, &mut removed, &mut added);
     unified
 }
 
@@ -696,6 +713,40 @@ mod tests {
         assert_eq!(UnifiedKind::Context.mark(), ' ');
         assert_eq!(UnifiedKind::Removed.mark(), '-');
         assert_eq!(UnifiedKind::Added.mark(), '+');
+    }
+
+    #[test]
+    fn a_multiline_replacement_is_one_block_of_removals_then_additions() {
+        // A patch hunk draws the old block first and the new block after it.
+        // Interleaving them row by row is what made the unified view read as
+        // a jagged alternation through a multi-line edit.
+        let rows = vec![
+            DiffRow {
+                left: Some(cell_at(1, "old a", true)),
+                right: Some(cell_at(1, "new a", true)),
+            },
+            DiffRow {
+                left: Some(cell_at(2, "old b", true)),
+                right: Some(cell_at(2, "new b", true)),
+            },
+            DiffRow {
+                left: Some(cell_at(3, "same", false)),
+                right: Some(cell_at(3, "same", false)),
+            },
+        ];
+        let unified = unify(&rows);
+        let kinds: Vec<UnifiedKind> = unified.iter().map(|row| row.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                UnifiedKind::Removed,
+                UnifiedKind::Removed,
+                UnifiedKind::Added,
+                UnifiedKind::Added,
+                UnifiedKind::Context
+            ],
+            "the old block, then the new, then the context: {unified:?}"
+        );
     }
 
     #[test]

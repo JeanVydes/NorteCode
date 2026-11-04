@@ -76,6 +76,14 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The edit diff colours each panel by its own side. A split row carried one
+  ink for both panels, so the panel on the right — the addition — was painted
+  red with the removal it shared the row with. Each panel now carries its
+  own ink: what left on the left, what arrived on the right. The unified
+  view groups a multi-line replacement into one block of removals followed
+  by one block of additions, instead of interleaving a `-` line and a `+`
+  line row by row.
+
 - Opening a saved session from `/sessions` restores that session's model in the
   footer, and `resume` resolves a unique session-key prefix before choosing the
   saved model. The history already ran on its stored spec; the client had kept

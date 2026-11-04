@@ -20,7 +20,11 @@ use crate::style::Style;
 /// A row is text and an ink, and most tests ask about the text: spelling every
 /// assertion as `.iter().map(...)` would bury the thing under test.
 fn texts(entry: &crate::transcript::Entry) -> Vec<String> {
-    entry.lines.iter().map(|line| line.text.clone()).collect()
+    entry
+        .lines
+        .iter()
+        .map(crate::transcript::Line::text)
+        .collect()
 }
 
 fn renderer(pinned: &Arc<Pinned>) -> Renderer {
@@ -82,7 +86,7 @@ fn the_command_that_ran_is_shown_under_the_call() {
         })
         .expect("started event");
     let started = renderer.transcript.entries().last().expect("started entry");
-    assert_eq!(started.lines[0].text, "shell $ cargo test --workspace");
+    assert_eq!(started.lines[0].text(), "shell $ cargo test --workspace");
 
     renderer.tool_event(&ServerEventKind::ToolOutput {
         turn: 1,
@@ -116,7 +120,7 @@ fn the_command_that_ran_is_shown_under_the_call() {
         .iter()
         .find(|entry| entry.kind == crate::transcript::Kind::ToolOutput && !entry.boxed)
         .expect("ending entry");
-    assert!(ending.lines[0].text.contains("$ cargo test --workspace"));
+    assert!(ending.lines[0].text().contains("$ cargo test --workspace"));
 
     assert_eq!(
         Renderer::command_summary(Some(&serde_json::json!({
@@ -537,7 +541,7 @@ fn a_streamed_chunk_is_recorded_once() {
         .entries()
         .iter()
         .flat_map(|entry| entry.lines.iter())
-        .filter(|line| line.text.contains("only once"))
+        .filter(|line| line.text().contains("only once"))
         .count();
     assert_eq!(hits, 1, "the chunk is drawn once, not once per path");
 }
@@ -1364,8 +1368,8 @@ fn expanded_output_retains_a_bounded_tail_and_counts_evictions() {
     let entry = renderer.transcript.entries().last().expect("shell output");
     assert_eq!(entry.lines.len(), crate::transcript::MAX_ENTRY_LINES);
     assert_eq!(entry.dropped, 5);
-    assert_eq!(entry.lines[0].text, "line 5");
-    assert_eq!(entry.lines.last().expect("last line").text, "line 1004");
+    assert_eq!(entry.lines[0].text(), "line 5");
+    assert_eq!(entry.lines.last().expect("last line").text(), "line 1004");
 }
 
 #[test]
@@ -1545,6 +1549,47 @@ fn the_unified_diff_reads_as_a_patch() {
 }
 
 #[test]
+fn the_unified_diff_groups_a_multiline_replacement_into_one_hunk() {
+    // A multi-line replacement is one block of `-` lines followed by one
+    // block of `+` lines, as a patch draws it. Interleaving them row by row
+    // — `-` on one row, `+` on the next — reads as a jagged alternation
+    // through the block instead of the old block and the new one.
+    let arguments = serde_json::json!({
+        "path": "src/lib.rs",
+        "edits": [{"search": "a\nb\nc\n", "replace": "A\nB\nC\n"}]
+    });
+    let preview = edit_preview(Some(&arguments), Some("a\nb\nc\nd\n")).expect("preview");
+    let edit = &preview.boxes[0];
+    let lines = Renderer::unified_lines(Style::plain(), &preview.path, edit, 60);
+    let plain: Vec<String> = lines.iter().map(|(_, text)| text.clone()).collect();
+    let joined = plain.join("\n");
+    // The three removed lines come first, as a block.
+    let first = plain
+        .iter()
+        .position(|line| line.contains("- a"))
+        .expect("the first removed line");
+    assert!(
+        plain[first..].iter().take(3).all(|line| line.contains('-')),
+        "the old block reads as a block:\n{joined}"
+    );
+    // Then the three added lines, as a block.
+    let added = plain
+        .iter()
+        .position(|line| line.contains("+ A"))
+        .expect("the first added line");
+    assert!(
+        plain[added..].iter().take(3).all(|line| line.contains('+')),
+        "the new block reads as a block:\n{joined}"
+    );
+    // And the context that follows the block is after both.
+    let tail = plain
+        .iter()
+        .position(|line| line.contains('d'))
+        .expect("the context line");
+    assert!(tail > added + 2, "context trails the hunk:\n{joined}");
+}
+
+#[test]
 fn the_unified_diff_clips_to_the_width_it_was_given() {
     // A row wider than the terminal wraps and breaks the box, which is the one
     // thing a box is for. `width` is the box's own width: `edit_box_width`
@@ -1599,6 +1644,44 @@ fn the_split_view_still_draws_two_panels() {
         ),
         "both views name the same edit"
     );
+}
+
+#[test]
+fn the_split_view_paints_each_panel_in_its_own_ink() {
+    // One ink per row painted the right panel — the addition — with the
+    // removal it shared the row with: the whole split row read red. Each
+    // panel carries its own ink now: what left on the left, what arrived on
+    // the right, the context quiet.
+    let arguments = serde_json::json!({
+        "path": "src/lib.rs",
+        "edits": [{"search": "two\n", "replace": "TWO\n"}]
+    });
+    let preview = edit_preview(Some(&arguments), Some("one\ntwo\nthree\n")).expect("preview");
+    let edit = &preview.boxes[0];
+    let lines = Renderer::split_lines(edit, 60);
+    // The header row is one row in the dim ink of a label.
+    assert_eq!(lines[0][0].0, crate::transcript::Ink::Dim);
+    // The changed row is three parts: left, gutter, right — in the ink of
+    // what left, the gutter quiet, in the ink of what arrived.
+    let changed = lines
+        .iter()
+        .find(|row| row[0].1.contains("two"))
+        .expect("the changed row");
+    assert_eq!(changed.len(), 3, "left, gutter, right: {changed:?}");
+    assert_eq!(changed[0].0, crate::transcript::Ink::Red, "what left, left");
+    assert_eq!(changed[1].0, crate::transcript::Ink::Faint, "the gutter");
+    assert_eq!(
+        changed[2].0,
+        crate::transcript::Ink::Green,
+        "what arrived, right"
+    );
+    // A context row is quiet on both sides.
+    let context = lines
+        .iter()
+        .find(|row| row[0].1.contains("one"))
+        .expect("the context row");
+    assert_eq!(context[0].0, crate::transcript::Ink::Faint);
+    assert_eq!(context[2].0, crate::transcript::Ink::Faint);
 }
 
 #[test]
@@ -1782,7 +1865,7 @@ fn the_outcome_of_a_call_carries_its_own_ink() {
         renderer
             .event(&tool_finished("call-1", "read", is_error))
             .expect("finished");
-        renderer.transcript.entries()[0].lines[0].ink
+        renderer.transcript.entries()[0].lines[0].ink()
     };
     assert_eq!(ink_of(false), Some(crate::transcript::Ink::Green));
     assert_eq!(ink_of(true), Some(crate::transcript::Ink::Red));
@@ -1799,8 +1882,9 @@ fn a_call_that_is_still_out_is_grey_and_carries_no_outcome() {
         .event(&read_started("call-1", "README.md"))
         .expect("started");
     let entry = &renderer.transcript.entries()[0];
-    assert_eq!(entry.lines[0].ink, None, "no outcome yet");
-    let text = &entry.lines[0].text;
+    assert_eq!(entry.lines[0].ink(), None, "no outcome yet");
+    let text = entry.lines[0].text();
+    let text = &text;
     assert!(!text.contains('\u{2713}'), "no tick: {text:?}");
     assert!(!text.contains('\u{2717}'), "no cross: {text:?}");
     assert!(entry.started.is_some(), "and it is counting");

@@ -76,22 +76,40 @@ pub enum Ink {
 /// One row of the conversation.
 ///
 /// The text is what arrived and nothing else: no wrap, no escape sequence, no
-/// marker. Everything the view needs to decide how to draw it is in the ink.
+/// marker. Everything the view needs to decide how to draw it is in the parts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
-    /// The row's text, as it arrived.
-    pub text: String,
-    /// The ink to draw it in, when it is not the entry's own.
-    pub ink: Option<Ink>,
+    /// One run of text and the ink it is written in, in order.
+    ///
+    /// Most rows are one part. A split diff row is two: the panel on the left
+    /// in the ink of what left, the panel on the right in the ink of what
+    /// arrived — one ink per row would paint the addition red with the
+    /// removal it shares a row with.
+    pub parts: Vec<(Option<Ink>, String)>,
 }
 
 impl Line {
+    /// The row's text, as it arrived.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.parts.iter().map(|(_, text)| text.as_str()).collect()
+    }
+
+    /// The ink of a one-part row, when it has one.
+    #[must_use]
+    pub fn ink(&self) -> Option<Ink> {
+        if self.parts.len() == 1 {
+            self.parts[0].0
+        } else {
+            None
+        }
+    }
+
     /// A row in the entry's own ink.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            ink: None,
+            parts: vec![(None, text.into())],
         }
     }
 
@@ -99,8 +117,18 @@ impl Line {
     #[must_use]
     pub fn inked(ink: Ink, text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            ink: Some(ink),
+            parts: vec![(Some(ink), text.into())],
+        }
+    }
+
+    /// A row of runs, each in its own ink.
+    #[must_use]
+    pub fn inked_parts(parts: Vec<(Ink, String)>) -> Self {
+        Self {
+            parts: parts
+                .into_iter()
+                .map(|(ink, text)| (Some(ink), text))
+                .collect(),
         }
     }
 }
@@ -235,6 +263,21 @@ impl Entry {
         self.trim();
     }
 
+    /// Adds one line built from runs, each in its own ink, cutting it like any
+    /// other.
+    ///
+    /// One run per panel of a split diff row: the left in the ink of what
+    /// left, the right in the ink of what arrived. The bound cuts the whole
+    /// row, not a run, which is also what a single ink cuts.
+    pub fn push_inked_parts(&mut self, parts: Vec<(Ink, String)>) {
+        let parts: Vec<(Ink, String)> = parts
+            .into_iter()
+            .map(|(ink, text)| (ink, clip_line(&text)))
+            .collect();
+        self.lines.push(Line::inked_parts(parts));
+        self.trim();
+    }
+
     /// Adds text that may be several lines.
     pub fn push_text(&mut self, text: &str) {
         for line in text.split('\n') {
@@ -272,7 +315,7 @@ impl Entry {
 impl fmt::Display for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for line in &self.lines {
-            writeln!(f, "{}", line.text)?;
+            writeln!(f, "{}", line.text())?;
         }
         Ok(())
     }
@@ -337,11 +380,12 @@ impl Transcript {
     #[must_use]
     #[allow(dead_code)]
     pub fn plain_text<R: std::ops::RangeBounds<usize>>(&self, range: R) -> String {
-        let lines: Vec<&str> = self
+        let lines: Vec<String> = self
             .entries
             .iter()
-            .flat_map(|entry| entry.lines.iter().map(|line| line.text.as_str()))
+            .flat_map(|entry| entry.lines.iter().map(Line::text))
             .collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
         let start = match range.start_bound() {
             std::ops::Bound::Included(i) => *i,
             std::ops::Bound::Excluded(i) => i.saturating_add(1),
@@ -426,7 +470,11 @@ impl Transcript {
         if let Some(first) = parts.next() {
             let first = first.to_owned();
             match last.lines.last_mut() {
-                Some(line) => line.text.push_str(&clip_line(&first)),
+                Some(line) => {
+                    if let Some((_, text)) = line.parts.last_mut() {
+                        text.push_str(&clip_line(&first));
+                    }
+                }
                 None => last.push_line(first),
             }
         }
@@ -494,7 +542,7 @@ mod tests {
 
     /// The text of an entry's rows, which is what most of these are about.
     fn texts(entry: &Entry) -> Vec<String> {
-        entry.lines.iter().map(|line| line.text.clone()).collect()
+        entry.lines.iter().map(Line::text).collect()
     }
 
     #[test]
@@ -546,7 +594,7 @@ mod tests {
         // room than the line it belongs to.
         let mut entry = Entry::new(Kind::ToolOutput);
         entry.push_line("x".repeat(MAX_LINE_CHARS + 100));
-        let line = &entry.lines[0].text;
+        let line = entry.lines[0].text();
         assert_eq!(line.chars().count(), MAX_LINE_CHARS);
         assert!(line.ends_with('…'), "the cut is visible");
     }
@@ -562,7 +610,7 @@ mod tests {
         assert_eq!(entry.lines.len(), MAX_ENTRY_LINES);
         assert_eq!(entry.dropped, 10);
         assert_eq!(
-            entry.lines[0].text,
+            entry.lines[0].text(),
             format!("line {}", 10),
             "the oldest went first"
         );
@@ -574,7 +622,7 @@ mod tests {
         // know the column: it is written as spaces so the count is honest.
         let mut entry = Entry::new(Kind::Answer);
         entry.push_line("a\tb");
-        assert_eq!(entry.lines[0].text, "a    b");
+        assert_eq!(entry.lines[0].text(), "a    b");
     }
 
     #[test]
@@ -633,10 +681,14 @@ mod tests {
         entry.push_inked(Ink::Red, "- old line");
         entry.push_line("  context");
         entry.push_inked(Ink::Green, "+ new line");
-        assert_eq!(entry.lines[0].ink, Some(Ink::Red));
-        assert_eq!(entry.lines[1].ink, None, "plain rows keep the entry's ink");
-        assert_eq!(entry.lines[2].ink, Some(Ink::Green));
-        assert_eq!(entry.lines[2].text, "+ new line");
+        assert_eq!(entry.lines[0].ink(), Some(Ink::Red));
+        assert_eq!(
+            entry.lines[1].ink(),
+            None,
+            "plain rows keep the entry's ink"
+        );
+        assert_eq!(entry.lines[2].ink(), Some(Ink::Green));
+        assert_eq!(entry.lines[2].text(), "+ new line");
     }
 
     #[test]
@@ -649,9 +701,9 @@ mod tests {
         entry.push_inked(Ink::Green, "+ new");
         for line in &entry.lines {
             assert!(
-                !line.text.contains('\u{1b}'),
+                !line.text().contains('\u{1b}'),
                 "a row carries ink, never an escape: {:?}",
-                line.text
+                line.text()
             );
         }
     }
