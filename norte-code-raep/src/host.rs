@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::NorteCodeExtension;
 use crate::commands::AgentCommand;
-use crate::payloads::canonical_event_payload;
+use crate::payloads::{canonical_event_payload, standard_event_payload};
 
 /// Host configuration independent of the HTTP listener.
 #[derive(Clone, Debug)]
@@ -1438,12 +1438,15 @@ impl NorteCodeRaepHost {
             .session
             .as_ref()
             .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
-        let payload = canonical_event_payload(&event.kind);
+        let turn_id = turn_id_for_event(&event.kind);
+        let payload = standard_event_payload(&event.kind)
+            .unwrap_or_else(|| canonical_event_payload(&event.kind));
         self.emit_with_extension(
             &session_id,
             kind,
             payload,
             Some(json!({"norte_code": serde_json::to_value(&event)?})),
+            turn_id,
         )
         .await
     }
@@ -1454,7 +1457,7 @@ impl NorteCodeRaepHost {
         kind: StandardFrameType,
         payload: Value,
     ) -> Result<Envelope<Value>, HostError> {
-        self.emit_with_extension(session_id, standard(kind), payload, None)
+        self.emit_with_extension(session_id, standard(kind), payload, None, None)
             .await
     }
 
@@ -1464,10 +1467,17 @@ impl NorteCodeRaepHost {
         kind: FrameType,
         payload: Value,
         ext: Option<Value>,
+        turn_id: Option<u64>,
     ) -> Result<Envelope<Value>, HostError> {
         let mut frame = Envelope::new(kind, payload, now_millis());
         frame.session_id = session_id.to_owned();
         frame.ext = ext;
+        if let Some(turn) = turn_id {
+            frame.turn_id = Some(
+                raep_types::TurnId::new(turn.to_string())
+                    .map_err(|error| HostError::InvalidFrame(error.to_string()))?,
+            );
+        }
         let mut state = self.state.lock().await;
         let sequence = state.sequences.entry(session_id.to_owned()).or_insert(0);
         *sequence = sequence.saturating_add(1);
@@ -1493,6 +1503,22 @@ impl NorteCodeRaepHost {
                 "session is not attached".to_owned(),
             ))
         }
+    }
+}
+
+fn turn_id_for_event(kind: &ServerEventKind) -> Option<u64> {
+    match kind {
+        ServerEventKind::TurnStarted { turn }
+        | ServerEventKind::Delta { turn, .. }
+        | ServerEventKind::ToolStarted { turn, .. }
+        | ServerEventKind::ToolOutput { turn, .. }
+        | ServerEventKind::ToolFinished { turn, .. }
+        | ServerEventKind::RequestReconstructed { turn, .. }
+        | ServerEventKind::TurnFinished { turn, .. }
+        | ServerEventKind::QuestionAsked { turn, .. }
+        | ServerEventKind::RetryScheduled { turn, .. }
+        | ServerEventKind::RetryStarted { turn, .. } => Some(*turn),
+        _ => None,
     }
 }
 
