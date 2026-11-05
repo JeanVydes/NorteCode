@@ -1,6 +1,6 @@
 //! Canonical RAEP payloads emitted by the `NorteCode` adapter.
 
-use norte_code_protocol::ServerEventKind;
+use norte_code_protocol::{Delta, ServerEventKind};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -317,6 +317,81 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
     serde_json::to_value(payload).expect("canonical event is serializable")
 }
 
+/// Builds the standard RAEP payload for events that have a faithful standard
+/// representation. Returns `None` for NorteCode-specific events; those keep
+/// the adapter's canonical payload and are sent as extensions.
+pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
+    match kind {
+        ServerEventKind::TurnStarted { .. } => Some(json!({"state": "QUEUED"})),
+        ServerEventKind::Delta { delta, .. } => {
+            let (text, index, channel) = match delta {
+                Delta::Text { index, text } | Delta::Refusal { index, text } => {
+                    (text.clone(), *index, "text")
+                }
+                Delta::Reasoning { index, text } => (text.clone(), *index, "reasoning"),
+                Delta::ToolArguments {
+                    index, arguments, ..
+                } => (arguments.clone(), *index, "text"),
+                Delta::Media { index, .. } => (String::new(), *index, "text"),
+            };
+            Some(json!({"delta": text, "index": index, "channel": channel}))
+        }
+        ServerEventKind::ToolStarted {
+            call_id,
+            tool,
+            arguments,
+            ..
+        } => {
+            let arguments = arguments
+                .as_ref()
+                .and_then(|arguments| arguments.as_object())
+                .cloned()
+                .map_or_else(|| json!({}), Value::Object);
+            Some(json!({
+                "tool_call_id": call_id,
+                "tool_name": tool,
+                "arguments": arguments,
+                "requires_approval": false,
+                "executor": "server",
+                "attempt": 1
+            }))
+        }
+        ServerEventKind::ToolFinished {
+            call_id,
+            is_error,
+            detached,
+            output,
+            error,
+            truncated,
+            duration_ms,
+            ..
+        } => {
+            let status = if *detached {
+                "CANCELLED"
+            } else if *is_error {
+                "ERROR"
+            } else {
+                "OK"
+            };
+            let summary = error.clone().or_else(|| output.clone()).unwrap_or_default();
+            Some(json!({
+                "tool_call_id": call_id,
+                "status": status,
+                "duration_ms": duration_ms,
+                "result_summary": summary,
+                "result_truncated": truncated
+            }))
+        }
+        ServerEventKind::TurnFinished { .. } => {
+            Some(json!({"state": "COMPLETED", "stop_reason": "end_turn"}))
+        }
+        ServerEventKind::TurnStopped { .. } => {
+            Some(json!({"state": "CANCELLED", "stop_reason": "cancelled"}))
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum CanonicalEvent<'a> {
@@ -522,5 +597,75 @@ mod tests {
         assert_eq!(payload["call_id"], "call-1");
         assert_eq!(payload["stream"], "stdout");
         assert_eq!(payload["last"], true);
+    }
+
+    #[test]
+    fn standard_payloads_match_the_raep_schemas() {
+        let delta = standard_event_payload(&ServerEventKind::Delta {
+            turn: 2,
+            delta: Delta::Text {
+                index: 3,
+                text: "hello".to_owned(),
+            },
+        })
+        .expect("standard token delta");
+        assert_eq!(
+            delta,
+            json!({"delta": "hello", "index": 3, "channel": "text"})
+        );
+
+        let finished = standard_event_payload(&ServerEventKind::TurnFinished {
+            turn: 2,
+            phase: norte_code_protocol::Phase::Idle,
+            committed: true,
+        })
+        .expect("standard turn state");
+        assert_eq!(
+            finished,
+            json!({"state": "COMPLETED", "stop_reason": "end_turn"})
+        );
+
+        let started = standard_event_payload(&ServerEventKind::ToolStarted {
+            turn: 2,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            arguments: Some(json!({"command": "ls"})),
+            source: None,
+        })
+        .expect("standard tool start");
+        assert_eq!(
+            started,
+            json!({
+                "tool_call_id": "call-1",
+                "tool_name": "shell",
+                "arguments": {"command": "ls"},
+                "requires_approval": false,
+                "executor": "server",
+                "attempt": 1
+            })
+        );
+
+        let tool_finished = standard_event_payload(&ServerEventKind::ToolFinished {
+            turn: 2,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            is_error: false,
+            error: None,
+            output: Some("done".to_owned()),
+            truncated: false,
+            detached: false,
+            duration_ms: 12,
+        })
+        .expect("standard tool finish");
+        assert_eq!(
+            tool_finished,
+            json!({
+                "tool_call_id": "call-1",
+                "status": "OK",
+                "duration_ms": 12,
+                "result_summary": "done",
+                "result_truncated": false
+            })
+        );
     }
 }
