@@ -1540,77 +1540,36 @@ fn turn_id_for_event(kind: &ServerEventKind) -> Option<u64> {
 }
 
 fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
-    if matches!(
-        kind,
-        ServerEventKind::QuestionAsked { .. }
-            | ServerEventKind::PluginList { .. }
-            | ServerEventKind::PluginChanged { .. }
-    ) {
-        if matches!(kind, ServerEventKind::QuestionAsked { .. }) {
-            FrameType::Extension("norte_code.question_asked".to_owned())
-        } else {
-            FrameType::Extension(NorteCodeExtension::Plugin.as_str().to_owned())
-        }
-    } else if matches!(kind, ServerEventKind::Telemetry { .. }) {
-        FrameType::Extension(NorteCodeExtension::Telemetry.as_str().to_owned())
-    } else if matches!(kind, ServerEventKind::ToolList { .. }) {
-        FrameType::Extension(NorteCodeExtension::ToolList.as_str().to_owned())
-    } else {
-        standard(standard_frame_type_for_event(kind))
+    match kind {
+        ServerEventKind::Delta { .. } => standard(StandardFrameType::TokenDelta),
+        ServerEventKind::ToolStarted { .. } => standard(StandardFrameType::ToolCallStarted),
+        ServerEventKind::ToolOutput { .. } => standard(StandardFrameType::ToolOutputDelta),
+        ServerEventKind::ToolFinished { .. } => standard(StandardFrameType::ToolCallFinished),
+        ServerEventKind::TurnStarted { .. }
+        | ServerEventKind::TurnFinished { .. }
+        | ServerEventKind::TurnStopped { .. } => standard(StandardFrameType::TurnStateChanged),
+        ServerEventKind::JobList { .. } => standard(StandardFrameType::JobListResult),
+        ServerEventKind::MessageReplayed { .. } => standard(StandardFrameType::HistoryPage),
+        ServerEventKind::Error { .. } => standard(StandardFrameType::Error),
+        other => FrameType::Extension(extension_name_for_event(other)),
     }
 }
 
-fn standard_frame_type_for_event(kind: &ServerEventKind) -> StandardFrameType {
-    match kind {
-        ServerEventKind::Delta { .. } => StandardFrameType::TokenDelta,
-        ServerEventKind::ToolStarted { .. } => StandardFrameType::ToolCallStarted,
-        ServerEventKind::ToolOutput { .. } => StandardFrameType::JobProgressDelta,
-        ServerEventKind::ToolFinished { .. } => StandardFrameType::ToolCallFinished,
-        ServerEventKind::QuestionAsked { .. } => StandardFrameType::ToolApprovalResponse,
-        ServerEventKind::BudgetWarning { .. } => StandardFrameType::BudgetWarning,
-        ServerEventKind::CompactionStarted { .. } => StandardFrameType::ContextUpdated,
-        ServerEventKind::CompactionFinished { .. } => StandardFrameType::HistoryCompacted,
-        ServerEventKind::SessionCreated { .. }
-        | ServerEventKind::SessionList { .. }
-        | ServerEventKind::SessionDeleted
-        | ServerEventKind::SessionRenamed { .. }
-        | ServerEventKind::SessionForked { .. }
-        | ServerEventKind::SessionSwitched
-        | ServerEventKind::SessionStats { .. }
-        | ServerEventKind::Committed { .. }
-        | ServerEventKind::SessionTodos { .. } => StandardFrameType::SessionUpdated,
-        ServerEventKind::TurnStarted { .. }
-        | ServerEventKind::TurnFinished { .. }
-        | ServerEventKind::TurnStopped { .. } => StandardFrameType::TurnStateChanged,
-        ServerEventKind::Error { .. } => StandardFrameType::Error,
-        ServerEventKind::JobList { .. } | ServerEventKind::JobsStopped { .. } => {
-            StandardFrameType::JobProgressDelta
-        }
-        ServerEventKind::SteerApplied { .. } => StandardFrameType::UserInputAccepted,
-        ServerEventKind::ModelChanged { .. }
-        | ServerEventKind::ModelQueued { .. }
-        | ServerEventKind::ReasoningDowngraded { .. }
-        | ServerEventKind::ModelList { .. }
-        | ServerEventKind::CatalogUpdated { .. }
-        | ServerEventKind::SkillList { .. }
-        | ServerEventKind::SkillsUpdated { .. }
-        | ServerEventKind::PluginList { .. }
-        | ServerEventKind::PluginChanged { .. }
-        | ServerEventKind::Telemetry { .. }
-        | ServerEventKind::ToolList { .. }
-        | ServerEventKind::McpList { .. } => StandardFrameType::AgentChanged,
-        ServerEventKind::QuestionAnswered { .. } => StandardFrameType::ApprovalResolved,
-        ServerEventKind::RetryScheduled { .. } | ServerEventKind::RetryStarted { .. } => {
-            StandardFrameType::ProviderRetry
-        }
-        ServerEventKind::RequestReconstructed { .. }
-        | ServerEventKind::CostUpdated { .. }
-        | ServerEventKind::CostNotReported { .. } => StandardFrameType::OutputPartFinished,
-        ServerEventKind::MessageReplayed { .. } => StandardFrameType::HistoryGet,
-        ServerEventKind::BudgetExceeded { .. } | ServerEventKind::BudgetChanged { .. } => {
-            StandardFrameType::BudgetWarning
-        }
-    }
+/// Names a `NorteCode` event that has no faithful standard frame.
+///
+/// Extensions carry the adapter's own payload, so a standard frame is never
+/// sent with a shape the standard does not define.
+fn extension_name_for_event(kind: &ServerEventKind) -> String {
+    let tag = serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("event")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "event".to_owned());
+    format!("norte_code.{tag}")
 }
 
 fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {

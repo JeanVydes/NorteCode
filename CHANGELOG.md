@@ -8,6 +8,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Events without a faithful standard frame are now sent as namespaced extensions instead of being forced into unrelated standard frames, so no standard frame carries a payload the spec does not define. Tool output now uses `TOOL_OUTPUT_DELTA`, a job listing uses `JOB_LIST_RESULT`, and replayed history uses `HISTORY_PAGE`.
 - The remote client now detects a gap in RAEP sequence numbers, stops applying the stream and surfaces an error naming the missing frame, instead of silently splicing a discontinuous transcript. It also acknowledges the last applied sequence with `ACK`.
 - The SSE event stream now opens with `HELLO`, honors the standard `Last-Event-Id` header (with `resume_from_seq` kept as a fallback), and reports a dropped backlog as an `ERROR` with code `REPLAY_TRUNCATED` instead of silently skipping frames.
 - Attaching a session now returns `SESSION_ATTACHED` and `SESSION_STATE` with the schema-required `last_seq`, `replay` and `history_summary` fields, and no longer replays the whole transcript on a first attach.
