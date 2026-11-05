@@ -90,7 +90,9 @@ The server translates that frame to a NorteCode `SendMessage` request. The
 result is streamed as RAEP events, including text deltas, tool calls,
 approvals, questions, jobs, usage and completion. To recover events after a
 disconnect, the client attaches with `resume_from_seq`; it does not resend the
-conversation history. The `norte_code.command` extension is available when a
+conversation history. The server binary persists the RAEP frame journal beside
+`NORTE_CODE_DATABASE` with the `.raep.jsonl` suffix, so sequence replay also
+survives a server restart. The `norte_code.command` extension is available when a
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
 
