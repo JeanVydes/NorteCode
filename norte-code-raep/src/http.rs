@@ -78,15 +78,19 @@ async fn upload_artifact(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Some(response) = unauthorized(&host, &headers) {
-        return response;
-    }
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
     let mime_type = headers
         .get("content-type")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream");
-    match host.put_artifact(mime_type, &body).await {
+    match host
+        .put_artifact_as(mime_type, &body, Some(&principal))
+        .await
+    {
         Ok(reference) => Json(json!({
             "id": reference.id,
             "mime_type": reference.mime_type,
@@ -109,10 +113,11 @@ async fn download_artifact(
     headers: HeaderMap,
     Path(artifact_id): Path<String>,
 ) -> Response {
-    if let Some(response) = unauthorized(&host, &headers) {
-        return response;
-    }
-    match host.get_artifact(&artifact_id).await {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.get_artifact_as(&artifact_id, Some(&principal)).await {
         Ok(bytes) => (
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
             bytes,
@@ -134,15 +139,16 @@ async fn websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if let Some(response) = unauthorized(&host, &headers) {
-        return response;
-    }
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let Some(permit) = host.try_connection() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     upgrade
         .protocols(["raep.v1"])
-        .on_upgrade(move |socket| websocket_session(host, socket, permit))
+        .on_upgrade(move |socket| websocket_session(host, socket, permit, principal))
         .into_response()
 }
 
@@ -151,6 +157,7 @@ async fn websocket_session(
     host: Arc<NorteCodeRaepHost>,
     mut socket: WebSocket,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    principal: String,
 ) {
     if send_frame(&mut socket, host.hello()).await.is_err() {
         return;
@@ -189,7 +196,10 @@ async fn websocket_session(
                 };
                 let session_hint = frame.session_id.clone();
                 let mut live = host.subscribe();
-                let future = tokio::time::timeout(host.command_timeout(), host.handle(frame));
+                let future = tokio::time::timeout(
+                    host.command_timeout(),
+                    host.handle_as(frame, Some(&principal)),
+                );
                 tokio::pin!(future);
                 let mut emitted = std::collections::HashSet::new();
                 loop {
@@ -271,9 +281,10 @@ async fn events(
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if let Some(response) = unauthorized(&host, &headers) {
-        return response;
-    }
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let Some(permit) = host.try_connection() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -299,7 +310,7 @@ async fn events(
             0,
         )
     };
-    let initial = match host.handle(attach).await {
+    let initial = match host.handle_as(attach, Some(&principal)).await {
         Ok(frames) => frames,
         Err(error) => vec![error_frame(&error)],
     };
@@ -351,9 +362,10 @@ async fn commands(
     Path(session_id): Path<String>,
     Json(mut frame): Json<Envelope<Value>>,
 ) -> Response {
-    if let Some(response) = unauthorized(&host, &headers) {
-        return response;
-    }
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     if frame.session_id.is_empty() {
         frame.session_id = session_id;
     } else if frame.session_id != session_id {
@@ -366,7 +378,12 @@ async fn commands(
         )
             .into_response();
     }
-    match tokio::time::timeout(host.command_timeout(), host.handle(frame)).await {
+    match tokio::time::timeout(
+        host.command_timeout(),
+        host.handle_as(frame, Some(&principal)),
+    )
+    .await
+    {
         Ok(Ok(events)) => (
             StatusCode::ACCEPTED,
             Json(json!({"accepted": true, "events": events})),
@@ -418,17 +435,18 @@ fn error_frame(error: &HostError) -> Envelope<Value> {
     )
 }
 
-fn unauthorized(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Option<Response> {
-    let expected = host.auth_token()?;
+#[allow(clippy::result_large_err)]
+fn principal(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Result<String, Response> {
+    if !host.authentication_enabled() {
+        return Ok(host.anonymous_principal().to_owned());
+    }
     let supplied = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| value == expected);
-    if supplied {
-        None
-    } else {
-        Some(
+        .and_then(|value| value.strip_prefix("Bearer "));
+    supplied
+        .and_then(|token| host.authenticate_bearer(token))
+        .ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
@@ -436,9 +454,8 @@ fn unauthorized(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Option<Respons
                     "error": {"code": "UNAUTHENTICATED", "message": "valid bearer token required"}
                 })),
             )
-                .into_response(),
-        )
-    }
+                .into_response()
+        })
 }
 
 #[cfg(test)]

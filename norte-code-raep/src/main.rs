@@ -1,6 +1,6 @@
 //! Norte Code's server process.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use norte_code_agent::{DEFAULT_SYSTEM_PROMPT, Service, VendorModels};
 use norte_code_protocol::{
@@ -38,8 +38,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     );
     service.install_subagent_runner();
+    let auth_principals = std::env::var("NORTE_CODE_AUTH_USERS")
+        .ok()
+        .map(|users| {
+            users
+                .split(',')
+                .filter_map(|entry| {
+                    let (token, principal) = entry.split_once('=')?;
+                    if token.is_empty() || principal.is_empty() {
+                        None
+                    } else {
+                        Some((token.to_owned(), principal.to_owned()))
+                    }
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
     let host_config = HostConfig {
         auth_token: std::env::var("NORTE_CODE_AUTH_TOKEN").ok(),
+        auth_principals,
         ..HostConfig::default()
     };
     let replay_store = Arc::new(SqliteReplayStore::open(
