@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use raep_types::{Envelope, FrameType, SessionAttach, StandardFrameType};
 use serde_json::{Value, json};
 use std::{convert::Infallible, sync::Arc};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tower_http::{
     limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer, trace::TraceLayer,
 };
@@ -329,6 +329,11 @@ async fn events(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let receiver = host.subscribe();
+    let resume_from_seq = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(query.resume_from_seq);
     let attach = Envelope {
         kind: FrameType::Standard(StandardFrameType::SessionAttach),
         payload: serde_json::to_value(SessionAttach {
@@ -337,7 +342,7 @@ async fn events(
             create_if_missing: Some(false),
             mode: None,
             takeover: None,
-            resume_from_seq: query.resume_from_seq,
+            resume_from_seq,
             capabilities: None,
             client_info: None,
             options: None,
@@ -350,10 +355,11 @@ async fn events(
             0,
         )
     };
-    let initial = match host.handle_as(attach, Some(&principal)).await {
+    let mut initial = vec![host.hello()];
+    initial.extend(match host.handle_as(attach, Some(&principal)).await {
         Ok(frames) => frames,
         Err(error) => vec![error_frame(&error)],
-    };
+    });
     let seen = Arc::new(std::sync::Mutex::new(
         initial
             .iter()
@@ -379,7 +385,25 @@ async fn events(
                 {
                     Some(Ok::<Event, Infallible>(sse_event(frame)))
                 }
-                _ => None,
+                Ok(_) => None,
+                Err(BroadcastStreamRecvError::Lagged(lost)) => {
+                    let mut frame = Envelope::new(
+                        FrameType::Standard(StandardFrameType::Error),
+                        json!({
+                            "code": "REPLAY_TRUNCATED",
+                            "message": format!(
+                                "the event stream fell behind and dropped {lost} frames; reconnect from the last sequence number"
+                            ),
+                            "retryable": true,
+                            "details": {"lost": lost}
+                        }),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
+                    );
+                    frame.session_id = session_id;
+                    Some(Ok::<Event, Infallible>(sse_event(frame)))
+                }
             }
         }
     });
@@ -673,40 +697,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_stream_accepts_resume_from_seq() {
+    async fn events_stream_starts_with_hello_and_reads_last_event_id() {
         let app = router(test_host(None));
-        let request = ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::CreateSession {
-                title: Some("resume harness".to_owned()),
-            },
-        };
-        let frame = Envelope::new(
-            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
-            serde_json::to_value(request).expect("request"),
-            1,
-        );
+        let session = create_session(&app).await;
         let response = app
-            .clone()
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions/unused/commands")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
+                    .method("GET")
+                    .uri(format!("/raep/v1/sessions/{session}/events"))
+                    .header("last-event-id", "0")
+                    .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut text = String::new();
+        for _ in 0..10 {
+            let chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                futures_util::StreamExt::next(&mut body),
+            )
             .await
-            .expect("body");
-        let body: Value = serde_json::from_slice(&body).expect("json");
-        let session = body["events"][0]["session_id"]
-            .as_str()
-            .expect("session id")
-            .to_owned();
+            .expect("frame timed out")
+            .expect("body ended early")
+            .expect("body error");
+            text.push_str(&String::from_utf8_lossy(&chunk));
+            if text.contains("event: HELLO") && text.contains("event: SESSION_ATTACHED") {
+                break;
+            }
+        }
+        assert!(
+            text.contains("event: HELLO"),
+            "stream must open with HELLO: {text}"
+        );
+        assert!(
+            text.contains("event: SESSION_ATTACHED"),
+            "stream must attach after HELLO: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn events_stream_accepts_resume_from_seq() {
+        let app = router(test_host(None));
+        let session = create_session(&app).await;
 
         // A known cursor is accepted and the stream opens; reading the body
         // is not needed to prove the query was understood.
@@ -738,5 +773,40 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn create_session(app: &Router) -> String {
+        let request = ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::CreateSession {
+                title: Some("event harness".to_owned()),
+            },
+        };
+        let frame = Envelope::new(
+            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
+            serde_json::to_value(request).expect("request"),
+            1,
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions/unused/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&body).expect("json");
+        body["events"][0]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_owned()
     }
 }
