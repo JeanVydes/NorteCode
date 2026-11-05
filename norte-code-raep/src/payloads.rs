@@ -320,6 +320,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
 /// Builds the standard RAEP payload for events that have a faithful standard
 /// representation. Returns `None` for NorteCode-specific events; those keep
 /// the adapter's canonical payload and are sent as extensions.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
     match kind {
         ServerEventKind::TurnStarted { .. } => Some(json!({"state": "QUEUED"})),
@@ -382,12 +383,67 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 "result_truncated": truncated
             }))
         }
+        ServerEventKind::ToolOutput {
+            call_id,
+            tool,
+            stream,
+            text,
+            ..
+        } => Some(json!({
+            "tool_call_id": call_id,
+            "tool_name": tool,
+            "stream": stream,
+            "delta": text,
+            "index": 0
+        })),
         ServerEventKind::TurnFinished { .. } => {
             Some(json!({"state": "COMPLETED", "stop_reason": "end_turn"}))
         }
         ServerEventKind::TurnStopped { .. } => {
             Some(json!({"state": "CANCELLED", "stop_reason": "cancelled"}))
         }
+        ServerEventKind::JobList { jobs } => {
+            let jobs = jobs
+                .iter()
+                .map(|job| {
+                    let status = match job.state {
+                        norte_code_protocol::JobState::Running => "RUNNING",
+                        norte_code_protocol::JobState::Finished => "COMPLETED",
+                        norte_code_protocol::JobState::Cancelled => "KILLED",
+                    };
+                    let command = if job.script.is_empty() {
+                        job.label.clone()
+                    } else {
+                        job.script.clone()
+                    };
+                    json!({
+                        "job_id": job.id,
+                        "command": command,
+                        "status": status
+                    })
+                })
+                .collect::<Vec<_>>();
+            Some(json!({ "jobs": jobs }))
+        }
+        ServerEventKind::MessageReplayed { role, text, .. } => {
+            let role = match role {
+                norte_code_protocol::MessageRole::Tool => "tool",
+                norte_code_protocol::MessageRole::System
+                | norte_code_protocol::MessageRole::Developer
+                | norte_code_protocol::MessageRole::Unknown => "system_event",
+                norte_code_protocol::MessageRole::User => "user",
+                norte_code_protocol::MessageRole::Assistant => "assistant",
+            };
+            Some(json!({
+                "items": [{"role": role, "content": text}],
+                "has_more": false
+            }))
+        }
+        ServerEventKind::Error { code, message } => Some(json!({
+            "code": serde_json::to_value(code).unwrap_or_else(|_| json!("INTERNAL")),
+            "message": message,
+            "retryable": false
+        })),
         _ => None,
     }
 }
@@ -601,6 +657,74 @@ mod tests {
 
     #[test]
     fn standard_payloads_match_the_raep_schemas() {
+        let tool_output = standard_event_payload(&ServerEventKind::ToolOutput {
+            turn: 2,
+            call_id: "call-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: OutputStream::Stdout,
+            text: "hello".to_owned(),
+            last: false,
+        })
+        .expect("standard tool output");
+        assert_eq!(
+            tool_output,
+            json!({
+                "tool_call_id": "call-1",
+                "tool_name": "shell",
+                "stream": "stdout",
+                "delta": "hello",
+                "index": 0
+            })
+        );
+
+        let history = standard_event_payload(&ServerEventKind::MessageReplayed {
+            index: 0,
+            role: norte_code_protocol::MessageRole::User,
+            kind: norte_code_protocol::ReplayedKind::Text,
+            text: "hi".to_owned(),
+        })
+        .expect("standard history page");
+        assert_eq!(
+            history,
+            json!({
+                "items": [{"role": "user", "content": "hi"}],
+                "has_more": false
+            })
+        );
+
+        let error = standard_event_payload(&ServerEventKind::Error {
+            code: norte_code_protocol::ErrorCode::Internal,
+            message: "boom".to_owned(),
+        })
+        .expect("standard error");
+        assert_eq!(error["message"], "boom");
+        assert_eq!(error["retryable"], false);
+        assert!(error["code"].is_string());
+
+        let jobs = standard_event_payload(&ServerEventKind::JobList {
+            jobs: vec![norte_code_protocol::JobInfo {
+                id: "job-1".to_owned(),
+                label: "sleep 1".to_owned(),
+                script: String::new(),
+                state: norte_code_protocol::JobState::Running,
+                exit_code: None,
+                timed_out: false,
+                elapsed_ms: 10,
+                output: String::new(),
+                dropped: false,
+            }],
+        })
+        .expect("standard job list");
+        assert_eq!(
+            jobs,
+            json!({
+                "jobs": [{"job_id": "job-1", "command": "sleep 1", "status": "RUNNING"}]
+            })
+        );
+    }
+
+    #[test]
+    fn standard_token_and_tool_payloads_match_the_raep_schemas() {
         let delta = standard_event_payload(&ServerEventKind::Delta {
             turn: 2,
             delta: Delta::Text {
