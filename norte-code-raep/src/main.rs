@@ -9,7 +9,9 @@ use std::{
 use norte_code_agent::{DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, VendorModels};
 use norte_code_plugin_host::load_plugins;
 use norte_code_protocol::{
-    catalog::{Catalog, Models, Providers, ensure_catalog_files, load_catalog_files},
+    catalog::{
+        Catalog, CatalogError, Models, Providers, ensure_catalog_files, load_catalog_files,
+    },
     config::{
         Agent, ServiceConfig, ensure_user_service_config, project_config_path, user_config_path,
     },
@@ -100,6 +102,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 models: offered.models.clone(),
             },
         )?,
+        Err(CatalogError::NoProviders { .. } | CatalogError::NoModels { .. })
+            if offered.providers.is_empty() && offered.models.is_empty() =>
+        {
+            eprintln!("catalogue is empty; install a catalogue plugin before starting a session");
+            Catalog::default()
+        }
         Err(error) => return Err(error.into()),
     };
     for skipped in catalog.extend(offered.providers.clone(), offered.models.clone()) {

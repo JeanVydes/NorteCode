@@ -7,10 +7,10 @@ banner line, or providers and models in the catalogue. The
 ready-made example: it offers a catalogue so you do not write
 `providers.json` and `models.json` by hand.
 
-## Install one
+## Install the OpenRouter catalogue
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
 ```
 
 For a workspace with several plugin packages, `--all` installs every one,

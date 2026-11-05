@@ -42,34 +42,33 @@ The smallest useful server file is:
 
 ```json
 {
-  "version": 1,
-  "default_provider": "openrouter",
-  "default_model": "anthropic/claude-sonnet-4"
+  "version": 1
 }
 ```
 
-Then export the key:
+Install the recommended OpenRouter catalogue:
+
+```sh
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
+```
+
+Then export the key and check the server catalogue:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-```
-
-Check the server catalogue knows the model:
-
-```sh
 norte-code models --provider openrouter --tools
 ```
 
 The catalogue is two files you own beside the config — `providers.json` (who
 serves models) and `models.json` (the models). Nothing is fetched or bundled:
-if a file is missing it is written empty and the error names it.
+the bundled files are empty and a missing file is also created empty.
 
-**Not maintaining those files?** Install the
-[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead — it
-offers a ready-made catalogue as a plugin, no files to write:
+**Recommended for OpenRouter:** install its catalogue from the trusted
+[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead — no
+catalogue files to maintain:
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package openrouter
 ```
 
 The server loads it before the catalogue is read, so its providers and models

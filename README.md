@@ -37,15 +37,16 @@ A few things worth knowing:
 ## Providers and models
 
 The server reads two files beside its configuration — `providers.json` and
-`models.json`. Nothing is fetched or bundled. Keys come from the environment
-or a private `secrets.json` (mode 0600); the stateless CLI never reads them.
+`models.json`. They are empty by default: nothing is fetched or bundled. Keys
+come from the environment or a private `secrets.json` (mode 0600); the
+stateless CLI never reads them.
 
-Prefer not to maintain the files? The
-[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) offers a
-ready-made catalogue as a plugin:
+Install the OpenRouter catalogue through the trusted
+[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead of
+maintaining those files:
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
 ```
 
 ## RAEP server
