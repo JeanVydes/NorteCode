@@ -12,7 +12,7 @@ mod host;
 mod http;
 
 pub use host::{
-    ArtifactRef, ArtifactStore, FileArtifactStore, FileReplayStore, HostConfig, HostError,
+    ArtifactRef, ArtifactStore, BlobArtifactStore, FileReplayStore, HostConfig, HostError,
     NorteCodeRaepHost, ReplayStore,
 };
 pub use http::router;

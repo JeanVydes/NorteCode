@@ -98,71 +98,41 @@ pub struct ArtifactRef {
 pub trait ArtifactStore: Send + Sync {
     /// Stores bytes and returns their opaque reference.
     async fn put(&self, mime_type: &str, bytes: &[u8]) -> Result<ArtifactRef, HostError>;
-
-    /// Resolves an opaque reference to a host-local path.
-    async fn path(&self, id: &str) -> Result<PathBuf, HostError>;
 }
 
-/// Filesystem-backed artifact storage for the RAEP server.
-pub struct FileArtifactStore {
-    root: PathBuf,
+/// Blob-backed artifact storage for the RAEP server.
+pub struct BlobArtifactStore {
+    blobs: Arc<dyn norte::BlobStore>,
 }
 
-impl FileArtifactStore {
-    /// Opens an artifact directory, creating it when needed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be created.
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self, HostError> {
-        let root = root.into();
-        std::fs::create_dir_all(&root).map_err(|error| HostError::Artifact(error.to_string()))?;
-        Ok(Self { root })
-    }
-
-    fn file_path(&self, id: &str) -> Result<PathBuf, HostError> {
-        if id.is_empty()
-            || id.contains('/')
-            || id.contains('\\')
-            || id.contains("..")
-            || id.chars().any(char::is_control)
-        {
-            return Err(HostError::Artifact("invalid artifact id".to_owned()));
-        }
-        Ok(self.root.join(id))
+impl BlobArtifactStore {
+    /// Creates an artifact adapter over Norte's content-addressed blob store.
+    #[must_use]
+    pub fn new(blobs: Arc<dyn norte::BlobStore>) -> Self {
+        Self { blobs }
     }
 }
 
 #[async_trait]
-impl ArtifactStore for FileArtifactStore {
+impl ArtifactStore for BlobArtifactStore {
     async fn put(&self, mime_type: &str, bytes: &[u8]) -> Result<ArtifactRef, HostError> {
-        let id = format!("artifact-{}", FrameId::generate());
-        let path = self.file_path(&id)?;
-        tokio::fs::write(path, bytes)
+        let id = self
+            .blobs
+            .put(bytes)
             .await
             .map_err(|error| HostError::Artifact(error.to_string()))?;
         Ok(ArtifactRef {
-            id,
+            id: id.to_string(),
             mime_type: mime_type.to_owned(),
             bytes: bytes.len() as u64,
         })
-    }
-
-    async fn path(&self, id: &str) -> Result<PathBuf, HostError> {
-        let path = self.file_path(id)?;
-        if !tokio::fs::try_exists(&path)
-            .await
-            .map_err(|error| HostError::Artifact(error.to_string()))?
-        {
-            return Err(HostError::Artifact("artifact not found".to_owned()));
-        }
-        Ok(path)
     }
 }
 
 /// A newline-delimited JSON replay journal.
 pub struct FileReplayStore {
     path: PathBuf,
+    max_frames: usize,
     lock: tokio::sync::Mutex<()>,
 }
 
@@ -182,8 +152,29 @@ impl FileReplayStore {
         }
         Ok(Self {
             path,
+            max_frames: 10_000,
             lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Opens a journal with a bounded number of frames retained per session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent directory cannot be created or the
+    /// capacity is zero.
+    pub fn open_with_capacity(
+        path: impl Into<PathBuf>,
+        max_frames: usize,
+    ) -> Result<Self, HostError> {
+        if max_frames == 0 {
+            return Err(HostError::ReplayJournal(
+                "replay journal capacity must be positive".to_owned(),
+            ));
+        }
+        let mut store = Self::open(path)?;
+        store.max_frames = max_frames;
+        Ok(store)
     }
 }
 
@@ -193,14 +184,48 @@ impl ReplayStore for FileReplayStore {
         let _guard = self.lock.lock().await;
         let line = serde_json::to_string(frame)?;
         let path = self.path.clone();
+        let max_frames = self.max_frames;
         tokio::task::spawn_blocking(move || {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
+            let mut by_session: HashMap<String, Vec<Envelope<Value>>> = HashMap::new();
+            if path.exists() {
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+                for existing in content.lines().filter(|line| !line.trim().is_empty()) {
+                    let frame = serde_json::from_str::<Envelope<Value>>(existing)
+                        .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+                    by_session
+                        .entry(frame.session_id.clone())
+                        .or_default()
+                        .push(frame);
+                }
+            }
+            let appended = serde_json::from_str::<Envelope<Value>>(&line)
                 .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-            writeln!(file, "{line}").map_err(|error| HostError::ReplayJournal(error.to_string()))
+            by_session
+                .entry(appended.session_id.clone())
+                .or_default()
+                .push(appended);
+            let mut retained = by_session
+                .into_values()
+                .flat_map(|mut frames| {
+                    if frames.len() > max_frames {
+                        frames.drain(..frames.len() - max_frames);
+                    }
+                    frames
+                })
+                .collect::<Vec<_>>();
+            retained.sort_by_key(|frame| frame.seq.unwrap_or_default());
+            let temporary = path.with_extension("jsonl.tmp");
+            let mut file = std::fs::File::create(&temporary)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            for frame in retained {
+                let line = serde_json::to_string(&frame)?;
+                writeln!(file, "{line}")
+                    .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            }
+            std::fs::rename(temporary, path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))
         })
         .await
         .map_err(|error| HostError::ReplayJournal(error.to_string()))?
@@ -626,14 +651,9 @@ impl NorteCodeRaepHost {
                                 "artifact source requires artifact_id".to_owned(),
                             )
                         })?;
-                    let path = self
-                        .artifact_store
-                        .as_ref()
-                        .ok_or_else(|| {
-                            HostError::Artifact("artifact storage is disabled".to_owned())
-                        })?
-                        .path(artifact_id)
-                        .await?;
+                    let blob = artifact_id.parse().map_err(|_| {
+                        HostError::InvalidFrame("artifact_id is not a valid blob id".to_owned())
+                    })?;
                     let mime = part.mime_type.clone().ok_or_else(|| {
                         HostError::InvalidFrame("artifact content requires mime_type".to_owned())
                     })?;
@@ -643,7 +663,8 @@ impl NorteCodeRaepHost {
                         .unwrap_or(artifact_id)
                         .to_owned();
                     attachments.push(norte_code_protocol::Attachment {
-                        path: path.to_string_lossy().into_owned(),
+                        path: String::new(),
+                        blob: Some(blob),
                         mime,
                         name,
                     });
@@ -921,6 +942,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use norte::BlobStore;
 
     #[tokio::test]
     async fn file_replay_store_round_trips_frames_by_session() {
@@ -942,5 +964,43 @@ mod tests {
         assert_eq!(frames, vec![frame]);
         assert_eq!(store.load("session-b").await.expect("load"), Vec::new());
         std::fs::remove_file(path).expect("remove replay journal");
+    }
+
+    #[tokio::test]
+    async fn file_replay_store_rotates_each_session_window() {
+        let path = std::env::temp_dir().join(format!(
+            "norte-code-raep-rotate-{}.jsonl",
+            FrameId::generate()
+        ));
+        let store = FileReplayStore::open_with_capacity(&path, 2).expect("replay store");
+        for seq in 1..=3 {
+            let mut frame = Envelope::new(
+                standard(StandardFrameType::TokenDelta),
+                json!({"seq": seq}),
+                i64::try_from(seq).expect("test sequence fits in i64"),
+            );
+            frame.session_id = "session-a".to_owned();
+            frame.seq = Some(seq);
+            store.append(&frame).await.expect("append");
+        }
+        let frames = store.load("session-a").await.expect("load");
+        assert_eq!(
+            frames
+                .iter()
+                .filter_map(|frame| frame.seq)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        std::fs::remove_file(path).expect("remove replay journal");
+    }
+
+    #[tokio::test]
+    async fn blob_artifacts_return_content_addressed_ids() {
+        let blobs = Arc::new(norte::InMemoryBlobStore::new());
+        let store = BlobArtifactStore::new(Arc::clone(&blobs) as Arc<dyn BlobStore>);
+        let reference = store.put("image/png", b"png").await.expect("put");
+        let id = reference.id.parse().expect("blob id");
+        assert_eq!(blobs.get(id).await.expect("get"), b"png");
+        assert_eq!(reference.mime_type, "image/png");
     }
 }

@@ -1182,6 +1182,7 @@ pub(crate) async fn interactive_loop(
                         .iter()
                         .map(|attachment| ProtocolAttachment {
                             path: attachment.path.clone(),
+                            blob: None,
                             mime: attachment.mime.clone(),
                             name: attachment.name.clone(),
                         })

@@ -1503,17 +1503,25 @@ impl Service {
     ) -> std::result::Result<Option<MediaPart>, String> {
         let mime = MimeType::new(attachment.mime.clone())
             .map_err(|_| format!("attachment: `{}` is not a media type", attachment.mime))?;
-        let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
-            format!("attachment: could not read `{}`: {error}", attachment.path)
-        })?;
-        // The bytes go where the model's own media would: the host stores them
-        // and sends a reference, so the graph holds one blob and the provider is
-        // handed bytes on the way out (the adapter resolves it).
-        let id = self
-            .blobs
-            .put(&bytes)
-            .await
-            .map_err(|error| error.to_string())?;
+        let id = if let Some(id) = attachment.blob {
+            if !self
+                .blobs
+                .contains(id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!("attachment: blob `{id}` was not found"));
+            }
+            id
+        } else {
+            let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
+                format!("attachment: could not read `{}`: {error}", attachment.path)
+            })?;
+            self.blobs
+                .put(&bytes)
+                .await
+                .map_err(|error| error.to_string())?
+        };
         Ok(Some(MediaPart::new(
             kind_of_mime(&attachment.mime),
             MediaSource::Blob(id),
