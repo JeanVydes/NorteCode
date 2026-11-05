@@ -19,7 +19,9 @@ use raep_types::{Envelope, FrameType, SessionAttach, StandardFrameType};
 use serde_json::{Value, json};
 use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::BroadcastStream;
-use tower_http::{limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer};
+use tower_http::{
+    limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer, trace::TraceLayer,
+};
 
 use crate::{HostError, NorteCodeRaepHost};
 
@@ -40,6 +42,7 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .layer(RequestBodyTimeoutLayer::new(
             HostConfigLimits::from_host(&host).command_timeout,
         ))
+        .layer(TraceLayer::new_for_http())
         .with_state(host)
 }
 
@@ -362,6 +365,7 @@ async fn commands(
     Path(session_id): Path<String>,
     Json(mut frame): Json<Envelope<Value>>,
 ) -> Response {
+    tracing::info!(session = %session_id, "raep command received");
     let principal = match principal(&host, &headers) {
         Ok(principal) => principal,
         Err(response) => return response,

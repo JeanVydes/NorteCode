@@ -1387,6 +1387,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tower-http",
+ "tracing",
 ]
 
 [[package]]
@@ -2501,6 +2502,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 
