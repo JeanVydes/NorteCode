@@ -4,6 +4,7 @@
 //! cost. The steering messages the running turns have not reached are handed
 //! to the engine here, at the boundary where the turn begins.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Utc;
@@ -31,9 +32,9 @@ use super::compaction::{
     COMPACTION_SAFE_POINT, CompactionGate, is_compaction_abort, is_compaction_message, used_context,
 };
 use super::mapping::{
-    call_arguments, configured_budget, emit, error_code, reported_cost, request_metrics,
-    retry_plan, shorten_tool_output, stream_label, to_delta, to_phase, to_usage, tool_error,
-    tool_result_text,
+    ToolResultText, call_arguments, configured_budget, emit, error_code, reported_cost,
+    request_metrics, retry_plan, shorten_tool_output, stream_label, to_delta, to_phase, to_usage,
+    tool_result_index,
 };
 use super::models::resolve_reasoning;
 
@@ -101,8 +102,7 @@ impl Service {
         // Registered before the first await: a cancel that lands while the
         // turn boundary compacts must survive the compaction, not be lost.
         let cancellation = CancellationToken::new();
-        self.lock_cancels()
-            .insert(key.clone(), cancellation.clone());
+        let cancel_generation = self.register_cancel(key.clone(), cancellation.clone());
         let result: Result<EventStream, ServiceError> = async {
             let mut leading = Vec::new();
             if let Some(changed) = self.apply_pending_model(request_id, &key).await? {
@@ -250,7 +250,7 @@ impl Service {
                 // that is looking at the approval it owes.
                 let phase = to_phase(state.phase);
                 self.set_phase(&key, phase).await;
-                self.lock_cancels().remove(&key);
+                self.remove_cancel(&key, cancel_generation);
                 let stream: EventStream = Box::pin(futures_util::stream::iter(vec![
                     ServerEvent::new(
                         request_id,
@@ -314,7 +314,7 @@ impl Service {
                         ))
                         .await;
                 }
-                this.lock_cancels().remove(&task_key);
+                this.remove_cancel(&task_key, cancel_generation);
             });
 
             Ok(Box::pin(futures_util::stream::iter(leading).chain(
@@ -325,7 +325,7 @@ impl Service {
         }
         .await;
         if result.is_err() {
-            self.lock_cancels().remove(&key);
+            self.remove_cancel(&key, cancel_generation);
         }
         result
     }
@@ -433,6 +433,7 @@ impl Service {
             let mut interrupted = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
+            let mut tool_results: Option<HashMap<String, ToolResultText>> = None;
 
             while let Some(event) = running_turn.next().await {
                 if is_compaction_abort(&event) {
@@ -470,6 +471,7 @@ impl Service {
                                 gate: gate.as_deref(),
                             },
                             &event,
+                            &mut tool_results,
                         )
                         .await
                 {
@@ -894,7 +896,12 @@ impl Service {
     /// Maps one engine event and answers whether to keep going (the client is
     /// still reading).
     #[allow(clippy::too_many_lines)]
-    async fn handle(&self, ctx: &mut TurnContext<'_>, event: &EngineEvent) -> bool {
+    async fn handle(
+        &self,
+        ctx: &mut TurnContext<'_>,
+        event: &EngineEvent,
+        tool_results: &mut Option<HashMap<String, ToolResultText>>,
+    ) -> bool {
         let (engine, request_id, key, nid, tx, gate) = (
             ctx.engine,
             ctx.request_id,
@@ -961,11 +968,23 @@ impl Service {
                 self.effects
                     .finished(nid, *call_id, tool.as_str(), *is_error);
                 let recorded = self.activity.finished(call_id);
+                let fallback = if recorded.as_ref().and_then(output_text).is_none() {
+                    if tool_results.is_none() {
+                        *tool_results = tool_result_index(engine, nid).await;
+                    }
+                    tool_results
+                        .as_ref()
+                        .and_then(|results| results.get(&call_id.to_string()))
+                        .filter(|result| result.is_error == *is_error)
+                        .map(|result| result.text.clone())
+                } else {
+                    None
+                };
                 let error = if *is_error {
                     if let Some(text) = recorded.as_ref().and_then(output_text) {
                         Some(text)
                     } else {
-                        tool_error(engine, nid, call_id).await
+                        fallback.clone()
                     }
                 } else {
                     None
@@ -973,10 +992,7 @@ impl Service {
                 let (output, truncated) = if *is_error {
                     (None, false)
                 } else {
-                    let text = recorded
-                        .as_ref()
-                        .and_then(output_text)
-                        .or(tool_result_text(engine, nid, call_id).await);
+                    let text = recorded.as_ref().and_then(output_text).or(fallback);
                     text.map_or((None, false), |text| {
                         let (text, truncated) = shorten_tool_output(text);
                         (Some(text), truncated)
