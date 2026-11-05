@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 norte-code-agent = { path = "../norte-code-agent" }
+norte-code-client = { path = "../norte-code-client" }
 norte-code-protocol = { path = "../norte-code-protocol" }
 
 clap = { workspace = true }

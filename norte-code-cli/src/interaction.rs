@@ -8,6 +8,7 @@ use super::{
 };
 use crate::input::{Attachment, CompletionNames, EditorAction, EditorEvent, InteractiveInput};
 use crate::models::ModelChoice;
+use norte_code_client::AgentClient;
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
@@ -508,6 +509,7 @@ fn catalogue_candidates(
         "/provider" => single_arg(rest, &names.providers, "provider"),
         "/model" => single_arg(rest, &names.models, "model"),
         "/connection" => connection_arg(rest, &names.providers),
+        "/allow" | "/deny" => single_arg(rest, &names.tools, "tool"),
         _ => None,
     };
     let Some((values, partial, note)) = offered else {
@@ -604,7 +606,22 @@ pub(crate) fn refresh_completions(
         })
         .unwrap_or_default();
     models.sort();
-    renderer.set_completion_names(CompletionNames { providers, models });
+    let mut tools = service
+        .tools(session)
+        .map(|registry| {
+            registry
+                .specs()
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    tools.sort();
+    renderer.set_completion_names(CompletionNames {
+        providers,
+        models,
+        tools,
+    });
 }
 
 /// The one dimmed row shown above the input, for the line as it stands.
@@ -651,6 +668,7 @@ pub(crate) fn command_suggestion(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn interactive_loop(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     mut session: Option<SessionKey>,
     renderer: &mut Renderer,
     style: Style,
@@ -695,7 +713,7 @@ pub(crate) async fn interactive_loop(
                     crate::plugins::attach(service, Some(key.clone()));
                     refresh_effort(service, &key, renderer);
                     refresh_completions(service, Some(&key), renderer);
-                    match service
+                    match client
                         .submit(ClientRequest {
                             request_id,
                             kind: ClientRequestKind::Resume {
@@ -709,6 +727,7 @@ pub(crate) async fn interactive_loop(
                             renderer.mark_working();
                             let outcome = drive_turns(
                                 service,
+                                client,
                                 stream,
                                 renderer,
                                 style,
@@ -841,7 +860,7 @@ pub(crate) async fn interactive_loop(
                         continue;
                     };
                     renderer.mark_working();
-                    let stream = service
+                    let stream = client
                         .submit(ClientRequest {
                             request_id,
                             kind: ClientRequestKind::Compact { session: current },
@@ -851,6 +870,7 @@ pub(crate) async fn interactive_loop(
                     request_id = request_id.saturating_add(1);
                     let outcome = drive_turns(
                         service,
+                        client,
                         stream,
                         renderer,
                         style,
@@ -1003,7 +1023,7 @@ pub(crate) async fn interactive_loop(
                 }
                 ChatCommand::Jobs { action, id } => match session.clone() {
                     Some(current) => {
-                        report_jobs(service, current, action, id, renderer, style).await;
+                        report_jobs(service, client, current, action, id, renderer, style).await;
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
@@ -1188,6 +1208,7 @@ pub(crate) async fn interactive_loop(
         request_id = request_id.saturating_add(1);
         let outcome = drive_turns(
             service,
+            client,
             stream,
             renderer,
             style,
@@ -1747,7 +1768,16 @@ async fn handle_live_command(
         }
         ChatCommand::Jobs { action, id } => match current {
             Some(session) => {
-                report_jobs(service, session.clone(), action, id, renderer, style).await;
+                report_jobs(
+                    service,
+                    service.as_ref(),
+                    session.clone(),
+                    action,
+                    id,
+                    renderer,
+                    style,
+                )
+                .await;
             }
             None => renderer.notice("no session yet; send a message first"),
         },
@@ -2640,6 +2670,7 @@ async fn handle_connection(
 /// may be running in a turn this client never started.
 async fn report_jobs(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     action: JobListAction,
     id: Option<String>,
@@ -2657,7 +2688,7 @@ async fn report_jobs(
                     id: id.clone(),
                 },
             };
-            match service.submit(request).await {
+            match client.submit(request).await {
                 Ok(mut stream) => {
                     let mut stopped = None;
                     while let Some(event) = stream.next().await {
@@ -3061,7 +3092,7 @@ pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
     lines.push(String::new());
     lines.push("text typed while a turn runs is steered into that turn".to_owned());
     lines.push("an approval scope defaults to session; global writes the user config".to_owned());
-    renderer.open_modal("help", lines);
+    renderer.open_markdown_modal("help", lines);
 }
 
 /// Prints the interactive prompt and waits for the next message.
@@ -3199,7 +3230,7 @@ pub(crate) async fn read_repl_line(
                     // prompt, which is to leave.
                     return Ok(ReplInput::End);
                 };
-                stop_jobs(service, session.clone(), renderer).await;
+                stop_jobs(service, service.as_ref(), session.clone(), renderer).await;
                 continue;
             }
             // Nothing is running at the prompt, so nothing to cancel or detach.
@@ -3306,7 +3337,8 @@ fn copied(text: &str, renderer: &mut Renderer) {
 
 /// Stops every background job of the session, and reports what it reached.
 pub(crate) async fn stop_jobs(
-    service: &Arc<Service>,
+    _service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     renderer: &mut Renderer,
 ) {
@@ -3314,7 +3346,7 @@ pub(crate) async fn stop_jobs(
         request_id: 0,
         kind: ClientRequestKind::StopJobs { session, id: None },
     };
-    match service.submit(request).await {
+    match client.submit(request).await {
         Ok(mut stream) => {
             let mut stopped = None;
             while let Some(event) = stream.next().await {
@@ -3377,6 +3409,7 @@ enum Wake {
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn drive_turns(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     primary: EventStream,
     renderer: &mut Renderer,
     style: Style,
@@ -3527,7 +3560,7 @@ pub(crate) async fn drive_turns(
                                     renderer.notice("no background job is running");
                                     continue;
                                 }
-                                stop_jobs(service, session, renderer).await;
+                                stop_jobs(service, client, session, renderer).await;
                                 continue;
                             }
                             EditorAction::Detach => {
@@ -3538,7 +3571,7 @@ pub(crate) async fn drive_turns(
                                     request_id: 0,
                                     kind: ClientRequestKind::DetachTurn { session },
                                 };
-                                if let Err(error) = service.submit(request).await {
+                                if let Err(error) = client.submit(request).await {
                                     renderer.notice(format!(
                                         "warning: could not detach the turn: {error}"
                                     ));
@@ -3659,6 +3692,7 @@ pub(crate) async fn drive_turns(
                 let pinned = Arc::clone(&renderer.pinned);
                 if answer_if_asked(
                     service,
+                    client,
                     &pinned,
                     &event,
                     input.as_deref_mut(),
@@ -3764,7 +3798,7 @@ pub(crate) async fn drive_turns(
             request_id: 0,
             kind: ClientRequestKind::Resume { session },
         };
-        match service.submit(request).await {
+        match client.submit(request).await {
             Ok(next) => {
                 renderer.mark_working();
                 streams.push_back(next);
@@ -3863,6 +3897,7 @@ mod tests {
                 "deepseek-ai/DeepSeek-V4.1-Flash".to_owned(),
                 "deepseek-v4.1-flash-uncensored".to_owned(),
             ],
+            tools: vec!["read".to_owned(), "shell".to_owned()],
         }
     }
 
@@ -4062,7 +4097,8 @@ mod tests {
         assert!(
             matches!(
                 parse_chat_command("/delete now"),
-                Some(Err(message)) if message.contains("no `now`") && message.contains("usage: /delete")
+                Some(Err(message))
+                    if message.contains("no `now`") && message.contains("Usage: /delete")
             ),
             "an argument is refused: {:?}",
             parse_chat_command("/delete now")
@@ -4247,6 +4283,20 @@ mod tests {
         assert_eq!(tool_scope.completion, "session");
 
         assert!(command_suggestion("/steer", "/steer".len(), &no_names()).is_none());
+    }
+
+    #[test]
+    fn approval_commands_complete_tool_names_from_the_session() {
+        let names = CompletionNames {
+            tools: vec!["browser_use".to_owned(), "shell".to_owned()],
+            ..CompletionNames::default()
+        };
+        let allow = command_suggestion("/allow sh", "/allow sh".len(), &names).expect("tool name");
+        assert_eq!(allow.completion, "ell");
+        assert!(allow.hint.contains("shell"));
+
+        let deny = command_suggestion("/deny bro", "/deny bro".len(), &names).expect("tool name");
+        assert_eq!(deny.completion, "wser_use");
     }
 
     #[test]
@@ -4681,6 +4731,7 @@ mod tests {
 
         interactive_loop(
             &service,
+            service.as_ref(),
             Some(session.clone()),
             &mut renderer,
             Style::plain(),
@@ -5007,6 +5058,7 @@ mod tests {
             std::time::Duration::from_secs(3),
             super::drive_turns(
                 &service,
+                service.as_ref(),
                 stream,
                 &mut renderer,
                 Style::plain(),

@@ -69,7 +69,8 @@ use norte::{
     ToolKind,
 };
 use norte_code_agent::{
-    EventStream, ModelSpec, RuleScope, Service, VendorModels, effective_reasoning, model_list,
+    EventStream, InProcessClient, ModelSpec, RuleScope, Service, VendorModels, effective_reasoning,
+    model_list,
 };
 use norte_code_protocol::catalog::{Catalog, WireSchema};
 use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
@@ -848,9 +849,11 @@ pub(crate) async fn new_session(
     // catalogue, because what they offer belongs in it; the handle they were
     // given is the same one, and it now knows where to look.
     crate::plugins::attach(&service, Some(session.clone()));
+    let client = InProcessClient::new(Arc::clone(&service));
     if let Some(receiver) = input.as_mut() {
         interactive_loop(
             &service,
+            &client,
             Some(session),
             &mut renderer,
             style,
@@ -1101,6 +1104,7 @@ async fn resume_session(
         .await
         .map_err(|e| e.to_string())?,
     );
+    let client = InProcessClient::new(Arc::clone(&service));
     service.install_subagent_runner();
     service.set_config_path(config_path);
     let pinned = Pinned::new();
@@ -1182,6 +1186,7 @@ async fn resume_session(
             .map_err(|e| e.to_string())?;
         drive_turns(
             &service,
+            &client,
             stream,
             &mut renderer,
             style,
@@ -1207,6 +1212,7 @@ async fn resume_session(
             .map_err(|e| e.to_string())?;
         drive_turns(
             &service,
+            &client,
             stream,
             &mut renderer,
             style,
@@ -1227,6 +1233,7 @@ async fn resume_session(
         .map_err(|e| e.to_string())?;
     let outcome = drive_turns(
         &service,
+        &client,
         stream,
         &mut renderer,
         style,
@@ -1242,6 +1249,7 @@ async fn resume_session(
     {
         interactive_loop(
             &service,
+            &client,
             Some(session),
             &mut renderer,
             style,
