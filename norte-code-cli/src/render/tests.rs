@@ -2121,6 +2121,20 @@ fn a_conflict_replaces_the_stale_transcript_with_replayed_history() {
 }
 
 #[test]
+fn saying_a_message_returns_the_view_to_the_tail() {
+    let pinned = Arc::new(Pinned::new());
+    let mut renderer = visible_renderer(&pinned);
+    pinned.scroll_transcript(-12);
+    assert_ne!(pinned.transcript_scroll(), 0, "the view is scrolled back");
+    renderer.said("hello");
+    assert_eq!(
+        pinned.transcript_scroll(),
+        0,
+        "a fresh message must be visible, not hidden behind the scroll"
+    );
+}
+
+#[test]
 fn a_call_is_one_row_that_changes_when_it_ends() {
     // A tool used to be two rows — one announcing it and one reporting how it
     // went — so a suite of ten calls put twenty lines in the conversation and
