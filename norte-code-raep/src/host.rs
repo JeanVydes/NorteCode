@@ -30,6 +30,8 @@ pub struct HostConfig {
     pub server_version: String,
     /// Maximum number of emitted frames retained per session.
     pub replay_capacity: usize,
+    /// Maximum number of command results retained for idempotent retries.
+    pub idempotency_capacity: usize,
     /// Maximum frame size advertised to clients.
     pub max_frame_bytes: u64,
     /// Optional bearer token required by operational HTTP routes.
@@ -50,6 +52,7 @@ impl Default for HostConfig {
             agent_id: "norte-code".to_owned(),
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
             replay_capacity: 10_000,
+            idempotency_capacity: 4_096,
             max_frame_bytes: 1024 * 1024,
             auth_token: None,
             auth_principals: HashMap::new(),
@@ -406,6 +409,7 @@ struct HostState {
     sequences: HashMap<String, u64>,
     replay: HashMap<String, VecDeque<Envelope<Value>>>,
     idempotency: HashMap<FrameId, Vec<Envelope<Value>>>,
+    idempotency_order: VecDeque<FrameId>,
     loaded_replay: HashSet<String>,
     session_owners: HashMap<String, String>,
     artifact_owners: HashMap<String, String>,
@@ -934,11 +938,14 @@ impl NorteCodeRaepHost {
             }
             _ => Err(HostError::InvalidFrame("unsupported command".to_owned())),
         }?;
-        self.state
-            .lock()
-            .await
-            .idempotency
-            .insert(frame_id, result.clone());
+        let mut state = self.state.lock().await;
+        state.idempotency.insert(frame_id.clone(), result.clone());
+        state.idempotency_order.push_back(frame_id);
+        while state.idempotency_order.len() > self.config.idempotency_capacity {
+            if let Some(oldest) = state.idempotency_order.pop_front() {
+                state.idempotency.remove(&oldest);
+            }
+        }
         Ok(result)
     }
 
@@ -1456,6 +1463,7 @@ impl NorteCodeRaepHost {
             .as_ref()
             .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
         let turn_id = turn_id_for_event(&event.kind);
+        let job_id = job_id_for_event(&event.kind);
         let payload = standard_event_payload(&event.kind)
             .unwrap_or_else(|| canonical_event_payload(&event.kind));
         self.emit_with_extension(
@@ -1464,6 +1472,7 @@ impl NorteCodeRaepHost {
             payload,
             Some(json!({"norte_code": serde_json::to_value(&event)?})),
             turn_id,
+            job_id.as_deref(),
         )
         .await
     }
@@ -1474,7 +1483,7 @@ impl NorteCodeRaepHost {
         kind: StandardFrameType,
         payload: Value,
     ) -> Result<Envelope<Value>, HostError> {
-        self.emit_with_extension(session_id, standard(kind), payload, None, None)
+        self.emit_with_extension(session_id, standard(kind), payload, None, None, None)
             .await
     }
 
@@ -1485,6 +1494,7 @@ impl NorteCodeRaepHost {
         payload: Value,
         ext: Option<Value>,
         turn_id: Option<u64>,
+        job_id: Option<&str>,
     ) -> Result<Envelope<Value>, HostError> {
         let mut frame = Envelope::new(kind, payload, now_millis());
         frame.session_id = session_id.to_owned();
@@ -1492,6 +1502,12 @@ impl NorteCodeRaepHost {
         if let Some(turn) = turn_id {
             frame.turn_id = Some(
                 raep_types::TurnId::new(turn.to_string())
+                    .map_err(|error| HostError::InvalidFrame(error.to_string()))?,
+            );
+        }
+        if let Some(job) = job_id {
+            frame.job_id = Some(
+                raep_types::JobId::new(job.to_owned())
                     .map_err(|error| HostError::InvalidFrame(error.to_string()))?,
             );
         }
@@ -1535,6 +1551,18 @@ fn turn_id_for_event(kind: &ServerEventKind) -> Option<u64> {
         | ServerEventKind::QuestionAsked { turn, .. }
         | ServerEventKind::RetryScheduled { turn, .. }
         | ServerEventKind::RetryStarted { turn, .. } => Some(*turn),
+        _ => None,
+    }
+}
+
+fn job_id_for_event(kind: &ServerEventKind) -> Option<String> {
+    match kind {
+        ServerEventKind::ToolOutput { call_id, .. }
+        | ServerEventKind::ToolFinished {
+            call_id,
+            detached: true,
+            ..
+        } => Some(call_id.clone()),
         _ => None,
     }
 }
@@ -1762,6 +1790,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotency_cache_is_bounded() {
+        let service = Arc::new(
+            Service::new(
+                norte_code_protocol::config::Config::default(),
+                Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                None,
+                Arc::new(norte_code_agent::VendorModels),
+                Arc::new(norte_code_protocol::InMemoryStore::new()),
+                Arc::new(norte::InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let host = NorteCodeRaepHost::new(
+            service,
+            HostConfig {
+                idempotency_capacity: 1,
+                ..HostConfig::default()
+            },
+        )
+        .expect("host");
+        for _ in 0..3 {
+            let frame = Envelope::new(
+                FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
+                serde_json::to_value(ClientRequest {
+                    request_id: 1,
+                    kind: ClientRequestKind::ListSessions,
+                })
+                .expect("request"),
+                1,
+            );
+            host.handle(frame).await.expect("request");
+        }
+        assert!(
+            host.state.lock().await.idempotency.len() <= 1,
+            "the idempotency cache must stay bounded"
+        );
+    }
+
+    #[tokio::test]
     async fn command_frames_are_idempotent_and_reject_unknown_wire_versions() {
         let service = Arc::new(
             Service::new(
@@ -1855,6 +1923,20 @@ mod tests {
             frames[1].payload["history_summary"].is_array(),
             "SESSION_STATE must carry history_summary"
         );
+    }
+
+    #[test]
+    fn tool_output_names_the_job_on_the_envelope() {
+        let kind = ServerEventKind::ToolOutput {
+            turn: 1,
+            call_id: "job-1".to_owned(),
+            tool: "shell".to_owned(),
+            stream: norte_code_protocol::types::OutputStream::Stdout,
+            text: "hi".to_owned(),
+            last: false,
+        };
+        assert_eq!(job_id_for_event(&kind).as_deref(), Some("job-1"));
+        assert_eq!(turn_id_for_event(&kind), Some(1));
     }
 
     #[test]

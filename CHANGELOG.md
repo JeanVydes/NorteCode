@@ -8,6 +8,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The RAEP server keeps idempotent command results in a bounded cache, so a long-lived session cannot grow it without limit, and job progress frames now carry the envelope `job_id`.
 - The remote client now validates the RAEP wire version and reads the standard payload before the `ext.norte_code` compatibility copy, so a server that follows the spec no longer depends on the extension. SSE chunks are buffered as bytes, which keeps a multi-byte character split across chunks from being replaced with `�`.
 - Events without a faithful standard frame are now sent as namespaced extensions instead of being forced into unrelated standard frames, so no standard frame carries a payload the spec does not define. Tool output now uses `TOOL_OUTPUT_DELTA`, a job listing uses `JOB_LIST_RESULT`, and replayed history uses `HISTORY_PAGE`.
 - The remote client now detects a gap in RAEP sequence numbers, stops applying the stream and surfaces an error naming the missing frame, instead of silently splicing a discontinuous transcript. It also acknowledges the last applied sequence with `ACK`.
