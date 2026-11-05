@@ -355,24 +355,31 @@ impl RemoteClient {
         }
 
         let command_url = self.command_url(session_id);
-        let http = self.http.clone();
-        let bearer = self.bearer_token.clone();
-        tokio::spawn(async move {
-            let mut command_headers = HeaderMap::new();
-            if let Some(token) = bearer {
-                command_headers.insert(AUTHORIZATION, token);
-            }
-            let _ = http
-                .post(command_url)
-                .headers(command_headers)
-                .json(&Envelope::new(
-                    FrameType::Extension("norte_code.command".to_owned()),
-                    serde_json::to_value(request).unwrap_or(Value::Null),
-                    timestamp_millis(),
-                ))
-                .send()
-                .await;
-        });
+        let mut command_headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            command_headers.insert(AUTHORIZATION, token.clone());
+        }
+        let command = self
+            .http
+            .post(command_url)
+            .headers(command_headers)
+            .json(&Envelope::new(
+                FrameType::Extension("norte_code.command".to_owned()),
+                serde_json::to_value(request)
+                    .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
+                timestamp_millis(),
+            ))
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP command failed: {error}")))?;
+        if !command.status().is_success() {
+            let status = command.status();
+            let body: Value = command.json().await.unwrap_or(Value::Null);
+            return Err(ClientError::new(format!(
+                "RAEP command returned HTTP {status}: {}",
+                response_error(&body)
+            )));
+        }
 
         let session = norte_code_protocol::SessionKey::new(session_id);
         let session_seq = Arc::clone(&self.session_seq);
