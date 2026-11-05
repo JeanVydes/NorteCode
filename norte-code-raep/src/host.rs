@@ -393,6 +393,11 @@ impl NorteCodeRaepHost {
             state.sequences.entry(session_id.clone()).or_insert(0);
             state.replay.entry(session_id.clone()).or_default();
         }
+        let replayed = if let Some(after) = attach.resume_from_seq {
+            self.replay_after(&session_id, after).await?
+        } else {
+            Vec::new()
+        };
         let mode = attach.mode.unwrap_or(AttachMode::Controller);
         let attached = self
             .emit(
@@ -415,10 +420,8 @@ impl NorteCodeRaepHost {
                 json!({"status": "ACTIVE"}),
             )
             .await?;
-        let mut output = vec![attached, state];
-        if let Some(after) = attach.resume_from_seq {
-            output.extend(self.replay_after(&session_id, after).await?);
-        }
+        let mut output = replayed;
+        output.extend([attached, state]);
         if exists && attach.resume_from_seq.is_none() {
             let replay = self
                 .submit_service(
