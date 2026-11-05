@@ -2111,8 +2111,14 @@ impl Renderer {
             crate::transcript::Kind::ToolOutput,
             Self::edit_title(path, edit),
         );
-        for (ink, text) in Self::unified_lines(self.style, path, edit, width) {
-            entry.push_inked(ink, text);
+        for (ink, text, runs) in Self::unified_lines_styled(self.style, path, edit, width) {
+            if let Some(runs) = runs {
+                entry
+                    .lines
+                    .push(crate::transcript::Line::with_runs(ink, runs));
+            } else {
+                entry.push_inked(ink, text);
+            }
         }
         self.transcript.push(entry);
     }
@@ -2232,11 +2238,23 @@ impl Renderer {
     /// `path` is not read here: the caller puts it on the box's top rule, which
     /// is the view's chrome and not a row of the diff.
     pub(crate) fn unified_lines(
-        _style: Style,
-        _path: &str,
+        style: Style,
+        path: &str,
         edit: &EditBox,
         width: usize,
     ) -> Vec<(Ink, String)> {
+        Self::unified_lines_styled(style, path, edit, width)
+            .into_iter()
+            .map(|(ink, text, _)| (ink, text))
+            .collect()
+    }
+
+    fn unified_lines_styled(
+        _style: Style,
+        path: &str,
+        edit: &EditBox,
+        width: usize,
+    ) -> Vec<(Ink, String, Option<Vec<crate::markdown::Run>>)> {
         let inner = width.saturating_sub(4).max(1);
         let digits = edit
             .rows
@@ -2260,11 +2278,16 @@ impl Renderer {
                 UnifiedKind::Removed => (Ink::Red, format!("{number} {mark} {text}")),
                 UnifiedKind::Added => (Ink::Green, format!("{number} {mark} {text}")),
             };
-            lines.push((ink, text));
+            let runs = if matches!(row.kind, UnifiedKind::Context) {
+                None
+            } else {
+                Some(crate::render::edit::syntax_runs(path, &text))
+            };
+            lines.push((ink, text, runs));
         }
         if edit.omitted > 0 {
             let note = format!("… {} more line(s) …", edit.omitted);
-            lines.push((Ink::Yellow, note));
+            lines.push((Ink::Yellow, note, None));
         }
         lines
     }

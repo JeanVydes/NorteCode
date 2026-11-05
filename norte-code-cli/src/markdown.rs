@@ -60,6 +60,16 @@ pub(crate) enum Emphasis {
     /// diff. An emphasis shapes text the row's ink already colours; a panel
     /// is a different thing, and `row_spans` draws it in [`crate::transcript::Ink`].
     Panel,
+    /// A syntax keyword inside a diff line.
+    SyntaxKeyword,
+    /// A syntax string or literal inside a diff line.
+    SyntaxString,
+    /// A syntax comment inside a diff line.
+    SyntaxComment,
+    /// A syntax number inside a diff line.
+    SyntaxNumber,
+    /// Plain syntax text inside a diff line.
+    SyntaxPlain,
 }
 
 /// One run of text in one emphasis.

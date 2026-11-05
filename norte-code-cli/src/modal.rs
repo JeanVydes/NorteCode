@@ -908,7 +908,10 @@ fn markdown_lines(rows: &[Row], width: u16, style: Style) -> Vec<Line<'static>> 
 fn markdown_span(run: crate::markdown::Run, style: Style) -> Span<'static> {
     let mut draw = RatatuiStyle::default();
     match run.emphasis {
-        crate::markdown::Emphasis::Bold | crate::markdown::Emphasis::TableHead => {
+        crate::markdown::Emphasis::Bold
+        | crate::markdown::Emphasis::TableHead
+        | crate::markdown::Emphasis::SyntaxKeyword
+        | crate::markdown::Emphasis::SyntaxNumber => {
             draw = draw.add_modifier(Modifier::BOLD);
         }
         crate::markdown::Emphasis::Italic => draw = draw.add_modifier(Modifier::ITALIC),
@@ -926,7 +929,14 @@ fn markdown_span(run: crate::markdown::Run, style: Style) -> Span<'static> {
         crate::markdown::Emphasis::Underline => draw = draw.add_modifier(Modifier::UNDERLINED),
         crate::markdown::Emphasis::TableCell
         | crate::markdown::Emphasis::Plain
-        | crate::markdown::Emphasis::Panel => {}
+        | crate::markdown::Emphasis::Panel
+        | crate::markdown::Emphasis::SyntaxPlain => {}
+        crate::markdown::Emphasis::SyntaxString => {
+            draw = draw.add_modifier(Modifier::UNDERLINED);
+        }
+        crate::markdown::Emphasis::SyntaxComment => {
+            draw = draw.add_modifier(Modifier::ITALIC);
+        }
     }
     Span::styled(run.text, draw)
 }

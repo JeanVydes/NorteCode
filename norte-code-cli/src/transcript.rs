@@ -86,6 +86,8 @@ pub struct Line {
     /// arrived — one ink per row would paint the addition red with the
     /// removal it shares a row with.
     pub parts: Vec<(Option<Ink>, String)>,
+    /// Optional styled runs, used by rendered diff lines.
+    pub runs: Vec<crate::markdown::Run>,
 }
 
 impl Line {
@@ -110,6 +112,7 @@ impl Line {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             parts: vec![(None, text.into())],
+            runs: Vec::new(),
         }
     }
 
@@ -118,6 +121,7 @@ impl Line {
     pub fn inked(ink: Ink, text: impl Into<String>) -> Self {
         Self {
             parts: vec![(Some(ink), text.into())],
+            runs: Vec::new(),
         }
     }
 
@@ -129,6 +133,19 @@ impl Line {
                 .into_iter()
                 .map(|(ink, text)| (Some(ink), text))
                 .collect(),
+            runs: Vec::new(),
+        }
+    }
+
+    /// A line whose text is split into styled runs.
+    #[must_use]
+    pub fn with_runs(ink: Ink, runs: Vec<crate::markdown::Run>) -> Self {
+        Self {
+            parts: vec![(
+                Some(ink),
+                runs.iter().map(|run| run.text.as_str()).collect(),
+            )],
+            runs,
         }
     }
 }

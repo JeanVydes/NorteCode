@@ -3,6 +3,8 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use crate::markdown::{Emphasis, Run, highlight};
+
 /// A search/replace edit rendered as a side-by-side, boxed preview.
 #[derive(Debug)]
 pub(crate) struct EditPreview {
@@ -401,6 +403,42 @@ fn cell(number: usize, text: &str, changed: bool) -> Cell {
 
 fn display_line(text: &str) -> String {
     text.trim_end_matches('\r').replace('\t', "    ")
+}
+
+/// Adds lightweight syntax emphasis without replacing the diff's red/green
+/// identity. The line colour remains the source of truth for added/removed;
+/// syntax only changes weight or decoration inside the line.
+pub(crate) fn syntax_runs(path: &str, text: &str) -> Vec<Run> {
+    let language = path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or_default();
+    let prefix_len = text
+        .find(|character: char| !character.is_ascii_digit() && character != ' ')
+        .unwrap_or(text.len())
+        .min(text.len());
+    let mut runs = Vec::new();
+    if prefix_len > 0 {
+        runs.push(Run::styled(
+            Emphasis::SyntaxPlain,
+            text[..prefix_len].to_owned(),
+        ));
+    }
+    let code = &text[prefix_len..];
+    for run in highlight(language, code) {
+        let emphasis = match run.emphasis {
+            Emphasis::Heading => Emphasis::SyntaxKeyword,
+            Emphasis::Code => Emphasis::SyntaxString,
+            Emphasis::Quote => Emphasis::SyntaxComment,
+            Emphasis::Bold => Emphasis::SyntaxNumber,
+            _ => Emphasis::SyntaxPlain,
+        };
+        runs.push(Run::styled(emphasis, run.text));
+    }
+    if runs.is_empty() {
+        runs.push(Run::styled(Emphasis::SyntaxPlain, text.to_owned()));
+    }
+    runs
 }
 
 /// Lays out one cell of a side-by-side panel as plain text.
