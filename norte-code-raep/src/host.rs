@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
+use crate::NorteCodeExtension;
+
 /// Host configuration independent of the HTTP listener.
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -195,7 +197,7 @@ impl NorteCodeRaepHost {
             FrameType::Standard(StandardFrameType::SessionDetach) => self.detach(frame).await,
             FrameType::Standard(StandardFrameType::SessionClose) => self.close(frame).await,
             FrameType::Standard(StandardFrameType::Ack) => self.ack(frame).await,
-            FrameType::Extension(ref name) if name == "norte_code.command" => {
+            FrameType::Extension(ref name) if name == NorteCodeExtension::Command.as_str() => {
                 self.extension_command(frame).await
             }
             _ => Err(HostError::InvalidFrame("unsupported command".to_owned())),

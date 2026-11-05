@@ -13,3 +13,20 @@ mod http;
 
 pub use host::{HostConfig, HostError, NorteCodeRaepHost};
 pub use http::router;
+
+/// Extensions owned by the `NorteCode` server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NorteCodeExtension {
+    /// Carries a complete `NorteCode` [`norte_code_protocol::ClientRequest`].
+    Command,
+}
+
+impl NorteCodeExtension {
+    /// Returns the namespaced wire name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Command => "norte_code.command",
+        }
+    }
+}
