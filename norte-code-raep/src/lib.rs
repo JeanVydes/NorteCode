@@ -12,6 +12,7 @@ mod commands;
 mod host;
 mod http;
 mod payloads;
+mod plugin_manager;
 
 pub use host::{
     ArtifactRef, ArtifactStore, BlobArtifactStore, FileReplayStore, HostConfig, HostError,
@@ -24,6 +25,12 @@ pub use http::router;
 pub enum NorteCodeExtension {
     /// Carries a complete `NorteCode` [`norte_code_protocol::ClientRequest`].
     Command,
+    /// Carries service telemetry.
+    Telemetry,
+    /// Carries service tool and rule state.
+    ToolList,
+    /// Carries plugin lifecycle data.
+    Plugin,
 }
 
 impl NorteCodeExtension {
@@ -32,6 +39,9 @@ impl NorteCodeExtension {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Command => "norte_code.command",
+            Self::Telemetry => "norte_code.telemetry",
+            Self::ToolList => "norte_code.tool_list",
+            Self::Plugin => "norte_code.plugin",
         }
     }
 }

@@ -134,7 +134,7 @@ pub fn environment_key(provider: &str, environment_keys: &[String]) -> Result<Ap
     })
 }
 
-/// The user-level `secrets.json`, beside `config.json`.
+/// The user-level `secrets.json`, beside `service.json`.
 #[must_use]
 pub fn secrets_path() -> Option<PathBuf> {
     user_config_path().map(|path| path.with_file_name("secrets.json"))

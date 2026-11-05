@@ -99,6 +99,11 @@ impl Service {
                 .ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         };
+        // A session has one durable turn owner. Without this gate, two
+        // simultaneous messages can both read version N, then one loses its
+        // optimistic commit at N+1. Steering remains independent and can still
+        // be queued while the owner is running.
+        let turn_guard = self.turn_lock(&key).lock_owned().await;
         // Registered before the first await: a cancel that lands while the
         // turn boundary compacts must survive the compaction, not be lost.
         let cancellation = CancellationToken::new();
@@ -286,6 +291,7 @@ impl Service {
             let this = Arc::clone(self);
             let task_key = key.clone();
             tokio::spawn(async move {
+                let _turn_guard = turn_guard;
                 let runner = Arc::clone(&this);
                 let result = runner
                     .run_turn(
@@ -782,6 +788,21 @@ impl Service {
                         ServerEvent::error(request_id, Some(key.clone()), code, message),
                     )
                     .await;
+                    if code == ErrorCode::Conflict {
+                        // The failed turn may have raced with another writer.
+                        // Send the committed history before closing the stream so
+                        // a client can reconcile its view without resending the
+                        // user's message or requiring a manual resume.
+                        let ancestors =
+                            compaction_ancestors(self.directory.as_ref(), current_nid).await;
+                        for replay in
+                            replay_events(request_id, key, &engine, current_nid, &ancestors).await
+                        {
+                            if !emit(tx, replay).await {
+                                break;
+                            }
+                        }
+                    }
                     self.finish_turn(
                         &mut TurnContext {
                             engine: &engine,

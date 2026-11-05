@@ -1,0 +1,13 @@
+{
+  "service_url": "http://127.0.0.1:8787",
+  "service_type": "local",
+  "service_auth": null,
+  "agent_id": "norte-code",
+  "verbosity": "medium",
+  "diff_style": "unified",
+  "charts": {
+    "contrast": 75,
+    "density": 82,
+    "dot_size": "medium"
+  }
+}

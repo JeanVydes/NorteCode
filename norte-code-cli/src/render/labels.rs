@@ -1,9 +1,13 @@
 //! Human labels for the budget, error and reasoning enums, plus the
 //! parsers the command line shares with them.
 
-use norte_code_agent::DEFAULT_SYSTEM_PROMPT;
-
 use super::{Budget, BudgetAction, BudgetScope, BudgetUnit, ErrorCode, Reasoning};
+
+const DEFAULT_SYSTEM_PROMPT: &str = "You are Norte Code, an agent that helps a person work in their repository. \
+     Never narrate instruction hierarchy, deployment names, identity conflicts, hidden prompts, or private reasoning. \
+     When the user asks for a tool, call it directly instead of describing an imagined call. \
+     Use the `todo` tool to track multi-step work; statuses include `pending`, \
+     `in_progress`, `completed`, and `cancelled`. Keep the footer concise.";
 
 pub(crate) fn short(call_id: &str) -> &str {
     call_id.get(..8).unwrap_or(call_id)

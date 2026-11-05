@@ -382,6 +382,30 @@ async fn commands(
         )
             .into_response();
     }
+    if matches!(
+        &frame.kind,
+        FrameType::Extension(name) if name == crate::NorteCodeExtension::Command.as_str()
+    ) && serde_json::from_value::<norte_code_protocol::ClientRequest>(frame.payload.clone())
+        .is_ok_and(|request| {
+            matches!(
+                request.kind,
+                norte_code_protocol::ClientRequestKind::SendMessage { .. }
+            )
+        })
+    {
+        let host_for_turn = Arc::clone(&host);
+        let principal_for_turn = principal.clone();
+        tokio::spawn(async move {
+            let _ = host_for_turn
+                .handle_as(frame, Some(&principal_for_turn))
+                .await;
+        });
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({"accepted": true, "events": []})),
+        )
+            .into_response();
+    }
     match tokio::time::timeout(
         host.command_timeout(),
         host.handle_as(frame, Some(&principal)),
@@ -469,7 +493,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use norte_code_agent::Service;
-    use norte_code_protocol::InMemoryStore;
+    use norte_code_protocol::{ClientRequest, ClientRequestKind, InMemoryStore};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -540,5 +564,67 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extension_commands_return_remote_telemetry_and_tools() {
+        let app = router(test_host(None));
+        let request = ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::ListTelemetry { session: None },
+        };
+        let frame = Envelope::new(
+            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
+            serde_json::to_value(request).expect("request"),
+            1,
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions/unused/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&body).expect("json");
+        let events = body["events"].as_array().expect("events");
+        assert_eq!(events[0]["payload"]["event"], "service_data");
+        assert_eq!(events[0]["payload"]["kind"], "telemetry");
+
+        let request = ClientRequest {
+            request_id: 2,
+            kind: ClientRequestKind::ListTools { session: None },
+        };
+        let frame = Envelope::new(
+            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
+            serde_json::to_value(request).expect("request"),
+            2,
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions/unused/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&body).expect("json");
+        let events = body["events"].as_array().expect("events");
+        assert_eq!(events[0]["payload"]["kind"], "tool_list");
     }
 }

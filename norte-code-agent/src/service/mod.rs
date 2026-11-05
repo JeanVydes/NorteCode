@@ -55,9 +55,10 @@ use norte_code_protocol::tools::{
 use norte_tools::{
     BrowserTool, EditTool, ReadTool, ShellLimits, ShellRequest, ShellTool, WriteTool,
 };
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-use norte_code_protocol::catalog::{Catalog, load_catalog_files};
+use norte_code_protocol::catalog::{Catalog, Models, Providers, load_catalog_files};
 use norte_code_protocol::config::{ApiKey, CompactionTrigger, Config};
 use norte_code_protocol::keys::KeyStore;
 use norte_code_protocol::plugins::ContextUsage;
@@ -157,7 +158,9 @@ pub(super) struct CancelRegistration {
 /// The Norte Code service.
 pub struct Service {
     config: RwLock<Config>,
+    agent_profiles: RwLock<BTreeMap<String, Config>>,
     catalog: RwLock<Arc<Catalog>>,
+    plugin_catalogue: RwLock<(Providers, Models)>,
     default_spec: RwLock<Option<ModelSpec>>,
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
@@ -200,6 +203,9 @@ pub struct Service {
     /// Sessions with an auto-turn already running, so a second job end for the
     /// same session does not start a duplicate one at the same time.
     auto_turns: Mutex<BTreeSet<SessionKey>>,
+    /// Serializes durable turn boundaries for each session. Steering does not
+    /// take this lock; it is deliberately allowed to reach the turn in flight.
+    turn_locks: Mutex<BTreeMap<SessionKey, Arc<AsyncMutex<()>>>>,
     /// The request ids handed to auto-turns, so their events are not mistaken
     /// for a client request's.
     auto_request_id: AtomicU64,
@@ -217,24 +223,17 @@ fn withheld(disabled: &[String], name: &str) -> bool {
     disabled.iter().any(|entry| entry == name)
 }
 
-const SUBAGENT_TOOL_NAMES: &[&str] = &[
-    "read",
-    "write",
-    "edit",
-    "plan",
-    "browser_use",
-    "shell",
-    "manage_jobs",
-    "grep",
-    "todo",
-    "ask_user",
-    "subagent",
-    "web_fetch",
-    "skill",
-    "skill_resource",
-];
-
 impl Service {
+    /// Returns the gate that serializes turn starts for one session.
+    pub(super) fn turn_lock(&self, key: &SessionKey) -> Arc<AsyncMutex<()>> {
+        self.turn_locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
     /// Resolves the model and tool policy for a child session.
     async fn subagent_settings(
         &self,
@@ -251,15 +250,31 @@ impl Service {
         let (_, parent_spec, _) = self.require_record(parent)?;
         let parent_spec =
             parent_spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
-        let config = self.config();
-        let subagent = &config.tools.subagent;
-        let spec = match (&subagent.provider, &subagent.model) {
-            (None, None) => parent_spec,
-            (provider, model) => {
-                let provider = provider.as_deref().unwrap_or(&parent_spec.provider);
-                let model = model.as_deref().unwrap_or(&parent_spec.model);
-                self.default_spec_for(&config, &self.lock_catalog(), provider, model)?
+        let parent_config = self.config();
+        let target_name = parent_config
+            .subagent
+            .as_deref()
+            .unwrap_or(&parent_config.name);
+        let target_config = self
+            .agent_profiles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(target_name)
+            .cloned()
+            .ok_or_else(|| {
+                ServiceError::Config(norte_code_protocol::config::ConfigError::Invalid {
+                    path: "subagent".to_owned(),
+                    message: format!("does not name a configured agent: {target_name}"),
+                })
+            })?;
+        let spec = match (
+            target_config.default_provider.as_deref(),
+            target_config.default_model.as_deref(),
+        ) {
+            (Some(provider), Some(model)) if target_name != parent_config.name => {
+                self.default_spec_for(&target_config, &self.lock_catalog(), provider, model)?
             }
+            _ => parent_spec,
         };
         let parent_disabled = self
             .lock_sessions()
@@ -267,16 +282,7 @@ impl Service {
             .map(|record| record.disabled_tools.clone())
             .unwrap_or_default();
         let mut disabled = parent_disabled;
-        if let Some(allow) = &subagent.allow {
-            for name in SUBAGENT_TOOL_NAMES {
-                if !allow.iter().any(|allowed| allowed == name) {
-                    disabled.push((*name).to_owned());
-                }
-            }
-        }
-        if let Some(deny) = &subagent.deny {
-            disabled.extend(deny.iter().cloned());
-        }
+        disabled.extend(target_config.tools.disabled.iter().cloned());
         disabled.extend([
             "ask_user".to_owned(),
             "browser_use".to_owned(),
@@ -285,7 +291,7 @@ impl Service {
         disabled.sort();
         disabled.dedup();
         let budget = self.budget_book(parent).await?;
-        Ok((spec, disabled, budget, subagent.max_iterations))
+        Ok((spec, disabled, budget, target_config.max_iterations))
     }
 
     /// Builds a service with an in-memory session directory.
@@ -434,8 +440,6 @@ impl Service {
         let system_prompt =
             compose_system_prompt(&system_prompt.into(), project.as_ref(), &skill_index);
         let subagent_base = config
-            .tools
-            .subagent
             .system_prompt
             .as_deref()
             .unwrap_or(DEFAULT_SUBAGENT_SYSTEM_PROMPT);
@@ -449,9 +453,12 @@ impl Service {
         let activity = Arc::new(ToolActivity::default());
         let plans = Arc::new(PlanRepository::new(Arc::clone(&directory)));
         let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
+        let agent_profiles = BTreeMap::from([(config.name.clone(), config.clone())]);
         let service = Self {
             config: RwLock::new(config),
+            agent_profiles: RwLock::new(agent_profiles),
             catalog: RwLock::new(catalog),
+            plugin_catalogue: RwLock::new((Providers::default(), Models::default())),
             default_spec: RwLock::new(default_spec),
             store,
             blobs,
@@ -482,6 +489,7 @@ impl Service {
             subagent_runner: RwLock::new(None),
             job_host: Arc::new(RwLock::new(None)),
             auto_turns: Mutex::new(BTreeSet::new()),
+            turn_locks: Mutex::new(BTreeMap::new()),
             auto_request_id: AtomicU64::new(1 << 62),
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
@@ -502,6 +510,28 @@ impl Service {
             let _ = service.engine(&spec, None)?;
         }
         Ok(service)
+    }
+
+    /// Supplies the service-owned agent definitions used by delegated turns.
+    ///
+    /// The active service still owns its own sessions; the additional
+    /// definitions only select the child model and policy when an agent names
+    /// one in `subagent`.
+    pub fn with_agent_profiles(self: Arc<Self>, profiles: BTreeMap<String, Config>) -> Arc<Self> {
+        *self
+            .agent_profiles
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = profiles;
+        self
+    }
+
+    /// Supplies catalogue entries contributed by server-loaded plugins.
+    ///
+    /// Plugin code belongs to the host process, so the service keeps only its
+    /// catalogue offer. A later catalogue refresh can then rebuild the same
+    /// merged view instead of silently dropping plugin providers and models.
+    pub fn set_plugin_catalogue(&self, providers: Providers, models: Models) {
+        *self.lock_plugin_catalogue_write() = (providers, models);
     }
 
     /// Builds a service over an in-memory store.
@@ -882,30 +912,25 @@ impl Service {
             &disabled,
             AskUserTool::new(Arc::clone(&self.questions)).into_declaration(),
         )?;
-        if self.config().tools.subagent.enabled {
-            let max_concurrent = self.config().tools.subagent.max_concurrent;
-            let runner: Arc<dyn SubagentRunner> = self
-                .subagent_runner
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-                .unwrap_or_else(|| {
-                    Arc::new(SubagentRunnerImpl::new(None)) as Arc<dyn SubagentRunner>
-                });
-            self.register_tool(
-                &mut tools,
-                &disabled,
-                SubagentTool::new(
-                    runner,
-                    Arc::clone(&self.jobs),
-                    Arc::clone(&self.steering),
-                    Arc::clone(&self.detaches),
-                    Arc::clone(&self.job_host),
-                    max_concurrent,
-                )
-                .into_declaration(),
-            )?;
-        }
+        let runner: Arc<dyn SubagentRunner> = self
+            .subagent_runner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| Arc::new(SubagentRunnerImpl::new(None)) as Arc<dyn SubagentRunner>);
+        self.register_tool(
+            &mut tools,
+            &disabled,
+            SubagentTool::new(
+                runner,
+                Arc::clone(&self.jobs),
+                Arc::clone(&self.steering),
+                Arc::clone(&self.detaches),
+                Arc::clone(&self.job_host),
+                3,
+            )
+            .into_declaration(),
+        )?;
 
         if self.config().tools.web_fetch {
             self.register_tool(
@@ -1473,13 +1498,34 @@ impl Service {
         let project = self
             .workspace_root
             .ancestors()
-            .map(|dir| dir.join(".norte-code").join("config.json"))
+            .map(|dir| dir.join(".norte-code").join("service.json"))
             .find(|candidate| candidate.exists());
-        let mut loaded = Config::load(path.as_deref(), project.as_deref())?;
+        let current_agent = self.lock_config().name.clone();
+        let service =
+            norte_code_protocol::config::ServiceConfig::load(path.as_deref(), project.as_deref())?;
+        let agent_profiles: BTreeMap<String, Config> = service
+            .agents
+            .iter()
+            .cloned()
+            .map(|agent| (agent.name.clone(), agent))
+            .collect();
+        let mut warnings = Vec::new();
+        let config = service
+            .agents
+            .iter()
+            .find(|agent| agent.name == current_agent)
+            .cloned()
+            .or_else(|| service.default_agent().ok())
+            .ok_or_else(|| {
+                ServiceError::Config(norte_code_protocol::config::ConfigError::Invalid {
+                    path: "agents".to_owned(),
+                    message: "no configured agent is available".to_owned(),
+                })
+            })?;
         // The file never carries the store; the host installed it on the live
         // config, so a reload has to carry it across or a keyring key would
         // disappear from every session the reload rebuilds.
-        let mut next = loaded.config;
+        let mut next = config;
         next.keys.clone_from(&self.lock_config().keys);
 
         // Everything that can fail happens before the live service is touched.
@@ -1494,9 +1540,7 @@ impl Service {
             // A malformed catalogue file must not abort the whole reload:
             // the catalogue already in memory stays in force.
             Err(error) => {
-                loaded
-                    .warnings
-                    .push(format!("catalogue did not reload: {error}"));
+                warnings.push(format!("catalogue did not reload: {error}"));
                 self.catalog()
             }
         };
@@ -1512,9 +1556,7 @@ impl Service {
                     // and a new session will report its own error when it tries to
                     // open on the missing provider.
                     Err(error) => {
-                        loaded
-                            .warnings
-                            .push(format!("default provider/model not in catalogue: {error}"));
+                        warnings.push(format!("default provider/model not in catalogue: {error}"));
                         self.default_spec()
                     }
                 }
@@ -1528,6 +1570,10 @@ impl Service {
         let skills = Arc::new(discover_skills(&next, &self.workspace_root));
 
         self.replace_config(next.clone());
+        *self
+            .agent_profiles
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = agent_profiles;
         *self
             .secrets
             .write()
@@ -1579,7 +1625,7 @@ impl Service {
         }
         Ok(ReloadedConfig {
             config: next,
-            warnings: loaded.warnings,
+            warnings,
         })
     }
 
@@ -1587,7 +1633,7 @@ impl Service {
     ///
     /// [`ModelSpec::from_catalog`] only knows the catalogue, and a configured
     /// provider is not in it: `river` and every other private endpoint is
-    /// declared in `config.json` and nowhere else. A reload that went straight
+    /// declared in `service.json` and nowhere else. A reload that went straight
     /// to the catalogue therefore failed on a default model that a run resolves
     /// without complaint — `run --provider river` worked while `/refresh` said
     /// the provider was unknown, which is the same pair answered two ways.
@@ -1708,8 +1754,9 @@ impl Service {
             Kind::ListJobs { session } => Kind::ListJobs {
                 session: resolve(session)?,
             },
-            Kind::Resume { session } => Kind::Resume {
+            Kind::Resume { session, replay } => Kind::Resume {
                 session: resolve(session)?,
+                replay,
             },
             Kind::AnswerQuestion {
                 session,
@@ -1841,7 +1888,7 @@ impl Service {
                 )
                 .await
             }
-            Kind::Resume { session } => {
+            Kind::Resume { session, replay } => {
                 self.plans
                     .ensure_session_folder(&session)
                     .await
@@ -1854,7 +1901,7 @@ impl Service {
                     Vec::new(),
                     None,
                     None,
-                    true,
+                    replay,
                 )
                 .await
             }
@@ -1917,6 +1964,40 @@ impl Service {
                 ))
             }
             Kind::CostReport { session } => Ok(self.cost_report(request_id, session.as_ref())),
+            Kind::ListTelemetry { session } => {
+                self.telemetry_report(request_id, session.as_ref()).await
+            }
+            Kind::ListTools { session } => Ok(self.tool_list_event(request_id, session.as_ref())),
+            Kind::ListMcp => Ok(self.mcp_list_event(request_id)),
+            Kind::RefreshMcp => {
+                self.reload_mcp().await;
+                Ok(self.mcp_list_event(request_id))
+            }
+            Kind::SetMcpActive { name, active } => {
+                if self.set_mcp_active(&name, active).is_none() {
+                    return Err(ServiceError::Unsupported("unknown MCP server"));
+                }
+                Ok(self.mcp_list_event(request_id))
+            }
+            Kind::SetApprovalRule {
+                session,
+                tool,
+                allow,
+                global,
+            } => {
+                self.set_approval_rule(session.as_ref(), &tool, allow, global)
+                    .await?;
+                Ok(self.tool_list_event(request_id, session.as_ref()))
+            }
+            Kind::ForgetApprovalRule {
+                session,
+                tool,
+                global,
+            } => {
+                self.forget_approval_rule(session.as_ref(), &tool, global)
+                    .await?;
+                Ok(self.tool_list_event(request_id, session.as_ref()))
+            }
             Kind::ListModels => Ok(self.list_models_event(request_id)),
             Kind::ListSkills => Ok(self.skill_list_event(request_id)),
             Kind::RefreshSkills => Ok(self.refresh_skills_event(request_id)),
@@ -1950,10 +2031,85 @@ impl Service {
             }
             Kind::Steer { session, text, id } => self.steer(request_id, session, text, id).await,
             Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
+            Kind::ListPlugins
+            | Kind::InstallPlugin { .. }
+            | Kind::UpdatePlugins { .. }
+            | Kind::RemovePlugin { .. }
+            | Kind::SetPluginEnabled { .. } => Ok(single(
+                request_id,
+                None,
+                ServerEventKind::Error {
+                    code: norte_code_protocol::ErrorCode::InvalidRequest,
+                    message: "plugin lifecycle is managed by the RAEP host".to_owned(),
+                },
+            )),
         }
     }
 
     /// The budget decision that stopped the turn, if the layer made one.
+    async fn telemetry_report(
+        &self,
+        request_id: u64,
+        session: Option<&SessionKey>,
+    ) -> Result<EventStream, ServiceError> {
+        let records = self
+            .directory
+            .requests(session.map(ToString::to_string).as_deref())
+            .await
+            .map_err(|error| ServiceError::Telemetry(error.to_string()))?;
+        Ok(single(
+            request_id,
+            session.cloned(),
+            ServerEventKind::Telemetry { records },
+        ))
+    }
+
+    fn tool_list_event(&self, request_id: u64, session: Option<&SessionKey>) -> EventStream {
+        let tools = self
+            .tool_rules(session)
+            .into_iter()
+            .map(|tool| norte_code_protocol::ToolInfo {
+                name: tool.name,
+                allowed: tool.allowed,
+                scope: match tool.scope {
+                    RuleScope::Session => "session",
+                    RuleScope::Global => "global",
+                    RuleScope::Default => "default",
+                }
+                .to_owned(),
+            })
+            .collect();
+        single(
+            request_id,
+            session.cloned(),
+            ServerEventKind::ToolList { tools },
+        )
+    }
+
+    fn mcp_list_event(&self, request_id: u64) -> EventStream {
+        let servers = self
+            .mcp_status()
+            .into_iter()
+            .map(|server| norte_code_protocol::McpInfo {
+                name: server.name,
+                command: server.command,
+                tools: server.tools,
+                filtered: server.filtered,
+                active: server.active,
+            })
+            .collect();
+        let failures = self
+            .mcp_failures()
+            .into_iter()
+            .map(|(name, reason)| norte_code_protocol::McpFailure { name, reason })
+            .collect();
+        single(
+            request_id,
+            None,
+            ServerEventKind::McpList { servers, failures },
+        )
+    }
+
     fn cost_report(&self, request_id: u64, session: Option<&SessionKey>) -> EventStream {
         let lock = self.lock_sessions();
         let (cost, requests, unpriced) = match session {
@@ -2061,6 +2217,18 @@ impl Service {
 
     fn lock_catalog_write(&self) -> RwLockWriteGuard<'_, Arc<Catalog>> {
         self.catalog.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_plugin_catalogue(&self) -> RwLockReadGuard<'_, (Providers, Models)> {
+        self.plugin_catalogue
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_plugin_catalogue_write(&self) -> RwLockWriteGuard<'_, (Providers, Models)> {
+        self.plugin_catalogue
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lock_skills(&self) -> RwLockReadGuard<'_, Arc<SkillRegistry>> {

@@ -231,6 +231,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::CostNotReported { requests } => CanonicalEvent::CostNotReported {
             requests: *requests,
         },
+        ServerEventKind::PluginList { plugins } => CanonicalEvent::PluginList {
+            plugins: serde_json::to_value(plugins).expect("plugin list is serializable"),
+        },
+        ServerEventKind::PluginChanged { operation, name } => {
+            CanonicalEvent::PluginChanged { operation, name }
+        }
         ServerEventKind::SteerApplied { ids, messages } => {
             CanonicalEvent::UserInputAccepted { ids, messages }
         }
@@ -295,6 +301,18 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             code: serde_json::to_value(code).expect("error code is serializable"),
             message,
         },
+        ServerEventKind::Telemetry { records } => CanonicalEvent::ServiceData {
+            kind: "telemetry",
+            data: serde_json::to_value(records).expect("telemetry is serializable"),
+        },
+        ServerEventKind::ToolList { tools } => CanonicalEvent::ServiceData {
+            kind: "tool_list",
+            data: serde_json::to_value(tools).expect("tool list is serializable"),
+        },
+        ServerEventKind::McpList { servers, failures } => CanonicalEvent::ServiceData {
+            kind: "mcp_list",
+            data: json!({"servers": servers, "failures": failures}),
+        },
     };
     serde_json::to_value(payload).expect("canonical event is serializable")
 }
@@ -302,6 +320,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum CanonicalEvent<'a> {
+    /// Norte Code service-specific data exposed through the RAEP adapter.
+    ServiceData { kind: &'static str, data: Value },
+    /// The plugins installed on the remote host.
+    PluginList { plugins: Value },
+    /// A plugin lifecycle operation completed.
+    PluginChanged { operation: &'a str, name: &'a str },
     /// A session was created.
     SessionCreated {
         #[serde(skip_serializing_if = "Option::is_none")]

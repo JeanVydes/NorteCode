@@ -8,6 +8,7 @@ mod argument;
 mod debug;
 mod dial;
 mod edit;
+pub(crate) mod halftone;
 mod helpers;
 mod labels;
 mod loading;
@@ -22,7 +23,8 @@ pub(crate) use debug::{
     tools_panel,
 };
 pub(crate) use dial::{reasoning_label, token_ratio};
-pub(crate) use helpers::{cache_percent_label, find_project_config, human_tokens};
+pub(crate) use halftone::HalftoneConfig;
+pub(crate) use helpers::{cache_percent_label, human_tokens};
 #[cfg(test)]
 pub(crate) use labels::budget_label;
 pub(crate) use labels::{
@@ -37,7 +39,6 @@ pub(crate) use renderer::{BudgetPrompt, Format, Renderer, Verbosity};
 use super::{
     BTreeMap, Budget, BudgetAction, BudgetScope, BudgetUnit, CacheMode, Config, Delta, DiffStyle,
     ErrorCode, Feature, MessageRole, Modality, ModelSpec, OutputStream, Path, Phase, Reasoning,
-    ReasoningEffort, ReasoningInfo, RuleScope, ServerEvent, ServerEventKind, Service, SessionKey,
-    StreamingGranularity, StructuredOutputMode, Style, ToolKind, clip_text, compact_json,
-    duration_label,
+    ReasoningEffort, ReasoningInfo, ServerEvent, ServerEventKind, SessionKey, StreamingGranularity,
+    StructuredOutputMode, Style, ToolKind, clip_text, compact_json, duration_label,
 };

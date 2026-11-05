@@ -127,11 +127,7 @@ pub(crate) fn built() -> Registry {
         .arg(ArgSpec::optional("provider")),
     );
     registry.register(
-        CommandSpec::new(
-            "/refresh",
-            "re-read the configuration, the skills and the MCP servers",
-        )
-        .aliased(&["/reload"]),
+        CommandSpec::new("/refresh", "re-read the client cli.json").aliased(&["/reload"]),
     );
     registry.register(
         CommandSpec::new("/mcp", "list, add, remove or switch an MCP server")

@@ -1,8 +1,16 @@
-# Script against the protocol
+# Script with JSONL
 
-`new` and `resume` keep the terminal, so they carry no event stream. A
-script speaks the protocol instead: one serialized `ServerEvent` per frame,
-stable to parse because frames are tagged serde JSON.
+The CLI can run without a terminal. Send one message per input line and read
+one JSON object per output line:
+
+```sh
+printf '%s\n' 'Summarize this repository' | norte-code new --jsonl
+```
+
+Server events retain their protocol shape. Client-side diagnostics use
+`"event":"client_diagnostic"` and identify connection, session creation,
+input, request start/failure/finish, and client completion. This makes a
+failed headless run distinguishable from an empty response.
 
 ## A successful turn
 
@@ -14,7 +22,7 @@ stable to parse because frames are tagged serde JSON.
 {"request_id":1,"session":"…","kind":{"event":"turn_finished","turn":1,"phase":"idle","committed":true}}
 ```
 
-## Terminal frames
+## Service events
 
 | Event | Meaning |
 | --- | --- |
@@ -22,9 +30,9 @@ stable to parse because frames are tagged serde JSON.
 | `error` | The request failed terminally. |
 | `question_asked` | The turn is parked until a client answers. |
 
-If stdin is not a terminal, the CLI leaves the session parked rather than
-guessing. For a fully programmatic client, use the `Service` API directly
-(`norte_code_agent::Service` + `ClientRequest`) — full API in rustdoc.
+The CLI connects to the service configured in `cli.json`; it does not create
+an in-process service. For a custom transport client, use the RAEP endpoint
+described in the protocol reference.
 
 ## Keep the session
 

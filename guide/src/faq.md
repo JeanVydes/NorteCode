@@ -2,18 +2,20 @@
 
 ## Is there a server to start?
 
-No. There is no daemon, port or socket. `norte-code` builds everything in its
-own process and talks to the service in-process.
+Yes. The CLI is a stateless client. Start the local service with
+`norte-code service start`, or set `service_type` to `remote` and
+`service_url` in `cli.json`.
 
 ## Can I use it from a script?
 
-Yes, two ways: drive the CLI from a shell, or speak the request/event
-protocol directly. See [Script against the protocol](guides/script-with-jsonl.md).
+Yes. Pipe newline-delimited messages to `norte-code new --jsonl`; it emits
+service events and client diagnostics as JSONL. See
+[Script with JSONL](guides/script-with-jsonl.md).
 
 ## Is there a TUI?
 
-No. The terminal prompt is the only client. The protocol is shaped so a
-future client could reuse it, but none ships.
+Yes. The terminal client is the interactive UI; `--jsonl` is the headless
+alternative.
 
 ## Does it work with OpenRouter?
 

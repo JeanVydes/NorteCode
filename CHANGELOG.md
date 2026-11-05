@@ -6,13 +6,29 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Medium-verbosity transcript replay no longer exposes assistant reasoning,
+  and the default agent prompt avoids emitting identity or instruction-hierarchy
+  narration as conversation text.
+- `/refresh` and `/reload` now reread only the client's `cli.json`; service
+  configuration, catalogues, skills and MCP servers require `service restart`.
+- The RAEP replay journal uses a separate SQLite database from session data to
+  prevent concurrent event and session writes from locking each other.
+
 ### Added
 
-- Subagents have a separate configurable system prompt
-  (`tools.subagent.system_prompt`) while retaining the parent's skills and
-  project instructions. Child turns share the parent's request, token and
-  reported-cost budget ledger; providers that omit costs remain unsupported
-  for USD budget validation.
+- Remote sessions now expose persisted telemetry and tool rules through the
+  RAEP extension contract, so `/telemetry`, `/tools`, `/allow` and `/deny`
+  operate against the service. Tool decisions are deterministic; the removed
+  Approval rules are now explicit `allow`/`deny` decisions handled by the
+  remote service; there is no interactive `approval_mode` setting.
+
+- Reusable halftone line, pie and radar charts in the CLI telemetry panel,
+  with shared `ui.charts` contrast, density and dot-size settings.
+
+- Agents can name a separate configured agent for delegated subagent turns;
+  leaving `subagent` null inherits the parent's provider and model.
 
 - Plugin installation selects one `cdylib` package from a Cargo workspace.
   Single-plugin repositories remain automatic; when a workspace exposes
@@ -86,9 +102,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   when they finish. Enable `tools.auto_turn_on_job_end` to let the model read
   the queued result without waiting for another user message; it is disabled
   by default to avoid unrequested token usage.
-- Subagents can use a configured provider/model and tool allow/deny policy.
-  Missing values inherit the parent session, while `ask_user`, `browser_use`
-  and nested `subagent` delegation are always unavailable to children.
+- Subagents can use another configured agent's provider/model and disabled-tool
+  policy; `ask_user`, `browser_use` and nested `subagent` delegation remain
+  unavailable to children.
 
 - The model can delegate one turn to a subagent. The `subagent` tool starts
   a new session, runs one turn on it, and returns what it said; the child
@@ -96,8 +112,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `detach: true` the run becomes a job the registry holds, like a detached
   shell: `manage_jobs` reads and stops it, and its result arrives as a
   message when it ends. A child never has `subagent`, so nesting stops at
-  one. It is off by default and capped at three concurrent runs; both are
-  configured under `tools.subagent`.
+  one. It is capped at three concurrent runs and is controlled through the
+  selected agent's `tools.disabled` list.
 
 ### Fixed
 

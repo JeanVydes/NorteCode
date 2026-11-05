@@ -642,6 +642,7 @@ impl SqliteStore {
     }
 
     fn from_connection(connection: Connection) -> std::result::Result<Self, SqliteError> {
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         // WAL keeps readers from blocking the single writer; it is a no-op for
         // an in-memory database.
         let _ = connection.pragma_update(None, "journal_mode", "WAL");

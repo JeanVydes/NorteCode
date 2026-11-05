@@ -55,6 +55,9 @@ pub enum ServiceError {
     /// An approval rule could not be read or written.
     #[error("approval: {0}")]
     Approval(String),
+    /// Host telemetry could not be read.
+    #[error("telemetry: {0}")]
+    Telemetry(String),
     /// Compaction could not produce a safe summary.
     #[error("compaction: {0}")]
     Compaction(String),

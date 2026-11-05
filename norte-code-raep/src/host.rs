@@ -183,6 +183,9 @@ impl SqliteReplayStore {
         let connection = rusqlite::Connection::open(&path)
             .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
         connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS raep_replay (
                     session_id TEXT NOT NULL,
@@ -207,6 +210,12 @@ impl ReplayStore for SqliteReplayStore {
         let frame = frame.clone();
         tokio::task::spawn_blocking(move || {
             let connection = rusqlite::Connection::open(path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            connection
+                .busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            connection
+                .busy_timeout(std::time::Duration::from_secs(5))
                 .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
             let encoded = serde_json::to_string(&frame)?;
             let sequence = frame.seq.ok_or_else(|| {
@@ -243,6 +252,9 @@ impl ReplayStore for SqliteReplayStore {
         let session_id = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let connection = rusqlite::Connection::open(path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            connection
+                .busy_timeout(std::time::Duration::from_secs(5))
                 .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
             let mut statement = connection
                 .prepare(
@@ -397,11 +409,13 @@ struct HostState {
     loaded_replay: HashSet<String>,
     session_owners: HashMap<String, String>,
     artifact_owners: HashMap<String, String>,
+    session_agents: HashMap<String, String>,
 }
 
 /// A Norte Code service exposed through the RAEP wire.
 pub struct NorteCodeRaepHost {
     service: Arc<Service>,
+    services: HashMap<String, Arc<Service>>,
     config: HostConfig,
     state: Mutex<HostState>,
     events: broadcast::Sender<Envelope<Value>>,
@@ -436,6 +450,7 @@ impl NorteCodeRaepHost {
         let max_connections = config.max_connections;
         let (events, _) = broadcast::channel(config.replay_capacity.max(16));
         Ok(Self {
+            services: HashMap::from([(config.agent_id.clone(), Arc::clone(&service))]),
             service,
             config,
             state: Mutex::new(HostState::default()),
@@ -444,6 +459,29 @@ impl NorteCodeRaepHost {
             artifact_store: None,
             connections: Arc::new(Semaphore::new(max_connections)),
         })
+    }
+
+    /// Creates a host exposing several named agent services.
+    ///
+    /// The entry named by `config.agent_id` is the default used by
+    /// connection-scoped requests and by clients that do not name an agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configured default agent is not present.
+    pub fn with_agents(
+        services: HashMap<String, Arc<Service>>,
+        config: HostConfig,
+    ) -> Result<Self, HostError> {
+        let service = services.get(&config.agent_id).cloned().ok_or_else(|| {
+            HostError::InvalidFrame(format!(
+                "no service configured for agent `{}`",
+                config.agent_id
+            ))
+        })?;
+        let mut host = Self::new(service, config)?;
+        host.services = services;
+        Ok(host)
     }
 
     /// Creates a host with a durable RAEP replay journal.
@@ -459,6 +497,13 @@ impl NorteCodeRaepHost {
         let mut host = Self::new(service, config)?;
         host.replay_store = Some(replay_store);
         Ok(host)
+    }
+
+    /// Enables a durable replay journal on an already configured host.
+    #[must_use]
+    pub fn with_replay_store_instance(mut self, replay_store: Arc<dyn ReplayStore>) -> Self {
+        self.replay_store = Some(replay_store);
+        self
     }
 
     /// Enables durable storage for client-uploaded artifacts.
@@ -563,6 +608,27 @@ impl NorteCodeRaepHost {
         &self.config.agent_id
     }
 
+    fn service_for_agent(&self, agent_id: &str) -> Result<Arc<Service>, HostError> {
+        let requested = if agent_id.is_empty() {
+            &self.config.agent_id
+        } else {
+            agent_id
+        };
+        self.services
+            .get(requested)
+            .cloned()
+            .ok_or_else(|| HostError::InvalidFrame(format!("unknown agent `{requested}`")))
+    }
+
+    async fn service_for_session(&self, session_id: &str) -> Result<Arc<Service>, HostError> {
+        let state = self.state.lock().await;
+        let agent_id = state
+            .session_agents
+            .get(session_id)
+            .map_or(self.config.agent_id.as_str(), String::as_str);
+        self.service_for_agent(agent_id)
+    }
+
     /// Returns the configured bearer token, when transport authentication is enabled.
     #[must_use]
     pub fn auth_token(&self) -> Option<&str> {
@@ -665,6 +731,11 @@ impl NorteCodeRaepHost {
     /// Returns discovery information for an HTTP info route.
     #[must_use]
     pub fn info(&self) -> Value {
+        let default_model = self
+            .services
+            .get(&self.config.agent_id)
+            .and_then(|service| service.default_spec())
+            .map(|spec| json!({"provider": spec.provider, "model": spec.model}));
         json!({
             "protocol": {"name": "RAEP", "version": WIRE_VERSION},
             "server_version": self.config.server_version,
@@ -684,7 +755,10 @@ impl NorteCodeRaepHost {
                 "max_frame_bytes": self.config.max_frame_bytes,
                 "replay_buffer_events": self.config.replay_capacity,
                 "max_artifact_bytes": self.config.max_artifact_bytes
-            }
+            },
+            "agents": self.services.keys().collect::<Vec<_>>(),
+            "default_agent": self.config.agent_id,
+            "default_model": default_model
         })
     }
 
@@ -802,7 +876,10 @@ impl NorteCodeRaepHost {
                     answer,
                 }
             }
-            AgentCommand::Resume => ClientRequestKind::Resume { session },
+            AgentCommand::Resume => ClientRequestKind::Resume {
+                session,
+                replay: true,
+            },
             AgentCommand::Compact => ClientRequestKind::Compact { session },
         };
         self.submit_service(&session_id, kind).await
@@ -840,14 +917,14 @@ impl NorteCodeRaepHost {
 
     async fn attach(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
         let attach: SessionAttach = serde_json::from_value(frame.payload)?;
-        if attach.agent_id != self.config.agent_id {
-            return Err(HostError::InvalidFrame(
-                "agent_id does not match this host".to_owned(),
-            ));
-        }
+        let agent_id = if attach.agent_id.is_empty() {
+            self.config.agent_id.clone()
+        } else {
+            attach.agent_id.clone()
+        };
+        let service = self.service_for_agent(&agent_id)?;
         let (session_id, created) = if frame.session_id.is_empty() {
-            let key = self
-                .service
+            let key = service
                 .start_session(None)
                 .await
                 .map_err(|error| HostError::Service(error.to_string()))?;
@@ -857,16 +934,29 @@ impl NorteCodeRaepHost {
         };
         let exists = created
             || self
-                .service
+                .service_for_session(&session_id)
+                .await
+                .ok()
+                .and_then(|service| service.session_title(&SessionKey::new(session_id.clone())))
+                .is_some()
+            || service
                 .session_title(&SessionKey::new(session_id.clone()))
                 .is_some()
-            || self
-                .service
+            || service
                 .session_spec(&SessionKey::new(session_id.clone()))
-                .is_some();
+                .is_some()
+            || service
+                .sessions()
+                .iter()
+                .any(|session| session.session.as_str() == session_id);
         if !exists && attach.create_if_missing == Some(false) {
             return Err(HostError::InvalidFrame("session not found".to_owned()));
         }
+        self.state
+            .lock()
+            .await
+            .session_agents
+            .insert(session_id.clone(), agent_id);
         self.load_persisted_replay(&session_id).await?;
         {
             let mut state = self.state.lock().await;
@@ -909,6 +999,7 @@ impl NorteCodeRaepHost {
                     &session_id,
                     ClientRequestKind::Resume {
                         session: SessionKey::new(session_id.clone()),
+                        replay: true,
                     },
                 )
                 .await?;
@@ -1092,21 +1183,119 @@ impl NorteCodeRaepHost {
         frame: Envelope<Value>,
     ) -> Result<Vec<Envelope<Value>>, HostError> {
         let request: ClientRequest = serde_json::from_value(frame.payload)?;
+        if is_plugin_request(&request.kind) {
+            return self.plugin_command(&frame.session_id, request).await;
+        }
+        // Connection-scoped commands deliberately ignore the route's
+        // placeholder session id. The HTTP adapter has a session-shaped URL
+        // for every command, but listing sessions, creating one, and querying
+        // host-wide catalogues must work before any session is attached.
         let session_id = session_for_request(&request.kind)
             .map(std::string::ToString::to_string)
-            .or_else(|| (!frame.session_id.is_empty()).then_some(frame.session_id.clone()))
             .unwrap_or_default();
         if !session_id.is_empty() {
             self.require_attached(&session_id).await?;
         }
+        let service = if session_id.is_empty() {
+            Arc::clone(&self.service)
+        } else {
+            self.service_for_session(&session_id).await?
+        };
         self.collect_service_events(
             &session_id,
-            self.service
+            service
                 .submit(request)
                 .await
                 .map_err(|error| HostError::Service(error.to_string()))?,
         )
         .await
+    }
+
+    async fn plugin_command(
+        &self,
+        session_id: &str,
+        request: ClientRequest,
+    ) -> Result<Vec<Envelope<Value>>, HostError> {
+        let event = match request.kind {
+            ClientRequestKind::ListPlugins => ServerEventKind::PluginList {
+                plugins: crate::plugin_manager::plugin_info(),
+            },
+            ClientRequestKind::InstallPlugin { url, package, all } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    if all {
+                        crate::plugin_manager::install_all_plugins(&url, &|_, _, _| {})
+                            .map(|names| names.join(", "))
+                    } else {
+                        crate::plugin_manager::install_plugin(
+                            &url,
+                            package.as_deref(),
+                            &|_, _, _| {},
+                        )
+                    }
+                })
+                .await
+                .map_err(|error| HostError::Service(error.to_string()))?
+                .map_err(HostError::Service)?;
+                ServerEventKind::PluginChanged {
+                    operation: "installed".to_owned(),
+                    name: result,
+                }
+            }
+            ClientRequestKind::UpdatePlugins { name } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::plugin_manager::update_plugins(name.as_deref())
+                })
+                .await
+                .map_err(|error| HostError::Service(error.to_string()))?
+                .map_err(HostError::Service)?;
+                let name = result
+                    .into_iter()
+                    .filter_map(|(_, result)| result.ok())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ServerEventKind::PluginChanged {
+                    operation: "updated".to_owned(),
+                    name,
+                }
+            }
+            ClientRequestKind::RemovePlugin { name } => {
+                tokio::task::spawn_blocking({
+                    let name = name.clone();
+                    move || crate::plugin_manager::remove_plugin(&name)
+                })
+                .await
+                .map_err(|error| HostError::Service(error.to_string()))?
+                .map_err(HostError::Service)?;
+                ServerEventKind::PluginChanged {
+                    operation: "removed".to_owned(),
+                    name,
+                }
+            }
+            ClientRequestKind::SetPluginEnabled { name, enabled } => {
+                tokio::task::spawn_blocking({
+                    let name = name.clone();
+                    move || crate::plugin_manager::set_plugin_enabled(&name, enabled)
+                })
+                .await
+                .map_err(|error| HostError::Service(error.to_string()))?
+                .map_err(HostError::Service)?;
+                ServerEventKind::PluginChanged {
+                    operation: if enabled { "enabled" } else { "disabled" }.to_owned(),
+                    name,
+                }
+            }
+            _ => unreachable!("plugin request was checked before dispatch"),
+        };
+        self.emit_event(
+            session_id,
+            ServerEvent {
+                request_id: request.request_id,
+                session: None,
+                kind: event,
+            },
+        )
+        .await
+        .map(|frame| vec![frame])
     }
 
     async fn submit_service(
@@ -1207,8 +1396,21 @@ impl NorteCodeRaepHost {
 }
 
 fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
-    if matches!(kind, ServerEventKind::QuestionAsked { .. }) {
-        FrameType::Extension("norte_code.question_asked".to_owned())
+    if matches!(
+        kind,
+        ServerEventKind::QuestionAsked { .. }
+            | ServerEventKind::PluginList { .. }
+            | ServerEventKind::PluginChanged { .. }
+    ) {
+        if matches!(kind, ServerEventKind::QuestionAsked { .. }) {
+            FrameType::Extension("norte_code.question_asked".to_owned())
+        } else {
+            FrameType::Extension(NorteCodeExtension::Plugin.as_str().to_owned())
+        }
+    } else if matches!(kind, ServerEventKind::Telemetry { .. }) {
+        FrameType::Extension(NorteCodeExtension::Telemetry.as_str().to_owned())
+    } else if matches!(kind, ServerEventKind::ToolList { .. }) {
+        FrameType::Extension(NorteCodeExtension::ToolList.as_str().to_owned())
     } else {
         standard(standard_frame_type_for_event(kind))
     }
@@ -1245,10 +1447,14 @@ fn standard_frame_type_for_event(kind: &ServerEventKind) -> StandardFrameType {
         | ServerEventKind::ModelQueued { .. }
         | ServerEventKind::ReasoningDowngraded { .. }
         | ServerEventKind::ModelList { .. }
-        | ServerEventKind::CatalogUpdated { .. } => StandardFrameType::AgentChanged,
-        ServerEventKind::SkillList { .. } | ServerEventKind::SkillsUpdated { .. } => {
-            StandardFrameType::AgentChanged
-        }
+        | ServerEventKind::CatalogUpdated { .. }
+        | ServerEventKind::SkillList { .. }
+        | ServerEventKind::SkillsUpdated { .. }
+        | ServerEventKind::PluginList { .. }
+        | ServerEventKind::PluginChanged { .. }
+        | ServerEventKind::Telemetry { .. }
+        | ServerEventKind::ToolList { .. }
+        | ServerEventKind::McpList { .. } => StandardFrameType::AgentChanged,
         ServerEventKind::QuestionAnswered { .. } => StandardFrameType::ApprovalResolved,
         ServerEventKind::RetryScheduled { .. } | ServerEventKind::RetryStarted { .. } => {
             StandardFrameType::ProviderRetry
@@ -1273,22 +1479,56 @@ fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
         | ClientRequestKind::StopJobs { session, .. }
         | ClientRequestKind::DetachTurn { session }
         | ClientRequestKind::ListJobs { session }
-        | ClientRequestKind::Resume { session }
+        | ClientRequestKind::Resume { session, .. }
         | ClientRequestKind::AnswerQuestion { session, .. }
         | ClientRequestKind::SetModel { session, .. }
         | ClientRequestKind::SetReasoning { session, .. }
         | ClientRequestKind::SetBudget { session, .. }
         | ClientRequestKind::Compact { session }
-        | ClientRequestKind::ForkSession { session, .. } => Some(session),
+        | ClientRequestKind::ForkSession { session, .. }
+        | ClientRequestKind::ListTools {
+            session: Some(session),
+        }
+        | ClientRequestKind::SetApprovalRule {
+            session: Some(session),
+            ..
+        }
+        | ClientRequestKind::ForgetApprovalRule {
+            session: Some(session),
+            ..
+        } => Some(session),
         ClientRequestKind::SendMessage { session, .. }
-        | ClientRequestKind::CostReport { session } => session.as_ref(),
+        | ClientRequestKind::CostReport { session }
+        | ClientRequestKind::ListTelemetry { session } => session.as_ref(),
         ClientRequestKind::CreateSession { .. }
         | ClientRequestKind::ListSessions
         | ClientRequestKind::ListModels
+        | ClientRequestKind::ListTools { session: None }
+        | ClientRequestKind::SetApprovalRule { session: None, .. }
+        | ClientRequestKind::ForgetApprovalRule { session: None, .. }
         | ClientRequestKind::RefreshCatalog
         | ClientRequestKind::ListSkills
-        | ClientRequestKind::RefreshSkills => None,
+        | ClientRequestKind::RefreshSkills
+        | ClientRequestKind::ListPlugins
+        | ClientRequestKind::InstallPlugin { .. }
+        | ClientRequestKind::UpdatePlugins { .. }
+        | ClientRequestKind::RemovePlugin { .. }
+        | ClientRequestKind::SetPluginEnabled { .. }
+        | ClientRequestKind::ListMcp
+        | ClientRequestKind::RefreshMcp
+        | ClientRequestKind::SetMcpActive { .. } => None,
     }
+}
+
+fn is_plugin_request(kind: &ClientRequestKind) -> bool {
+    matches!(
+        kind,
+        ClientRequestKind::ListPlugins
+            | ClientRequestKind::InstallPlugin { .. }
+            | ClientRequestKind::UpdatePlugins { .. }
+            | ClientRequestKind::RemovePlugin { .. }
+            | ClientRequestKind::SetPluginEnabled { .. }
+    )
 }
 
 fn standard(kind: StandardFrameType) -> FrameType {
