@@ -63,9 +63,9 @@ use norte_code_protocol::keys::KeyStore;
 use norte_code_protocol::plugins::ContextUsage;
 use norte_code_protocol::{Phase, Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
-use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
+use crate::{DEFAULT_SUBAGENT_SYSTEM_PROMPT, ServiceError};
 
 use self::screenshots::{ScreenshotInterceptor, Screenshots, publishing_tool};
 use self::sessions::SessionRecord;
@@ -158,6 +158,7 @@ pub struct Service {
     blobs: Arc<dyn BlobStore>,
     factory: Arc<dyn ModelFactory>,
     system_prompt: String,
+    subagent_system_prompt: String,
     project_path: Option<PathBuf>,
     project_chars: usize,
     workspace_root: PathBuf,
@@ -229,10 +230,18 @@ const SUBAGENT_TOOL_NAMES: &[&str] = &[
 
 impl Service {
     /// Resolves the model and tool policy for a child session.
-    fn subagent_settings(
+    async fn subagent_settings(
         &self,
         parent: &SessionKey,
-    ) -> Result<(ModelSpec, Vec<String>), ServiceError> {
+    ) -> Result<
+        (
+            ModelSpec,
+            Vec<String>,
+            Arc<Mutex<BudgetBook>>,
+            Option<usize>,
+        ),
+        ServiceError,
+    > {
         let (_, parent_spec, _) = self.require_record(parent)?;
         let parent_spec =
             parent_spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
@@ -269,7 +278,8 @@ impl Service {
         ]);
         disabled.sort();
         disabled.dedup();
-        Ok((spec, disabled))
+        let budget = self.budget_book(parent).await?;
+        Ok((spec, disabled, budget, subagent.max_iterations))
     }
 
     /// Builds a service with an in-memory session directory.
@@ -417,6 +427,14 @@ impl Service {
             .collect();
         let system_prompt =
             compose_system_prompt(&system_prompt.into(), project.as_ref(), &skill_index);
+        let subagent_base = config
+            .tools
+            .subagent
+            .system_prompt
+            .as_deref()
+            .unwrap_or(DEFAULT_SUBAGENT_SYSTEM_PROMPT);
+        let subagent_system_prompt =
+            compose_system_prompt(subagent_base, project.as_ref(), &skill_index);
         let questions = Arc::new(
             QuestionBroker::new()
                 .with_store(Arc::new(DirectoryQuestions::new(Arc::clone(&directory)))),
@@ -433,6 +451,7 @@ impl Service {
             blobs,
             factory,
             system_prompt,
+            subagent_system_prompt,
             project_path,
             project_chars,
             workspace_root,
@@ -510,7 +529,7 @@ impl Service {
     /// current value, because the declarations are part of the prompt's prefix
     /// and moving them under a live conversation throws away its cache.
     fn engine(&self, spec: &ModelSpec, key: Option<&SessionKey>) -> Result<Harness, ServiceError> {
-        self.engine_with_budget(spec, key, None, None)
+        self.engine_with_budget(spec, key, None, None, None)
     }
 
     /// Builds an engine whose requests pass through the budget and telemetry
@@ -521,6 +540,7 @@ impl Service {
         key: Option<&SessionKey>,
         budget: Option<Arc<Mutex<BudgetBook>>>,
         compaction: Option<Arc<CompactionGate>>,
+        max_iterations: Option<usize>,
     ) -> Result<Harness, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
         // The adapter is what turns a `Blob` back into bytes on the way out. A
@@ -537,7 +557,9 @@ impl Service {
             .model(model)
             .tools(self.tools(key)?)
             .config(HarnessConfig {
-                max_iterations: self.config().max_iterations.unwrap_or(usize::MAX),
+                max_iterations: max_iterations
+                    .or(self.config().max_iterations)
+                    .unwrap_or(usize::MAX),
                 ..HarnessConfig::default()
             })
             .tool_metadata({
@@ -2173,17 +2195,19 @@ impl SubagentRunner for SubagentRunnerImpl {
                 is_error: true,
             };
         };
-        let (child_spec, child_disabled) = match service.subagent_settings(&parent_key) {
-            Ok(settings) => settings,
-            Err(error) => {
-                return SubagentOutcome {
-                    text: format!("subagent: could not resolve child settings: {error}"),
-                    is_error: true,
-                };
-            }
-        };
+        let (child_spec, child_disabled, child_budget, child_max_iterations) =
+            match service.subagent_settings(&parent_key).await {
+                Ok(settings) => settings,
+                Err(error) => {
+                    return SubagentOutcome {
+                        text: format!("subagent: could not resolve child settings: {error}"),
+                        is_error: true,
+                    };
+                }
+            };
+        let engine_budget = Arc::clone(&child_budget);
         let child_key = match service
-            .create_session_child(child_spec, child_disabled)
+            .create_session_child(child_spec, child_disabled, child_budget)
             .await
         {
             Ok(key) => key,
@@ -2209,7 +2233,13 @@ impl SubagentRunner for SubagentRunnerImpl {
                 is_error: true,
             };
         };
-        let engine = match service.engine(&spec, Some(&child_key)) {
+        let engine = match service.engine_with_budget(
+            &spec,
+            Some(&child_key),
+            Some(engine_budget),
+            None,
+            child_max_iterations,
+        ) {
             Ok(engine) => engine,
             Err(error) => {
                 return SubagentOutcome {

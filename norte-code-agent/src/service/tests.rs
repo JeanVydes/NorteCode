@@ -7440,6 +7440,7 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     );
     let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
     let mut child_config = subagent_config();
+    child_config.tools.subagent.system_prompt = Some("child instructions".to_owned());
     child_config.tools.subagent.provider = Some("test".to_owned());
     child_config.tools.subagent.model = Some("scripted".to_owned());
     child_config.tools.subagent.allow = Some(vec!["read".to_owned(), "todo".to_owned()]);
@@ -7461,14 +7462,34 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     service.install_subagent_runner();
 
     let parent = service.create_session(None).await.expect("parent session");
-    let (child_spec, child_disabled) = service.subagent_settings(&parent).expect("child settings");
+    let (child_spec, child_disabled, child_budget, _) = service
+        .subagent_settings(&parent)
+        .await
+        .expect("child settings");
     let child = service
-        .create_session_child(child_spec, child_disabled)
+        .create_session_child(child_spec, child_disabled, child_budget)
         .await
         .expect("child session");
+    let parent_budget = service.budget_book(&parent).await.expect("parent budget");
+    let child_budget = service.budget_book(&child).await.expect("child budget");
+    assert!(
+        Arc::ptr_eq(&parent_budget, &child_budget),
+        "child turns use the parent's budget ledger"
+    );
     let child_model = service.session_spec(&child).expect("child model");
     assert_eq!(child_model.provider, "test");
     assert_eq!(child_model.model, "scripted");
+    let (child_id, child_spec, _) = service.require_record(&child).expect("child record");
+    let child_history = service
+        .engine(&child_spec.expect("child spec"), Some(&child))
+        .expect("child engine")
+        .history(child_id)
+        .await
+        .expect("child history");
+    assert_eq!(
+        child_history.first().map(norte::Message::text),
+        Some("child instructions".to_owned())
+    );
 
     let parent_tools = service.tools(Some(&parent)).expect("parent tools").specs();
     let parent_names: Vec<&str> = parent_tools.iter().map(|tool| tool.name.as_str()).collect();

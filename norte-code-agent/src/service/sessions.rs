@@ -6,10 +6,11 @@
 //! read and write.
 
 use std::collections::BTreeMap;
-use std::sync::{MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
 
+use norte_code_protocol::costs::BudgetBook;
 use norte_code_protocol::{
     Budget, Phase as ProtocolPhase, Reasoning, ReasoningScope, SessionInfo, SessionKey,
 };
@@ -377,6 +378,15 @@ impl Service {
         &self,
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
+        self.create_session_with_prompt(title, &self.system_prompt)
+            .await
+    }
+
+    async fn create_session_with_prompt(
+        &self,
+        title: Option<String>,
+        system_prompt: &str,
+    ) -> Result<SessionKey, ServiceError> {
         // A run with no configured model still needs an engine to create the
         // session, so the first catalogue model is borrowed for that alone. The
         // session itself carries no spec (`None`): it is not a model the person
@@ -429,7 +439,7 @@ impl Service {
             let _ = engine
                 .append_history(
                     session.id,
-                    vec![norte::Message::system(self.system_prompt.clone())],
+                    vec![norte::Message::system(system_prompt.to_owned())],
                 )
                 .await;
             session
@@ -578,8 +588,11 @@ impl Service {
         &self,
         spec: ModelSpec,
         disabled_tools: Vec<String>,
+        budget: Arc<Mutex<BudgetBook>>,
     ) -> Result<SessionKey, ServiceError> {
-        let key = self.create_session(None).await?;
+        let key = self
+            .create_session_with_prompt(None, &self.subagent_system_prompt)
+            .await?;
         {
             let mut sessions = self.lock_sessions();
             if let Some(record) = sessions.get_mut(&key) {
@@ -588,6 +601,7 @@ impl Service {
             }
         }
         self.persist(&key).await?;
+        self.lock_budget_states().insert(key.clone(), budget);
         Ok(key)
     }
 

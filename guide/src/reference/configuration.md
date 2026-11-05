@@ -101,6 +101,7 @@ a child never has `subagent` — nesting stops at one.
 | `enabled` | bool | `false` | Register the `subagent` tool. Spawning agents spends tokens on its own, so it is off until it is turned on. |
 | `provider` | string or null | `null` | Provider for child sessions; null inherits the parent's provider. |
 | `model` | string or null | `null` | Model for child sessions; null inherits the parent's model. |
+| `system_prompt` | string or null | built-in | Base system prompt for child sessions. Skills and project instructions are appended as usual. |
 | `allow` | array or null | `null` | Tools exposed to child sessions; null inherits the parent's tool set. |
 | `deny` | array or null | `null` | Additional tools withheld from child sessions; null inherits the parent's restrictions. `ask_user`, `browser_use` and `subagent` are always denied. |
 | `max_concurrent` | int | `3` | How many subagents may run at once. Past the cap a spawn is refused, not queued. |
@@ -113,6 +114,10 @@ ends.
 The `subagent` tool accepts only `prompt`, `title` and `detach`. The child
 starts without the parent's conversation history. It uses the configured
 provider/model when present, otherwise the exact provider/model of the parent.
+Child turns use the parent's budget ledger, so request and token limits are
+shared. Reported provider costs are charged to that same ledger; requests
+without a reported cost remain measurable by requests/tokens but cannot be
+used to validate a USD budget.
 Its tool allow/deny policy is frozen when the child session is created.
 `ask_user`, `browser_use` and `subagent` are never available to a child.
 
