@@ -33,6 +33,8 @@ pub struct HostConfig {
     pub max_frame_bytes: u64,
     /// Optional bearer token required by operational HTTP routes.
     pub auth_token: Option<String>,
+    /// Optional bearer-token to principal mappings for multi-user ownership.
+    pub auth_principals: HashMap<String, String>,
     /// Maximum size accepted for one uploaded artifact.
     pub max_artifact_bytes: usize,
     /// Maximum concurrent WebSocket and SSE connections.
@@ -49,6 +51,7 @@ impl Default for HostConfig {
             replay_capacity: 10_000,
             max_frame_bytes: 1024 * 1024,
             auth_token: None,
+            auth_principals: HashMap::new(),
             max_artifact_bytes: 16 * 1024 * 1024,
             max_connections: 256,
             command_timeout_ms: 120_000,
@@ -391,6 +394,8 @@ struct HostState {
     replay: HashMap<String, VecDeque<Envelope<Value>>>,
     idempotency: HashMap<FrameId, Vec<Envelope<Value>>>,
     loaded_replay: HashSet<String>,
+    session_owners: HashMap<String, String>,
+    artifact_owners: HashMap<String, String>,
 }
 
 /// A Norte Code service exposed through the RAEP wire.
@@ -472,17 +477,41 @@ impl NorteCodeRaepHost {
         mime_type: &str,
         bytes: &[u8],
     ) -> Result<ArtifactRef, HostError> {
+        self.put_artifact_as(mime_type, bytes, None).await
+    }
+
+    /// Stores an artifact and records ownership for an authenticated principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when storage is disabled, the artifact exceeds the
+    /// configured limit, or the backing store rejects the write.
+    pub async fn put_artifact_as(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+        principal: Option<&str>,
+    ) -> Result<ArtifactRef, HostError> {
         if bytes.len() > self.config.max_artifact_bytes {
             return Err(HostError::Artifact(format!(
                 "artifact exceeds {} byte limit",
                 self.config.max_artifact_bytes
             )));
         }
-        self.artifact_store
+        let reference = self
+            .artifact_store
             .as_ref()
             .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
             .put(mime_type, bytes)
-            .await
+            .await?;
+        if let Some(principal) = principal {
+            self.state
+                .lock()
+                .await
+                .artifact_owners
+                .insert(reference.id.clone(), principal.to_owned());
+        }
+        Ok(reference)
     }
 
     /// Reads an uploaded artifact.
@@ -492,6 +521,28 @@ impl NorteCodeRaepHost {
     /// Returns an error when artifact storage is disabled or the identifier is
     /// invalid or missing.
     pub async fn get_artifact(&self, id: &str) -> Result<Vec<u8>, HostError> {
+        self.get_artifact_as(id, None).await
+    }
+
+    /// Reads an artifact after checking its authenticated owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the artifact is not owned by the principal,
+    /// storage is disabled, or the backing store cannot resolve the id.
+    pub async fn get_artifact_as(
+        &self,
+        id: &str,
+        principal: Option<&str>,
+    ) -> Result<Vec<u8>, HostError> {
+        if let Some(principal) = principal
+            && let Some(owner) = self.state.lock().await.artifact_owners.get(id)
+            && owner != principal
+        {
+            return Err(HostError::Artifact(
+                "artifact belongs to another principal".to_owned(),
+            ));
+        }
         self.artifact_store
             .as_ref()
             .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
@@ -515,6 +566,41 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn auth_token(&self) -> Option<&str> {
         self.config.auth_token.as_deref()
+    }
+
+    /// Resolves a bearer token to its configured principal.
+    ///
+    /// When authentication is disabled, all requests use the anonymous
+    /// principal. A single legacy token maps to `default` unless an explicit
+    /// principal mapping exists.
+    #[must_use]
+    pub fn authenticate_bearer(&self, token: &str) -> Option<String> {
+        let configured = self.config.auth_token.as_deref();
+        if configured.is_none() && self.config.auth_principals.is_empty() {
+            return None;
+        }
+        if configured != Some(token) && !self.config.auth_principals.contains_key(token) {
+            return None;
+        }
+        Some(
+            self.config
+                .auth_principals
+                .get(token)
+                .cloned()
+                .unwrap_or_else(|| "default".to_owned()),
+        )
+    }
+
+    /// Returns the principal used for unauthenticated local operation.
+    #[must_use]
+    pub fn anonymous_principal(&self) -> &'static str {
+        "anonymous"
+    }
+
+    /// Returns whether this host requires transport authentication.
+    #[must_use]
+    pub fn authentication_enabled(&self) -> bool {
+        self.config.auth_token.is_some() || !self.config.auth_principals.is_empty()
     }
 
     /// Attempts to reserve one long-lived transport connection.
@@ -601,10 +687,32 @@ impl NorteCodeRaepHost {
     /// for the current attachment, or rejected by the Norte Code service.
     ///
     pub async fn handle(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
+        self.handle_as(frame, None).await
+    }
+
+    /// Handles one frame while enforcing ownership for `principal`.
+    ///
+    /// `None` is reserved for in-process callers and keeps the existing local
+    /// behavior. HTTP and WebSocket adapters pass the authenticated principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the frame is invalid or the principal does not
+    /// own the requested session.
+    pub async fn handle_as(
+        &self,
+        frame: Envelope<Value>,
+        principal: Option<&str>,
+    ) -> Result<Vec<Envelope<Value>>, HostError> {
         if frame.version != WIRE_VERSION {
             return Err(HostError::InvalidFrame(
                 "unsupported RAEP wire version".to_owned(),
             ));
+        }
+        if let Some(principal) = principal
+            && !frame.session_id.is_empty()
+        {
+            self.claim_session(&frame.session_id, principal).await?;
         }
         {
             let state = self.state.lock().await;
@@ -631,6 +739,22 @@ impl NorteCodeRaepHost {
             .idempotency
             .insert(frame_id, result.clone());
         Ok(result)
+    }
+
+    async fn claim_session(&self, session_id: &str, principal: &str) -> Result<(), HostError> {
+        let mut state = self.state.lock().await;
+        match state.session_owners.get(session_id) {
+            Some(owner) if owner != principal => Err(HostError::InvalidFrame(
+                "session belongs to another principal".to_owned(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                state
+                    .session_owners
+                    .insert(session_id.to_owned(), principal.to_owned());
+                Ok(())
+            }
+        }
     }
 
     /// Returns replay frames strictly after `last_seq`.
