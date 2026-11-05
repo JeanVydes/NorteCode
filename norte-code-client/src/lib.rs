@@ -12,7 +12,7 @@ use futures_core::Stream;
 use futures_util::stream::{self, StreamExt};
 use norte_code_protocol::{ClientRequest, ServerEvent};
 use raep_types::{Envelope, FrameType, StandardFrameType};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
@@ -316,18 +316,11 @@ impl RemoteClient {
     }
 
     fn events_url(&self, session_id: &str) -> String {
-        match self.last_seq(session_id) {
-            Some(seq) => format!(
-                "{}/raep/v1/sessions/{}/events?resume_from_seq={seq}",
-                self.base_url,
-                percent_encode(session_id)
-            ),
-            None => format!(
-                "{}/raep/v1/sessions/{}/events",
-                self.base_url,
-                percent_encode(session_id)
-            ),
-        }
+        format!(
+            "{}/raep/v1/sessions/{}/events",
+            self.base_url,
+            percent_encode(session_id)
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -339,6 +332,13 @@ impl RemoteClient {
         let mut headers = HeaderMap::new();
         if let Some(token) = &self.bearer_token {
             headers.insert(AUTHORIZATION, token.clone());
+        }
+        if let Some(seq) = self.last_seq(session_id) {
+            headers.insert(
+                HeaderName::from_static("last-event-id"),
+                HeaderValue::from_str(&seq.to_string())
+                    .map_err(|error| ClientError::new(format!("invalid cursor: {error}")))?,
+            );
         }
         let response = self
             .http
