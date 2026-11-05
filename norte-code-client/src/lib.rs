@@ -14,7 +14,7 @@ use norte_code_protocol::{ClientRequest, ServerEvent};
 use raep_types::{Envelope, FrameType, StandardFrameType};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_stream::iter;
@@ -381,59 +381,49 @@ impl RemoteClient {
             (
                 bytes,
                 String::new(),
-                Vec::<(ServerEvent, bool)>::new(),
+                VecDeque::<(ServerEvent, bool)>::new(),
                 session,
                 false,
                 session_seq,
             ),
-            |(mut bytes, mut buffer, mut pending, session, done, session_seq)| async move {
+            |(mut bytes, mut buffer, mut pending, session, finished, session_seq)| async move {
                 loop {
-                    if done {
+                    if let Some((event, terminal)) = pending.pop_front() {
+                        return Some((
+                            event,
+                            (
+                                bytes,
+                                buffer,
+                                pending,
+                                session,
+                                finished || terminal,
+                                session_seq,
+                            ),
+                        ));
+                    }
+                    if finished {
                         return None;
                     }
-                    if let Some((event, terminal)) = pending.pop() {
-                        return Some((
-                            event,
-                            (bytes, buffer, pending, session, terminal, session_seq),
-                        ));
-                    }
-                    while let Some(end) = buffer.find("\n\n") {
-                        let block = buffer[..end].to_owned();
-                        buffer.drain(..end + 2);
-                        if let Some(data) =
-                            block.lines().find_map(|line| line.strip_prefix("data: "))
-                            && let Ok(frame) = serde_json::from_str::<Value>(data)
-                        {
-                            if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
-                                let mut seqs = session_seq
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                seqs.entry(session.as_str().to_owned())
-                                    .and_modify(|current| *current = (*current).max(seq))
-                                    .or_insert(seq);
-                            }
-                            if let Ok(event) = server_event_from_frame(&frame) {
-                                let terminal = matches!(
-                                    event.kind,
-                                    norte_code_protocol::ServerEventKind::TurnFinished { .. }
-                                        | norte_code_protocol::ServerEventKind::TurnStopped { .. }
-                                );
-                                pending.insert(0, (event, terminal));
-                                break;
-                            }
+                    for (event, terminal, seq) in drain_sse_buffer(&mut buffer) {
+                        if let Some(seq) = seq {
+                            let mut seqs = session_seq
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            seqs.entry(session.as_str().to_owned())
+                                .and_modify(|current| *current = (*current).max(seq))
+                                .or_insert(seq);
                         }
-                    }
-                    if let Some((event, terminal)) = pending.pop() {
-                        return Some((
-                            event,
-                            (bytes, buffer, pending, session, terminal, session_seq),
-                        ));
+                        pending.push_back((event, terminal));
                     }
                     match bytes.next().await {
                         Some(Ok(chunk)) => {
                             buffer.push_str(&String::from_utf8_lossy(&chunk));
                         }
-                        Some(Err(_)) | None => return None,
+                        Some(Err(_)) | None => {
+                            if pending.is_empty() {
+                                return None;
+                            }
+                        }
                     }
                 }
             },
@@ -585,6 +575,39 @@ impl AgentClient for RemoteClient {
     async fn submit(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
         self.submit_http(request).await
     }
+}
+
+/// Drains complete SSE blocks from `buffer`, in wire order.
+///
+/// Each complete block becomes one event; a trailing partial block stays in
+/// the buffer for the next chunk. Blocks that are not `data:` frames or
+/// that do not decode are skipped, so a keepalive or a foreign event never
+/// wedges the stream. Terminal events (`TurnFinished`, `TurnStopped`) are
+/// flagged but do not stop the drain: events the server sent after the
+/// terminal in the same flush must still reach the caller.
+fn drain_sse_buffer(buffer: &mut String) -> Vec<(ServerEvent, bool, Option<u64>)> {
+    let mut events = Vec::new();
+    while let Some(end) = buffer.find("\n\n") {
+        let block = buffer[..end].to_owned();
+        buffer.drain(..end + 2);
+        let Some(data) = block.lines().find_map(|line| line.strip_prefix("data: ")) else {
+            continue;
+        };
+        let Ok(frame) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let seq = frame.get("seq").and_then(Value::as_u64);
+        let Ok(event) = server_event_from_frame(&frame) else {
+            continue;
+        };
+        let terminal = matches!(
+            event.kind,
+            norte_code_protocol::ServerEventKind::TurnFinished { .. }
+                | norte_code_protocol::ServerEventKind::TurnStopped { .. }
+        );
+        events.push((event, terminal, seq));
+    }
+    events
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1220,5 +1243,30 @@ mod tests {
             "seq": 99,
         }));
         assert_eq!(client.last_seq(""), None);
+    }
+
+    #[test]
+    fn drains_sse_blocks_in_order_and_reaches_past_the_terminal() {
+        let mut buffer = concat!(
+            "event: turn_state_changed\n",
+            "data: {\"session_id\":\"session-1\",\"seq\":1,\"payload\":{\"event\":\"turn_state_changed\",\"state\":\"finished\",\"turn\":1,\"phase\":\"idle\",\"committed\":true}}\n",
+            "\n",
+            "event: SESSION_STATS\n",
+            "data: {\"session_id\":\"session-1\",\"seq\":2,\"payload\":{\"event\":\"session_stats\",\"input_tokens\":10,\"output_tokens\":4,\"cache_read_tokens\":2,\"cache_write_tokens\":1,\"cost_usd\":0.25,\"requests\":2,\"context_used\":14,\"context_window\":100}}\n",
+            "\n",
+            "data: {\"session_id\":\"session-1\",\"seq\":3,\"payload\":{\"event\":\"session_stats\",\"input_tokens\":11,\"output_tokens\":5,\"cache_read_tokens\":2,\"cache_write_tokens\":1,\"cost_usd\":0.26,\"requests\":3,\"context_used\":15,\"context_window\":100}}"
+        )
+        .to_owned();
+        let drained = drain_sse_buffer(&mut buffer);
+        assert_eq!(drained.len(), 2);
+        assert!(drained[0].1, "the terminal event is flagged");
+        assert_eq!(drained[0].2, Some(1));
+        assert!(
+            !drained[1].1,
+            "the event after the terminal is not terminal but still drains"
+        );
+        assert_eq!(drained[1].2, Some(2));
+        // The partial trailing block is left for the next chunk.
+        assert!(buffer.contains("\"seq\":3"));
     }
 }
