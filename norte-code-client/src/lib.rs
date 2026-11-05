@@ -16,7 +16,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio_stream::iter;
 
 /// A stream of events answering one client request.
@@ -66,6 +66,7 @@ pub struct RemoteClient {
     agent_id: String,
     default_session: Option<String>,
     attached_sessions: Mutex<HashSet<String>>,
+    session_seq: Arc<Mutex<HashMap<String, u64>>>,
     session_info: Mutex<HashMap<String, norte_code_protocol::SessionInfo>>,
     session_reasoning: Mutex<HashMap<String, norte_code_protocol::Reasoning>>,
     session_stats: Mutex<HashMap<String, RemoteSessionStats>>,
@@ -121,6 +122,7 @@ impl RemoteClient {
             agent_id: "norte-code".to_owned(),
             default_session,
             attached_sessions: Mutex::new(HashSet::new()),
+            session_seq: Arc::new(Mutex::new(HashMap::new())),
             session_info: Mutex::new(HashMap::new()),
             session_reasoning: Mutex::new(HashMap::new()),
             session_stats: Mutex::new(HashMap::new()),
@@ -203,6 +205,41 @@ impl RemoteClient {
             .cloned()
     }
 
+    /// Returns the last RAEP sequence observed for a session.
+    #[must_use]
+    pub fn last_seq(&self, session: &str) -> Option<u64> {
+        self.session_seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .copied()
+    }
+
+    /// Records a frame's sequence for its session, keeping the maximum seen.
+    fn note_seq(&self, session: &str, seq: u64) {
+        let mut seqs = self
+            .session_seq
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        seqs.entry(session.to_owned())
+            .and_modify(|current| *current = (*current).max(seq))
+            .or_insert(seq);
+    }
+
+    /// Records the sequence of one raw RAEP frame, if it carries one.
+    fn note_frame_seq(&self, frame: &Value) {
+        let Some(seq) = frame.get("seq").and_then(Value::as_u64) else {
+            return;
+        };
+        let session = frame
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        if let Some(session) = session {
+            self.note_seq(session, seq);
+        }
+    }
+
     fn session_for(&self, request: &ClientRequest) -> String {
         session_from_request(request)
             .or_else(|| self.default_session.clone())
@@ -271,10 +308,29 @@ impl RemoteClient {
             .iter()
             .map(server_event_from_frame)
             .collect::<Result<Vec<_>, _>>()?;
+        for frame in frames {
+            self.note_frame_seq(frame);
+        }
         self.remember_sessions(&events);
         Ok(Box::pin(iter(events)))
     }
 
+    fn events_url(&self, session_id: &str) -> String {
+        match self.last_seq(session_id) {
+            Some(seq) => format!(
+                "{}/raep/v1/sessions/{}/events?resume_from_seq={seq}",
+                self.base_url,
+                percent_encode(session_id)
+            ),
+            None => format!(
+                "{}/raep/v1/sessions/{}/events",
+                self.base_url,
+                percent_encode(session_id)
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
     async fn submit_streaming(
         &self,
         session_id: &str,
@@ -286,11 +342,7 @@ impl RemoteClient {
         }
         let response = self
             .http
-            .get(format!(
-                "{}/raep/v1/sessions/{}/events",
-                self.base_url,
-                percent_encode(session_id)
-            ))
+            .get(self.events_url(session_id))
             .headers(headers.clone())
             .send()
             .await
@@ -323,6 +375,7 @@ impl RemoteClient {
         });
 
         let session = norte_code_protocol::SessionKey::new(session_id);
+        let session_seq = Arc::clone(&self.session_seq);
         let bytes = response.bytes_stream();
         let stream = stream::unfold(
             (
@@ -331,14 +384,18 @@ impl RemoteClient {
                 Vec::<(ServerEvent, bool)>::new(),
                 session,
                 false,
+                session_seq,
             ),
-            |(mut bytes, mut buffer, mut pending, session, done)| async move {
+            |(mut bytes, mut buffer, mut pending, session, done, session_seq)| async move {
                 loop {
                     if done {
                         return None;
                     }
                     if let Some((event, terminal)) = pending.pop() {
-                        return Some((event, (bytes, buffer, pending, session, terminal)));
+                        return Some((
+                            event,
+                            (bytes, buffer, pending, session, terminal, session_seq),
+                        ));
                     }
                     while let Some(end) = buffer.find("\n\n") {
                         let block = buffer[..end].to_owned();
@@ -346,19 +403,31 @@ impl RemoteClient {
                         if let Some(data) =
                             block.lines().find_map(|line| line.strip_prefix("data: "))
                             && let Ok(frame) = serde_json::from_str::<Value>(data)
-                            && let Ok(event) = server_event_from_frame(&frame)
                         {
-                            let terminal = matches!(
-                                event.kind,
-                                norte_code_protocol::ServerEventKind::TurnFinished { .. }
-                                    | norte_code_protocol::ServerEventKind::TurnStopped { .. }
-                            );
-                            pending.insert(0, (event, terminal));
-                            break;
+                            if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
+                                let mut seqs = session_seq
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                seqs.entry(session.as_str().to_owned())
+                                    .and_modify(|current| *current = (*current).max(seq))
+                                    .or_insert(seq);
+                            }
+                            if let Ok(event) = server_event_from_frame(&frame) {
+                                let terminal = matches!(
+                                    event.kind,
+                                    norte_code_protocol::ServerEventKind::TurnFinished { .. }
+                                        | norte_code_protocol::ServerEventKind::TurnStopped { .. }
+                                );
+                                pending.insert(0, (event, terminal));
+                                break;
+                            }
                         }
                     }
                     if let Some((event, terminal)) = pending.pop() {
-                        return Some((event, (bytes, buffer, pending, session, terminal)));
+                        return Some((
+                            event,
+                            (bytes, buffer, pending, session, terminal, session_seq),
+                        ));
                     }
                     match bytes.next().await {
                         Some(Ok(chunk)) => {
@@ -483,6 +552,7 @@ impl RemoteClient {
                 serde_json::json!({
                     "agent_id": &self.agent_id,
                     "create_if_missing": false,
+                    "resume_from_seq": self.last_seq(session_id),
                 }),
                 timestamp_millis(),
             ))
@@ -496,6 +566,11 @@ impl RemoteClient {
             .map_err(|error| ClientError::new(format!("invalid RAEP attach response: {error}")))?;
         if !status.is_success() {
             return Err(ClientError::new(response_error(&body)));
+        }
+        if let Some(frames) = body.get("events").and_then(Value::as_array) {
+            for frame in frames {
+                self.note_frame_seq(frame);
+            }
         }
         self.attached_sessions
             .lock()
@@ -1104,5 +1179,46 @@ mod tests {
         };
         let value = serde_json::to_value(request).expect("request serializes");
         assert_eq!(value["kind"]["type"], "list_telemetry");
+    }
+
+    #[test]
+    fn tracks_last_sequence_per_session_and_keeps_the_maximum() {
+        let client =
+            RemoteClient::new("http://localhost:8080", None, None).expect("client creates");
+        assert_eq!(client.last_seq("session-1"), None);
+        client.note_seq("session-1", 7);
+        assert_eq!(client.last_seq("session-1"), Some(7));
+        client.note_seq("session-1", 4);
+        assert_eq!(
+            client.last_seq("session-1"),
+            Some(7),
+            "an older frame must not move the cursor backwards"
+        );
+        client.note_seq("session-1", 9);
+        assert_eq!(client.last_seq("session-1"), Some(9));
+        client.note_seq("session-2", 3);
+        assert_eq!(client.last_seq("session-2"), Some(3));
+        assert_eq!(client.last_seq("session-1"), Some(9));
+    }
+
+    #[test]
+    fn records_sequence_from_raw_frames_only() {
+        let client =
+            RemoteClient::new("http://localhost:8080", None, None).expect("client creates");
+        client.note_frame_seq(&serde_json::json!({
+            "session_id": "session-1",
+            "seq": 12,
+        }));
+        assert_eq!(client.last_seq("session-1"), Some(12));
+        client.note_frame_seq(&serde_json::json!({
+            "session_id": "session-1",
+            "payload": {},
+        }));
+        assert_eq!(client.last_seq("session-1"), Some(12));
+        client.note_frame_seq(&serde_json::json!({
+            "session_id": "",
+            "seq": 99,
+        }));
+        assert_eq!(client.last_seq(""), None);
     }
 }
