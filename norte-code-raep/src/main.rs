@@ -9,12 +9,11 @@ use std::{
 use norte_code_agent::{DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, VendorModels};
 use norte_code_plugin_host::load_plugins;
 use norte_code_protocol::{
-    catalog::{
-        Catalog, CatalogError, Models, Providers, ensure_catalog_files, load_catalog_files,
-    },
+    catalog::{Catalog, CatalogError, Models, Providers, ensure_catalog_files, load_catalog_files},
     config::{
         Agent, ServiceConfig, ensure_user_service_config, project_config_path, user_config_path,
     },
+    plugins::Catalogue,
     plugins::Plugins,
     sqlite::{SessionDirectory, SqliteStore},
 };
@@ -75,6 +74,29 @@ async fn build_services(
     Ok(services)
 }
 
+fn load_catalog(offered: Catalogue) -> Result<Catalog, Box<dyn std::error::Error>> {
+    match load_catalog_files() {
+        Ok(catalog) => Ok(catalog),
+        Err(_error) if !offered.providers.is_empty() && !offered.models.is_empty() => {
+            Ok(Catalog::new(
+                Providers {
+                    providers: offered.providers,
+                },
+                Models {
+                    models: offered.models,
+                },
+            )?)
+        }
+        Err(CatalogError::NoProviders { .. } | CatalogError::NoModels { .. })
+            if offered.providers.is_empty() && offered.models.is_empty() =>
+        {
+            eprintln!("catalogue is empty; install a catalogue plugin before starting a session");
+            Ok(Catalog::default())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace = std::env::current_dir()?;
@@ -92,24 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "created the default server catalogue; edit providers.json and models.json if needed"
         );
     }
-    let mut catalog = match load_catalog_files() {
-        Ok(catalog) => catalog,
-        Err(_error) if !offered.providers.is_empty() && !offered.models.is_empty() => Catalog::new(
-            Providers {
-                providers: offered.providers.clone(),
-            },
-            Models {
-                models: offered.models.clone(),
-            },
-        )?,
-        Err(CatalogError::NoProviders { .. } | CatalogError::NoModels { .. })
-            if offered.providers.is_empty() && offered.models.is_empty() =>
-        {
-            eprintln!("catalogue is empty; install a catalogue plugin before starting a session");
-            Catalog::default()
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let mut catalog = load_catalog(offered.clone())?;
     for skipped in catalog.extend(offered.providers.clone(), offered.models.clone()) {
         eprintln!("warning: {skipped}");
     }
