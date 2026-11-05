@@ -10,6 +10,7 @@
 
 mod host;
 mod http;
+mod payloads;
 
 pub use host::{
     ArtifactRef, ArtifactStore, BlobArtifactStore, FileReplayStore, HostConfig, HostError,
