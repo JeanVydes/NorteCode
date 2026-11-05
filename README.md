@@ -97,8 +97,8 @@ content-addressed BlobStore; no second artifact directory is created. The
 common event families use canonical RAEP payloads (`turn`, tools, jobs,
 questions, budget, usage, retries and errors). The original NorteCode event is
 kept under envelope `ext.norte_code` for lossless compatibility while the
-remaining NorteCode-specific events retain their typed payload in that
-extension.
+session, history, compaction, agent/catalogue and cost events are normalized
+as well.
 `norte_code.command` extension is available when a
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
