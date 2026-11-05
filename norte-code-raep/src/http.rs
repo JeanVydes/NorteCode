@@ -6,7 +6,7 @@ use axum::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -47,8 +47,12 @@ async fn health_ready(State(_host): State<Arc<NorteCodeRaepHost>>) -> StatusCode
 
 async fn websocket(
     State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    if let Some(response) = unauthorized(&host, &headers) {
+        return response;
+    }
     upgrade
         .protocols(["raep.v1"])
         .on_upgrade(move |socket| websocket_session(host, socket))
@@ -145,8 +149,12 @@ async fn send_frame(socket: &mut WebSocket, frame: Envelope<Value>) -> Result<()
 
 async fn events(
     State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
+    if let Some(response) = unauthorized(&host, &headers) {
+        return response;
+    }
     let receiver = host.subscribe();
     let attach = Envelope {
         kind: FrameType::Standard(StandardFrameType::SessionAttach),
@@ -216,9 +224,13 @@ async fn events(
 
 async fn commands(
     State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(mut frame): Json<Envelope<Value>>,
 ) -> Response {
+    if let Some(response) = unauthorized(&host, &headers) {
+        return response;
+    }
     if frame.session_id.is_empty() {
         frame.session_id = session_id;
     } else if frame.session_id != session_id {
@@ -273,4 +285,27 @@ fn error_frame(error: &HostError) -> Envelope<Value> {
         }),
         0,
     )
+}
+
+fn unauthorized(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Option<Response> {
+    let expected = host.auth_token()?;
+    let supplied = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| value == expected);
+    if supplied {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "accepted": false,
+                    "error": {"code": "UNAUTHENTICATED", "message": "valid bearer token required"}
+                })),
+            )
+                .into_response(),
+        )
+    }
 }

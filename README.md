@@ -96,6 +96,10 @@ survives a server restart. The `norte_code.command` extension is available when 
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
 
+Set `NORTE_CODE_AUTH_TOKEN` to require `Authorization: Bearer <token>` on
+WebSocket, SSE and session-command routes. Health and discovery endpoints
+remain public for orchestration probes.
+
 ## Documentation
 
 - **[Guide](https://jeanvydes.github.io/NorteCode/)** — getting started,

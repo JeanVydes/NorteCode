@@ -30,6 +30,8 @@ pub struct HostConfig {
     pub replay_capacity: usize,
     /// Maximum frame size advertised to clients.
     pub max_frame_bytes: u64,
+    /// Optional bearer token required by operational HTTP routes.
+    pub auth_token: Option<String>,
 }
 
 impl Default for HostConfig {
@@ -39,6 +41,7 @@ impl Default for HostConfig {
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
             replay_capacity: 10_000,
             max_frame_bytes: 1024 * 1024,
+            auth_token: None,
         }
     }
 }
@@ -219,6 +222,12 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn agent_id(&self) -> &str {
         &self.config.agent_id
+    }
+
+    /// Returns the configured bearer token, when transport authentication is enabled.
+    #[must_use]
+    pub fn auth_token(&self) -> Option<&str> {
+        self.config.auth_token.as_deref()
     }
 
     /// Returns a receiver for live frames emitted by any attached connection.

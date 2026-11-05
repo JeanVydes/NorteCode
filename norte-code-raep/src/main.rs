@@ -38,9 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service.install_subagent_runner();
     let replay_path = database.with_extension("raep.jsonl");
     let replay_store = Arc::new(FileReplayStore::open(replay_path)?);
+    let host_config = HostConfig {
+        auth_token: std::env::var("NORTE_CODE_AUTH_TOKEN").ok(),
+        ..HostConfig::default()
+    };
     let host = Arc::new(NorteCodeRaepHost::with_replay_store(
         service,
-        HostConfig::default(),
+        host_config,
         replay_store,
     )?);
     let app = router(host);
