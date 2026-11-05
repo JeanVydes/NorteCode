@@ -426,7 +426,13 @@ impl RemoteClient {
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                                 match seq_step(seqs.get(session.as_str()).copied(), seq) {
-                                    SeqStep::Duplicate => continue,
+                                    SeqStep::Duplicate => {
+                                        // Still advance terminal bookkeeping? no.
+                                        if event.is_none() {
+                                            // undecodable frame: skip yielding
+                                        }
+                                        continue;
+                                    }
                                     SeqStep::Gap { expected } => {
                                         drop(seqs);
                                         finished = true;
@@ -452,7 +458,9 @@ impl RemoteClient {
                                 drop(seqs);
                                 last_applied = Some(seq);
                             }
-                            pending.push_back((event, terminal));
+                            if let Some(event) = event {
+                                pending.push_back((event, terminal));
+                            }
                         }
                         if let Some(seq) = last_applied {
                             let mut headers = HeaderMap::new();
@@ -667,7 +675,7 @@ fn seq_step(previous: Option<u64>, seq: u64) -> SeqStep {
 /// wedges the stream. Terminal events (`TurnFinished`, `TurnStopped`) are
 /// flagged but do not stop the drain: events the server sent after the
 /// terminal in the same flush must still reach the caller.
-fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(ServerEvent, bool, Option<u64>)> {
+fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(Option<ServerEvent>, bool, Option<u64>)> {
     let mut events = Vec::new();
     while let Some(end) = buffer.windows(2).position(|window| window == b"\n\n") {
         let block = buffer[..end].to_vec();
@@ -682,14 +690,14 @@ fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(ServerEvent, bool, Option<u64>
             continue;
         };
         let seq = frame.get("seq").and_then(Value::as_u64);
-        let Ok(event) = server_event_from_frame(&frame) else {
-            continue;
-        };
-        let terminal = matches!(
-            event.kind,
-            norte_code_protocol::ServerEventKind::TurnFinished { .. }
-                | norte_code_protocol::ServerEventKind::TurnStopped { .. }
-        );
+        let event = server_event_from_frame(&frame).ok();
+        let terminal = event.as_ref().is_some_and(|event| {
+            matches!(
+                event.kind,
+                norte_code_protocol::ServerEventKind::TurnFinished { .. }
+                    | norte_code_protocol::ServerEventKind::TurnStopped { .. }
+            )
+        });
         events.push((event, terminal, seq));
     }
     events
@@ -1614,7 +1622,7 @@ mod tests {
         let drained = drain_sse_buffer(&mut buffer);
         assert_eq!(drained.len(), 1);
         assert!(matches!(
-            drained[0].0.kind,
+            drained[0].0.as_ref().unwrap().kind,
             norte_code_protocol::ServerEventKind::SessionCreated { title: Some(ref title) }
                 if title == "café"
         ));
