@@ -6,6 +6,10 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Browser requests are checked against a new `allowed_origins` list: a request that carries an `Origin` header is rejected unless the origin is listed. A non-browser client sends no `Origin` and is unaffected.
+
 ### Changed
 
 - A streaming client request now waits for the command POST and reports a non-2xx answer instead of ignoring it in a detached task, so a rejected message no longer looks like an empty stream.

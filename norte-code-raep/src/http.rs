@@ -65,8 +65,11 @@ impl HostConfigLimits {
     }
 }
 
-async fn info(State(host): State<Arc<NorteCodeRaepHost>>) -> Json<Value> {
-    Json(host.info())
+async fn info(State(host): State<Arc<NorteCodeRaepHost>>, headers: HeaderMap) -> Response {
+    if let Err(response) = origin_guard(&host, &headers) {
+        return response;
+    }
+    Json(host.info()).into_response()
 }
 
 async fn health_live() -> Json<Value> {
@@ -525,7 +528,25 @@ fn error_frame(error: &HostError) -> Envelope<Value> {
 }
 
 #[allow(clippy::result_large_err)]
+fn origin_guard(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Result<(), Response> {
+    if let Some(origin) = headers.get("origin").and_then(|value| value.to_str().ok())
+        && !host.origin_allowed(origin)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "accepted": false,
+                "error": {"code": "ORIGIN_NOT_ALLOWED", "message": "origin is not allowed"}
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+#[allow(clippy::result_large_err)]
 fn principal(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Result<String, Response> {
+    origin_guard(host, headers)?;
     if !host.authentication_enabled() {
         return Ok(host.anonymous_principal().to_owned());
     }
@@ -558,8 +579,8 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    fn test_host(token: Option<&str>) -> Arc<NorteCodeRaepHost> {
-        let service = Arc::new(
+    fn test_service() -> Arc<Service> {
+        Arc::new(
             Service::new(
                 norte_code_protocol::config::Config::default(),
                 Arc::new(norte_code_protocol::catalog::Catalog::default()),
@@ -570,10 +591,13 @@ mod tests {
                 "system",
             )
             .expect("service"),
-        );
+        )
+    }
+
+    fn test_host(token: Option<&str>) -> Arc<NorteCodeRaepHost> {
         Arc::new(
             NorteCodeRaepHost::new(
-                service,
+                test_service(),
                 HostConfig {
                     auth_token: token.map(str::to_owned),
                     ..HostConfig::default()
@@ -694,6 +718,47 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).expect("json");
         let events = body["events"].as_array().expect("events");
         assert_eq!(events[0]["payload"]["kind"], "tool_list");
+    }
+
+    #[tokio::test]
+    async fn browser_origin_must_be_on_the_allow_list() {
+        let host = Arc::new(
+            NorteCodeRaepHost::new(
+                test_service(),
+                HostConfig {
+                    allowed_origins: vec!["https://app.example".to_owned()],
+                    ..HostConfig::default()
+                },
+            )
+            .expect("host"),
+        );
+        let app = router(host);
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/raep/v1/info")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/raep/v1/info")
+                    .header("origin", "https://app.example")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]
