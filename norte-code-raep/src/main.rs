@@ -8,7 +8,9 @@ use norte_code_protocol::{
     config::{Config, user_config_path},
     sqlite::{SessionDirectory, SqliteStore},
 };
-use norte_code_raep::{BlobArtifactStore, FileReplayStore, HostConfig, NorteCodeRaepHost, router};
+use norte_code_raep::{
+    BlobArtifactStore, HostConfig, NorteCodeRaepHost, SqliteReplayStore, router,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,13 +38,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     );
     service.install_subagent_runner();
-    let replay_path = database.with_extension("raep.jsonl");
     let host_config = HostConfig {
         auth_token: std::env::var("NORTE_CODE_AUTH_TOKEN").ok(),
         ..HostConfig::default()
     };
-    let replay_store = Arc::new(FileReplayStore::open_with_capacity(
-        replay_path,
+    let replay_store = Arc::new(SqliteReplayStore::open(
+        &database,
         host_config.replay_capacity,
     )?);
     let artifact_store = Arc::new(BlobArtifactStore::new(blobs));

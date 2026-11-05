@@ -14,7 +14,7 @@ mod payloads;
 
 pub use host::{
     ArtifactRef, ArtifactStore, BlobArtifactStore, FileReplayStore, HostConfig, HostError,
-    NorteCodeRaepHost, ReplayStore,
+    NorteCodeRaepHost, ReplayStore, SqliteReplayStore,
 };
 pub use http::router;
 

@@ -1379,6 +1379,7 @@ dependencies = [
  "norte-code-agent",
  "norte-code-protocol",
  "raep-types",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",
