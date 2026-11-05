@@ -156,6 +156,110 @@ pub struct FileReplayStore {
     lock: tokio::sync::Mutex<()>,
 }
 
+/// SQLite-backed replay storage safe for multiple server processes.
+pub struct SqliteReplayStore {
+    path: PathBuf,
+    max_frames: usize,
+}
+
+impl SqliteReplayStore {
+    /// Opens or creates the replay table in the supplied database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when SQLite cannot open the database or create its
+    /// schema.
+    pub fn open(path: impl Into<PathBuf>, max_frames: usize) -> Result<Self, HostError> {
+        if max_frames == 0 {
+            return Err(HostError::ReplayJournal(
+                "replay journal capacity must be positive".to_owned(),
+            ));
+        }
+        let path = path.into();
+        let connection = rusqlite::Connection::open(&path)
+            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS raep_replay (
+                    session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    frame TEXT NOT NULL,
+                    PRIMARY KEY (session_id, seq)
+                );
+                CREATE INDEX IF NOT EXISTS idx_raep_replay_session_seq
+                    ON raep_replay(session_id, seq);",
+            )
+            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        Ok(Self { path, max_frames })
+    }
+}
+
+#[async_trait]
+impl ReplayStore for SqliteReplayStore {
+    async fn append(&self, frame: &Envelope<Value>) -> Result<(), HostError> {
+        let path = self.path.clone();
+        let max_frames = i64::try_from(self.max_frames)
+            .map_err(|_| HostError::ReplayJournal("replay capacity is too large".to_owned()))?;
+        let frame = frame.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            let encoded = serde_json::to_string(&frame)?;
+            let sequence = frame.seq.ok_or_else(|| {
+                HostError::ReplayJournal("replay frame has no sequence".to_owned())
+            })?;
+            let session_id = frame.session_id.clone();
+            connection
+                .execute(
+                    "INSERT OR REPLACE INTO raep_replay(session_id, seq, frame)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id, sequence, encoded],
+                )
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            connection
+                .execute(
+                    "DELETE FROM raep_replay
+                     WHERE session_id = ?1
+                       AND seq NOT IN (
+                           SELECT seq FROM raep_replay
+                           WHERE session_id = ?1
+                           ORDER BY seq DESC LIMIT ?2
+                       )",
+                    rusqlite::params![frame.session_id, max_frames],
+                )
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
+    }
+
+    async fn load(&self, session_id: &str) -> Result<Vec<Envelope<Value>>, HostError> {
+        let path = self.path.clone();
+        let session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT frame FROM raep_replay
+                     WHERE session_id = ?1 ORDER BY seq ASC",
+                )
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            let rows = statement
+                .query_map(rusqlite::params![session_id], |row| row.get::<_, String>(0))
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            rows.map(|row| {
+                let encoded = row.map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+                serde_json::from_str(&encoded).map_err(HostError::from)
+            })
+            .collect()
+        })
+        .await
+        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
+    }
+}
+
 impl FileReplayStore {
     /// Opens a journal at `path`, creating its parent directory when needed.
     ///
@@ -1077,6 +1181,32 @@ mod tests {
             [2, 3]
         );
         std::fs::remove_file(path).expect("remove replay journal");
+    }
+
+    #[tokio::test]
+    async fn sqlite_replay_store_round_trips_and_rotates() {
+        let path =
+            std::env::temp_dir().join(format!("norte-code-raep-replay-{}.db", FrameId::generate()));
+        let store = SqliteReplayStore::open(&path, 2).expect("replay store");
+        for seq in 1..=3 {
+            let mut frame = Envelope::new(
+                standard(StandardFrameType::TokenDelta),
+                json!({"seq": seq}),
+                i64::try_from(seq).expect("test sequence fits in i64"),
+            );
+            frame.session_id = "session-a".to_owned();
+            frame.seq = Some(seq);
+            store.append(&frame).await.expect("append");
+        }
+        let frames = store.load("session-a").await.expect("load");
+        assert_eq!(
+            frames
+                .iter()
+                .filter_map(|frame| frame.seq)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        std::fs::remove_file(path).expect("remove replay database");
     }
 
     #[tokio::test]
