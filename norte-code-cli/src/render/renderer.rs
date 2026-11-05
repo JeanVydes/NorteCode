@@ -203,6 +203,8 @@ pub(crate) struct Renderer {
     /// provider's models stay visible while the cursor moves and a selection
     /// is made.
     pub(crate) models_expanded: Option<String>,
+    /// The calendar days expanded in the session picker.
+    pub(crate) session_days_expanded: std::collections::BTreeSet<String>,
     /// The query typed into the `/models` filter.
     ///
     /// It lives here because the panel is rebuilt from it: every printable key
@@ -369,6 +371,7 @@ impl Renderer {
             model_unset: false,
             pending_provider: None,
             models_expanded: None,
+            session_days_expanded: std::collections::BTreeSet::new(),
             panel_filter: String::new(),
             reasoning: None,
             waiting: None,

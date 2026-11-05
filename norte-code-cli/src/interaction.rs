@@ -777,22 +777,7 @@ pub(crate) async fn interactive_loop(
                     let rows = crate::startup::session_rows(&database)
                         .await
                         .unwrap_or_default();
-                    let mut modal_rows: Vec<crate::modal::Row> = vec![crate::modal::Row::actable(
-                        "new session",
-                        crate::modal::Action::NewSession,
-                    )];
-                    if rows.len() > 1 {
-                        modal_rows.push(crate::modal::Row::actable(
-                            "last session",
-                            crate::modal::Action::ResumeLast,
-                        ));
-                    }
-                    for row in &rows {
-                        modal_rows.push(crate::modal::Row::actable(
-                            row.label(),
-                            crate::modal::Action::OpenSession(SessionKey::new(row.key.clone())),
-                        ));
-                    }
+                    let modal_rows = session_modal_rows(&rows, renderer);
                     renderer.open_editable("sessions".to_owned(), modal_rows);
                 }
 
@@ -1935,6 +1920,48 @@ async fn read_telemetry() -> Result<Vec<norte_code_protocol::sqlite::RequestReco
 /// changed says what it became — a rule that changed with the list still saying
 /// the old word is a list nobody can trust.
 #[allow(clippy::too_many_lines)]
+/// Builds the session picker as collapsible calendar-day groups.
+fn session_modal_rows(
+    rows: &[crate::startup::SessionRow],
+    renderer: &Renderer,
+) -> Vec<crate::modal::Row> {
+    let mut modal_rows = vec![crate::modal::Row::actable(
+        "new session",
+        crate::modal::Action::NewSession,
+    )];
+    if let Some(last) = rows.first() {
+        modal_rows.push(crate::modal::Row::actable(
+            format!("last session · {}", last.label()),
+            crate::modal::Action::OpenSession(SessionKey::new(last.key.clone())),
+        ));
+    }
+    let mut days: std::collections::BTreeMap<String, Vec<&crate::startup::SessionRow>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        days.entry(row.updated_at.format("%Y-%m-%d").to_string())
+            .or_default()
+            .push(row);
+    }
+    for (day, rows) in days.into_iter().rev() {
+        let expanded = renderer.session_days_expanded.contains(&day);
+        let marker = if expanded { "▼" } else { "▶" };
+        modal_rows.push(crate::modal::Row::actable(
+            format!("{marker} {day} ({} sessions)", rows.len()),
+            crate::modal::Action::ToggleSessionDay(day),
+        ));
+        if expanded {
+            for row in rows {
+                modal_rows.push(crate::modal::Row::actable(
+                    row.label(),
+                    crate::modal::Action::OpenSession(SessionKey::new(row.key.clone())),
+                ));
+            }
+        }
+    }
+    modal_rows
+}
+
+#[allow(clippy::too_many_lines)]
 async fn apply_tool_action(
     service: &Arc<Service>,
     session: Option<&SessionKey>,
@@ -1977,17 +2004,19 @@ async fn apply_tool_action(
                 }
             };
         }
-        // The newest session that is not the one open now.
-        crate::modal::Action::ResumeLast => {
-            let newest = service
-                .sessions()
-                .into_iter()
-                .map(|info| info.session)
-                .find(|key| Some(key) != session);
-            if let Some(key) = newest {
-                return Some(key);
+        crate::modal::Action::ToggleSessionDay(day) => {
+            if !renderer.session_days_expanded.remove(day) {
+                renderer.session_days_expanded.insert(day.clone());
             }
-            renderer.notice("there is no other session to open");
+            let Ok(database) = crate::commands::database_path() else {
+                renderer.notice("could not locate the sessions database");
+                return None;
+            };
+            let Ok(rows) = crate::startup::session_rows(&database).await else {
+                renderer.notice("could not read saved sessions");
+                return None;
+            };
+            renderer.open_editable("sessions".to_owned(), session_modal_rows(&rows, renderer));
             return None;
         }
         // Expand or collapse a provider in the models panel, rebuilding it from
