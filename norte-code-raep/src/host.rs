@@ -18,6 +18,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::NorteCodeExtension;
+use crate::payloads::canonical_event_payload;
 
 /// Host configuration independent of the HTTP listener.
 #[derive(Clone, Debug)]
@@ -868,8 +869,14 @@ impl NorteCodeRaepHost {
             .session
             .as_ref()
             .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
-        let payload = serde_json::to_value(event)?;
-        self.emit(&session_id, kind, payload).await
+        let payload = canonical_event_payload(&event.kind);
+        self.emit_with_extension(
+            &session_id,
+            kind,
+            payload,
+            Some(json!({"norte_code": serde_json::to_value(&event)?})),
+        )
+        .await
     }
 
     async fn emit(
@@ -878,8 +885,20 @@ impl NorteCodeRaepHost {
         kind: StandardFrameType,
         payload: Value,
     ) -> Result<Envelope<Value>, HostError> {
+        self.emit_with_extension(session_id, kind, payload, None)
+            .await
+    }
+
+    async fn emit_with_extension(
+        &self,
+        session_id: &str,
+        kind: StandardFrameType,
+        payload: Value,
+        ext: Option<Value>,
+    ) -> Result<Envelope<Value>, HostError> {
         let mut frame = Envelope::new(standard(kind), payload, now_millis());
         frame.session_id = session_id.to_owned();
+        frame.ext = ext;
         let mut state = self.state.lock().await;
         let sequence = state.sequences.entry(session_id.to_owned()).or_insert(0);
         *sequence = sequence.saturating_add(1);

@@ -94,6 +94,11 @@ conversation history. The server binary persists the RAEP frame journal beside
 `NORTE_CODE_DATABASE` with the `.raep.jsonl` suffix, so sequence replay also
 survives a server restart. Artifact uploads go directly into Norte's
 content-addressed BlobStore; no second artifact directory is created. The
+common event families use canonical RAEP payloads (`turn`, tools, jobs,
+questions, budget, usage, retries and errors). The original NorteCode event is
+kept under envelope `ext.norte_code` for lossless compatibility while the
+remaining NorteCode-specific events retain their typed payload in that
+extension.
 `norte_code.command` extension is available when a
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
