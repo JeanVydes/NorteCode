@@ -486,6 +486,17 @@ pub struct ToolsConfig {
     pub screenshots: ScreenshotConfig,
     /// Whether the `subagent` tool is registered.
     pub subagent: SubagentConfig,
+    /// Whether a finished job starts a turn by itself.
+    ///
+    /// A detached shell or subagent reports its result through steering, which
+    /// a running turn sees at its next safe point — the same way a message
+    /// the user sends mid-turn is queued and not waited for. When no turn is
+    /// running, the report sits in the queue until the next one. With this on,
+    /// the service starts a turn of its own the moment a job ends, so the
+    /// model reads the result right away instead of when the next user
+    /// message happens to arrive. Off by default: it spends tokens without
+    /// being asked.
+    pub auto_turn_on_job_end: bool,
     /// Tools a new session does not get, by the name the model would call them.
     ///
     /// A tool named here is never registered: it is not in the schema the model
@@ -511,6 +522,7 @@ impl Default for ToolsConfig {
             confinement: ConfinementConfig::default(),
             screenshots: ScreenshotConfig::default(),
             subagent: SubagentConfig::default(),
+            auto_turn_on_job_end: false,
             disabled: Vec::new(),
         }
     }

@@ -106,6 +106,14 @@ With `detach: true` the call becomes a job (`job-N`), like a detached shell:
 `manage_jobs` reads and stops it, and its result arrives as a message when it
 ends.
 
+## `tools.auto_turn_on_job_end`
+
+When enabled, a detached shell or subagent starts a new turn as soon as its
+job finishes, so the model can read the result without waiting for another
+user message. The result is still queued through the normal steering path, and
+an active turn is never interrupted. It is disabled by default because each
+automatically started turn can spend model tokens.
+
 ## `budgets`
 
 `message`, `session` and `global_daily` each accept null or:
@@ -123,6 +131,7 @@ ends.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `web_fetch` | `false` | Register `web_fetch`. |
+| `auto_turn_on_job_end` | `false` | Start a turn when a detached shell or subagent finishes. |
 | `disabled` | `[]` | Tools a new session does not get, by model name; frozen at creation. |
 | `command_max_model_bytes` | `131072` | Bytes of each `shell` stream that reach the model; range `1024`–`1048576`. |
 | `confinement.workspace_only` | `false` | Confine tool paths to the workspace. |

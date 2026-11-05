@@ -76,6 +76,11 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Detached shell and subagent jobs can automatically start a follow-up turn
+  when they finish. Enable `tools.auto_turn_on_job_end` to let the model read
+  the queued result without waiting for another user message; it is disabled
+  by default to avoid unrequested token usage.
+
 - The model can delegate one turn to a subagent. The `subagent` tool starts
   a new session, runs one turn on it, and returns what it said; the child
   starts blank, so the prompt carries everything it needs. With

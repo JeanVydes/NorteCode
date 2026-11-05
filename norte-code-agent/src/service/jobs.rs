@@ -152,22 +152,7 @@ impl JobRegistry {
         else {
             return;
         };
-        job.summary.output.push_str(text);
-        job.bytes += text.len();
-        // Keep the tail: the most recent output is what a reader wants.
-        if job.bytes > JOB_BUFFER_BYTES {
-            let overflow = job.bytes - JOB_BUFFER_BYTES;
-            let drop_to = job
-                .summary
-                .output
-                .char_indices()
-                .map(|(index, _)| index)
-                .find(|index| *index >= overflow)
-                .unwrap_or(0);
-            job.summary.output.drain(..drop_to);
-            job.bytes -= drop_to;
-            job.summary.dropped = true;
-        }
+        append_output(job, text);
     }
 
     /// Appends to a job by its id.
@@ -183,22 +168,7 @@ impl JobRegistry {
         if job.summary.state.is_done() {
             return;
         }
-        job.summary.output.push_str(text);
-        job.bytes += text.len();
-        // Keep the tail: the most recent output is what a reader wants.
-        if job.bytes > JOB_BUFFER_BYTES {
-            let overflow = job.bytes - JOB_BUFFER_BYTES;
-            let drop_to = job
-                .summary
-                .output
-                .char_indices()
-                .map(|(index, _)| index)
-                .find(|index| *index >= overflow)
-                .unwrap_or(0);
-            job.summary.output.drain(..drop_to);
-            job.bytes -= drop_to;
-            job.summary.dropped = true;
-        }
+        append_output(job, text);
     }
 
     /// Marks a job as having ended by id, recording its exit code when it has one.
@@ -359,6 +329,26 @@ pub(super) fn job_info(job: &JobSummary) -> JobInfo {
 
 fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Appends output while keeping only the newest bounded tail.
+fn append_output(job: &mut Job, text: &str) {
+    job.summary.output.push_str(text);
+    job.bytes += text.len();
+    if job.bytes <= JOB_BUFFER_BYTES {
+        return;
+    }
+    let overflow = job.bytes - JOB_BUFFER_BYTES;
+    let drop_to = job
+        .summary
+        .output
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= overflow)
+        .unwrap_or(0);
+    job.summary.output.drain(..drop_to);
+    job.bytes -= drop_to;
+    job.summary.dropped = true;
 }
 
 /// The label as one line, for a listing that has one line per job.

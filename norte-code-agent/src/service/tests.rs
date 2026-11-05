@@ -306,6 +306,14 @@ fn service() -> Arc<Service> {
 
 /// A service whose scripted model answers one text per queued turn.
 fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<ScriptedModel>) {
+    scripted_service_with_config(config(), spec, turns)
+}
+
+fn scripted_service_with_config(
+    config: Config,
+    spec: ModelSpec,
+    turns: &[&str],
+) -> (Arc<Service>, Arc<ScriptedModel>) {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
         ModelId::new("scripted").expect("model"),
@@ -317,7 +325,7 @@ fn scripted_service(spec: ModelSpec, turns: &[&str]) -> (Arc<Service>, Arc<Scrip
     let model = Arc::new(model);
     let service = Arc::new(
         Service::new(
-            config(),
+            config,
             catalog(),
             Some(spec),
             Arc::new(ScriptedFactory {
@@ -616,6 +624,99 @@ async fn a_turn_streams_text_and_commits() {
         .position(|event| matches!(event.kind, ServerEventKind::Delta { .. }))
         .expect("the turn streams");
     assert!(started < first_delta, "the turn starts before its answer");
+}
+
+#[tokio::test]
+async fn a_finished_job_can_start_a_turn_without_a_new_message() {
+    let mut config = config();
+    config.tools.auto_turn_on_job_end = true;
+    let (service, model) =
+        scripted_service_with_config(config, spec("scripted"), &["first", "second"]);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "start".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("turn has a session");
+    let session = service.require_record(&key).expect("session record").0;
+    service.steering.push(
+        session,
+        super::steering::Steered::new("job:test".to_owned(), "job finished".to_owned()),
+    );
+
+    service.auto_turn_on_job_end(session).await;
+
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn auto_turn_does_nothing_when_disabled() {
+    let (service, model) = scripted_service(spec("scripted"), &["first", "unused"]);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "start".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("turn has a session");
+    let session = service.require_record(&key).expect("session record").0;
+
+    service.auto_turn_on_job_end(session).await;
+
+    assert_eq!(model.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_existing_auto_turn_blocks_a_duplicate() {
+    let mut config = config();
+    config.tools.auto_turn_on_job_end = true;
+    let (service, model) =
+        scripted_service_with_config(config, spec("scripted"), &["first", "unused"]);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "start".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("turn has a session");
+    let session = service.require_record(&key).expect("session record").0;
+    service
+        .auto_turns
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key);
+
+    service.auto_turn_on_job_end(session).await;
+
+    assert_eq!(model.requests().len(), 1);
 }
 
 mod streaming_regressions {
@@ -5116,6 +5217,7 @@ async fn a_zero_bound_is_granted_only_to_a_call_nobody_waits_for() {
         Arc::new(JobRegistry::default()),
         Arc::new(Steering::default()),
         Arc::new(DetachRegistry::default()),
+        Arc::new(std::sync::RwLock::new(None)),
     );
     let context = ToolContext::new()
         .with_session(SessionId::new())
@@ -6110,6 +6212,7 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
         Arc::clone(&jobs),
         Arc::clone(&steering),
         Arc::new(DetachRegistry::default()),
+        Arc::new(std::sync::RwLock::new(None)),
     );
 
     // The process writes, waits, then writes again and touches its marker: the
@@ -6211,6 +6314,7 @@ async fn stopping_a_job_through_the_registry_ends_its_process() {
         Arc::clone(&jobs),
         steering,
         Arc::new(DetachRegistry::default()),
+        Arc::new(std::sync::RwLock::new(None)),
     );
     let script = format!("sleep 3; touch {}", marker.display());
     let request: ShellRequest = serde_json::from_value(serde_json::json!({
@@ -6254,6 +6358,7 @@ async fn a_call_detached_from_outside_leaves_a_job_the_model_can_read() {
         Arc::clone(&jobs),
         Arc::clone(&steering),
         Arc::clone(&detaches),
+        Arc::new(std::sync::RwLock::new(None)),
     );
 
     let session = SessionId::new();
@@ -6327,6 +6432,7 @@ async fn a_process_that_ends_after_the_detach_reports_once() {
         Arc::clone(&jobs),
         Arc::clone(&steering),
         Arc::clone(&detaches),
+        Arc::new(std::sync::RwLock::new(None)),
     );
 
     let session = SessionId::new();
@@ -6382,6 +6488,7 @@ async fn a_process_that_ends_before_the_detached_call_returns_reports_once() {
         Arc::clone(&jobs),
         Arc::clone(&steering),
         Arc::clone(&detaches),
+        Arc::new(std::sync::RwLock::new(None)),
     );
 
     let session = SessionId::new();
@@ -6454,6 +6561,7 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
         Arc::new(JobRegistry::default()),
         Arc::new(Steering::default()),
         Arc::clone(&detaches),
+        Arc::new(std::sync::RwLock::new(None)),
     );
 
     // Detaching only once the first line has reached the pipe, so the assertion
@@ -7309,6 +7417,7 @@ async fn too_many_subagents_is_an_error_the_model_reads() {
         Arc::clone(&service.jobs),
         Arc::clone(&service.steering),
         Arc::clone(&service.detaches),
+        Arc::new(std::sync::RwLock::new(None)),
         1,
     );
     // Take the one slot.
