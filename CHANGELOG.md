@@ -80,6 +80,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   when they finish. Enable `tools.auto_turn_on_job_end` to let the model read
   the queued result without waiting for another user message; it is disabled
   by default to avoid unrequested token usage.
+- Subagents can use a configured provider/model and tool allow/deny policy.
+  Missing values inherit the parent session, while `ask_user`, `browser_use`
+  and nested `subagent` delegation are always unavailable to children.
 
 - The model can delegate one turn to a subagent. The `subagent` tool starts
   a new session, runs one turn on it, and returns what it said; the child

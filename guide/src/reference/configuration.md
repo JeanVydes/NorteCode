@@ -99,12 +99,22 @@ a child never has `subagent` — nesting stops at one.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Register the `subagent` tool. Spawning agents spends tokens on its own, so it is off until it is turned on. |
+| `provider` | string or null | `null` | Provider for child sessions; null inherits the parent's provider. |
+| `model` | string or null | `null` | Model for child sessions; null inherits the parent's model. |
+| `allow` | array or null | `null` | Tools exposed to child sessions; null inherits the parent's tool set. |
+| `deny` | array or null | `null` | Additional tools withheld from child sessions; null inherits the parent's restrictions. `ask_user`, `browser_use` and `subagent` are always denied. |
 | `max_concurrent` | int | `3` | How many subagents may run at once. Past the cap a spawn is refused, not queued. |
 | `max_iterations` | int or null | `null` | How many model iterations one child turn may run. `null` inherits the session's limit. |
 
 With `detach: true` the call becomes a job (`job-N`), like a detached shell:
 `manage_jobs` reads and stops it, and its result arrives as a message when it
 ends.
+
+The `subagent` tool accepts only `prompt`, `title` and `detach`. The child
+starts without the parent's conversation history. It uses the configured
+provider/model when present, otherwise the exact provider/model of the parent.
+Its tool allow/deny policy is frozen when the child session is created.
+`ask_user`, `browser_use` and `subagent` are never available to a child.
 
 ## `tools.auto_turn_on_job_end`
 

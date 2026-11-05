@@ -7439,9 +7439,14 @@ async fn a_child_session_never_sees_the_subagent_tool() {
         ModelId::new("scripted").expect("model"),
     );
     let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
+    let mut child_config = subagent_config();
+    child_config.tools.subagent.provider = Some("test".to_owned());
+    child_config.tools.subagent.model = Some("scripted".to_owned());
+    child_config.tools.subagent.allow = Some(vec!["read".to_owned(), "todo".to_owned()]);
+    child_config.tools.subagent.deny = Some(vec!["todo".to_owned()]);
     let service = Arc::new(
         Service::new(
-            subagent_config(),
+            child_config,
             catalog(),
             Some(spec("scripted")),
             Arc::new(ScriptedFactory {
@@ -7456,10 +7461,14 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     service.install_subagent_runner();
 
     let parent = service.create_session(None).await.expect("parent session");
+    let (child_spec, child_disabled) = service.subagent_settings(&parent).expect("child settings");
     let child = service
-        .create_session_child(&parent)
+        .create_session_child(child_spec, child_disabled)
         .await
         .expect("child session");
+    let child_model = service.session_spec(&child).expect("child model");
+    assert_eq!(child_model.provider, "test");
+    assert_eq!(child_model.model, "scripted");
 
     let parent_tools = service.tools(Some(&parent)).expect("parent tools").specs();
     let parent_names: Vec<&str> = parent_tools.iter().map(|tool| tool.name.as_str()).collect();
@@ -7473,5 +7482,25 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     assert!(
         !child_names.contains(&"subagent"),
         "the child never has subagent: {child_names:?}"
+    );
+    assert!(
+        !child_names.contains(&"ask_user"),
+        "the child never has ask_user: {child_names:?}"
+    );
+    assert!(
+        !child_names.contains(&"browser_use"),
+        "the child never has browser_use: {child_names:?}"
+    );
+    assert!(
+        child_names.contains(&"read"),
+        "allow keeps read: {child_names:?}"
+    );
+    assert!(
+        !child_names.contains(&"write"),
+        "allow withholds write: {child_names:?}"
+    );
+    assert!(
+        !child_names.contains(&"todo"),
+        "deny withholds todo: {child_names:?}"
     );
 }

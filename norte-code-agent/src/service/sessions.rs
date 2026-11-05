@@ -14,6 +14,8 @@ use norte_code_protocol::{
     Budget, Phase as ProtocolPhase, Reasoning, ReasoningScope, SessionInfo, SessionKey,
 };
 
+use crate::provider::ModelSpec;
+
 use super::EventStream;
 
 use super::Steered;
@@ -568,27 +570,21 @@ impl Service {
         Ok(key)
     }
 
-    /// Creates a child session for a subagent, inheriting the parent's spec.
+    /// Creates a child session for a subagent with frozen settings.
     ///
     /// The child's tool list is frozen without `subagent`: it starts blank
     /// and cannot spawn another one, so the recursion depth is one. The
-    /// disabled list is the parent's, plus `subagent` — the parent may have
-    /// had it, and the child must not.
     pub(super) async fn create_session_child(
         &self,
-        parent: &SessionKey,
+        spec: ModelSpec,
+        disabled_tools: Vec<String>,
     ) -> Result<SessionKey, ServiceError> {
-        let (_, spec, _) = self.require_record(parent)?;
-        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
         let key = self.create_session(None).await?;
         {
             let mut sessions = self.lock_sessions();
             if let Some(record) = sessions.get_mut(&key) {
                 record.spec = Some(spec.clone());
-                // The child's engine is built from the parent's spec, not
-                // the default: the delegation is on the model the parent
-                // already chose and already has credentials for.
-                record.disabled_tools.push("subagent".to_owned());
+                record.disabled_tools = disabled_tools;
             }
         }
         self.persist(&key).await?;

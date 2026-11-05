@@ -301,12 +301,6 @@ pub struct SubagentArgs {
     /// The child session's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The provider the model asks for, or none to inherit the parent's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// The model the model asks for, or none to inherit the parent's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     /// Let the run go as a job rather than waiting for it.
     #[serde(default)]
     pub detach: bool,
