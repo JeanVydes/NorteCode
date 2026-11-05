@@ -32,5 +32,8 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[dev-dependencies]
+reqwest = { workspace = true }
+
 [lints]
 workspace = true

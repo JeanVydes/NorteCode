@@ -168,7 +168,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
         .parse::<SocketAddr>()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    eprintln!("norte-code RAEP server listening on {bind}");
+    let actual_bind = listener.local_addr()?;
+    if let Some(path) = std::env::var_os("NORTE_CODE_READY_FILE") {
+        std::fs::write(&path, actual_bind.to_string())?;
+    }
+    eprintln!("norte-code RAEP server listening on {actual_bind}");
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -8,13 +8,25 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The RAEP server now exposes JSON liveness/readiness data, a structured
+  telemetry report with aggregate counters, and an end-to-end harness that
+  starts the real `norte-code-server` binary and exercises HTTP plus SSE.
+- The server harness covers idempotent commands, wire-version rejection,
+  connection limits, session creation, replay attachment and telemetry
+  delivery over SSE.
 - Medium-verbosity transcript replay no longer exposes assistant reasoning,
   and the default agent prompt avoids emitting identity or instruction-hierarchy
   narration as conversation text.
+
 - `/refresh` and `/reload` now reread only the client's `cli.json`; service
   configuration, catalogues, skills and MCP servers require `service restart`.
 - The RAEP replay journal uses a separate SQLite database from session data to
   prevent concurrent event and session writes from locking each other.
+
+### Deferred
+
+- Production exposure still needs TLS/reverse-proxy guidance, credential
+  rotation, per-agent authorization policy and explicit CORS/origin controls.
 
 ### Added
 
