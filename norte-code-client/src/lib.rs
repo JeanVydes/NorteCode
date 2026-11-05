@@ -359,27 +359,42 @@ impl RemoteClient {
         if let Some(token) = &self.bearer_token {
             command_headers.insert(AUTHORIZATION, token.clone());
         }
-        let command = self
-            .http
-            .post(command_url)
-            .headers(command_headers)
-            .json(&Envelope::new(
-                FrameType::Extension("norte_code.command".to_owned()),
-                serde_json::to_value(request)
-                    .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
-                timestamp_millis(),
-            ))
-            .send()
-            .await
-            .map_err(|error| ClientError::new(format!("RAEP command failed: {error}")))?;
-        if !command.status().is_success() {
-            let status = command.status();
-            let body: Value = command.json().await.unwrap_or(Value::Null);
-            return Err(ClientError::new(format!(
-                "RAEP command returned HTTP {status}: {}",
-                response_error(&body)
-            )));
-        }
+        let command_body = Envelope::new(
+            FrameType::Extension("norte_code.command".to_owned()),
+            serde_json::to_value(request)
+                .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
+            timestamp_millis(),
+        );
+        let command_result: Arc<Mutex<Option<Result<(), ClientError>>>> =
+            Arc::new(Mutex::new(None));
+        let command_result_task = Arc::clone(&command_result);
+        let http_for_command = self.http.clone();
+        let url_for_command = command_url.clone();
+        let headers_for_command = command_headers.clone();
+        tokio::spawn(async move {
+            let outcome = async {
+                let response = http_for_command
+                    .post(url_for_command)
+                    .headers(headers_for_command)
+                    .json(&command_body)
+                    .send()
+                    .await
+                    .map_err(|error| ClientError::new(format!("RAEP command failed: {error}")))?;
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body: Value = response.json().await.unwrap_or(Value::Null);
+                    return Err(ClientError::new(format!(
+                        "RAEP command returned HTTP {status}: {}",
+                        response_error(&body)
+                    )));
+                }
+                Ok(())
+            }
+            .await;
+            *command_result_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+        });
 
         let session = norte_code_protocol::SessionKey::new(session_id);
         let session_seq = Arc::clone(&self.session_seq);
@@ -395,12 +410,46 @@ impl RemoteClient {
                 session,
                 false,
                 session_seq,
+                command_result,
+                false,
             ),
-            move |(mut bytes, mut buffer, mut pending, session, mut finished, session_seq)| {
+            move |(
+                mut bytes,
+                mut buffer,
+                mut pending,
+                session,
+                mut finished,
+                session_seq,
+                command_result,
+                mut command_reported,
+            )| {
                 let ack_http = ack_http.clone();
                 let ack_url = ack_url.clone();
                 let ack_token = ack_token.clone();
                 async move {
+                    if !command_reported {
+                        let result = command_result
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        if let Some(Err(error)) = result {
+                            command_reported = true;
+                            finished = true;
+                            pending.push_back((
+                                ServerEvent {
+                                    request_id: 0,
+                                    session: Some(session.clone()),
+                                    kind: norte_code_protocol::ServerEventKind::Error {
+                                        code: norte_code_protocol::ErrorCode::Internal,
+                                        message: error.to_string(),
+                                    },
+                                },
+                                true,
+                            ));
+                        } else if result.is_some() {
+                            command_reported = true;
+                        }
+                    }
                     loop {
                         if let Some((event, terminal)) = pending.pop_front() {
                             return Some((
@@ -412,6 +461,8 @@ impl RemoteClient {
                                     session,
                                     finished || terminal,
                                     session_seq,
+                                    command_result,
+                                    command_reported,
                                 ),
                             ));
                         }
@@ -485,11 +536,35 @@ impl RemoteClient {
                         if finished {
                             continue;
                         }
+                        #[allow(clippy::single_match_else)]
                         match bytes.next().await {
                             Some(Ok(chunk)) => {
                                 buffer.extend_from_slice(&chunk);
                             }
                             Some(Err(_)) | None => {
+                                if !command_reported {
+                                    let result = command_result
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .clone();
+                                    if let Some(Err(error)) = result {
+                                        command_reported = true;
+                                        finished = true;
+                                        pending.push_back((
+                                            ServerEvent {
+                                                request_id: 0,
+                                                session: Some(session.clone()),
+                                                kind: norte_code_protocol::ServerEventKind::Error {
+                                                    code: norte_code_protocol::ErrorCode::Internal,
+                                                    message: error.to_string(),
+                                                },
+                                            },
+                                            true,
+                                        ));
+                                    } else if result.is_some() {
+                                        command_reported = true;
+                                    }
+                                }
                                 if pending.is_empty() {
                                     return None;
                                 }

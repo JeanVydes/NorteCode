@@ -15,6 +15,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - A streaming client request now waits for the command POST and reports a non-2xx answer instead of ignoring it in a detached task, so a rejected message no longer looks like an empty stream.
+- A streaming client request no longer stalls until the turn ends: the command POST runs in the background while SSE is consumed immediately, eliminating the ~10s delay before output. A failed command is still reported as an error event.
 - The remote client no longer reports a false sequence gap on every message: control frames such as `SESSION_ATTACHED` and `SESSION_STATE` advance the sequence cursor even though they are not Norte Code events.
 - The RAEP server keeps idempotent command results in a bounded cache, so a long-lived session cannot grow it without limit, and job progress frames now carry the envelope `job_id`.
 - The remote client now validates the RAEP wire version and reads the standard payload before the `ext.norte_code` compatibility copy, so a server that follows the spec no longer depends on the extension. SSE chunks are buffered as bytes, which keeps a multi-byte character split across chunks from being replaced with `�`.
