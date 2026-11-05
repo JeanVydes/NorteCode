@@ -5014,6 +5014,7 @@ async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
             text: "what is in this picture?".to_owned(),
             attachments: vec![norte_code_protocol::Attachment {
                 path: photo.display().to_string(),
+                blob: None,
                 mime: "image/png".to_owned(),
                 name: "photo.png".to_owned(),
             }],
@@ -5073,6 +5074,7 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
             text: "what is in this picture?".to_owned(),
             attachments: vec![norte_code_protocol::Attachment {
                 path: photo.display().to_string(),
+                blob: None,
                 mime: "image/png".to_owned(),
                 name: "photo.png".to_owned(),
             }],
