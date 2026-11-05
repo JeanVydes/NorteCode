@@ -84,6 +84,44 @@ pub struct SessionInfo {
     pub phase: Phase,
 }
 
+/// Metadata for one plugin managed by the remote host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginInfo {
+    /// Plugin name or installed library stem.
+    pub name: String,
+    /// Whether the plugin is enabled for the next host start.
+    pub enabled: bool,
+    /// Whether the host currently loaded it successfully.
+    pub loaded: bool,
+}
+
+/// One MCP server visible to the service.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpInfo {
+    /// Configuration name.
+    pub name: String,
+    /// Command label.
+    pub command: String,
+    /// Published tool names.
+    pub tools: Vec<String>,
+    /// Tools filtered by configuration.
+    pub filtered: Vec<String>,
+    /// Whether its tools are enabled.
+    pub active: bool,
+}
+
+/// An MCP server that could not be started.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpFailure {
+    /// Configuration name.
+    pub name: String,
+    /// Startup failure.
+    pub reason: String,
+}
+
 /// One task in a session's list, as a client renders it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

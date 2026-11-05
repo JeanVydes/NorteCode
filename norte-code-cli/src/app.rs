@@ -47,6 +47,8 @@ pub(crate) struct State {
     pub(crate) transcript: Transcript,
     /// The draft being typed, as the editor holds it.
     pub(crate) input: String,
+    /// Whether the service connection is ready to accept input.
+    pub(crate) input_ready: bool,
     /// Where the cursor is in the draft, in characters.
     pub(crate) cursor: usize,
     /// The other end of the draft's selection, when there is one.
@@ -152,7 +154,10 @@ impl State {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            input_ready: true,
+            ..Self::default()
+        }
     }
 
     /// The rows each band asks for at this width.
@@ -186,7 +191,7 @@ impl State {
         });
         // A question holds the draft: the answer is typed into the question's
         // own box, so the draft band is empty while it is up.
-        let input = if self.question.is_some() {
+        let input = if self.question.is_some() || !self.input_ready {
             0
         } else {
             self.draft_rows(width)
@@ -309,7 +314,7 @@ impl State {
             if let Some(question) = self.question.as_ref().filter(|_| areas.question.height > 0) {
                 draw_question(frame, areas.question, question, self, style);
             }
-            if areas.input.height > 0 {
+            if areas.input.height > 0 && self.input_ready {
                 draw_input(frame, areas.input, self, style);
             }
             if areas.completion.height > 0

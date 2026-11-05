@@ -1,8 +1,7 @@
 # Norte Code
 
-A terminal-based coding agent. Open a session in a directory, ask for work
-in plain language, and the model reads, writes and runs commands there —
-with your approvals, your budgets and your model.
+A terminal client for the Norte service. The server owns sessions, execution,
+catalogues and plugins; the CLI connects to it through RAEP.
 
 ## Install
 
@@ -19,10 +18,13 @@ cargo build --release
 ## Quick start
 
 ```sh
+norte-code service start
 norte-code
 ```
 
-Pick or create a session and start typing. A few things worth knowing:
+Pick or create a session and start typing. Configure the client endpoint in
+`cli.json`; use `service_type: "remote"` for a server on another machine.
+A few things worth knowing:
 
 - **Approvals** — tools run only under your rules. `/allow` and `/deny`
   decide per tool, per session or globally.
@@ -34,10 +36,9 @@ Pick or create a session and start typing. A few things worth knowing:
 
 ## Providers and models
 
-Models come from two files you own beside the config — `providers.json`
-and `models.json`. Nothing is fetched or bundled. Keys come from the
-environment or a private `secrets.json` (mode 0600); they are never in
-`config.json`.
+The server reads two files beside its configuration — `providers.json` and
+`models.json`. Nothing is fetched or bundled. Keys come from the environment
+or a private `secrets.json` (mode 0600); the stateless CLI never reads them.
 
 Prefer not to maintain the files? The
 [catalog-plugin](https://github.com/JeanVydes/catalog-plugin) offers a
@@ -107,7 +108,7 @@ Common session operations use the standard `SESSION_CONFIGURE` frame with an
 `set_budget`, `answer_question`, `resume`, or `compact`), so clients do not
 need the NorteCode extension for those controls.
 
-Set `NORTE_CODE_AUTH_TOKEN` to require `Authorization: Bearer <token>` on
+Set `NORTE_CODE_AUTH_TOKEN` to require a bearer `Authorization` header on
 WebSocket, SSE, artifact upload and session-command routes. Health and
 discovery endpoints remain public for orchestration probes. Upload binary
 content with `POST /raep/v1/artifacts` and use the returned `id` as

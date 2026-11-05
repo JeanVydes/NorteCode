@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "openrouter": {
+      "name": "OpenRouter",
+      "doc": "https://openrouter.ai",
+      "environment_keys": [
+        "OPENROUTER_API_KEY"
+      ],
+      "wires": [
+        {
+          "api": "https://openrouter.ai/api/v1",
+          "schema": "openai",
+          "auth": null
+        }
+      ]
+    }
+  }
+}

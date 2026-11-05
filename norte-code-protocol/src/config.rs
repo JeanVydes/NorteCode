@@ -1,10 +1,10 @@
 //! Norte Code configuration.
 //!
-//! Loads, validates and merges `config.json`: a user file plus an optional
+//! Loads, validates and merges `service.json`: a user file plus an optional
 //! per-project overlay, where the project wins. Every key has a documented
 //! default, and a validation error names the field that is wrong.
 //!
-//! Secrets are not stored in `config.json`. A provider names the environment
+//! Secrets are not stored in `service.json`. A provider names the environment
 //! variables it accepts (the catalogue's `environment_keys`); a host may install
 //! a [`KeyStore`](crate::keys::KeyStore) to add the OS keyring and the 0600
 //! `secrets.json` fallback. The key is resolved on demand into an [`ApiKey`],
@@ -30,12 +30,25 @@ pub const CONFIG_VERSION: u32 = 1;
 /// Largest config file accepted.
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
-/// The whole configuration file.
+/// One server-owned agent definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Config {
+pub struct Agent {
     /// Schema revision. Must be [`CONFIG_VERSION`].
     pub version: u32,
+    /// Stable identifier used by RAEP attachment.
+    pub name: String,
+    /// Human-readable description.
+    pub description: Option<String>,
+    /// Optional URL of a remote JSON definition for this agent.
+    pub origin_url: Option<String>,
+    /// Person or organization that publishes the agent.
+    pub author: Option<String>,
+    /// Agent used for delegated `subagent` turns.
+    ///
+    /// `None` keeps the parent session's model. When set, the name must refer
+    /// to another configured agent; that agent supplies the child defaults.
+    pub subagent: Option<String>,
     /// The provider a new session uses when none is named.
     ///
     /// It is separate from the model because a model name is a string and may
@@ -56,8 +69,6 @@ pub struct Config {
     pub reasoning: ReasoningConfig,
     /// A system prompt override; `None` uses the built-in default.
     pub system_prompt: Option<String>,
-    /// How tool calls are approved.
-    pub approval_mode: ApprovalMode,
     /// Tools always allowed or denied across sessions.
     pub approvals: ApprovalsConfig,
     /// How many model iterations one turn may run, or `None` for no limit.
@@ -68,8 +79,13 @@ pub struct Config {
     /// `openai.chat:provider` with `{"order": ["deepinfra"]}`. Norte ignores a
     /// key whose family does not match the active wire.
     pub extensions: BTreeMap<String, Value>,
-    /// How the client shows what it does.
-    pub ui: UiConfig,
+    /// Client-only interface settings.
+    ///
+    /// This field is kept in the in-memory aggregate for compatibility with
+    /// callers that build a `Config`, but it is never read from or written to
+    /// `service.json`. The CLI loads its settings from `cli.json` through [`CliConfig::load`].
+    #[serde(skip)]
+    pub ui: CliConfig,
     /// Display settings for cost.
     pub cost: CostConfig,
     /// Optional spending limits.
@@ -96,6 +112,131 @@ pub struct Config {
     /// file through it. `None` resolves environment variables only.
     #[serde(skip)]
     pub keys: Option<Arc<dyn KeyStore>>,
+}
+
+/// The selected agent configuration used by the engine.
+pub type Config = Agent;
+
+/// Server configuration containing the available agents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceConfig {
+    /// Schema revision. Must be [`CONFIG_VERSION`].
+    pub version: u32,
+    /// Agent selected for new RAEP attachments.
+    pub default_agent: String,
+    /// Agents exposed by the service.
+    pub agents: Vec<Agent>,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            version: CONFIG_VERSION,
+            default_agent: "norte-code".to_owned(),
+            agents: vec![Agent::default()],
+        }
+    }
+}
+
+impl ServiceConfig {
+    /// Returns the configured default agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the service has no valid default agent.
+    pub fn default_agent(&self) -> Result<Agent, ConfigError> {
+        self.agents
+            .iter()
+            .find(|agent| agent.name == self.default_agent)
+            .cloned()
+            .ok_or_else(|| {
+                invalid(
+                    "default_agent",
+                    format!("does not name an agent: {}", self.default_agent),
+                )
+            })
+    }
+
+    /// Loads and validates a server configuration from user and project files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a file is unreadable, malformed or invalid.
+    pub fn load(user: Option<&Path>, project: Option<&Path>) -> Result<Self, ConfigError> {
+        let mut value = Value::Object(serde_json::Map::new());
+        if let Some(path) = user
+            && path.exists()
+        {
+            merge(&mut value, read_value(path)?);
+        }
+        if let Some(path) = project
+            && path.exists()
+        {
+            merge(&mut value, read_value(path)?);
+        }
+        let service: ServiceConfig = if value.get("agents").is_none() {
+            let agent: Agent =
+                serde_json::from_value(value).map_err(|source| ConfigError::Parse {
+                    path: PathBuf::from("<service.json>"),
+                    source,
+                })?;
+            Self {
+                version: agent.version,
+                default_agent: agent.name.clone(),
+                agents: vec![agent],
+            }
+        } else {
+            serde_json::from_value(value).map_err(|source| ConfigError::Parse {
+                path: PathBuf::from("<service.json>"),
+                source,
+            })?
+        };
+        service.validate()?;
+        Ok(service)
+    }
+
+    /// Validates the service envelope and every agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] naming the first invalid field.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.version != CONFIG_VERSION {
+            return Err(invalid(
+                "version",
+                format!(
+                    "expected {CONFIG_VERSION}, found {}; migrate the file",
+                    self.version
+                ),
+            ));
+        }
+        if self.agents.is_empty() {
+            return Err(invalid("agents", "must contain at least one agent"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for agent in &self.agents {
+            agent.validate()?;
+            if !names.insert(agent.name.clone()) {
+                return Err(invalid(
+                    "agents.name",
+                    format!("duplicate agent name `{}`", agent.name),
+                ));
+            }
+        }
+        for agent in &self.agents {
+            if let Some(subagent) = &agent.subagent
+                && !names.contains(subagent)
+            {
+                return Err(invalid(
+                    format!("agents.{}.subagent", agent.name),
+                    format!("does not name a configured agent: {subagent}"),
+                ));
+            }
+        }
+        self.default_agent()?;
+        Ok(())
+    }
 }
 
 /// One MCP server the agent may reach.
@@ -190,21 +331,25 @@ impl Default for McpServerConfig {
     }
 }
 
-impl Default for Config {
+impl Default for Agent {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
+            name: "norte-code".to_owned(),
+            description: None,
+            origin_url: None,
+            author: None,
+            subagent: None,
             default_provider: None,
             default_model: None,
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
             reasoning: ReasoningConfig::default(),
             system_prompt: None,
-            approval_mode: ApprovalMode::default(),
             approvals: ApprovalsConfig::default(),
             max_iterations: None,
             extensions: BTreeMap::new(),
-            ui: UiConfig::default(),
+            ui: CliConfig::default(),
             cost: CostConfig::default(),
             budgets: BudgetsConfig::default(),
             tools: ToolsConfig::default(),
@@ -227,33 +372,6 @@ pub enum CompactionTrigger {
     Eager,
 }
 
-/// The reasoning setting for a compaction summary request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionReasoning {
-    /// Turn reasoning off when the model allows it.
-    Off,
-    /// The lowest effort the model allows (or off when it can disable).
-    #[default]
-    Lowest,
-    /// A named effort.
-    Minimal,
-    /// A named effort.
-    Low,
-    /// A named effort.
-    Medium,
-    /// A named effort.
-    High,
-    /// A named effort.
-    ///
-    /// The same spelling `/reasoning` uses; `x_high` is accepted from files
-    /// written while the enum derived its name.
-    #[serde(rename = "xhigh", alias = "x_high")]
-    XHigh,
-    /// A named effort.
-    Max,
-}
-
 /// Compaction settings.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -268,15 +386,6 @@ pub struct CompactionConfig {
     pub trigger: CompactionTrigger,
     /// How many recent messages to keep verbatim.
     pub keep_recent: usize,
-    /// The provider of the model to summarise with.
-    ///
-    /// It is its own key and the model id is its own string: a model id may
-    /// carry slashes of its own, so the two are never written as one.
-    pub provider: Option<String>,
-    /// The model id to summarise with, or the session's own.
-    pub model: Option<String>,
-    /// The reasoning setting for the summary request.
-    pub reasoning: CompactionReasoning,
 }
 
 impl Default for CompactionConfig {
@@ -286,9 +395,6 @@ impl Default for CompactionConfig {
             threshold: 0.90,
             trigger: CompactionTrigger::default(),
             keep_recent: 6,
-            provider: None,
-            model: None,
-            reasoning: CompactionReasoning::default(),
         }
     }
 }
@@ -337,25 +443,11 @@ impl Default for ReasoningConfig {
     }
 }
 
-/// How tool calls are approved.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ApprovalMode {
-    /// Ask before every write and command.
-    #[default]
-    Ask,
-    /// Allow edits without asking; commands still ask.
-    AutoEdit,
-    /// Allow everything.
-    Yolo,
-}
-
 /// Approval rules that outlive one session.
 ///
-/// A tool named in `deny` is refused before the approval mode is consulted; a
-/// tool named in `allow` runs without asking. Denial wins when a tool is in
-/// both lists. These are deliberately tool-wide: use the session prompt for a
-/// narrower decision.
+/// A tool named in `deny` is refused, while a tool named in `allow` runs.
+/// Denial wins when a tool is in both lists. These are deliberately tool-wide:
+/// use `/allow` and `/deny` for session-scoped rules.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApprovalsConfig {
@@ -380,7 +472,15 @@ pub struct CostConfig {
 /// service — is free to ignore the whole block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct UiConfig {
+pub struct CliConfig {
+    /// The service endpoint used by the CLI.
+    pub service_url: String,
+    /// Whether lifecycle commands may manage the local service process.
+    pub service_type: ServiceType,
+    /// Optional raw bearer token for the service.
+    pub service_auth: Option<String>,
+    /// Agent identifier sent when attaching to the service.
+    pub agent_id: String,
     /// How much of the conversation to show: `low` (the answer alone), `medium`
     /// (also that tools run and that the model is thinking) or `high` (the
     /// reasoning, what each tool was asked and what it returned).
@@ -391,15 +491,129 @@ pub struct UiConfig {
     pub verbosity: String,
     /// How an `edit` call's diff is drawn.
     pub diff_style: DiffStyle,
+    /// Configuration shared by the terminal's halftone charts.
+    pub charts: ChartConfig,
 }
 
-impl Default for UiConfig {
+/// The service type configured for the CLI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceType {
+    /// The service is managed as a local process by lifecycle commands.
+    #[default]
+    Local,
+    /// The service is remote and cannot be started or stopped by this CLI.
+    Remote,
+}
+
+/// The result of loading the client-only `cli.json` file.
+#[derive(Clone, Debug)]
+pub struct LoadedCli {
+    /// The merged interface settings.
+    pub config: CliConfig,
+    /// Unknown keys, as dotted paths, to report to the client.
+    pub warnings: Vec<String>,
+}
+
+impl CliConfig {
+    /// Loads client settings from a user file and an optional
+    /// project overlay. The project file wins for every key it sets.
+    ///
+    /// Unlike [`Config::load`], this function never reads `service.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a file cannot be read or is not valid JSON.
+    pub fn load(user: Option<&Path>, project: Option<&Path>) -> Result<LoadedCli, ConfigError> {
+        let mut value = Value::Object(serde_json::Map::new());
+        if let Some(path) = user
+            && path.exists()
+        {
+            merge(&mut value, read_value(path)?);
+        }
+        if let Some(path) = project
+            && path.exists()
+        {
+            merge(&mut value, read_value(path)?);
+        }
+        let mut warnings = Vec::new();
+        let config: CliConfig = serde_ignored::deserialize(value, |path| {
+            warnings.push(path.to_string());
+        })
+        .map_err(|source| ConfigError::Parse {
+            path: PathBuf::from("<cli.json>"),
+            source,
+        })?;
+        Ok(LoadedCli { config, warnings })
+    }
+
+    /// Parses client-only interface settings from JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the JSON is invalid or does not match the
+    /// interface schema.
+    pub fn from_json(text: &str) -> Result<LoadedCli, ConfigError> {
+        let value = read_text(text)?;
+        let mut warnings = Vec::new();
+        let config: CliConfig = serde_ignored::deserialize(value, |path| {
+            warnings.push(path.to_string());
+        })
+        .map_err(|source| ConfigError::Parse {
+            path: PathBuf::from("<cli.json>"),
+            source,
+        })?;
+        Ok(LoadedCli { config, warnings })
+    }
+}
+
+impl Default for CliConfig {
     fn default() -> Self {
         Self {
+            service_url: "http://127.0.0.1:8787".to_owned(),
+            service_type: ServiceType::Local,
+            service_auth: None,
+            agent_id: "norte-code".to_owned(),
             verbosity: "medium".to_owned(),
             diff_style: DiffStyle::default(),
+            charts: ChartConfig::default(),
         }
     }
+}
+
+/// Visual settings shared by chart widgets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChartConfig {
+    /// Contrast of the halftone ramp, from 0 to 100.
+    pub contrast: u8,
+    /// Probability that a candidate dot is drawn, from 0 to 100.
+    pub density: u8,
+    /// Character scale used for halftone dots.
+    pub dot_size: ChartDotSize,
+}
+
+impl Default for ChartConfig {
+    fn default() -> Self {
+        Self {
+            contrast: 75,
+            density: 82,
+            dot_size: ChartDotSize::Medium,
+        }
+    }
+}
+
+/// Character scale for halftone chart marks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChartDotSize {
+    /// Fine single-cell dots.
+    Small,
+    /// Balanced dots for normal terminal sizes.
+    #[default]
+    Medium,
+    /// Dense dots with stronger visual weight.
+    Large,
 }
 
 /// How the diff of an `edit` call is drawn.
@@ -484,8 +698,6 @@ pub struct ToolsConfig {
     pub confinement: ConfinementConfig,
     /// How a browser screenshot reaches the model.
     pub screenshots: ScreenshotConfig,
-    /// Whether the `subagent` tool is registered.
-    pub subagent: SubagentConfig,
     /// Whether a finished job starts a turn by itself.
     ///
     /// A detached shell or subagent reports its result through steering, which
@@ -521,83 +733,9 @@ impl Default for ToolsConfig {
             command_max_model_bytes: DEFAULT_COMMAND_MAX_MODEL_BYTES,
             confinement: ConfinementConfig::default(),
             screenshots: ScreenshotConfig::default(),
-            subagent: SubagentConfig::default(),
             auto_turn_on_job_end: false,
             disabled: Vec::new(),
         }
-    }
-}
-
-/// Settings for the `subagent` tool.
-///
-/// A subagent is a session of its own with one turn, started by the model to
-/// do one delegated task. Spawning agents is a cost and trust decision —
-/// every child spends tokens on its own — so it is off by default and turning
-/// it on is deliberate, the same way `skills.allow_scripts` is.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SubagentConfig {
-    /// Whether the `subagent` tool is registered.
-    pub enabled: bool,
-    /// Base system prompt for child sessions. `None` uses the built-in prompt.
-    pub system_prompt: Option<String>,
-    /// Provider override for child sessions. `None` inherits the parent.
-    pub provider: Option<String>,
-    /// Model override for child sessions. `None` inherits the parent.
-    pub model: Option<String>,
-    /// Tools to expose to child sessions. `None` inherits the parent's set.
-    pub allow: Option<Vec<String>>,
-    /// Tools to withhold from child sessions. `None` inherits the parent's set.
-    pub deny: Option<Vec<String>>,
-    /// How many subagents may run at once.
-    ///
-    /// A semaphore: past this many, a new spawn is refused with an error the
-    /// model reads rather than queued. Queuing would let one turn hold every
-    /// provider slot behind an unbounded fan-out.
-    pub max_concurrent: usize,
-    /// How many model iterations one subagent turn may run.
-    ///
-    /// `None` inherits the session's own `max_iterations`: a child cannot run
-    /// longer than its parent can.
-    pub max_iterations: Option<usize>,
-}
-
-impl Default for SubagentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            system_prompt: None,
-            provider: None,
-            model: None,
-            allow: None,
-            deny: None,
-            max_concurrent: DEFAULT_SUBAGENT_MAX_CONCURRENT,
-            max_iterations: None,
-        }
-    }
-}
-
-/// Default cap on subagents running at once.
-pub const DEFAULT_SUBAGENT_MAX_CONCURRENT: usize = 3;
-
-/// Validate the subagent settings.
-impl Config {
-    fn validate_subagent(&self) -> Result<(), ConfigError> {
-        if self.tools.subagent.max_concurrent == 0 {
-            return Err(invalid(
-                "tools.subagent.max_concurrent",
-                "must be at least 1",
-            ));
-        }
-        if let Some(max_iterations) = self.tools.subagent.max_iterations
-            && max_iterations == 0
-        {
-            return Err(invalid(
-                "tools.subagent.max_iterations",
-                "must be at least 1 when set",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -678,7 +816,7 @@ impl Default for ConfinementConfig {
     }
 }
 
-impl Config {
+impl Agent {
     /// Checks every `mcpServers` entry.
     ///
     /// A server that is on must name a program, and its name becomes a segment
@@ -850,7 +988,7 @@ pub enum ConfigError {
     },
 }
 
-impl Config {
+impl Agent {
     /// Loads and validates a configuration from a user file and an optional
     /// project overlay. The project wins for every key it sets.
     ///
@@ -919,12 +1057,7 @@ impl Config {
             self.default_provider.as_deref(),
             self.default_model.as_deref(),
         )?;
-        validate_pair(
-            "compaction.provider",
-            "compaction.model",
-            self.compaction.provider.as_deref(),
-            self.compaction.model.as_deref(),
-        )
+        Ok(())
     }
 
     /// Checks the invariants the loader cannot express.
@@ -933,6 +1066,9 @@ impl Config {
     ///
     /// Returns [`ConfigError::Invalid`] naming the first field that is wrong.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.name.trim().is_empty() {
+            return Err(invalid("name", "must not be empty"));
+        }
         if self.version != CONFIG_VERSION {
             return Err(invalid(
                 "version",
@@ -945,7 +1081,6 @@ impl Config {
         if self.max_iterations == Some(0) {
             return Err(invalid("max_iterations", "must be at least 1"));
         }
-        self.validate_subagent()?;
         self.validate_model_pairs()?;
         if self.skills.max_skills == 0 {
             return Err(invalid("skills.max_skills", "must be at least 1"));
@@ -1142,7 +1277,7 @@ fn validate_pair(
     }
 }
 
-/// The user config path: `$XDG_CONFIG_HOME/norte-code/config.json`, or the
+/// The user service path: `$XDG_CONFIG_HOME/norte-code/service.json`, or the
 /// platform equivalent.
 #[must_use]
 pub fn user_config_path() -> Option<PathBuf> {
@@ -1150,13 +1285,87 @@ pub fn user_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
-    Some(base.join("norte-code").join("config.json"))
+    Some(base.join("norte-code").join("service.json"))
+}
+
+/// Default server configuration shipped with this build.
+const DEFAULT_SERVICE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../default/service.json"
+));
+
+/// Default client configuration shipped with this build.
+const DEFAULT_CLI_JSON: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../default/cli.json"));
+
+/// Creates the user service configuration when it does not exist.
+///
+/// Existing files are never overwritten. `None` means that no user config
+/// directory could be determined and the caller must keep using in-memory
+/// defaults.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the default cannot be written.
+pub fn ensure_user_service_config() -> Result<Option<PathBuf>, ConfigError> {
+    ensure_default_config_file(user_config_path(), DEFAULT_SERVICE_JSON)
+}
+
+/// The client configuration path: `$XDG_CONFIG_HOME/norte-code/cli.json`, or the
+/// platform equivalent.
+#[must_use]
+pub fn user_cli_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
+    Some(base.join("norte-code").join("cli.json"))
+}
+
+/// Creates the user CLI configuration when it does not exist.
+///
+/// Existing files are never overwritten.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] when the default cannot be written.
+pub fn ensure_user_cli_config() -> Result<Option<PathBuf>, ConfigError> {
+    ensure_default_config_file(user_cli_path(), DEFAULT_CLI_JSON)
+}
+
+fn ensure_default_config_file(
+    path: Option<PathBuf>,
+    contents: &str,
+) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if path.exists() {
+        return Ok(Some(path));
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    atomic_write(&path, contents.as_bytes())?;
+    Ok(Some(path))
 }
 
 /// The per-project overlay path under `root`.
 #[must_use]
 pub fn project_config_path(root: &Path) -> PathBuf {
-    root.join(".norte-code").join("config.json")
+    root.join(".norte-code").join("service.json")
+}
+
+/// The per-project client overlay path under `root`.
+#[must_use]
+pub fn project_cli_path(root: &Path) -> PathBuf {
+    root.join(".norte-code").join("cli.json")
 }
 
 /// The file a change to the user's configuration is written to.
@@ -1190,19 +1399,19 @@ pub fn update_user_default(path: &Path, provider: &str, model: &str) -> Result<(
     if model.is_empty() {
         return Err(invalid("default_model", "the model name is empty"));
     }
-    let mut root = if path.exists() {
-        read_value(path)?
+    let mut service = if path.exists() {
+        ServiceConfig::load(Some(path), None)?
     } else {
-        Value::Object(serde_json::Map::new())
+        ServiceConfig::default()
     };
-    let root = root
-        .as_object_mut()
-        .ok_or_else(|| invalid("default_model", "the config root must be a JSON object"))?;
-    root.insert(
-        "default_provider".to_owned(),
-        Value::String(provider.to_owned()),
-    );
-    root.insert("default_model".to_owned(), Value::String(model.to_owned()));
+    let default_agent = service.default_agent.clone();
+    let agent = service
+        .agents
+        .iter_mut()
+        .find(|agent| agent.name == default_agent)
+        .ok_or_else(|| invalid("default_agent", "the default agent does not exist"))?;
+    agent.default_provider = Some(provider.to_owned());
+    agent.default_model = Some(model.to_owned());
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1212,7 +1421,7 @@ pub fn update_user_default(path: &Path, provider: &str, model: &str) -> Result<(
             source,
         })?;
     }
-    let mut body = serde_json::to_string_pretty(&root).map_err(|source| ConfigError::Parse {
+    let mut body = serde_json::to_string_pretty(&service).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
     })?;
@@ -1287,7 +1496,7 @@ pub(crate) fn atomic_write_with(
         let name = target
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("config.json");
+            .unwrap_or("service.json");
         let tmp = parent.join(format!(
             ".{name}.{}.{}.tmp",
             std::process::id(),
@@ -2191,25 +2400,73 @@ mod ui_tests {
         // A config file that does not mention `ui` must behave exactly as it did
         // before the block existed, so every field has a default that is what
         // the client already did.
-        let loaded = Config::from_json("{}").expect("empty config");
+        let loaded = CliConfig::from_json("{}").expect("empty cli");
         let config = loaded.config;
-        assert_eq!(config.ui.verbosity, "medium");
-        assert_eq!(config.ui.diff_style, DiffStyle::Unified);
+        assert_eq!(config.verbosity, "medium");
+        assert_eq!(config.diff_style, DiffStyle::Unified);
+        assert_eq!(config.service_url, "http://127.0.0.1:8787");
+        assert_eq!(config.service_type, ServiceType::Local);
+        assert_eq!(config.service_auth, None);
+    }
+
+    #[cfg(test)]
+    mod service_config_tests {
+        use super::*;
+
+        #[test]
+        fn service_json_selects_a_named_agent() {
+            let service: ServiceConfig = serde_json::from_str(
+                r#"{
+                    "version": 1,
+                    "default_agent": "reviewer",
+                    "agents": [
+                        {"name": "builder", "description": null},
+                        {"name": "reviewer", "author": "team"}
+                    ]
+                }"#,
+            )
+            .expect("service");
+            service.validate().expect("valid service");
+            let agent = service.default_agent().expect("default");
+            assert_eq!(agent.name, "reviewer");
+            assert_eq!(agent.author.as_deref(), Some("team"));
+        }
+
+        #[test]
+        fn service_json_rejects_duplicate_agent_names() {
+            let error = serde_json::from_str::<ServiceConfig>(
+                r#"{"default_agent":"same","agents":[{"name":"same"},{"name":"same"}]}"#,
+            )
+            .expect("parse")
+            .validate()
+            .expect_err("duplicate names must fail");
+            assert!(error.to_string().contains("duplicate agent name"));
+        }
+    }
+
+    #[test]
+    fn service_settings_are_client_only_and_preserve_raw_auth() {
+        let loaded = CliConfig::from_json(
+            r#"{"service_url":"https://agent.example/raep","service_type":"remote","service_auth":"raw-token"}"#,
+        )
+        .expect("service settings");
+        assert_eq!(loaded.config.service_url, "https://agent.example/raep");
+        assert_eq!(loaded.config.service_type, ServiceType::Remote);
+        assert_eq!(loaded.config.service_auth.as_deref(), Some("raw-token"));
     }
 
     #[test]
     fn the_diff_style_is_named_the_way_a_person_writes_it() {
         // The two names are what the configuration accepts, so they are part of
         // the interface and not a detail of the enum.
-        let loaded = Config::from_json(r#"{"ui":{"diff_style":"split"}}"#).expect("split");
+        let loaded = CliConfig::from_json(r#"{"diff_style":"split"}"#).expect("split");
         let config = loaded.config;
-        assert_eq!(config.ui.diff_style, DiffStyle::Split);
-        let loaded = Config::from_json(r#"{"ui":{"diff_style":"unified"}}"#).expect("unified");
-        let config = loaded.config;
-        assert_eq!(config.ui.diff_style, DiffStyle::Unified);
+        assert_eq!(config.diff_style, DiffStyle::Split);
+        let loaded = CliConfig::from_json(r#"{"diff_style":"unified"}"#).expect("unified");
+        assert_eq!(loaded.config.diff_style, DiffStyle::Unified);
         // A name that is not one of the two is refused rather than silently
         // falling back, because a person who wrote `side-by-side` should be told.
-        let error = Config::from_json(r#"{"ui":{"diff_style":"diagonal"}}"#)
+        let error = CliConfig::from_json(r#"{"diff_style":"diagonal"}"#)
             .expect_err("an unknown style is refused");
         assert!(
             error.to_string().contains("diagonal"),
@@ -2222,13 +2479,13 @@ mod ui_tests {
         // The enum lives in the client, not here: the engine never reads this
         // and a config crate that refused the value would make every host
         // reimplement the message.
-        let loaded = Config::from_json(r#"{"ui":{"verbosity":"high"}}"#).expect("high");
+        let loaded = CliConfig::from_json(r#"{"verbosity":"high"}"#).expect("high");
         let config = loaded.config;
-        assert_eq!(config.ui.verbosity, "high");
-        let loaded = Config::from_json(r#"{"ui":{"verbosity":"loud"}}"#).expect("any string");
+        assert_eq!(config.verbosity, "high");
+        let loaded = CliConfig::from_json(r#"{"verbosity":"loud"}"#).expect("any string");
         let config = loaded.config;
         assert_eq!(
-            config.ui.verbosity, "loud",
+            config.verbosity, "loud",
             "the client is what refuses it, with the levels it knows"
         );
     }
@@ -2276,61 +2533,43 @@ mod subagent_tests {
     use super::*;
 
     #[test]
-    fn subagent_is_off_and_capped_by_default() {
-        // Spawning agents costs tokens on its own, so it is off until a
-        // person turns it on — the same posture as `skills.allow_scripts`.
+    fn subagent_defaults_to_the_parent_agent() {
         let loaded = Config::from_json("{}").expect("empty config");
-        let config = loaded.config;
-        assert!(!config.tools.subagent.enabled, "off by default");
-        assert_eq!(
-            config.tools.subagent.max_concurrent, DEFAULT_SUBAGENT_MAX_CONCURRENT,
-            "three at once, no more"
-        );
-        assert_eq!(
-            config.tools.subagent.max_iterations, None,
-            "inherits the session's limit"
+        assert_eq!(loaded.config.subagent, None);
+    }
+
+    #[test]
+    fn subagent_agent_round_trips() {
+        let loaded = Config::from_json(r#"{"subagent":"research"}"#).expect("config");
+        assert_eq!(loaded.config.subagent.as_deref(), Some("research"));
+    }
+
+    #[test]
+    fn service_rejects_an_unknown_subagent_agent() {
+        let service = ServiceConfig {
+            default_agent: "main".to_owned(),
+            agents: vec![Agent {
+                name: "main".to_owned(),
+                subagent: Some("missing".to_owned()),
+                ..Agent::default()
+            }],
+            ..ServiceConfig::default()
+        };
+        let error = service.validate().expect_err("unknown agent");
+        assert!(
+            error
+                .to_string()
+                .contains("does not name a configured agent")
         );
     }
 
     #[test]
-    fn subagent_settings_round_trip() {
-        let loaded = Config::from_json(
-            r#"{"tools":{"subagent":{"enabled":true,"system_prompt":"work independently","provider":"test","model":"scripted","allow":["read"],"deny":["shell"],"max_concurrent":5,"max_iterations":12}}}"#,
-        )
-        .expect("config");
-        let config = loaded.config;
-        assert!(config.tools.subagent.enabled);
-        assert_eq!(
-            config.tools.subagent.system_prompt.as_deref(),
-            Some("work independently")
-        );
-        assert_eq!(config.tools.subagent.provider.as_deref(), Some("test"));
-        assert_eq!(config.tools.subagent.model.as_deref(), Some("scripted"));
-        assert_eq!(
-            config.tools.subagent.allow.as_deref(),
-            Some(&vec!["read".to_owned()][..])
-        );
-        assert_eq!(
-            config.tools.subagent.deny.as_deref(),
-            Some(&vec!["shell".to_owned()][..])
-        );
-        assert_eq!(config.tools.subagent.max_concurrent, 5);
-        assert_eq!(config.tools.subagent.max_iterations, Some(12));
-    }
-
-    #[test]
-    fn subagent_limits_must_be_positive() {
-        let error = Config::from_json(r#"{"tools":{"subagent":{"max_concurrent":0}}}"#)
-            .expect_err("zero concurrency is refused");
-        assert!(
-            error.to_string().contains("tools.subagent.max_concurrent"),
-            "the error names the field: {error}"
-        );
-        let error = Config::from_json(r#"{"tools":{"subagent":{"max_iterations":0}}}"#)
-            .expect_err("zero iterations is refused");
-        assert!(
-            error.to_string().contains("tools.subagent.max_iterations"),
-            "the error names the field: {error}"
-        );
+    fn checked_in_service_template_is_valid() {
+        let service: ServiceConfig = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../default/service.json"
+        )))
+        .expect("service template");
+        service.validate().expect("valid service template");
     }
 }

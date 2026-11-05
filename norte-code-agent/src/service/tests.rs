@@ -284,6 +284,19 @@ async fn a_real_mcp_server_publishes_its_tools_into_the_service() {
     );
 }
 
+#[tokio::test]
+async fn mcp_status_is_available_through_the_service_wire() {
+    let (service, _model) = scripted_service(spec("scripted"), &["ok"]);
+    let events = drain(&service, ClientRequestKind::ListMcp).await;
+    assert!(events.iter().any(|event| matches!(
+        event.kind,
+        ServerEventKind::McpList {
+            ref servers,
+            ref failures
+        } if servers.is_empty() && failures.is_empty()
+    )));
+}
+
 fn service() -> Arc<Service> {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
@@ -343,9 +356,7 @@ fn scripted_service_with_config(
 
 #[allow(dead_code)]
 fn subagent_config() -> Config {
-    let mut config = config();
-    config.tools.subagent.enabled = true;
-    config
+    config()
 }
 
 #[tokio::test]
@@ -504,7 +515,7 @@ async fn a_reload_applies_a_good_config_and_discards_a_bad_one() {
     let dir = std::env::temp_dir().join(format!("norte-reload-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("dir");
     let path = dir.join("config.json");
-    std::fs::write(&path, r#"{"approval_mode":"yolo","max_iterations":7}"#).expect("write");
+    std::fs::write(&path, r#"{"max_iterations":7}"#).expect("write");
     service.set_config_path(Some(path.clone()));
 
     let reloaded = service.reload_config().expect("a valid config reloads");
@@ -572,6 +583,60 @@ async fn drain(
         .unwrap_or_else(|error| panic!("request failed: {error}"))
         .collect()
         .await
+}
+
+#[tokio::test]
+async fn concurrent_messages_on_one_session_are_serialized() {
+    let (service, _model) = scripted_service(spec("scripted"), &["first answer", "second answer"]);
+    let session = service.start_session(None).await.expect("session");
+    let first = service.submit(ClientRequest {
+        request_id: 1,
+        kind: ClientRequestKind::SendMessage {
+            session: Some(session.clone()),
+            text: "first".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    });
+    let second = service.submit(ClientRequest {
+        request_id: 2,
+        kind: ClientRequestKind::SendMessage {
+            session: Some(session.clone()),
+            text: "second".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            replay: false,
+        },
+    });
+    let (first, second) = tokio::join!(first, second);
+    let first = first.expect("first turn").collect::<Vec<_>>().await;
+    let second = second.expect("second turn").collect::<Vec<_>>().await;
+
+    for events in [first, second] {
+        assert!(
+            events.iter().any(|event| matches!(
+                event.kind,
+                ServerEventKind::TurnFinished {
+                    committed: true,
+                    ..
+                }
+            )),
+            "each concurrent request should commit: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.kind,
+                ServerEventKind::Error {
+                    code: ErrorCode::Conflict,
+                    ..
+                }
+            )),
+            "serialized turns must not report a conflict: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1208,8 +1273,7 @@ async fn cancelling_a_turn_stops_a_running_command() {
         },
         norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
     ]));
-    let mut config = config();
-    config.approval_mode = norte_code_protocol::config::ApprovalMode::Yolo;
+    let config = config();
     let (service, _store) = persistent_service_with_config(config, model).await;
     let mut events = service
         .submit(ClientRequest {
@@ -1596,6 +1660,7 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
         &reopened,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: true,
         },
     )
     .await;
@@ -2899,13 +2964,20 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
     .await;
 
     // A turn with no input of its own still takes them, in order.
-    drain(
+    let resumed = drain(
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: false,
         },
     )
     .await;
+    assert!(
+        !resumed
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::MessageReplayed { .. })),
+        "internal continuation must not replay the transcript"
+    );
 
     let requests = model.requests();
     assert_eq!(requests.len(), 2, "the resume made one request");
@@ -4407,6 +4479,7 @@ async fn a_session_budget_stops_the_next_request() {
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: false,
         },
     )
     .await;
@@ -5943,6 +6016,7 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: true,
         },
     )
     .await;
@@ -6028,6 +6102,7 @@ async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: true,
         },
     )
     .await;
@@ -6065,6 +6140,7 @@ async fn a_resume_replays_the_recent_messages() {
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: true,
         },
     )
     .await;
@@ -6723,6 +6799,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: true,
         },
     )
     .await;
@@ -6749,6 +6826,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
         &service,
         ClientRequestKind::Resume {
             session: key.clone(),
+            replay: true,
         },
     )
     .await;
@@ -7242,8 +7320,7 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
             // Turn 3 (parent): finish.
             .turn_text("The child said 4."),
     );
-    let mut config = subagent_config();
-    config.approval_mode = norte_code_protocol::config::ApprovalMode::Yolo;
+    let config = subagent_config();
     let service = Arc::new(
         Service::new(
             config,
@@ -7321,8 +7398,7 @@ async fn a_detached_subagent_is_a_job_that_reports_and_can_be_stopped() {
             // The parent's next turn.
             .turn_text("parent finished"),
     );
-    let mut config = subagent_config();
-    config.approval_mode = norte_code_protocol::config::ApprovalMode::Yolo;
+    let config = subagent_config();
     let service = Arc::new(
         Service::new(
             config,
@@ -7442,11 +7518,8 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     );
     let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
     let mut child_config = subagent_config();
-    child_config.tools.subagent.system_prompt = Some("child instructions".to_owned());
-    child_config.tools.subagent.provider = Some("test".to_owned());
-    child_config.tools.subagent.model = Some("scripted".to_owned());
-    child_config.tools.subagent.allow = Some(vec!["read".to_owned(), "todo".to_owned()]);
-    child_config.tools.subagent.deny = Some(vec!["todo".to_owned()]);
+    child_config.system_prompt = Some("child instructions".to_owned());
+    child_config.tools.disabled = vec!["write".to_owned(), "todo".to_owned()];
     let service = Arc::new(
         Service::new(
             child_config,

@@ -19,8 +19,8 @@ use super::labels::{
     budget_action_name, budget_label, code_name, format_measure, scope_name, short, unit_name,
 };
 use super::{
-    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, DiffStyle, HostFacts, MessageRole,
-    OutputStream, Phase, ServerEvent, ServerEventKind, Style, clip_text, compact_json,
+    BTreeMap, BudgetAction, BudgetScope, BudgetUnit, Delta, DiffStyle, ErrorCode, HostFacts,
+    MessageRole, OutputStream, Phase, ServerEvent, ServerEventKind, Style, clip_text, compact_json,
     duration_label,
 };
 
@@ -146,13 +146,19 @@ pub(crate) struct Renderer {
     /// state and is not printed as if it were missing.
     pub(crate) cost_silent: bool,
     pub(crate) style: Style,
+    /// Shared visual configuration for telemetry charts.
+    pub(crate) chart_config: super::HalftoneConfig,
     /// The pinned footer text shared with the input editor.
     pub(crate) pinned: Arc<Pinned>,
+    /// Whether the input editor is usable.
+    pub(crate) input_ready: bool,
     pub(crate) block: Block,
     pub(crate) reasoning_line_start: bool,
     /// Whether `--quiet` has already printed its one redacted reasoning marker
     /// for this turn.
     pub(crate) reasoning_placeholder: bool,
+    /// Whether the next replay should replace the stale view after a conflict.
+    replay_after_conflict: bool,
     pub(crate) last_char: Option<char>,
     /// Buffered answer text, rendered as markdown on `end_blocks`.
     pub(crate) answer_buffer: String,
@@ -280,6 +286,8 @@ pub(crate) struct Renderer {
     /// stdout and stderr are read by two tasks at once and arrive interleaved,
     /// which is what a terminal shows.
     output_gutter: Option<String>,
+    /// The transcript entry receiving the currently streamed output.
+    output_entry: Option<usize>,
 
     /// The compact command description for streamed shell output headers.
     output_commands: BTreeMap<String, String>,
@@ -308,7 +316,7 @@ pub(crate) struct Renderer {
     /// reader hands over `stdout[01] p` and `arcial... completa` as two chunks
     /// of one row. A row is written only once its line is whole, so the two are
     /// joined instead of landing on rows of their own.
-    output_pending: BTreeMap<String, String>,
+    output_pending: BTreeMap<(String, String), String>,
 }
 
 /// How a finished call is announced: a mark, the tool, and how long it took.
@@ -357,10 +365,13 @@ impl Renderer {
             show_cost,
             cost_silent: false,
             style,
+            chart_config: super::HalftoneConfig::default(),
             pinned,
+            input_ready: true,
             block: Block::None,
             reasoning_line_start: false,
             reasoning_placeholder: false,
+            replay_after_conflict: false,
             last_char: None,
             answer_buffer: String::new(),
             transcript: crate::transcript::Transcript::new(),
@@ -399,6 +410,7 @@ impl Renderer {
             streamed_calls: BTreeSet::new(),
             closed_calls: BTreeSet::new(),
             output_gutter: None,
+            output_entry: None,
             output_commands: BTreeMap::new(),
             output_line_start: true,
             output_pending: BTreeMap::new(),
@@ -505,37 +517,9 @@ impl Renderer {
                     }
                 }
             }
-            ServerEventKind::MessageReplayed { role, text, .. } => {
-                self.transcript.close();
-                // The replay says who spoke, and it is not always the human: a
-                // resumed session replays the tool results and the model's own
-                // answers too.
-                let kind = if *role == MessageRole::User {
-                    Entry::Said
-                } else {
-                    Entry::Answer
-                };
-                let mut entry = crate::transcript::Entry::new(kind);
-                entry.push_text(text);
-                self.transcript.push(entry);
-            }
-            ServerEventKind::Error { message, .. } => {
-                self.transcript.close();
-                self.transcript.push(crate::transcript::Entry::line(
-                    Entry::Failure,
-                    message.clone(),
-                ));
-            }
-            ServerEventKind::CompactionStarted { .. } => {
-                self.transcript.close();
-                self.transcript
-                    .push(crate::transcript::Entry::line(Entry::Notice, "compacting"));
-            }
-            ServerEventKind::RetryScheduled { .. } => {
-                self.transcript.close();
-                self.transcript
-                    .push(crate::transcript::Entry::line(Entry::Notice, "retrying"));
-            }
+            // Replay messages are recorded by `replay_message`, which preserves
+            // reasoning/tool kinds and their gutter. Recording them here too
+            // would add a plain duplicate before the styled replay entry.
             _ => {}
         }
     }
@@ -611,6 +595,30 @@ impl Renderer {
             println!("{line}");
             return Ok(());
         }
+        if matches!(
+            event.kind,
+            ServerEventKind::MessageReplayed {
+                role: MessageRole::System | MessageRole::Developer,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+        if matches!(event.kind, ServerEventKind::MessageReplayed { .. })
+            && self.replay_after_conflict
+        {
+            self.reset_transcript_for_replay();
+            self.replay_after_conflict = false;
+        }
+        if matches!(
+            event.kind,
+            ServerEventKind::Error {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ) {
+            self.replay_after_conflict = true;
+        }
         // A delta changes the block before it is recorded. The block change is
         // where the blank row between two blocks is written, and if the entry
         // for the new text already exists that row lands inside the answer it
@@ -677,6 +685,42 @@ impl Renderer {
         Ok(())
     }
 
+    /// Clears the stale conversation before replaying the committed session.
+    fn reset_transcript_for_replay(&mut self) {
+        self.transcript = crate::transcript::Transcript::new();
+        self.block = Block::None;
+        self.reasoning_line_start = true;
+        self.reasoning_placeholder = false;
+        self.last_char = Some('\n');
+        self.answer_buffer.clear();
+        self.output_gutter = None;
+        self.output_entry = None;
+        self.output_pending.clear();
+        self.output_rows.clear();
+        self.output_rows_dropped = 0;
+        self.output_line_start = true;
+    }
+
+    /// Writes a client-side diagnostic record in headless mode.
+    ///
+    /// Service events retain the protocol's exact shape. These records make
+    /// the client-side gaps observable too: a script can distinguish an empty
+    /// response from a request that was never submitted or an input stream
+    /// that ended before the next turn began.
+    pub(crate) fn diagnostic(&mut self, kind: &str, details: &serde_json::Value) {
+        if !matches!(self.format, Format::Jsonl) {
+            return;
+        }
+        let record = serde_json::json!({
+            "event": "client_diagnostic",
+            "kind": kind,
+            "details": details,
+        });
+        if let Ok(line) = serde_json::to_string(&record) {
+            println!("{line}");
+        }
+    }
+
     /// Opens a panel over the interface.
     ///
     /// The lines are kept plain: the panel is drawn by the frame, and a report
@@ -709,10 +753,16 @@ impl Renderer {
     /// It is its own entry point and not `open_editable`: the panel draws charts
     /// from its own state and walks its own tabs, so it is not a list of rows
     /// with a cursor over them.
+    #[allow(dead_code)]
     pub(crate) fn open_telemetry(&mut self, panel: crate::telemetry_panel::Panel) {
-        let mut modal = crate::modal::Modal::telemetry(panel);
+        let mut modal = crate::modal::Modal::telemetry(panel, self.chart_config);
         modal.refresh_telemetry();
         self.set_modal(modal);
+    }
+
+    /// Sets the shared chart visual configuration from the user's UI config.
+    pub(crate) fn set_chart_config(&mut self, config: &norte_code_protocol::config::ChartConfig) {
+        self.chart_config = super::HalftoneConfig::from_chart_config(config);
     }
 
     /// Opens a panel that can be acted on.
@@ -985,11 +1035,19 @@ impl Renderer {
     /// translation between them.
     fn ui_state(&self) -> crate::app::State {
         let (input, cursor, anchor) = self.pinned.draft();
-        let completion = self.completion_for(&input, cursor);
+        let completion = self
+            .input_ready
+            .then(|| self.completion_for(&input, cursor))
+            .flatten();
         // The hint speaks only when no menu is up: an open menu is already
         // saying what may be typed, and a row repeating the first candidate
         // under it would say the same thing twice.
-        let suggestion = if completion.is_some() {
+        let queued = self.pinned.pending_steers();
+        let suggestion = if !self.input_ready {
+            String::new()
+        } else if !queued.is_empty() {
+            format!("queued: {}", queued.join(" · "))
+        } else if completion.is_some() {
             String::new()
         } else {
             self.suggestion_for(&input, cursor)
@@ -997,6 +1055,7 @@ impl Renderer {
         crate::app::State {
             transcript: self.transcript.clone(),
             input,
+            input_ready: self.input_ready,
             cursor,
             select: anchor,
             completion,
@@ -1129,6 +1188,20 @@ impl Renderer {
         self.cancelled = false;
         self.set_wait(super::loading::Wait::Waiting);
         self.set_activity(Some("waiting for the first token".to_owned()));
+    }
+
+    /// Enables or disables the input editor while the client connects.
+    pub(crate) fn set_input_ready(&mut self, ready: bool) {
+        if self.input_ready != ready {
+            self.input_ready = ready;
+            self.pinned.mark_dirty();
+        }
+    }
+
+    /// Ends the startup connection wait without changing the transcript.
+    pub(crate) fn mark_ready(&mut self) {
+        self.end_blocks();
+        self.set_activity(None);
     }
 
     /// Moves the spinner to a phase, keeping the clock it counts on.
@@ -1295,31 +1368,6 @@ impl Renderer {
         self.last_char = Some('\n');
     }
 
-    /// Writes a message the human typed into the transcript, where the
-    /// conversation reached.
-    ///
-    /// It is the echo that used to happen when the line was sent: a steering
-    /// message is not in the history until the engine applies it, and printing
-    /// it earlier claimed something that had not happened. It keeps the live
-    /// prompt's marker, so it reads as the same message it always was.
-    pub(crate) fn arrived_message(&mut self, text: &str) {
-        if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
-            return;
-        }
-        self.stop_bar();
-        self.end_blocks();
-        // The message is the conversation: it goes there once, and the view
-        // draws the `›` that marks who said it.
-        let escaped = crate::text::terminal(text);
-        let mut entry = crate::transcript::Entry::new(crate::transcript::Kind::Said);
-        entry.push_text(&escaped);
-        self.transcript.push(entry);
-        self.last_char = Some('\n');
-        if !self.failed && !self.cancelled {
-            self.mark_working();
-        }
-    }
-
     /// Adds what the human said to the conversation.
     ///
     /// It is called when the message is sent and not when the engine applies
@@ -1385,6 +1433,17 @@ impl Renderer {
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }
+        // History replay uses the same visibility policy as live deltas:
+        // reasoning is diagnostic detail, not conversation, unless high
+        // verbosity explicitly asks for it. Without this guard, reconnecting
+        // or resolving a conflict brought every old thought back into the
+        // transcript even when the live stream had hidden it.
+        if kind == K::Reasoning && !self.verbosity.at_least(Verbosity::High) {
+            return;
+        }
+        if kind == K::ToolResult && !self.verbosity.at_least(Verbosity::High) {
+            return;
+        }
         // The working bar shares stderr with the transcript, so the replay stops
         // it before printing, exactly as the reasoning gutter does.
         self.stop_bar();
@@ -1419,7 +1478,9 @@ impl Renderer {
                 call.push_line(format!("#{index} {role}"));
             }
             self.transcript.push(call);
-            if let Some(arguments) = arguments {
+            if self.verbosity.at_least(Verbosity::High)
+                && let Some(arguments) = arguments
+            {
                 let mut block = crate::transcript::Entry::bordered(
                     crate::transcript::Kind::ToolOutput,
                     format!("{tool} arguments"),
@@ -1520,6 +1581,13 @@ impl Renderer {
             // later, which is what left a `│` running down one side of the
             // transcript.
             self.output_gutter = Some(call_id.to_owned());
+            let mut entry =
+                crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, "");
+            entry.title = None;
+            entry.call_id = Some(call_id.to_owned());
+            entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
+            self.transcript.push(entry);
+            self.output_entry = self.transcript.entries().len().checked_sub(1);
             self.output_line_start = true;
         }
         // The buffer is filled and read in one borrow, and the rows are written
@@ -1527,7 +1595,8 @@ impl Renderer {
         let mut whole: Vec<String> = Vec::new();
         let mut leftover = String::new();
         {
-            let pending = self.output_pending.entry(stream.to_owned()).or_default();
+            let key = (call_id.to_owned(), stream.to_owned());
+            let pending = self.output_pending.entry(key.clone()).or_default();
             pending.push_str(text);
             // Whole lines only: what follows the last newline waits for the rest
             // of its line, whenever that arrives. A line that grows past the cap
@@ -1542,7 +1611,7 @@ impl Renderer {
             // An empty buffer is no buffer: leaving the entry behind makes a
             // stream look like it is mid-line when it has nothing pending.
             if pending.is_empty() {
-                self.output_pending.remove(stream);
+                self.output_pending.remove(&key);
             }
         }
         for line in whole {
@@ -1551,6 +1620,7 @@ impl Renderer {
         if !leftover.is_empty() {
             self.keep_partial_row(&leftover);
         }
+        self.sync_output_entry();
         self.last_char = None;
     }
 
@@ -1596,11 +1666,40 @@ impl Renderer {
         self.output_rows_dropped += 1;
     }
 
+    /// Copies the bounded streamed rows into the live transcript node.
+    ///
+    /// The node is created when the first chunk arrives, rather than when the
+    /// tool finishes, so the frame can show output while the process is still
+    /// running. The renderer keeps the rows separately because chunks can
+    /// arrive mid-line and the retention bound applies before drawing.
+    fn sync_output_entry(&mut self) {
+        let Some(index) = self.output_entry else {
+            return;
+        };
+        let Some(entry) = self.transcript.entries_mut().get_mut(index) else {
+            self.output_entry = None;
+            return;
+        };
+        entry.lines = self
+            .output_rows
+            .iter()
+            .cloned()
+            .map(crate::transcript::Line::new)
+            .collect();
+        entry.dropped = self.output_rows_dropped;
+    }
+
     /// Keeps what was left of a stream that ended without a newline.
-    fn flush_output_pending(&mut self) {
-        for text in std::mem::take(&mut self.output_pending).into_values() {
-            if !text.is_empty() {
-                self.keep_partial_row(&text);
+    fn flush_output_pending(&mut self, call_id: &str) {
+        let pending = std::mem::take(&mut self.output_pending);
+        for ((pending_call_id, pending_stream), text) in pending {
+            if pending_call_id == call_id {
+                if !text.is_empty() {
+                    self.keep_partial_row(&text);
+                }
+            } else {
+                self.output_pending
+                    .insert((pending_call_id, pending_stream), text);
             }
         }
     }
@@ -1617,17 +1716,14 @@ impl Renderer {
         let Some(call_id) = self.output_gutter.take() else {
             return;
         };
-        self.flush_output_pending();
-        let hidden = self.output_rows_dropped;
-        let mut entry = crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, "");
-        entry.title = None;
-        entry.call_id = Some(call_id);
-        entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
-        for row in std::mem::take(&mut self.output_rows) {
-            entry.push_line(row);
+        self.flush_output_pending(&call_id);
+        self.sync_output_entry();
+        if let Some(index) = self.output_entry.take()
+            && let Some(entry) = self.transcript.entries_mut().get_mut(index)
+        {
+            entry.call_id = Some(call_id);
         }
-        entry.dropped = hidden;
-        self.transcript.push(entry);
+        self.output_rows.clear();
         self.output_rows_dropped = 0;
         self.output_line_start = true;
     }
@@ -1635,6 +1731,16 @@ impl Renderer {
     /// Closes the open streamed-output box, if there is one.
     fn end_output_gutter(&mut self) {
         self.close_output_gutter();
+    }
+
+    /// Closes a streamed-output box only when it belongs to this call.
+    ///
+    /// Tool calls may run in parallel. A finish for one call must not close the
+    /// box currently receiving another call's output.
+    fn end_output_gutter_for(&mut self, call_id: &str) {
+        if self.output_gutter.as_deref() == Some(call_id) {
+            self.close_output_gutter();
+        }
     }
 
     /// Writes answer text, closing reasoning and separating it first.
@@ -1805,10 +1911,11 @@ impl Renderer {
                 // A tool that streamed its output has an open box; its closing
                 // chunk usually closed it, but a call that died before sending
                 // one would leave the box open and the next line inside it.
-                self.end_output_gutter();
+                self.end_output_gutter_for(call_id);
                 // From here the call has no box, and a chunk that arrives after
                 // this one must not open another.
                 self.closed_calls.insert(call_id.clone());
+                let streamed = self.streamed_calls.remove(call_id);
                 if self.verbosity.at_least(Verbosity::Medium) {
                     // How the call ended is the same row the call began on,
                     // rewritten: a row that said what was running now says how
@@ -1856,7 +1963,11 @@ impl Renderer {
                         }
                     }
                 }
-                if *is_error && !*detached && tool.as_str() != "edit" {
+                if self.verbosity.at_least(Verbosity::High)
+                    && *is_error
+                    && !*detached
+                    && tool.as_str() != "edit"
+                {
                     // A failure needs its reason whatever the verbosity. A
                     // detached call's text is not a reason — it is the answer the
                     // model got, naming the job the process became — and it is
@@ -1864,7 +1975,7 @@ impl Renderer {
                     if let Some(error) = error {
                         self.keep_tool_result(error);
                     }
-                } else if *detached && !self.streamed_calls.remove(call_id) {
+                } else if self.verbosity.at_least(Verbosity::High) && *detached && !streamed {
                     // The call answered with what it had and the name of the job
                     // the rest belongs to, so its result is what the model saw.
                     if let Some(result) = Self::tool_result_for(
@@ -1875,7 +1986,7 @@ impl Renderer {
                     ) {
                         self.keep_tool_result(&result);
                     }
-                } else if !self.streamed_calls.remove(call_id) {
+                } else if self.verbosity.at_least(Verbosity::High) && !streamed {
                     // The output was printed as it arrived, so showing the
                     // result would print the same text twice. A failure is the
                     // exception above: its reason is not part of the stream.
@@ -1894,17 +2005,6 @@ impl Renderer {
                 if self.waiting.is_none() && !self.failed && !self.cancelled {
                     self.mark_working();
                 }
-                if self.verbosity.at_least(Verbosity::High) {
-                    if *is_error {
-                        if tool.as_str() != "edit"
-                            && let Some(error) = error
-                        {
-                            self.code_block("text", error);
-                        }
-                    } else if let Some(output) = output {
-                        self.code_block("text", output);
-                    }
-                }
             }
             ServerEventKind::ToolOutput {
                 call_id,
@@ -1913,11 +2013,18 @@ impl Renderer {
                 last,
                 ..
             } => {
+                // Medium shows the call and its final status, but not the
+                // command's payload. Keeping the stream out of the transcript
+                // here is important: otherwise a later verbosity decision
+                // cannot hide rows that were already appended.
+                if !self.verbosity.at_least(Verbosity::High) {
+                    return;
+                }
                 // The closing chunk carries no bytes, so it is handled before
                 // the emptiness check: the block it ends has to be closed, and
                 // returning here would leave its bracket unprinted.
                 if *last {
-                    self.end_output_gutter();
+                    self.end_output_gutter_for(call_id);
                 }
                 if text.is_empty() {
                     return;
@@ -1980,7 +2087,7 @@ impl Renderer {
     pub(crate) fn output_pending(&self) -> Vec<(String, String)> {
         self.output_pending
             .iter()
-            .map(|(stream, text)| (stream.clone(), text.clone()))
+            .map(|((call_id, stream), text)| (format!("{call_id}:{stream}"), text.clone()))
             .collect()
     }
 

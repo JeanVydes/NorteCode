@@ -24,7 +24,7 @@ in front of the session line.
 
 | Option | Meaning |
 | --- | --- |
-| `--config PATH` | Use this user config file instead of the platform path. |
+| `--cli-config PATH` | Use this client config file instead of the platform path. |
 | `--verbose LEVEL` | `low` (answer alone), `medium` (default), `high` (reasoning, tool arguments and results). |
 | `--debug` | Print startup details, model metadata, paths and extensions. |
 
@@ -53,6 +53,7 @@ There is no prompt argument — a session is read, not handed a message.
 | `--reasoning SETTING` | `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. |
 | `--max-iterations N` | Cap model iterations for this session. |
 | `--extension KEY=JSON` | Vendor request field; repeatable. |
+| `--jsonl` | Read newline-delimited messages from stdin and emit service events plus client diagnostics as JSONL. |
 
 Without `--model`/`--provider`, the session opens on the config defaults —
 and if those are unset, startup asks once and writes the answer to the config.
@@ -94,6 +95,18 @@ norte-code models [--provider ID] [--tools] [--reasoning] [--json]
 
 Lists what the catalogue knows. `--tools`/`--reasoning` filter to models
 that call tools / reason.
+
+## `service`
+
+```text
+norte-code service start [-f|--follow]
+norte-code service stop|restart|status|catalog [--json]
+```
+
+`start`, `stop` and `restart` manage only a local service and are rejected
+when `cli.json` has `service_type: "remote"`. `status` and `catalog` query the
+configured RAEP service. The local process writes its PID and log under the
+platform state directory.
 
 ## `skills`
 
@@ -182,7 +195,7 @@ as soon as it starts with `/`; anything else is a message.
 | `/models` | Provider/model picker; typing filters, `Enter` expands, picking sets both. |
 | `/provider NAME` | Switch provider, keeping the model where it has one. |
 | `/sessions` | Session picker: new, last, or a saved one. |
-| `/refresh`, `/reload` | Re-read config, skills and MCP servers. |
+| `/refresh`, `/reload` | Re-read the client `cli.json`. Service configuration, providers, models, skills and MCP servers require `service restart`. |
 | `/restart` | Re-read config and rebuild the engine at the next turn boundary. |
 | `/mcp [list\|enable\|disable] [SERVER]` | List the MCP servers, or switch one. |
 | `/jobs [list\|check\|stop] [ID]` | Background jobs: list, inspect, or stop one. |

@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "default_agent": "norte-code",
+  "agents": [
+    {
+      "name": "norte-code",
+      "description": "Norte Code",
+      "origin_url": "https://github.com/JeanVydes/NorteCode/default/service.json",
+      "author": "Jean Vides",
+      "subagent": "norte-code-subagent",
+      "version": 1,
+      "default_provider": "openrouter",
+      "default_model": "stealth/crouton-alpha",
+      "compaction": {
+        "enabled": true,
+        "threshold": 0.9,
+        "trigger": "idle",
+        "keep_recent": 6
+      },
+      "retry": {
+        "max_attempts": 3,
+        "max_delay_ms": 60000,
+        "backoff_ms": 5000
+      },
+      "reasoning": {
+        "default": "auto"
+      },
+      "system_prompt": null,
+      "approvals": {
+        "allow": [],
+        "deny": []
+      },
+      "max_iterations": null,
+      "extensions": {},
+      "cost": {
+        "show": true
+      },
+      "budgets": {
+        "message": null,
+        "session": null,
+        "global_daily": null
+      },
+      "tools": {
+        "web_fetch": false,
+        "command_max_model_bytes": 131072,
+        "confinement": {
+          "workspace_only": true,
+          "sandbox": {
+            "enabled": false,
+            "network": false,
+            "writable": []
+          }
+        },
+        "screenshots": {
+          "enabled": true,
+          "max_dimension": 1568,
+          "max_bytes": 4000000
+        },
+        "auto_turn_on_job_end": false,
+        "disabled": []
+      },
+      "skills": {
+        "enabled": true,
+        "paths": [],
+        "interop": true,
+        "allow_scripts": false,
+        "honor_allowed_tools": false,
+        "max_skills": 128
+      },
+      "mcpServers": {}
+    },
+    {
+      "name": "norte-code-subagent",
+      "description": "Default delegated agent used by norte-code",
+      "origin_url": null,
+      "author": "Jean Vides",
+      "subagent": null,
+      "version": 1,
+      "default_provider": "openrouter",
+      "default_model": "cohere/north-mini-code:free",
+      "compaction": {
+        "enabled": true,
+        "threshold": 0.9,
+        "trigger": "idle",
+        "keep_recent": 6
+      },
+      "retry": {
+        "max_attempts": 3,
+        "max_delay_ms": 60000,
+        "backoff_ms": 5000
+      },
+      "reasoning": {
+        "default": "auto"
+      },
+      "system_prompt": null,
+      "approvals": {
+        "allow": [],
+        "deny": []
+      },
+      "max_iterations": 8,
+      "extensions": {},
+      "cost": {
+        "show": true
+      },
+      "budgets": {
+        "message": null,
+        "session": null,
+        "global_daily": null
+      },
+      "tools": {
+        "web_fetch": false,
+        "command_max_model_bytes": 131072,
+        "confinement": {
+          "workspace_only": true,
+          "sandbox": {
+            "enabled": false,
+            "network": false,
+            "writable": []
+          }
+        },
+        "screenshots": {
+          "enabled": true,
+          "max_dimension": 1568,
+          "max_bytes": 4000000
+        },
+        "auto_turn_on_job_end": false,
+        "disabled": []
+      },
+      "skills": {
+        "enabled": true,
+        "paths": [],
+        "interop": true,
+        "allow_scripts": false,
+        "honor_allowed_tools": false,
+        "max_skills": 128
+      },
+      "mcpServers": {}
+    }
+  ]
+}

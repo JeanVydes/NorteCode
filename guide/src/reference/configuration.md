@@ -5,30 +5,49 @@ repository's [`CONFIG.md`](https://github.com/JeanVydes/NorteCode/blob/dev/CONFI
 
 ## Files and precedence
 
-1. User file: `$XDG_CONFIG_HOME/norte-code/config.json`,
-   `~/.config/norte-code/config.json` or `%APPDATA%\norte-code\config.json`.
-2. Project overlay: `.norte-code/config.json` in the workspace or nearest parent.
+### Server configuration
+
+1. User file: `$XDG_CONFIG_HOME/norte-code/service.json`,
+   `~/.config/norte-code/service.json` or `%APPDATA%\norte-code\service.json`.
+2. Project overlay: `.norte-code/service.json` in the workspace or nearest parent.
 
 The overlay wins key by key (deep merge; arrays and scalars replace).
-`--config PATH` replaces the user path. `version` must be `1`. Unknown keys
+`version` must be `1`. Unknown keys
 are reported as warnings, not applied. Validation errors name the field.
 
-## Top level
+### CLI configuration
+
+The CLI reads only `cli.json`, from the corresponding platform config
+directory or `.norte-code/cli.json`. Use `--cli-config PATH` to select it.
+Its service settings are:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `service_url` | string | `http://127.0.0.1:8787` | RAEP service endpoint. |
+| `service_type` | `local` or `remote` | `local` | Whether lifecycle commands may manage a local process. |
+| `service_auth` | string or null | null | Raw bearer token, without the `Bearer` prefix. |
+| `agent_id` | string | `norte-code` | Agent identifier sent during RAEP attachment. |
+| `verbosity` | `low`, `medium` or `high` | `medium` | Output detail for the terminal client. |
+
+## Service envelope and agents
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `version` | integer | `1` | Schema revision. |
-| `default_provider` | string or null | null | Provider for new sessions. |
-| `default_model` | string or null | null | Model id for new sessions; may contain slashes. |
+| `default_agent` | string | `norte-code` | Agent selected for new attachments. |
+| `agents` | array | one agent | Named agent definitions. |
+
+Each agent has a unique required `name`; `description`, `origin_url` and
+`author` are optional metadata. The RAEP server exposes all named agents, and
+`cli.json.agent_id` selects the agent used by the CLI.
 | `compaction` | object | see below | Automatic compaction. |
 | `retry` | object | see below | Transient retry policy. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
 | `system_prompt` | string or null | null | Base prompt replacement; `AGENTS.md` is appended after it. |
-| `approval_mode` | `ask`, `auto-edit`, `yolo` | `ask` | When tools ask. |
 | `approvals` | object | empty lists | Global allow/deny rules. |
 | `max_iterations` | integer or null | null | Model iterations per turn. |
 | `extensions` | object | `{}` | Vendor request fields. |
-| `ui` | object | see below | What the client shows. |
+| `ui` | object | see below | Legacy server-side UI defaults retained for compatibility. |
 | `cost` | object | `{"show":true}` | Cost display. |
 | `budgets` | object | all null | Message, session, daily limits. |
 | `tools` | object | see below | Web fetch, output cap and sandbox. |
@@ -39,7 +58,7 @@ message truncated to 32 characters, written once.
 
 Keys resolve from the provider's `environment_keys` (first set and
 non-blank wins), then `secrets.json` beside the config (mode 0600). There
-is no plaintext key field in `config.json`.
+is no plaintext key field in `service.json`.
 
 ## `compaction`
 
@@ -49,9 +68,7 @@ is no plaintext key field in `config.json`.
 | `threshold` | `0.90` | Context fraction in `(0, 1]`. |
 | `trigger` | `idle` | `idle` or `eager`. |
 | `keep_recent` | `6` | Recent messages kept verbatim. |
-| `provider` | null | Summary model provider; set with `model` or not at all. |
-| `model` | null | Summary model id; null uses the session model. |
-| `reasoning` | `lowest` | Summary reasoning effort. |
+Compaction uses the session's provider, model and effective reasoning.
 
 ## `retry`
 
@@ -68,13 +85,12 @@ Only rate limits, overload, server errors and transport errors are retried.
 `default` is `auto`, `off`, an effort name (`minimal`, `low`, `medium`,
 `high`) or `{"budget": N}`. It is checked against the selected model.
 
-## `approval_mode` and `approvals`
+## `approvals`
 
-`ask` asks for `write`, `edit`, `shell` and `skill_script`. `auto-edit`
-lets edits run and still asks for commands and scripts. `yolo` runs
-everything. `approvals.allow` / `approvals.deny` are tool-wide; denial
-wins. `/allow` and `/deny` edit the same rules; `global` writes the user
-config.
+Tool access is deterministic: an explicit deny rejects a tool, an explicit
+allow permits it, and an unconfigured tool follows the host default. The
+`approvals.allow` and `approvals.deny` lists are global; `/allow` and `/deny`
+edit session rules, or global rules when followed by `global`.
 
 ## `ui`
 
@@ -89,36 +105,28 @@ What the client shows, as opposed to what the engine does.
 diff in two shapes: `unified` (patch, fits narrow terminals) and `split`
 (before/after side by side, shows changes inside a line).
 
-## `tools.subagent`
+## `subagent`
 
-Settings for the `subagent` tool. A subagent is a new session that runs one
-turn and answers; the model delegates a task to it and reads back what it
-said. The child starts blank, so the prompt carries everything it needs, and
-a child never has `subagent` — nesting stops at one.
+`subagent` belongs to each entry in `service.json`'s `agents` array. It is
+either `null` or the name of another configured agent. `null` keeps the
+parent session's provider and model; a name selects that agent's defaults.
+The name may refer to the same agent.
 
-| Key | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `enabled` | bool | `false` | Register the `subagent` tool. Spawning agents spends tokens on its own, so it is off until it is turned on. |
-| `provider` | string or null | `null` | Provider for child sessions; null inherits the parent's provider. |
-| `model` | string or null | `null` | Model for child sessions; null inherits the parent's model. |
-| `system_prompt` | string or null | built-in | Base system prompt for child sessions. Skills and project instructions are appended as usual. |
-| `allow` | array or null | `null` | Tools exposed to child sessions; null inherits the parent's tool set. |
-| `deny` | array or null | `null` | Additional tools withheld from child sessions; null inherits the parent's restrictions. `ask_user`, `browser_use` and `subagent` are always denied. |
-| `max_concurrent` | int | `3` | How many subagents may run at once. Past the cap a spawn is refused, not queued. |
-| `max_iterations` | int or null | `null` | How many model iterations one child turn may run. `null` inherits the session's limit. |
-
-With `detach: true` the call becomes a job (`job-N`), like a detached shell:
+The `subagent` tool is available unless it is listed in the agent's
+`tools.disabled` list. A child starts blank and never receives the
+`subagent` tool, so nesting stops at one. With `detach: true` the call becomes a job (`job-N`), like a detached shell:
 `manage_jobs` reads and stops it, and its result arrives as a message when it
 ends.
 
-The `subagent` tool accepts only `prompt`, `title` and `detach`. The child
-starts without the parent's conversation history. It uses the configured
-provider/model when present, otherwise the exact provider/model of the parent.
+The tool accepts only `prompt`, `title` and `detach`. The child starts without
+the parent's conversation history. It uses the selected agent's model when
+configured, otherwise the exact provider/model of the parent.
 Child turns use the parent's budget ledger, so request and token limits are
 shared. Reported provider costs are charged to that same ledger; requests
 without a reported cost remain measurable by requests/tokens but cannot be
 used to validate a USD budget.
-Its tool allow/deny policy is frozen when the child session is created.
+The selected agent's `tools.disabled` policy is applied when the child session
+is created.
 `ask_user`, `browser_use` and `subagent` are never available to a child.
 
 ## `tools.auto_turn_on_job_end`

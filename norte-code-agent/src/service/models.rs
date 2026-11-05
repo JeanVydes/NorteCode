@@ -366,7 +366,11 @@ impl Service {
     /// The catalogue already in memory is left alone in that case: a file being
     /// edited is not a reason to lose the models the session can already use.
     pub(super) fn reload_catalog(&self, request_id: u64) -> Result<EventStream, ServiceError> {
-        let catalog = load_catalog_files()?;
+        let mut catalog = load_catalog_files()?;
+        let (providers, models) = self.lock_plugin_catalogue().clone();
+        for skipped in catalog.extend(providers.providers, models.models) {
+            tracing::warn!("skipping plugin catalogue entry during reload: {skipped}");
+        }
         let models = catalog.model_count();
         *self.lock_catalog_write() = Arc::new(catalog);
         Ok(single(

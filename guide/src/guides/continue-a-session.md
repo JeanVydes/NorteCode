@@ -57,7 +57,7 @@ The prompt keeps the same session open after each turn. The chat commands:
 | `/plugins enable <name>` / `/plugins disable <name>` | Load or skip a plugin at next start. |
 | `/debug` | What the process knows: model, tools, paths. |
 | `/telemetry` | Request ledger for this session and every provider. |
-| `/refresh`, `/reload` | Re-read config, skills and MCP servers. |
+| `/refresh`, `/reload` | Re-read the client `cli.json`; service-side changes require `service restart`. |
 | `/restart` | Re-read config and rebuild the engine; the session stays saved. |
 | `/menu`, `/back` | Every provider and its models, the session's own marked. |
 | `/delete` | Delete this session, with its cost and telemetry, and leave. |

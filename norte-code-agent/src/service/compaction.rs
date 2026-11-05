@@ -9,12 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::runtime::EngineEvent;
 use async_trait::async_trait;
 use norte::{
-    Continuation, Layer, LayerContext, Message, MessageStatus, ModelRequest, ModelStream,
-    Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, Role, ShortCircuitReason,
+    Continuation, Layer, LayerContext, Message, MessageStatus, ModelRequest, ModelStream, Role,
+    ShortCircuitReason,
 };
 use norte_code_protocol::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
 
 use super::mapping::{emit, reported_cost};
+use super::models::resolve_reasoning;
 use super::{CostRecord, ModelSpec, Service, ServiceError};
 
 impl Service {
@@ -189,7 +190,7 @@ impl Service {
                 "there is no conversation to compact yet".to_owned(),
             ));
         }
-        let summary_spec = self.summary_spec(&spec)?;
+        let summary_spec = Self::summary_spec(&spec);
         let book = self.budget_book(key).await?;
         let summary_engine =
             self.engine_with_budget(&summary_spec, Some(key), Some(book), None, None)?;
@@ -199,10 +200,11 @@ impl Service {
         summary_engine
             .append_history(scratch.id, request_messages)
             .await?;
-        let reasoning = compaction_reasoning(
+        let reasoning = resolve_reasoning(
+            self.session_reasoning(key).as_ref(),
+            &self.config().reasoning.default,
             &summary_spec.capabilities.reasoning,
-            self.config().compaction.reasoning,
-        );
+        )?;
         let turn = summary_engine
             .turn(scratch.id)
             .reasoning(reasoning)
@@ -275,17 +277,8 @@ impl Service {
         })
     }
 
-    fn summary_spec(&self, session: &ModelSpec) -> Result<ModelSpec, ServiceError> {
-        let config = self.config();
-        match (&config.compaction.provider, &config.compaction.model) {
-            // The same resolution a switch uses: a summariser can be a provider
-            // the catalogue does not list, and a compaction that failed on one
-            // would stop the session it was meant to make room for.
-            (Some(provider), Some(model)) => {
-                self.default_spec_for(&self.lock_config(), &self.catalog(), provider, model)
-            }
-            _ => Ok(session.clone()),
-        }
+    fn summary_spec(session: &ModelSpec) -> ModelSpec {
+        session.clone()
     }
 
     /// The cost the summary of a compaction reported.
@@ -392,33 +385,6 @@ pub(super) fn recent_start(messages: &[Message], keep: usize) -> usize {
         start -= 1;
     }
     start
-}
-
-/// The lowest reasoning the model allows, or `Automatic` when it has none.
-pub(super) fn compaction_reasoning(
-    reasoning: &ReasoningCapability,
-    setting: norte_code_protocol::config::CompactionReasoning,
-) -> ReasoningRequest {
-    use norte_code_protocol::config::CompactionReasoning as S;
-    if !reasoning.supported {
-        return ReasoningRequest::Automatic;
-    }
-    match setting {
-        S::Off | S::Lowest if reasoning.can_disable => ReasoningRequest::Disabled,
-        S::Off => ReasoningRequest::Automatic,
-        S::Lowest => reasoning
-            .efforts
-            .iter()
-            .next()
-            .copied()
-            .map_or(ReasoningRequest::Automatic, ReasoningRequest::Effort),
-        S::Minimal => ReasoningRequest::Effort(ReasoningEffort::Minimal),
-        S::Low => ReasoningRequest::Effort(ReasoningEffort::Low),
-        S::Medium => ReasoningRequest::Effort(ReasoningEffort::Medium),
-        S::High => ReasoningRequest::Effort(ReasoningEffort::High),
-        S::XHigh => ReasoningRequest::Effort(ReasoningEffort::XHigh),
-        S::Max => ReasoningRequest::Effort(ReasoningEffort::Max),
-    }
 }
 
 /// Whether the next request is over the compaction threshold.
