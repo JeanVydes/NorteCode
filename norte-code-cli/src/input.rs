@@ -245,6 +245,8 @@ pub(crate) struct CompletionNames {
     /// provider comes from the session, which is why the field is filled from
     /// the provider in play rather than from the whole catalogue.
     pub(crate) models: Vec<String>,
+    /// Tool names accepted by tool approval commands.
+    pub(crate) tools: Vec<String>,
 }
 
 /// The pinned text above the input line.

@@ -796,12 +796,14 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         // The render is where the width is known and where an emphasis becomes a
         // run the widget draws: the data holds what arrived, and how it is drawn
         // is the view's.
-        if entry.kind == Kind::Answer {
-            let body: Vec<String> = entry
-                .lines
-                .iter()
-                .map(crate::transcript::Line::text)
-                .collect();
+        let body: Vec<String> = entry
+            .lines
+            .iter()
+            .map(crate::transcript::Line::text)
+            .collect();
+        let render_markdown = entry.kind == Kind::Answer
+            || (entry.kind == Kind::ToolOutput && body.iter().any(|line| line.contains('`')));
+        if render_markdown {
             for rendered in crate::markdown::render(&body.join("\n"), usize::from(width)) {
                 push_rendered(&mut out, entry.kind, &rendered, width);
             }

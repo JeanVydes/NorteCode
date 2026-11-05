@@ -1,0 +1,18 @@
+[package]
+name = "norte-code-client"
+description = "Transport-neutral client contract for Norte Code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+norte-code-protocol = { path = "../norte-code-protocol" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+norte-code-client = { path = "../norte-code-client" }
 norte-code-protocol = { path = "../norte-code-protocol" }
 
 async-trait = { workspace = true }

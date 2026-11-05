@@ -1,0 +1,29 @@
+[package]
+name = "norte-code-raep"
+description = "RAEP server adapter for the Norte Code agent host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "norte-code-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+futures-util = { workspace = true }
+norte-code-agent = { path = "../norte-code-agent" }
+norte-code-protocol = { path = "../norte-code-protocol" }
+norte = { workspace = true }
+raep-types = { path = "../../raep/raep-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+[lints]
+workspace = true

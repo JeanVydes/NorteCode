@@ -6,6 +6,7 @@ use super::{
     ClientRequest, ClientRequestKind, Renderer, ServerEvent, ServerEventKind, Service, SessionKey,
     StreamExt, mpsc,
 };
+use norte_code_client::AgentClient;
 
 /// How often the question on screen is repainted while it waits for an answer.
 ///
@@ -26,6 +27,7 @@ const PLAN_REVIEW_PREFIX: &str = "NORTE_CODE_PLAN_REVIEW\n";
 /// marked, and composes them the way a single answer composes one.
 pub(crate) async fn answer_if_asked(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     pinned: &Arc<crate::input::Pinned>,
     event: &ServerEvent,
     input: Option<&mut crate::input::InteractiveInput>,
@@ -53,6 +55,7 @@ pub(crate) async fn answer_if_asked(
             eprintln!("(no interactive client; the saved plan remains pending)");
             return submit_answer(
                 service,
+                client,
                 session,
                 question,
                 "Plan review left pending".to_owned(),
@@ -63,7 +66,7 @@ pub(crate) async fn answer_if_asked(
         eprintln!("(no interactive client; answering with a note)");
         let answer =
             "(no interactive client is attached; continue with your best judgment)".to_owned();
-        return submit_answer(service, session, question, answer).await;
+        return submit_answer(service, client, session, question, answer).await;
     };
     // Plans are already saved as Markdown before this event is emitted. Show
     // that exact file content in the scrollable report modal, while the
@@ -141,12 +144,13 @@ pub(crate) async fn answer_if_asked(
             "(the question was left unanswered; continue with your best judgment)".to_owned()
         }
     };
-    submit_answer(service, session, question, answer).await
+    submit_answer(service, client, session, question, answer).await
 }
 
 /// Sends one answer and drains its acknowledgement.
 pub(crate) async fn submit_answer(
-    service: &Arc<Service>,
+    _service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     question: String,
     answer: String,
@@ -159,7 +163,7 @@ pub(crate) async fn submit_answer(
             answer,
         },
     };
-    let mut acknowledgement = service.submit(response).await.map_err(|e| e.to_string())?;
+    let mut acknowledgement = client.submit(response).await.map_err(|e| e.to_string())?;
     while acknowledgement.next().await.is_some() {}
     Ok(false)
 }

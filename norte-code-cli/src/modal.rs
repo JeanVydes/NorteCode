@@ -834,12 +834,18 @@ fn row_line(row: &Row, under_cursor: bool, _style: Style) -> Line<'static> {
             let _ = write!(text, "  {note}");
         }
     }
-    let ink = if row.heading {
-        Style::bold_span()
-    } else if under_cursor {
+    let ink = if under_cursor {
         Style::selected()
+    } else if row.heading {
+        Style::bold_span().fg(ratatui::style::Color::Rgb(PRIMARY.0, PRIMARY.1, PRIMARY.2))
     } else if row.dim {
         ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::DIM)
+    } else if row.action.is_some() {
+        ratatui::style::Style::new().fg(ratatui::style::Color::Rgb(
+            ALTERNATE.0,
+            ALTERNATE.1,
+            ALTERNATE.2,
+        ))
     } else {
         ratatui::style::Style::new()
     };
