@@ -440,3 +440,84 @@ fn unauthorized(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Option<Respons
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HostConfig;
+    use axum::body::Body;
+    use axum::http::Request;
+    use norte_code_agent::Service;
+    use norte_code_protocol::InMemoryStore;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_host(token: Option<&str>) -> Arc<NorteCodeRaepHost> {
+        let service = Arc::new(
+            Service::new(
+                norte_code_protocol::config::Config::default(),
+                Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                None,
+                Arc::new(norte_code_agent::VendorModels),
+                Arc::new(InMemoryStore::new()),
+                Arc::new(norte::InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        Arc::new(
+            NorteCodeRaepHost::new(
+                service,
+                HostConfig {
+                    auth_token: token.map(str::to_owned),
+                    ..HostConfig::default()
+                },
+            )
+            .expect("host"),
+        )
+    }
+
+    #[tokio::test]
+    async fn health_and_info_are_public_when_authentication_is_enabled() {
+        let app = router(test_host(Some("secret")));
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/health/live")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(health.status(), StatusCode::NO_CONTENT);
+
+        let info = app
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/info")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(info.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_artifact_routes_require_the_configured_token() {
+        let app = router(test_host(Some("secret")));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/artifacts")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("hello"))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
