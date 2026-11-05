@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { workspace = true }
+async-trait = { workspace = true }
 futures-util = { workspace = true }
 norte-code-agent = { path = "../norte-code-agent" }
 norte-code-protocol = { path = "../norte-code-protocol" }

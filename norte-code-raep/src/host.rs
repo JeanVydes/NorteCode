@@ -1,8 +1,10 @@
 //! Runtime-independent RAEP host adapter.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use norte_code_agent::Service;
 use norte_code_protocol::{
     ClientRequest, ClientRequestKind, ServerEvent, ServerEventKind, SessionKey,
@@ -56,6 +58,94 @@ pub enum HostError {
     /// A frame could not be serialized.
     #[error("serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// The durable replay journal could not be read or written.
+    #[error("replay journal failed: {0}")]
+    ReplayJournal(String),
+}
+
+/// Durable storage for RAEP frames.
+#[async_trait]
+pub trait ReplayStore: Send + Sync {
+    /// Appends one emitted frame.
+    async fn append(&self, frame: &Envelope<Value>) -> Result<(), HostError>;
+
+    /// Loads frames for one session, including frames retained before restart.
+    async fn load(&self, session_id: &str) -> Result<Vec<Envelope<Value>>, HostError>;
+}
+
+/// A newline-delimited JSON replay journal.
+pub struct FileReplayStore {
+    path: PathBuf,
+    lock: tokio::sync::Mutex<()>,
+}
+
+impl FileReplayStore {
+    /// Opens a journal at `path`, creating its parent directory when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent directory cannot be created.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, HostError> {
+        let path = path.into();
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        }
+        Ok(Self {
+            path,
+            lock: tokio::sync::Mutex::new(()),
+        })
+    }
+}
+
+#[async_trait]
+impl ReplayStore for FileReplayStore {
+    async fn append(&self, frame: &Envelope<Value>) -> Result<(), HostError> {
+        let _guard = self.lock.lock().await;
+        let line = serde_json::to_string(frame)?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            writeln!(file, "{line}").map_err(|error| HostError::ReplayJournal(error.to_string()))
+        })
+        .await
+        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
+    }
+
+    async fn load(&self, session_id: &str) -> Result<Vec<Envelope<Value>>, HostError> {
+        let _guard = self.lock.lock().await;
+        let path = self.path.clone();
+        let session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            if !Path::new(&path).exists() {
+                return Ok(Vec::new());
+            }
+            let content = std::fs::read_to_string(path)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    serde_json::from_str::<Envelope<Value>>(line)
+                        .map_err(|error| HostError::ReplayJournal(error.to_string()))
+                })
+                .filter_map(|result| match result {
+                    Ok(frame) if frame.session_id == session_id => Some(Ok(frame)),
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect()
+        })
+        .await
+        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
+    }
 }
 
 #[derive(Default)]
@@ -64,6 +154,7 @@ struct HostState {
     sequences: HashMap<String, u64>,
     replay: HashMap<String, VecDeque<Envelope<Value>>>,
     idempotency: HashMap<FrameId, Vec<Envelope<Value>>>,
+    loaded_replay: HashSet<String>,
 }
 
 /// A Norte Code service exposed through the RAEP wire.
@@ -72,6 +163,7 @@ pub struct NorteCodeRaepHost {
     config: HostConfig,
     state: Mutex<HostState>,
     events: broadcast::Sender<Envelope<Value>>,
+    replay_store: Option<Arc<dyn ReplayStore>>,
 }
 
 impl NorteCodeRaepHost {
@@ -98,7 +190,23 @@ impl NorteCodeRaepHost {
             config,
             state: Mutex::new(HostState::default()),
             events,
+            replay_store: None,
         })
+    }
+
+    /// Creates a host with a durable RAEP replay journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the host configuration or journal path is invalid.
+    pub fn with_replay_store(
+        service: Arc<Service>,
+        config: HostConfig,
+        replay_store: Arc<dyn ReplayStore>,
+    ) -> Result<Self, HostError> {
+        let mut host = Self::new(service, config)?;
+        host.replay_store = Some(replay_store);
+        Ok(host)
     }
 
     /// Returns the server-owned agent service.
@@ -269,6 +377,7 @@ impl NorteCodeRaepHost {
         if !exists && attach.create_if_missing == Some(false) {
             return Err(HostError::InvalidFrame("session not found".to_owned()));
         }
+        self.load_persisted_replay(&session_id).await?;
         {
             let mut state = self.state.lock().await;
             state.attached.insert(session_id.clone());
@@ -313,6 +422,43 @@ impl NorteCodeRaepHost {
             output.extend(replay);
         }
         Ok(output)
+    }
+
+    async fn load_persisted_replay(&self, session_id: &str) -> Result<(), HostError> {
+        let Some(store) = &self.replay_store else {
+            return Ok(());
+        };
+        if self.state.lock().await.loaded_replay.contains(session_id) {
+            return Ok(());
+        }
+        let persisted = store.load(session_id).await?;
+        let mut state = self.state.lock().await;
+        let mut max_seq = 0;
+        let replayed = persisted
+            .into_iter()
+            .filter(|frame| {
+                if let Some(seq) = frame.seq {
+                    max_seq = max_seq.max(seq);
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        if max_seq > 0 {
+            state
+                .sequences
+                .entry(session_id.to_owned())
+                .and_modify(|current| *current = (*current).max(max_seq))
+                .or_insert(max_seq);
+        }
+        let replay = state.replay.entry(session_id.to_owned()).or_default();
+        replay.extend(replayed);
+        while replay.len() > self.config.replay_capacity {
+            replay.pop_front();
+        }
+        state.loaded_replay.insert(session_id.to_owned());
+        Ok(())
     }
 
     async fn user_input(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
@@ -497,6 +643,9 @@ impl NorteCodeRaepHost {
         while replay.len() > self.config.replay_capacity {
             replay.pop_front();
         }
+        if let Some(store) = &self.replay_store {
+            store.append(&frame).await?;
+        }
         drop(state);
         let _ = self.events.send(frame.clone());
         Ok(frame)
@@ -600,4 +749,31 @@ fn now_millis() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn file_replay_store_round_trips_frames_by_session() {
+        let path = std::env::temp_dir().join(format!(
+            "norte-code-raep-replay-{}.jsonl",
+            FrameId::generate()
+        ));
+        let store = FileReplayStore::open(&path).expect("replay store");
+        let mut frame = Envelope::new(
+            standard(StandardFrameType::TokenDelta),
+            json!({"delta": "hello"}),
+            1,
+        );
+        frame.session_id = "session-a".to_owned();
+        frame.seq = Some(7);
+        store.append(&frame).await.expect("append");
+
+        let frames = store.load("session-a").await.expect("load");
+        assert_eq!(frames, vec![frame]);
+        assert_eq!(store.load("session-b").await.expect("load"), Vec::new());
+        std::fs::remove_file(path).expect("remove replay journal");
+    }
 }
