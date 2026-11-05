@@ -696,59 +696,67 @@ pub(crate) async fn interactive_loop(
         renderer.set_title(title);
     }
     loop {
-        let (text, attachments) =
-            match read_repl_line(service, session.as_ref(), input, renderer, style).await? {
-                ReplInput::End => break,
-                ReplInput::Session(key) => {
-                    // A panel chose a session: start its view afresh, then
-                    // replay its history so the screen shows the conversation
-                    // that was opened, not the one that was left.
-                    renderer.begin_session();
-                    renderer.session = Some(key.to_string());
-                    refresh_session_model(service, &key, renderer);
-                    if let Some(title) = service.session_title(&key) {
-                        renderer.set_title(title);
-                    }
-                    session = Some(key.clone());
-                    crate::plugins::attach(service, Some(key.clone()));
-                    refresh_effort(service, &key, renderer);
-                    refresh_completions(service, Some(&key), renderer);
-                    match client
-                        .submit(ClientRequest {
-                            request_id,
-                            kind: ClientRequestKind::Resume {
-                                session: key.clone(),
-                            },
-                        })
-                        .await
-                    {
-                        Ok(stream) => {
-                            request_id = request_id.saturating_add(1);
-                            renderer.mark_working();
-                            let outcome = drive_turns(
-                                service,
-                                client,
-                                stream,
-                                renderer,
-                                style,
-                                Some(key),
-                                Some(&mut *input),
-                            )
-                            .await?;
-                            renderer.ensure_newline();
-                            session = outcome.session.or(session);
-                            crate::plugins::attach(service, session.clone());
-                            refresh_completions(service, session.as_ref(), renderer);
-                        }
-                        Err(error) => {
-                            renderer.notice(format!("could not open the session: {error}"));
-                        }
-                    }
-                    renderer.draw()?;
-                    continue;
+        let (text, attachments) = match read_repl_line(
+            service,
+            client,
+            session.as_ref(),
+            input,
+            renderer,
+            style,
+        )
+        .await?
+        {
+            ReplInput::End => break,
+            ReplInput::Session(key) => {
+                // A panel chose a session: start its view afresh, then
+                // replay its history so the screen shows the conversation
+                // that was opened, not the one that was left.
+                renderer.begin_session();
+                renderer.session = Some(key.to_string());
+                refresh_session_model(service, &key, renderer);
+                if let Some(title) = service.session_title(&key) {
+                    renderer.set_title(title);
                 }
-                ReplInput::Line(text, attachments) => (text, attachments),
-            };
+                session = Some(key.clone());
+                crate::plugins::attach(service, Some(key.clone()));
+                refresh_effort(service, &key, renderer);
+                refresh_completions(service, Some(&key), renderer);
+                match client
+                    .submit(ClientRequest {
+                        request_id,
+                        kind: ClientRequestKind::Resume {
+                            session: key.clone(),
+                        },
+                    })
+                    .await
+                {
+                    Ok(stream) => {
+                        request_id = request_id.saturating_add(1);
+                        renderer.mark_working();
+                        let outcome = drive_turns(
+                            service,
+                            client,
+                            stream,
+                            renderer,
+                            style,
+                            Some(key),
+                            Some(&mut *input),
+                        )
+                        .await?;
+                        renderer.ensure_newline();
+                        session = outcome.session.or(session);
+                        crate::plugins::attach(service, session.clone());
+                        refresh_completions(service, session.as_ref(), renderer);
+                    }
+                    Err(error) => {
+                        renderer.notice(format!("could not open the session: {error}"));
+                    }
+                }
+                renderer.draw()?;
+                continue;
+            }
+            ReplInput::Line(text, attachments) => (text, attachments),
+        };
         let command = match parse_chat_command(&text) {
             None => None,
             Some(Ok(command)) => Some(command),
@@ -1604,6 +1612,7 @@ fn plan_file_metadata(contents: &str, key: &str) -> Option<String> {
 #[allow(clippy::too_many_lines)]
 async fn handle_live_command(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     command: ChatCommand,
     current: Option<&SessionKey>,
     renderer: &mut Renderer,
@@ -1771,7 +1780,7 @@ async fn handle_live_command(
             Some(session) => {
                 report_jobs(
                     service,
-                    service.as_ref(),
+                    client,
                     session.clone(),
                     action,
                     id,
@@ -3117,6 +3126,7 @@ pub(crate) enum ReplInput {
 
 pub(crate) async fn read_repl_line(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: Option<&SessionKey>,
     input: &mut InteractiveInput,
     renderer: &mut Renderer,
@@ -3231,7 +3241,7 @@ pub(crate) async fn read_repl_line(
                     // prompt, which is to leave.
                     return Ok(ReplInput::End);
                 };
-                stop_jobs(service, service.as_ref(), session.clone(), renderer).await;
+                stop_jobs(service, client, session.clone(), renderer).await;
                 continue;
             }
             // Nothing is running at the prompt, so nothing to cancel or detach.
@@ -3620,6 +3630,7 @@ pub(crate) async fn drive_turns(
                             Some(Ok(command)) => {
                                 handle_live_command(
                                     service,
+                                    client,
                                     command,
                                     current.as_ref(),
                                     renderer,
@@ -4625,7 +4636,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
-        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
+        use norte_code_agent::{InProcessClient, ModelFactory, ModelSpec, Service, ServiceError};
         use norte_code_protocol::catalog::Catalog;
         use norte_code_protocol::config::{ApiKey, Config};
         use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
@@ -4724,6 +4735,7 @@ mod tests {
         // takes, which is the thing that was wired wrong.
         let (tx, rx) = mpsc::unbounded_channel();
         let mut input = InteractiveInput::from_events(rx);
+        let client = InProcessClient::new(Arc::clone(&service));
         for line in ["/provider second", "/model other", "/exit"] {
             tx.send(EditorEvent::Line(line.to_owned(), Vec::new()))
                 .expect("line");
@@ -4732,7 +4744,7 @@ mod tests {
 
         interactive_loop(
             &service,
-            service.as_ref(),
+            &client,
             Some(session.clone()),
             &mut renderer,
             Style::plain(),
@@ -4914,7 +4926,7 @@ mod tests {
         use norte::{
             Capabilities, Model, ModelId, ModelRef, ModelRequest, ModelStream, ProviderId,
         };
-        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
+        use norte_code_agent::{InProcessClient, ModelFactory, ModelSpec, Service, ServiceError};
         use norte_code_protocol::ClientRequest;
         use norte_code_protocol::catalog::Catalog;
         use norte_code_protocol::config::Config;
@@ -5055,11 +5067,12 @@ mod tests {
         let _ =
             tokio::time::timeout(std::time::Duration::from_millis(500), started.notified()).await;
 
+        let client = InProcessClient::new(Arc::clone(&service));
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             super::drive_turns(
                 &service,
-                service.as_ref(),
+                &client,
                 stream,
                 &mut renderer,
                 Style::plain(),

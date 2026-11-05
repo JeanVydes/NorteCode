@@ -42,12 +42,3 @@ impl AgentClient for InProcessClient {
             .map_err(|error| ClientError::new(error.to_string()))
     }
 }
-
-#[async_trait]
-impl AgentClient for Service {
-    async fn submit(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
-        self.submit(request)
-            .await
-            .map_err(|error| ClientError::new(error.to_string()))
-    }
-}

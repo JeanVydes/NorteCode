@@ -1,5 +1,6 @@
 //! Protocol mapping, usage metrics and the budget layer.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -97,56 +98,37 @@ pub(super) fn token_rate(
     Some(output as f64 * 1_000.0 / window as f64)
 }
 
-/// The text of a failed tool result, read from the committed history.
-pub(super) async fn tool_error(
-    engine: &Harness,
-    session: SessionId,
-    call_id: &norte::CallId,
-) -> Option<String> {
-    let history = engine.history(session).await.ok()?;
-    for message in history.iter().rev() {
-        for part in &message.parts {
-            if let norte::Part::ToolResult(result) = part
-                && result.call_id == *call_id
-                && result.is_error
-            {
-                let text = result
-                    .parts
-                    .iter()
-                    .filter_map(norte::Part::as_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Some(text);
-            }
-        }
-    }
-    None
+pub(super) struct ToolResultText {
+    pub(super) is_error: bool,
+    pub(super) text: String,
 }
 
-/// The text a tool returned, whether it succeeded or failed.
-pub(super) async fn tool_result_text(
+/// Indexes committed tool results once, for fallback when the live activity
+/// journal does not contain a result.
+pub(super) async fn tool_result_index(
     engine: &Harness,
     session: SessionId,
-    call_id: &norte::CallId,
-) -> Option<String> {
+) -> Option<HashMap<String, ToolResultText>> {
     let history = engine.history(session).await.ok()?;
+    let mut results = HashMap::new();
     for message in history.iter().rev() {
         for part in &message.parts {
-            if let norte::Part::ToolResult(result) = part
-                && result.call_id == *call_id
-            {
-                return Some(
-                    result
-                        .parts
-                        .iter()
-                        .filter_map(norte::Part::as_text)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
+            if let norte::Part::ToolResult(result) = part {
+                results
+                    .entry(result.call_id.to_string())
+                    .or_insert_with(|| ToolResultText {
+                        is_error: result.is_error,
+                        text: result
+                            .parts
+                            .iter()
+                            .filter_map(norte::Part::as_text)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    });
             }
         }
     }
-    None
+    Some(results)
 }
 
 /// The most tool output the wire carries for a verbose renderer.

@@ -149,6 +149,11 @@ pub struct ReloadedConfig {
     pub warnings: Vec<String>,
 }
 
+pub(super) struct CancelRegistration {
+    pub(super) generation: u64,
+    pub(super) token: CancellationToken,
+}
+
 /// The Norte Code service.
 pub struct Service {
     config: RwLock<Config>,
@@ -171,7 +176,8 @@ pub struct Service {
     activity: Arc<ToolActivity>,
     plans: Arc<PlanRepository>,
     sessions: Mutex<BTreeMap<SessionKey, SessionRecord>>,
-    cancels: Mutex<BTreeMap<SessionKey, CancellationToken>>,
+    cancels: Mutex<BTreeMap<SessionKey, CancelRegistration>>,
+    next_cancel_generation: AtomicU64,
     /// The steering messages the running turns have not reached.
     steering: Arc<Steering>,
     /// The browser screenshots waiting to be attached to the next request.
@@ -465,6 +471,7 @@ impl Service {
             plans,
             sessions: Mutex::new(BTreeMap::new()),
             cancels: Mutex::new(BTreeMap::new()),
+            next_cancel_generation: AtomicU64::new(1),
             steering: Arc::new(Steering::default()),
             screenshots: Arc::new(Screenshots::default()),
             jobs: Arc::new(JobRegistry::default()),
@@ -1852,8 +1859,8 @@ impl Service {
                 .await
             }
             Kind::CancelTurn { session } => {
-                if let Some(token) = self.lock_cancels().get(&session).cloned() {
-                    token.cancel();
+                if let Some(registration) = self.lock_cancels().get(&session) {
+                    registration.token.cancel();
                 }
                 Ok(Box::pin(futures_util::stream::empty()))
             }
@@ -2015,16 +2022,33 @@ impl Service {
         Ok(Box::pin(futures_util::stream::empty()))
     }
 
-    pub(super) fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, CancellationToken>> {
+    pub(super) fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, CancelRegistration>> {
         self.cancels.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn register_cancel(&self, key: SessionKey, token: CancellationToken) -> u64 {
+        let generation = self.next_cancel_generation.fetch_add(1, Ordering::Relaxed);
+        self.lock_cancels()
+            .insert(key, CancelRegistration { generation, token });
+        generation
+    }
+
+    pub(super) fn remove_cancel(&self, key: &SessionKey, generation: u64) {
+        let mut cancels = self.lock_cancels();
+        if cancels
+            .get(key)
+            .is_some_and(|registration| registration.generation == generation)
+        {
+            cancels.remove(key);
+        }
     }
 
     /// Cancels the turn for `session`, if one is running. Returns whether a
     /// token was found and signalled.
     pub fn cancel_turn(&self, session: &SessionKey) -> bool {
         let cancels = self.lock_cancels();
-        if let Some(token) = cancels.get(session).cloned() {
-            token.cancel();
+        if let Some(registration) = cancels.get(session) {
+            registration.token.cancel();
             true
         } else {
             false

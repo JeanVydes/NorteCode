@@ -164,7 +164,11 @@ impl Service {
     /// guessing at it.
     #[allow(clippy::too_many_lines)]
     pub(super) async fn compact_core(&self, key: &SessionKey) -> Result<Compaction, ServiceError> {
-        let cancellation = self.lock_cancels().get(key).cloned().unwrap_or_default();
+        let cancellation = self
+            .lock_cancels()
+            .get(key)
+            .map(|registration| registration.token.clone())
+            .unwrap_or_default();
         let (old, spec, _) = self.require_record(key)?;
         let spec = spec.ok_or(ServiceError::Unsupported("no model is configured"))?;
         let engine = self.engine(&spec, Some(key))?;
