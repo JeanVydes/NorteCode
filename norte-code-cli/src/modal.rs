@@ -141,8 +141,8 @@ pub(crate) enum Action {
     OpenSession(SessionKey),
     /// Start a fresh session.
     NewSession,
-    /// Open the newest session that is not the current one.
-    ResumeLast,
+    /// Expand or collapse a day in the session picker.
+    ToggleSessionDay(String),
     /// Expand a provider in the models panel, or collapse it again.
     ExpandProvider(String),
     /// Set both the provider and the model to a choice from the models panel.

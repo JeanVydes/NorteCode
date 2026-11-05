@@ -27,6 +27,7 @@ use std::path::Path;
 use norte_code_protocol::catalog::Catalog;
 use norte_code_protocol::config::{Config, update_user_default};
 use norte_code_protocol::sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
+use norte_code_protocol::store::Store as _;
 use norte_code_protocol::{Phase, SessionKey};
 
 use crate::models::ModelChoice;
@@ -95,6 +96,8 @@ pub(crate) struct SessionRow {
     pub(crate) phase: Phase,
     /// When the session was created.
     pub(crate) created_at: chrono::DateTime<chrono::Utc>,
+    /// When the conversation was last updated.
+    pub(crate) updated_at: chrono::DateTime<chrono::Utc>,
     /// Tokens of context the session last used.
     pub(crate) context_used: u64,
     /// Whether a turn was interrupted and can be continued.
@@ -109,7 +112,7 @@ impl SessionRow {
     /// recognise it by, and both are worth seeing.
     pub(crate) fn label(&self) -> String {
         let key = self.key.get(..12).unwrap_or(&self.key);
-        let date = self.created_at.format("%Y-%m-%d").to_string();
+        let date = self.updated_at.format("%Y-%m-%d %H:%M").to_string();
         let stats = if self.context_used > 0 {
             format!(" · {} ctx", self.context_used)
         } else {
@@ -159,11 +162,20 @@ pub(crate) async fn session_rows(path: &Path) -> Result<Vec<SessionRow>, String>
         .sessions()
         .await
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    Ok(sessions.into_iter().map(row_of).collect())
+    let mut rows = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let updated_at = store
+            .load(session.north)
+            .await
+            .map_or(session.created_at, |north| north.updated_at);
+        rows.push(row_of(session, updated_at));
+    }
+    rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
+    Ok(rows)
 }
 
 /// One stored session as a row.
-fn row_of(session: StoredSession) -> SessionRow {
+fn row_of(session: StoredSession, updated_at: chrono::DateTime<chrono::Utc>) -> SessionRow {
     let phase = session.phase;
     SessionRow {
         // A phase a live turn writes is a phase that outlived it: no process is
@@ -177,6 +189,7 @@ fn row_of(session: StoredSession) -> SessionRow {
         model: session.model,
         phase,
         created_at: session.created_at,
+        updated_at,
         context_used: session
             .stats
             .get("context_used")
@@ -510,6 +523,9 @@ mod tests {
             created_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
             context_used: 0,
             unfinished,
         }
@@ -628,17 +644,29 @@ mod tests {
 
     #[test]
     fn a_stored_phase_becomes_the_phase_the_client_shows() {
-        assert_eq!(row_of(stored("streaming")).phase, Phase::Streaming);
-        assert_eq!(row_of(stored("awaiting_tool")).phase, Phase::AwaitingTool);
+        assert_eq!(
+            row_of(stored("streaming"), chrono::Utc::now()).phase,
+            Phase::Streaming
+        );
+        assert_eq!(
+            row_of(stored("awaiting_tool"), chrono::Utc::now()).phase,
+            Phase::AwaitingTool
+        );
         // Anything else starts idle, which is what the service does with a phase
         // it does not recognise.
-        assert_eq!(row_of(stored("idle")).phase, Phase::Idle);
-        assert_eq!(row_of(stored("nonsense")).phase, Phase::Idle);
+        assert_eq!(
+            row_of(stored("idle"), chrono::Utc::now()).phase,
+            Phase::Idle
+        );
+        assert_eq!(
+            row_of(stored("nonsense"), chrono::Utc::now()).phase,
+            Phase::Idle
+        );
         // A turn in flight outlived its process, so there is work to continue; a
         // tool that was about to run is not the same thing.
-        assert!(row_of(stored("streaming")).unfinished);
-        assert!(!row_of(stored("idle")).unfinished);
-        assert!(!row_of(stored("awaiting_tool")).unfinished);
+        assert!(row_of(stored("streaming"), chrono::Utc::now()).unfinished);
+        assert!(!row_of(stored("idle"), chrono::Utc::now()).unfinished);
+        assert!(!row_of(stored("awaiting_tool"), chrono::Utc::now()).unfinished);
     }
 
     #[test]
