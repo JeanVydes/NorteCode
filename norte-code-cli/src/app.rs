@@ -622,8 +622,20 @@ fn row_line(row: &Row, width: u16, style: Style) -> Line<'static> {
             // Tool output is a panel, not a collection of ASCII rules. The
             // background is the boundary; its content remains clean to copy.
             let room = usize::from(width);
-            let text = format!("  {:<width$}  ", row.text, width = room.saturating_sub(4));
-            let mut line = Line::from(vec![Span::styled(text, ink)]);
+            let content_width = room.saturating_sub(4);
+            let padding = content_width.saturating_sub(row.text.chars().count());
+            let mut spans = vec![Span::raw("  ".to_owned())];
+            if row.runs.is_empty() {
+                spans.push(Span::styled(
+                    format!("{:<width$}", row.text, width = content_width),
+                    ink,
+                ));
+            } else {
+                spans.extend(row_spans(row, ink, style));
+                spans.push(Span::styled(" ".repeat(padding), ink));
+            }
+            spans.push(Span::raw("  ".to_owned()));
+            let mut line = Line::from(spans);
             line.style = style.output_background();
             line
         }
@@ -694,19 +706,23 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
                 }
                 // An underline keeps the ink and adds the line under it, the
                 // way bold keeps the ink and adds weight.
-                crate::markdown::Emphasis::Underline => {
+                crate::markdown::Emphasis::Underline | crate::markdown::Emphasis::SyntaxString => {
                     draw = draw.add_modifier(Modifier::UNDERLINED);
                 }
                 // A table's header is its column names: bold, in the answer's
                 // own ink, so it reads as a label and not as another colour.
-                crate::markdown::Emphasis::TableHead => {
+                crate::markdown::Emphasis::TableHead
+                | crate::markdown::Emphasis::SyntaxKeyword
+                | crate::markdown::Emphasis::SyntaxNumber => {
                     draw = draw.add_modifier(Modifier::BOLD);
                 }
                 // A body cell is ordinary text: the padding and the `│` between
                 // cells are what draw the table, and a colour of its own would
                 // fight the prose around it. So it takes the same arm as plain
                 // text, which is what it is.
-                crate::markdown::Emphasis::TableCell | crate::markdown::Emphasis::Plain => {}
+                crate::markdown::Emphasis::TableCell
+                | crate::markdown::Emphasis::Plain
+                | crate::markdown::Emphasis::SyntaxPlain => {}
                 // A panel of a split diff is its own ink, carried in the row
                 // it came from: the left in the ink of what left, the right in
                 // the ink of what arrived. The row's ink is the fallback for a
@@ -722,6 +738,9 @@ fn row_spans(row: &Row, ink: ratatui::style::Style, style: Style) -> Vec<Span<'s
                             Ink::Yellow => style.yellow_span(),
                         };
                     }
+                }
+                crate::markdown::Emphasis::SyntaxComment => {
+                    draw = draw.add_modifier(Modifier::ITALIC);
                 }
             }
             Span::styled(run.text.clone(), draw)
@@ -848,7 +867,11 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
             }
             let wrapped = wrap(&text, width);
             for text in wrapped {
-                let runs = shell_command_runs(&text);
+                let runs = if line.runs.is_empty() {
+                    shell_command_runs(&text)
+                } else {
+                    line.runs.clone()
+                };
                 out.push(Row {
                     ink,
                     kind: entry.kind,

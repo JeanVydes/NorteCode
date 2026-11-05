@@ -9,7 +9,7 @@ use crate::input::{Pinned, TodoItem, TodoStatus};
 use crate::render::argument::todo_items;
 use crate::render::dial::context_dial;
 use crate::render::edit::{
-    EditPreview, build_edit_preview, edit_preview, edit_range, preview_path,
+    EditPreview, build_edit_preview, edit_preview, edit_range, preview_path, syntax_runs,
 };
 
 use crate::render::renderer::{Block, Format, Renderer, Verbosity, call_ending, tool_sections};
@@ -35,6 +35,30 @@ fn renderer(pinned: &Arc<Pinned>) -> Renderer {
         Style::plain(),
         Arc::clone(pinned),
     )
+}
+
+#[test]
+fn an_edit_diff_keeps_change_identity_while_highlighting_code() {
+    let runs = syntax_runs("src/main.rs", "  + let count = 42; // total");
+    assert_eq!(
+        runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+        "  + let count = 42; // total"
+    );
+    assert!(
+        runs.iter()
+            .any(|run| run.emphasis == crate::markdown::Emphasis::SyntaxKeyword),
+        "keywords are highlighted without replacing the diff line colour: {runs:?}"
+    );
+    assert!(
+        runs.iter()
+            .any(|run| run.emphasis == crate::markdown::Emphasis::SyntaxNumber),
+        "numbers are highlighted: {runs:?}"
+    );
+    assert!(
+        runs.iter()
+            .any(|run| run.emphasis == crate::markdown::Emphasis::SyntaxComment),
+        "comments are highlighted: {runs:?}"
+    );
 }
 
 fn visible_renderer(pinned: &Arc<Pinned>) -> Renderer {
