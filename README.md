@@ -102,7 +102,8 @@ Set `NORTE_CODE_AUTH_TOKEN` to require `Authorization: Bearer <token>` on
 WebSocket, SSE, artifact upload and session-command routes. Health and
 discovery endpoints remain public for orchestration probes. Upload binary
 content with `POST /raep/v1/artifacts` and use the returned `id` as
-`content[].source.artifact_id` in a multimodal `USER_INPUT`.
+`content[].source.artifact_id` in a multimodal `USER_INPUT`. An uploaded blob
+can be read back with authenticated `GET /raep/v1/artifacts/{artifact_id}`.
 
 ## Documentation
 

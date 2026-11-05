@@ -19,6 +19,7 @@ use raep_types::{Envelope, FrameType, SessionAttach, StandardFrameType};
 use serde_json::{Value, json};
 use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::BroadcastStream;
+use tower_http::{limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer};
 
 use crate::{HostError, NorteCodeRaepHost};
 
@@ -28,11 +29,36 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .route("/raep/v1/ws", get(websocket))
         .route("/raep/v1/info", get(info))
         .route("/raep/v1/artifacts", post(upload_artifact))
+        .route("/raep/v1/artifacts/{artifact_id}", get(download_artifact))
         .route("/raep/v1/health/live", get(health_live))
         .route("/raep/v1/health/ready", get(health_ready))
         .route("/raep/v1/sessions/{session_id}/events", get(events))
         .route("/raep/v1/sessions/{session_id}/commands", post(commands))
+        .layer(RequestBodyLimitLayer::new(
+            HostConfigLimits::from_host(&host).max_body_bytes,
+        ))
+        .layer(RequestBodyTimeoutLayer::new(
+            HostConfigLimits::from_host(&host).command_timeout,
+        ))
         .with_state(host)
+}
+
+struct HostConfigLimits {
+    max_body_bytes: usize,
+    command_timeout: std::time::Duration,
+}
+
+impl HostConfigLimits {
+    fn from_host(host: &NorteCodeRaepHost) -> Self {
+        let info = host.info();
+        Self {
+            max_body_bytes: info["limits"]["max_frame_bytes"]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(1024 * 1024),
+            command_timeout: host.command_timeout(),
+        }
+    }
 }
 
 async fn info(State(host): State<Arc<NorteCodeRaepHost>>) -> Json<Value> {
@@ -55,6 +81,7 @@ async fn upload_artifact(
     if let Some(response) = unauthorized(&host, &headers) {
         return response;
     }
+
     let mime_type = headers
         .get("content-type")
         .and_then(|value| value.to_str().ok())
@@ -77,6 +104,31 @@ async fn upload_artifact(
     }
 }
 
+async fn download_artifact(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(artifact_id): Path<String>,
+) -> Response {
+    if let Some(response) = unauthorized(&host, &headers) {
+        return response;
+    }
+    match host.get_artifact(&artifact_id).await {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "accepted": false,
+                "error": {"code": "ARTIFACT_NOT_FOUND", "message": error.to_string()}
+            })),
+        )
+            .into_response(),
+    }
+}
+
 async fn websocket(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
@@ -85,19 +137,41 @@ async fn websocket(
     if let Some(response) = unauthorized(&host, &headers) {
         return response;
     }
+    let Some(permit) = host.try_connection() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     upgrade
         .protocols(["raep.v1"])
-        .on_upgrade(move |socket| websocket_session(host, socket))
+        .on_upgrade(move |socket| websocket_session(host, socket, permit))
         .into_response()
 }
 
-async fn websocket_session(host: Arc<NorteCodeRaepHost>, mut socket: WebSocket) {
+#[allow(clippy::too_many_lines)]
+async fn websocket_session(
+    host: Arc<NorteCodeRaepHost>,
+    mut socket: WebSocket,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
     if send_frame(&mut socket, host.hello()).await.is_err() {
         return;
     }
     while let Some(Ok(message)) = socket.recv().await {
         match message {
             Message::Text(text) => {
+                if text.len() > host.max_frame_bytes() {
+                    if send_frame(
+                        &mut socket,
+                        error_frame(&HostError::InvalidFrame(
+                            "frame exceeds size limit".to_owned(),
+                        )),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
                 let frame = match serde_json::from_str::<Envelope<Value>>(&text) {
                     Ok(frame) => frame,
                     Err(error) => {
@@ -115,14 +189,14 @@ async fn websocket_session(host: Arc<NorteCodeRaepHost>, mut socket: WebSocket) 
                 };
                 let session_hint = frame.session_id.clone();
                 let mut live = host.subscribe();
-                let future = host.handle(frame);
+                let future = tokio::time::timeout(host.command_timeout(), host.handle(frame));
                 tokio::pin!(future);
                 let mut emitted = std::collections::HashSet::new();
                 loop {
                     tokio::select! {
                         result = &mut future => {
                             match result {
-                                Ok(frames) => {
+                                Ok(Ok(frames)) => {
                                     for frame in frames {
                                         if emitted.insert(frame.id.clone())
                                             && send_frame(&mut socket, frame).await.is_err()
@@ -131,8 +205,21 @@ async fn websocket_session(host: Arc<NorteCodeRaepHost>, mut socket: WebSocket) 
                                         }
                                     }
                                 }
-                                Err(error) => {
+                                Ok(Err(error)) => {
                                     if send_frame(&mut socket, error_frame(&error)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Err(_) => {
+                                    if send_frame(
+                                        &mut socket,
+                                        error_frame(&HostError::Service(
+                                            "command timed out".to_owned(),
+                                        )),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -187,6 +274,9 @@ async fn events(
     if let Some(response) = unauthorized(&host, &headers) {
         return response;
     }
+    let Some(permit) = host.try_connection() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let receiver = host.subscribe();
     let attach = Envelope {
         kind: FrameType::Standard(StandardFrameType::SessionAttach),
@@ -225,6 +315,7 @@ async fn events(
             .map(|frame| Ok::<Event, Infallible>(sse_event(frame))),
     );
     let live = BroadcastStream::new(receiver).filter_map(move |result| {
+        let _permit = &permit;
         let session_id = session_id.clone();
         let seen = Arc::clone(&seen);
         async move {
@@ -275,13 +366,21 @@ async fn commands(
         )
             .into_response();
     }
-    match host.handle(frame).await {
-        Ok(events) => (
+    match tokio::time::timeout(host.command_timeout(), host.handle(frame)).await {
+        Ok(Ok(events)) => (
             StatusCode::ACCEPTED,
             Json(json!({"accepted": true, "events": events})),
         )
             .into_response(),
-        Err(error) => (
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(json!({
+                "accepted": false,
+                "error": {"code": "TIMEOUT", "message": "command timed out"}
+            })),
+        )
+            .into_response(),
+        Ok(Err(error)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
                 "accepted": false,
