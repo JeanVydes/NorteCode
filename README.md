@@ -102,6 +102,10 @@ as well.
 `norte_code.command` extension is available when a
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
+Common session operations use the standard `SESSION_CONFIGURE` frame with an
+`operation` enum (`list_jobs`, `stop_jobs`, `set_model`, `set_reasoning`,
+`set_budget`, `answer_question`, `resume`, or `compact`), so clients do not
+need the NorteCode extension for those controls.
 
 Set `NORTE_CODE_AUTH_TOKEN` to require `Authorization: Bearer <token>` on
 WebSocket, SSE, artifact upload and session-command routes. Health and

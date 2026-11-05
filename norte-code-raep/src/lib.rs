@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod commands;
 mod host;
 mod http;
 mod payloads;

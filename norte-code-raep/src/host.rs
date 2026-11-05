@@ -18,6 +18,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::NorteCodeExtension;
+use crate::commands::AgentCommand;
 use crate::payloads::canonical_event_payload;
 
 /// Host configuration independent of the HTTP listener.
@@ -641,6 +642,7 @@ impl NorteCodeRaepHost {
                     "transport.ws",
                     "transport.sse",
                     "agent.norte_code",
+                    "agent.commands",
                     "events.replay",
                     "events.canonical",
                     "auth.principals",
@@ -671,6 +673,7 @@ impl NorteCodeRaepHost {
                 "transport.ws",
                 "transport.sse",
                 "agent.norte_code",
+                "agent.commands",
                 "events.replay",
                 "events.canonical",
                 "auth.principals",
@@ -738,6 +741,9 @@ impl NorteCodeRaepHost {
             FrameType::Standard(StandardFrameType::SessionDetach) => self.detach(frame).await,
             FrameType::Standard(StandardFrameType::SessionClose) => self.close(frame).await,
             FrameType::Standard(StandardFrameType::Ack) => self.ack(frame).await,
+            FrameType::Standard(StandardFrameType::SessionConfigure) => {
+                self.agent_command(frame).await
+            }
             FrameType::Extension(ref name) if name == NorteCodeExtension::Command.as_str() => {
                 self.extension_command(frame).await
             }
@@ -765,6 +771,41 @@ impl NorteCodeRaepHost {
                 Ok(())
             }
         }
+    }
+
+    async fn agent_command(
+        &self,
+        frame: Envelope<Value>,
+    ) -> Result<Vec<Envelope<Value>>, HostError> {
+        self.require_attached(&frame.session_id).await?;
+        let command: AgentCommand = serde_json::from_value(frame.payload)?;
+        let session_id = frame.session_id;
+        let session = SessionKey::new(session_id.clone());
+        let kind = match command {
+            AgentCommand::ListJobs => ClientRequestKind::ListJobs { session },
+            AgentCommand::StopJobs { id } => ClientRequestKind::StopJobs { session, id },
+            AgentCommand::SetModel { provider, model } => ClientRequestKind::SetModel {
+                session,
+                provider,
+                model,
+            },
+            AgentCommand::SetReasoning { scope, reasoning } => ClientRequestKind::SetReasoning {
+                session,
+                scope,
+                reasoning,
+            },
+            AgentCommand::SetBudget { budget } => ClientRequestKind::SetBudget { session, budget },
+            AgentCommand::AnswerQuestion { question, answer } => {
+                ClientRequestKind::AnswerQuestion {
+                    session,
+                    question,
+                    answer,
+                }
+            }
+            AgentCommand::Resume => ClientRequestKind::Resume { session },
+            AgentCommand::Compact => ClientRequestKind::Compact { session },
+        };
+        self.submit_service(&session_id, kind).await
     }
 
     /// Returns replay frames strictly after `last_seq`.
