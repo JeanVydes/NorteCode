@@ -9,6 +9,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Sending a message no longer replays the whole session history into the transcript: the client now tracks the last RAEP sequence per session and reopens the event stream with `resume_from_seq`, so the server only sends frames after the cursor.
+- The event stream now drains events buffered after `TurnFinished` in wire order instead of stopping at the terminal, so trailing usage and stats events are no longer lost.
 
 - The RAEP server now exposes JSON liveness/readiness data, a structured
   telemetry report with aggregate counters, and an end-to-end harness that
