@@ -8,6 +8,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Attaching a session now returns `SESSION_ATTACHED` and `SESSION_STATE` with the schema-required `last_seq`, `replay` and `history_summary` fields, and no longer replays the whole transcript on a first attach.
 - Core RAEP service events now use schema-shaped standard payloads for token deltas, tool lifecycle, and turn state, and emitted frames now carry the envelope `turn_id` where available.
 - Sending a message no longer replays the whole session history into the transcript: the client now tracks the last RAEP sequence per session and reopens the event stream with `resume_from_seq`, so the server only sends frames after the cursor.
 - The event stream now drains events buffered after `TurnFinished` in wire order instead of stopping at the terminal, so trailing usage and stats events are no longer lost.
