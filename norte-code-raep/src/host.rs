@@ -15,7 +15,7 @@ use raep_types::{
 };
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::NorteCodeExtension;
 
@@ -34,6 +34,10 @@ pub struct HostConfig {
     pub auth_token: Option<String>,
     /// Maximum size accepted for one uploaded artifact.
     pub max_artifact_bytes: usize,
+    /// Maximum concurrent WebSocket and SSE connections.
+    pub max_connections: usize,
+    /// Maximum time spent handling one command, in milliseconds.
+    pub command_timeout_ms: u64,
 }
 
 impl Default for HostConfig {
@@ -45,6 +49,8 @@ impl Default for HostConfig {
             max_frame_bytes: 1024 * 1024,
             auth_token: None,
             max_artifact_bytes: 16 * 1024 * 1024,
+            max_connections: 256,
+            command_timeout_ms: 120_000,
         }
     }
 }
@@ -98,6 +104,9 @@ pub struct ArtifactRef {
 pub trait ArtifactStore: Send + Sync {
     /// Stores bytes and returns their opaque reference.
     async fn put(&self, mime_type: &str, bytes: &[u8]) -> Result<ArtifactRef, HostError>;
+
+    /// Reads an uploaded artifact by its content-addressed identifier.
+    async fn get(&self, id: &str) -> Result<Vec<u8>, HostError>;
 }
 
 /// Blob-backed artifact storage for the RAEP server.
@@ -126,6 +135,16 @@ impl ArtifactStore for BlobArtifactStore {
             mime_type: mime_type.to_owned(),
             bytes: bytes.len() as u64,
         })
+    }
+
+    async fn get(&self, id: &str) -> Result<Vec<u8>, HostError> {
+        let id = id
+            .parse()
+            .map_err(|_| HostError::Artifact("invalid artifact id".to_owned()))?;
+        self.blobs
+            .get(id)
+            .await
+            .map_err(|error| HostError::Artifact(error.to_string()))
     }
 }
 
@@ -277,6 +296,7 @@ pub struct NorteCodeRaepHost {
     events: broadcast::Sender<Envelope<Value>>,
     replay_store: Option<Arc<dyn ReplayStore>>,
     artifact_store: Option<Arc<dyn ArtifactStore>>,
+    connections: Arc<Semaphore>,
 }
 
 impl NorteCodeRaepHost {
@@ -297,6 +317,12 @@ impl NorteCodeRaepHost {
                 "replay_capacity must be positive".to_owned(),
             ));
         }
+        if config.max_connections == 0 {
+            return Err(HostError::InvalidFrame(
+                "max_connections must be positive".to_owned(),
+            ));
+        }
+        let max_connections = config.max_connections;
         let (events, _) = broadcast::channel(config.replay_capacity.max(16));
         Ok(Self {
             service,
@@ -305,6 +331,7 @@ impl NorteCodeRaepHost {
             events,
             replay_store: None,
             artifact_store: None,
+            connections: Arc::new(Semaphore::new(max_connections)),
         })
     }
 
@@ -353,6 +380,20 @@ impl NorteCodeRaepHost {
             .await
     }
 
+    /// Reads an uploaded artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when artifact storage is disabled or the identifier is
+    /// invalid or missing.
+    pub async fn get_artifact(&self, id: &str) -> Result<Vec<u8>, HostError> {
+        self.artifact_store
+            .as_ref()
+            .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
+            .get(id)
+            .await
+    }
+
     /// Returns the server-owned agent service.
     #[must_use]
     pub fn service(&self) -> &Arc<Service> {
@@ -369,6 +410,23 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn auth_token(&self) -> Option<&str> {
         self.config.auth_token.as_deref()
+    }
+
+    /// Attempts to reserve one long-lived transport connection.
+    pub fn try_connection(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.connections).try_acquire_owned().ok()
+    }
+
+    /// Returns the configured command timeout.
+    #[must_use]
+    pub fn command_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.config.command_timeout_ms)
+    }
+
+    /// Returns the maximum accepted RAEP frame size.
+    #[must_use]
+    pub fn max_frame_bytes(&self) -> usize {
+        usize::try_from(self.config.max_frame_bytes).unwrap_or(usize::MAX)
     }
 
     /// Returns a receiver for live frames emitted by any attached connection.
@@ -1002,5 +1060,29 @@ mod tests {
         let id = reference.id.parse().expect("blob id");
         assert_eq!(blobs.get(id).await.expect("get"), b"png");
         assert_eq!(reference.mime_type, "image/png");
+        assert_eq!(store.get(&reference.id).await.expect("get"), b"png");
+    }
+
+    #[tokio::test]
+    async fn artifact_uploads_obey_host_limit() {
+        let service = Arc::new(
+            Service::new(
+                norte_code_protocol::config::Config::default(),
+                Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                None,
+                Arc::new(norte_code_agent::VendorModels),
+                Arc::new(norte_code_protocol::InMemoryStore::new()),
+                Arc::new(norte::InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let config = HostConfig {
+            max_artifact_bytes: 2,
+            ..HostConfig::default()
+        };
+        let host = NorteCodeRaepHost::new(service, config).expect("host");
+        let error = host.put_artifact("text/plain", b"123").await;
+        assert!(matches!(error, Err(HostError::Artifact(message)) if message.contains("limit")));
     }
 }

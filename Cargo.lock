@@ -1380,6 +1380,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "tower-http",
 ]
 
 [[package]]
@@ -2488,7 +2489,9 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

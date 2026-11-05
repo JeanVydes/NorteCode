@@ -46,6 +46,7 @@ thiserror = "2.0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs", "signal", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["limit", "timeout"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
