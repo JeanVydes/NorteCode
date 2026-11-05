@@ -692,6 +692,16 @@ impl NorteCodeRaepHost {
         self.events.subscribe()
     }
 
+    async fn current_seq(&self, session_id: &str) -> u64 {
+        self.state
+            .lock()
+            .await
+            .sequences
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Returns the RAEP handshake frame.
     ///
     /// The handshake payload uses only JSON values constructed from validated
@@ -1065,11 +1075,28 @@ impl NorteCodeRaepHost {
             state.sequences.entry(session_id.clone()).or_insert(0);
             state.replay.entry(session_id.clone()).or_default();
         }
-        let replayed = if let Some(after) = attach.resume_from_seq {
-            self.replay_after(&session_id, after).await?
-        } else {
-            Vec::new()
+        let (replayed, replay_meta) = match attach.resume_from_seq {
+            Some(after) => match self.replay_after(&session_id, after).await {
+                Ok(frames) => {
+                    let to_seq = frames
+                        .iter()
+                        .filter_map(|frame| frame.seq)
+                        .max()
+                        .unwrap_or(after);
+                    (
+                        frames,
+                        json!({"from_seq": after.saturating_add(1), "to_seq": to_seq, "truncated": false}),
+                    )
+                }
+                Err(HostError::Replay(_)) => (
+                    Vec::new(),
+                    json!({"from_seq": after.saturating_add(1), "to_seq": after, "truncated": true}),
+                ),
+                Err(error) => return Err(error),
+            },
+            None => (Vec::new(), json!({"truncated": false})),
         };
+        let last_seq = self.current_seq(&session_id).await;
         let mode = attach.mode.unwrap_or(AttachMode::Controller);
         let attached = self
             .emit(
@@ -1078,6 +1105,8 @@ impl NorteCodeRaepHost {
                 json!({
                     "created": created,
                     "mode": mode,
+                    "last_seq": last_seq,
+                    "replay": replay_meta,
                     "negotiated_capabilities": [
                         "agent.norte_code",
                         "events.replay"
@@ -1085,27 +1114,15 @@ impl NorteCodeRaepHost {
                 }),
             )
             .await?;
-        let state = self
-            .emit(
-                &session_id,
-                StandardFrameType::SessionState,
-                json!({"status": "ACTIVE"}),
-            )
-            .await?;
-        let mut output = replayed;
-        output.extend([attached, state]);
-        if exists && attach.resume_from_seq.is_none() {
-            let replay = self
-                .submit_service(
-                    &session_id,
-                    ClientRequestKind::Resume {
-                        session: SessionKey::new(session_id.clone()),
-                        replay: true,
-                    },
-                )
-                .await?;
-            output.extend(replay);
+        let mut state_payload = json!({"status": "ACTIVE", "history_summary": []});
+        if let Some(title) = service.session_title(&SessionKey::new(session_id.clone())) {
+            state_payload["title"] = json!(title);
         }
+        let state = self
+            .emit(&session_id, StandardFrameType::SessionState, state_payload)
+            .await?;
+        let mut output = vec![attached, state];
+        output.extend(replayed);
         Ok(output)
     }
 
@@ -1845,6 +1862,40 @@ mod tests {
         assert!(host.try_connection().is_none());
         drop(permit);
         assert!(host.try_connection().is_some());
+    }
+
+    #[tokio::test]
+    async fn attaching_emits_schema_shaped_state_without_replaying_history() {
+        let service = Arc::new(
+            Service::new(
+                norte_code_protocol::config::Config::default(),
+                Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                None,
+                Arc::new(norte_code_agent::VendorModels),
+                Arc::new(norte_code_protocol::InMemoryStore::new()),
+                Arc::new(norte::InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let host = NorteCodeRaepHost::new(service, HostConfig::default()).expect("host");
+        let frame = Envelope::new(
+            standard(StandardFrameType::SessionAttach),
+            json!({"agent_id": "norte-code", "create_if_missing": true}),
+            1,
+        );
+        let frames = host.handle(frame).await.expect("attach");
+        assert_eq!(frames.len(), 2, "attach must not replay history");
+        assert_eq!(frames[0].kind, standard(StandardFrameType::SessionAttached));
+        assert_eq!(frames[0].payload["created"], true);
+        assert_eq!(frames[0].payload["mode"], "controller");
+        assert_eq!(frames[0].payload["last_seq"], 0);
+        assert_eq!(frames[1].kind, standard(StandardFrameType::SessionState));
+        assert_eq!(frames[1].payload["status"], "ACTIVE");
+        assert!(
+            frames[1].payload["history_summary"].is_array(),
+            "SESSION_STATE must carry history_summary"
+        );
     }
 
     #[test]
