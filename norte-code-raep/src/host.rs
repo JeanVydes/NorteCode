@@ -634,14 +634,19 @@ impl NorteCodeRaepHost {
         Envelope::new(
             standard(StandardFrameType::Hello),
             json!({
+                "protocol": {"name": "RAEP", "version": WIRE_VERSION},
                 "server_version": self.config.server_version,
                 "wire_versions": [WIRE_VERSION],
                 "capabilities": [
                     "transport.ws",
                     "transport.sse",
                     "agent.norte_code",
-                    "events.replay"
+                    "events.replay",
+                    "events.canonical",
+                    "auth.principals",
+                    "replay.sqlite"
                 ],
+                "extensions": [NorteCodeExtension::Command.as_str()],
                 "limits": {
                     "max_frame_bytes": self.config.max_frame_bytes,
                     "replay_buffer_events": self.config.replay_capacity,
@@ -659,14 +664,19 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn info(&self) -> Value {
         json!({
+            "protocol": {"name": "RAEP", "version": WIRE_VERSION},
             "server_version": self.config.server_version,
             "wire_versions": [WIRE_VERSION],
             "capabilities": [
                 "transport.ws",
                 "transport.sse",
                 "agent.norte_code",
-                "events.replay"
+                "events.replay",
+                "events.canonical",
+                "auth.principals",
+                "replay.sqlite"
             ],
+            "extensions": [NorteCodeExtension::Command.as_str()],
             "limits": {
                 "max_frame_bytes": self.config.max_frame_bytes,
                 "replay_buffer_events": self.config.replay_capacity,
