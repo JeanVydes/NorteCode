@@ -8,6 +8,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Sending a message no longer replays the whole session history into the transcript: the client now tracks the last RAEP sequence per session and reopens the event stream with `resume_from_seq`, so the server only sends frames after the cursor.
+
 - The RAEP server now exposes JSON liveness/readiness data, a structured
   telemetry report with aggregate counters, and an end-to-end harness that
   starts the real `norte-code-server` binary and exercises HTTP plus SSE.

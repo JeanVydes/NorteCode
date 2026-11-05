@@ -310,10 +310,16 @@ async fn send_frame(socket: &mut WebSocket, frame: Envelope<Value>) -> Result<()
         .map_err(|_| ())
 }
 
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    resume_from_seq: Option<u64>,
+}
+
 async fn events(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
+    Query(query): Query<EventsQuery>,
 ) -> Response {
     let principal = match principal(&host, &headers) {
         Ok(principal) => principal,
@@ -331,7 +337,7 @@ async fn events(
             create_if_missing: Some(false),
             mode: None,
             takeover: None,
-            resume_from_seq: None,
+            resume_from_seq: query.resume_from_seq,
             capabilities: None,
             client_info: None,
             options: None,
@@ -664,5 +670,73 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).expect("json");
         let events = body["events"].as_array().expect("events");
         assert_eq!(events[0]["payload"]["kind"], "tool_list");
+    }
+
+    #[tokio::test]
+    async fn events_stream_accepts_resume_from_seq() {
+        let app = router(test_host(None));
+        let request = ClientRequest {
+            request_id: 1,
+            kind: ClientRequestKind::CreateSession {
+                title: Some("resume harness".to_owned()),
+            },
+        };
+        let frame = Envelope::new(
+            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
+            serde_json::to_value(request).expect("request"),
+            1,
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions/unused/commands")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&body).expect("json");
+        let session = body["events"][0]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_owned();
+
+        // A known cursor is accepted and the stream opens; reading the body
+        // is not needed to prove the query was understood.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/raep/v1/sessions/{session}/events?resume_from_seq=0"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/raep/v1/sessions/{session}/events?resume_from_seq=abc"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
