@@ -1300,6 +1300,13 @@ impl Renderer {
 
     /// Ends the current output line before a prompt or the final summary.
     pub(crate) fn ensure_newline(&mut self) {
+        // Writing to the terminal's stream while the alternate screen is
+        // up lands at the cursor and is never repainted; with a screen
+        // the frame owns every byte.
+        if self.screen.is_some() {
+            self.last_char = Some('\n');
+            return;
+        }
         if matches!(self.format, Format::Text) && self.last_char.is_some_and(|last| last != '\n') {
             println!();
             self.last_char = Some('\n');

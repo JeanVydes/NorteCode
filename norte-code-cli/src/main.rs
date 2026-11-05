@@ -1024,11 +1024,20 @@ pub(crate) async fn new_session(
         );
     }
     if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
-        eprintln!(
-            "{} {}",
-            style.dim("session"),
-            style.faint(short(session.as_str()).to_owned())
-        );
+        // The alternate screen owns the terminal once Guard has entered:
+        // a bare write here lands at the cursor and the next frame's diff
+        // never repaints it, which is what left fragments doubled on
+        // screen. With a screen up the line goes through the transcript;
+        // without one (pipe, headless) the plain write stands.
+        if renderer.screen.is_some() {
+            renderer.notice(format!("session {}", short(session.as_str())));
+        } else {
+            eprintln!(
+                "{} {}",
+                style.dim("session"),
+                style.faint(short(session.as_str()).to_owned())
+            );
+        }
     }
     // Hand the service and session to the plugins so they can reach them when
     // they run a command or redraw. The plugins were loaded before the
