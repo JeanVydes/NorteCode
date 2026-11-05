@@ -13,7 +13,7 @@ use futures_util::stream::{self, StreamExt};
 use norte_code_protocol::{ClientRequest, ServerEvent};
 use raep_types::{Envelope, FrameType, StandardFrameType};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -383,7 +383,7 @@ impl RemoteClient {
         let stream = stream::unfold(
             (
                 bytes,
-                String::new(),
+                Vec::new(),
                 VecDeque::<(ServerEvent, bool)>::new(),
                 session,
                 false,
@@ -472,7 +472,7 @@ impl RemoteClient {
                         }
                         match bytes.next().await {
                             Some(Ok(chunk)) => {
-                                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                                buffer.extend_from_slice(&chunk);
                             }
                             Some(Err(_)) | None => {
                                 if pending.is_empty() {
@@ -633,14 +633,6 @@ impl AgentClient for RemoteClient {
     }
 }
 
-/// Drains complete SSE blocks from `buffer`, in wire order.
-///
-/// Each complete block becomes one event; a trailing partial block stays in
-/// the buffer for the next chunk. Blocks that are not `data:` frames or
-/// that do not decode are skipped, so a keepalive or a foreign event never
-/// wedges the stream. Terminal events (`TurnFinished`, `TurnStopped`) are
-/// flagged but do not stop the drain: events the server sent after the
-/// terminal in the same flush must still reach the caller.
 /// Whether an arriving sequence can be applied, is a duplicate, or skipped a
 /// frame the client never saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,11 +652,22 @@ fn seq_step(previous: Option<u64>, seq: u64) -> SeqStep {
     }
 }
 
-fn drain_sse_buffer(buffer: &mut String) -> Vec<(ServerEvent, bool, Option<u64>)> {
+/// Drains complete SSE blocks from `buffer`, in wire order.
+///
+/// Each complete block becomes one event; a trailing partial block stays in
+/// the buffer for the next chunk. Blocks that are not `data:` frames or
+/// that do not decode are skipped, so a keepalive or a foreign event never
+/// wedges the stream. Terminal events (`TurnFinished`, `TurnStopped`) are
+/// flagged but do not stop the drain: events the server sent after the
+/// terminal in the same flush must still reach the caller.
+fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(ServerEvent, bool, Option<u64>)> {
     let mut events = Vec::new();
-    while let Some(end) = buffer.find("\n\n") {
-        let block = buffer[..end].to_owned();
+    while let Some(end) = buffer.windows(2).position(|window| window == b"\n\n") {
+        let block = buffer[..end].to_vec();
         buffer.drain(..end + 2);
+        let Ok(block) = std::str::from_utf8(&block) else {
+            continue;
+        };
         let Some(data) = block.lines().find_map(|line| line.strip_prefix("data: ")) else {
             continue;
         };
@@ -685,8 +688,184 @@ fn drain_sse_buffer(buffer: &mut String) -> Vec<(ServerEvent, bool, Option<u64>)
     events
 }
 
+/// Decodes a standard RAEP frame from its canonical payload.
+///
+/// Returns `Ok(None)` for a frame this adapter has no faithful standard
+/// mapping for, so the caller can fall back to the `NorteCode` extension.
+#[allow(clippy::too_many_lines)]
+fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, ClientError> {
+    let Some(frame_type) = frame.get("type").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(payload) = frame.get("payload") else {
+        return Ok(None);
+    };
+    let session = frame
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(norte_code_protocol::SessionKey::new);
+    let turn = frame
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let event = |kind| ServerEvent {
+        request_id: 0,
+        session: session.clone(),
+        kind,
+    };
+    let kind = match frame_type {
+        "TOKEN_DELTA" => {
+            let index = u32::try_from(number(payload, "index")?).unwrap_or(u32::MAX);
+            let text = required_string(payload, "delta")?;
+            let delta = if payload.get("channel").and_then(Value::as_str) == Some("reasoning") {
+                norte_code_protocol::Delta::Reasoning { index, text }
+            } else {
+                norte_code_protocol::Delta::Text { index, text }
+            };
+            event(norte_code_protocol::ServerEventKind::Delta { turn, delta })
+        }
+        "TURN_STATE_CHANGED" => match required_string(payload, "state")?.as_str() {
+            "QUEUED" => event(norte_code_protocol::ServerEventKind::TurnStarted { turn }),
+            "COMPLETED" => event(norte_code_protocol::ServerEventKind::TurnFinished {
+                turn,
+                phase: norte_code_protocol::Phase::Idle,
+                committed: true,
+            }),
+            "CANCELLED" => event(norte_code_protocol::ServerEventKind::TurnStopped {
+                reason: payload
+                    .get("stop_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("cancelled")
+                    .to_owned(),
+            }),
+            _ => return Ok(None),
+        },
+        "TOOL_CALL_STARTED" => event(norte_code_protocol::ServerEventKind::ToolStarted {
+            turn,
+            call_id: required_string(payload, "tool_call_id")?,
+            tool: required_string(payload, "tool_name")?,
+            arguments: payload.get("arguments").cloned(),
+            source: None,
+        }),
+        "TOOL_OUTPUT_DELTA" => event(norte_code_protocol::ServerEventKind::ToolOutput {
+            turn,
+            call_id: required_string(payload, "tool_call_id")?,
+            tool: required_string(payload, "tool_name")?,
+            stream: serde_json::from_value(
+                payload
+                    .get("stream")
+                    .cloned()
+                    .unwrap_or_else(|| json!("stdout")),
+            )
+            .unwrap_or(norte_code_protocol::types::OutputStream::Stdout),
+            text: required_string(payload, "delta")?,
+            last: false,
+        }),
+        "TOOL_CALL_FINISHED" => {
+            let status = required_string(payload, "status")?;
+            event(norte_code_protocol::ServerEventKind::ToolFinished {
+                turn,
+                call_id: required_string(payload, "tool_call_id")?,
+                tool: String::new(),
+                is_error: status == "ERROR",
+                error: None,
+                output: payload
+                    .get("result_summary")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                truncated: payload
+                    .get("result_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                detached: status == "CANCELLED",
+                duration_ms: payload
+                    .get("duration_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            })
+        }
+        "JOB_LIST_RESULT" => {
+            let jobs = payload
+                .get("jobs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|job| {
+                    let status = job
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("RUNNING");
+                    let state = match status {
+                        "COMPLETED" => norte_code_protocol::JobState::Finished,
+                        "FAILED" | "KILLED" | "TIMED_OUT" => {
+                            norte_code_protocol::JobState::Cancelled
+                        }
+                        _ => norte_code_protocol::JobState::Running,
+                    };
+                    norte_code_protocol::JobInfo {
+                        id: job
+                            .get("job_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        label: job
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        script: String::new(),
+                        state,
+                        exit_code: job
+                            .get("exit_code")
+                            .and_then(Value::as_i64)
+                            .and_then(|code| i32::try_from(code).ok()),
+                        timed_out: status == "TIMED_OUT",
+                        elapsed_ms: 0,
+                        output: String::new(),
+                        dropped: false,
+                    }
+                })
+                .collect();
+            event(norte_code_protocol::ServerEventKind::JobList { jobs })
+        }
+        "ERROR" => {
+            let code = payload
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("internal")
+                .to_ascii_lowercase();
+            let code = serde_json::from_value(code.into())
+                .unwrap_or(norte_code_protocol::ErrorCode::Internal);
+            event(norte_code_protocol::ServerEventKind::Error {
+                code,
+                message: payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(kind))
+}
+
 #[allow(clippy::too_many_lines)]
 fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
+    if let Some(version) = frame.get("version").and_then(Value::as_str)
+        && version != raep_types::WIRE_VERSION
+    {
+        return Err(ClientError::new(format!(
+            "unsupported RAEP wire version `{version}`; this client speaks {}",
+            raep_types::WIRE_VERSION
+        )));
+    }
+    if let Some(event) = standard_event_from_frame(frame)? {
+        return Ok(event);
+    }
     if let Some(event) = frame
         .get("ext")
         .and_then(|ext| ext.get("norte_code"))
@@ -1167,6 +1346,63 @@ mod tests {
     use norte_code_protocol::{ClientRequestKind, SessionKey};
 
     #[test]
+    fn prefers_the_standard_payload_over_the_compatibility_extension() {
+        let frame = serde_json::json!({
+            "version": "1.0",
+            "type": "TOKEN_DELTA",
+            "session_id": "session-1",
+            "turn_id": "7",
+            "payload": {"delta": "canonical", "index": 2, "channel": "text"},
+            "ext": {"norte_code": {
+                "request_id": 0,
+                "session": "session-1",
+                "kind": {"event": "committed", "turn": 7, "version": 1}
+            }}
+        });
+        let event = server_event_from_frame(&frame).expect("standard token delta");
+        assert!(matches!(
+            event.kind,
+            norte_code_protocol::ServerEventKind::Delta {
+                turn: 7,
+                delta: norte_code_protocol::Delta::Text { index: 2, ref text }
+            } if text == "canonical"
+        ));
+    }
+
+    #[test]
+    fn rejects_an_unsupported_wire_version() {
+        let frame = serde_json::json!({
+            "version": "2.0",
+            "type": "TOKEN_DELTA",
+            "payload": {"delta": "hi", "index": 0}
+        });
+        let error = server_event_from_frame(&frame).expect_err("unsupported version");
+        assert!(error.to_string().contains("wire version"), "{error}");
+    }
+
+    #[test]
+    fn decodes_a_standard_tool_start() {
+        let frame = serde_json::json!({
+            "version": "1.0",
+            "type": "TOOL_CALL_STARTED",
+            "session_id": "session-1",
+            "turn_id": "3",
+            "payload": {
+                "tool_call_id": "call-1",
+                "tool_name": "shell",
+                "arguments": {"command": "ls"},
+                "requires_approval": false
+            }
+        });
+        let event = server_event_from_frame(&frame).expect("standard tool start");
+        assert!(matches!(
+            event.kind,
+            norte_code_protocol::ServerEventKind::ToolStarted { turn: 3, ref call_id, ref tool, .. }
+                if call_id == "call-1" && tool == "shell"
+        ));
+    }
+
+    #[test]
     fn classifies_sequence_steps() {
         assert_eq!(seq_step(None, 1), SeqStep::Apply);
         assert_eq!(seq_step(Some(4), 5), SeqStep::Apply);
@@ -1341,7 +1577,8 @@ mod tests {
             "\n",
             "data: {\"session_id\":\"session-1\",\"seq\":3,\"payload\":{\"event\":\"session_stats\",\"input_tokens\":11,\"output_tokens\":5,\"cache_read_tokens\":2,\"cache_write_tokens\":1,\"cost_usd\":0.26,\"requests\":3,\"context_used\":15,\"context_window\":100}}"
         )
-        .to_owned();
+        .to_owned()
+        .into_bytes();
         let drained = drain_sse_buffer(&mut buffer);
         assert_eq!(drained.len(), 2);
         assert!(drained[0].1, "the terminal event is flagged");
@@ -1352,6 +1589,27 @@ mod tests {
         );
         assert_eq!(drained[1].2, Some(2));
         // The partial trailing block is left for the next chunk.
-        assert!(buffer.contains("\"seq\":3"));
+        assert!(String::from_utf8_lossy(&buffer).contains("\"seq\":3"));
+    }
+
+    #[test]
+    fn keeps_a_multibyte_character_split_across_chunks() {
+        let text = "data: {\"session_id\":\"s\",\"payload\":{\"event\":\"session_created\",\"title\":\"café\"}}\n\n";
+        let bytes = text.as_bytes();
+        let split = text.find('é').expect("accented character") + 1;
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&bytes[..split]);
+        assert!(
+            drain_sse_buffer(&mut buffer).is_empty(),
+            "a partial block must wait for the rest"
+        );
+        buffer.extend_from_slice(&bytes[split..]);
+        let drained = drain_sse_buffer(&mut buffer);
+        assert_eq!(drained.len(), 1);
+        assert!(matches!(
+            drained[0].0.kind,
+            norte_code_protocol::ServerEventKind::SessionCreated { title: Some(ref title) }
+                if title == "café"
+        ));
     }
 }
