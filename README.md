@@ -97,8 +97,10 @@ client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
 
 Set `NORTE_CODE_AUTH_TOKEN` to require `Authorization: Bearer <token>` on
-WebSocket, SSE and session-command routes. Health and discovery endpoints
-remain public for orchestration probes.
+WebSocket, SSE, artifact upload and session-command routes. Health and
+discovery endpoints remain public for orchestration probes. Upload binary
+content with `POST /raep/v1/artifacts` and use the returned `id` as
+`content[].source.artifact_id` in a multimodal `USER_INPUT`.
 
 ## Documentation
 

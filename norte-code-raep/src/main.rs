@@ -8,7 +8,7 @@ use norte_code_protocol::{
     config::{Config, user_config_path},
     sqlite::{SessionDirectory, SqliteStore},
 };
-use norte_code_raep::{FileReplayStore, HostConfig, NorteCodeRaepHost, router};
+use norte_code_raep::{FileArtifactStore, FileReplayStore, HostConfig, NorteCodeRaepHost, router};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,15 +38,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     service.install_subagent_runner();
     let replay_path = database.with_extension("raep.jsonl");
     let replay_store = Arc::new(FileReplayStore::open(replay_path)?);
+    let artifact_store = Arc::new(FileArtifactStore::open(
+        database.with_extension("artifacts"),
+    )?);
     let host_config = HostConfig {
         auth_token: std::env::var("NORTE_CODE_AUTH_TOKEN").ok(),
         ..HostConfig::default()
     };
-    let host = Arc::new(NorteCodeRaepHost::with_replay_store(
-        service,
-        host_config,
-        replay_store,
-    )?);
+    let host = Arc::new(
+        NorteCodeRaepHost::with_replay_store(service, host_config, replay_store)?
+            .with_artifact_store(artifact_store),
+    );
     let app = router(host);
     let bind = std::env::var("NORTE_CODE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())

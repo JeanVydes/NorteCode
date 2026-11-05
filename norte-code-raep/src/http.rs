@@ -2,6 +2,7 @@
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
         Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -26,6 +27,7 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
     Router::new()
         .route("/raep/v1/ws", get(websocket))
         .route("/raep/v1/info", get(info))
+        .route("/raep/v1/artifacts", post(upload_artifact))
         .route("/raep/v1/health/live", get(health_live))
         .route("/raep/v1/health/ready", get(health_ready))
         .route("/raep/v1/sessions/{session_id}/events", get(events))
@@ -43,6 +45,36 @@ async fn health_live() -> StatusCode {
 
 async fn health_ready(State(_host): State<Arc<NorteCodeRaepHost>>) -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn upload_artifact(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(response) = unauthorized(&host, &headers) {
+        return response;
+    }
+    let mime_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    match host.put_artifact(mime_type, &body).await {
+        Ok(reference) => Json(json!({
+            "id": reference.id,
+            "mime_type": reference.mime_type,
+            "bytes": reference.bytes
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "accepted": false,
+                "error": {"code": "ARTIFACT_FAILED", "message": error.to_string()}
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn websocket(

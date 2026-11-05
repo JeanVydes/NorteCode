@@ -32,6 +32,8 @@ pub struct HostConfig {
     pub max_frame_bytes: u64,
     /// Optional bearer token required by operational HTTP routes.
     pub auth_token: Option<String>,
+    /// Maximum size accepted for one uploaded artifact.
+    pub max_artifact_bytes: usize,
 }
 
 impl Default for HostConfig {
@@ -42,6 +44,7 @@ impl Default for HostConfig {
             replay_capacity: 10_000,
             max_frame_bytes: 1024 * 1024,
             auth_token: None,
+            max_artifact_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -64,6 +67,9 @@ pub enum HostError {
     /// The durable replay journal could not be read or written.
     #[error("replay journal failed: {0}")]
     ReplayJournal(String),
+    /// An upload could not be stored or resolved.
+    #[error("artifact failed: {0}")]
+    Artifact(String),
 }
 
 /// Durable storage for RAEP frames.
@@ -74,6 +80,84 @@ pub trait ReplayStore: Send + Sync {
 
     /// Loads frames for one session, including frames retained before restart.
     async fn load(&self, session_id: &str) -> Result<Vec<Envelope<Value>>, HostError>;
+}
+
+/// A stored upload that can be referenced by a user input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactRef {
+    /// Opaque upload identifier.
+    pub id: String,
+    /// MIME type supplied by the client.
+    pub mime_type: String,
+    /// Number of stored bytes.
+    pub bytes: u64,
+}
+
+/// Durable storage for client-uploaded artifacts.
+#[async_trait]
+pub trait ArtifactStore: Send + Sync {
+    /// Stores bytes and returns their opaque reference.
+    async fn put(&self, mime_type: &str, bytes: &[u8]) -> Result<ArtifactRef, HostError>;
+
+    /// Resolves an opaque reference to a host-local path.
+    async fn path(&self, id: &str) -> Result<PathBuf, HostError>;
+}
+
+/// Filesystem-backed artifact storage for the RAEP server.
+pub struct FileArtifactStore {
+    root: PathBuf,
+}
+
+impl FileArtifactStore {
+    /// Opens an artifact directory, creating it when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be created.
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, HostError> {
+        let root = root.into();
+        std::fs::create_dir_all(&root).map_err(|error| HostError::Artifact(error.to_string()))?;
+        Ok(Self { root })
+    }
+
+    fn file_path(&self, id: &str) -> Result<PathBuf, HostError> {
+        if id.is_empty()
+            || id.contains('/')
+            || id.contains('\\')
+            || id.contains("..")
+            || id.chars().any(char::is_control)
+        {
+            return Err(HostError::Artifact("invalid artifact id".to_owned()));
+        }
+        Ok(self.root.join(id))
+    }
+}
+
+#[async_trait]
+impl ArtifactStore for FileArtifactStore {
+    async fn put(&self, mime_type: &str, bytes: &[u8]) -> Result<ArtifactRef, HostError> {
+        let id = format!("artifact-{}", FrameId::generate());
+        let path = self.file_path(&id)?;
+        tokio::fs::write(path, bytes)
+            .await
+            .map_err(|error| HostError::Artifact(error.to_string()))?;
+        Ok(ArtifactRef {
+            id,
+            mime_type: mime_type.to_owned(),
+            bytes: bytes.len() as u64,
+        })
+    }
+
+    async fn path(&self, id: &str) -> Result<PathBuf, HostError> {
+        let path = self.file_path(id)?;
+        if !tokio::fs::try_exists(&path)
+            .await
+            .map_err(|error| HostError::Artifact(error.to_string()))?
+        {
+            return Err(HostError::Artifact("artifact not found".to_owned()));
+        }
+        Ok(path)
+    }
 }
 
 /// A newline-delimited JSON replay journal.
@@ -167,6 +251,7 @@ pub struct NorteCodeRaepHost {
     state: Mutex<HostState>,
     events: broadcast::Sender<Envelope<Value>>,
     replay_store: Option<Arc<dyn ReplayStore>>,
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
 
 impl NorteCodeRaepHost {
@@ -194,6 +279,7 @@ impl NorteCodeRaepHost {
             state: Mutex::new(HostState::default()),
             events,
             replay_store: None,
+            artifact_store: None,
         })
     }
 
@@ -210,6 +296,36 @@ impl NorteCodeRaepHost {
         let mut host = Self::new(service, config)?;
         host.replay_store = Some(replay_store);
         Ok(host)
+    }
+
+    /// Enables durable storage for client-uploaded artifacts.
+    #[must_use]
+    pub fn with_artifact_store(mut self, artifact_store: Arc<dyn ArtifactStore>) -> Self {
+        self.artifact_store = Some(artifact_store);
+        self
+    }
+
+    /// Stores an uploaded artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when artifact storage is disabled or the upload fails.
+    pub async fn put_artifact(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<ArtifactRef, HostError> {
+        if bytes.len() > self.config.max_artifact_bytes {
+            return Err(HostError::Artifact(format!(
+                "artifact exceeds {} byte limit",
+                self.config.max_artifact_bytes
+            )));
+        }
+        self.artifact_store
+            .as_ref()
+            .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
+            .put(mime_type, bytes)
+            .await
     }
 
     /// Returns the server-owned agent service.
@@ -255,6 +371,7 @@ impl NorteCodeRaepHost {
                 "limits": {
                     "max_frame_bytes": self.config.max_frame_bytes,
                     "replay_buffer_events": self.config.replay_capacity,
+                    "max_artifact_bytes": self.config.max_artifact_bytes,
                 },
                 "heartbeat_s": 20,
                 "draining": false,
@@ -278,7 +395,8 @@ impl NorteCodeRaepHost {
             ],
             "limits": {
                 "max_frame_bytes": self.config.max_frame_bytes,
-                "replay_buffer_events": self.config.replay_capacity
+                "replay_buffer_events": self.config.replay_capacity,
+                "max_artifact_bytes": self.config.max_artifact_bytes
             }
         })
     }
@@ -479,21 +597,58 @@ impl NorteCodeRaepHost {
         input
             .validate()
             .map_err(|error| HostError::InvalidFrame(error.to_string()))?;
-        let text = match (input.prompt, input.content) {
-            (Some(text), None) => text,
+        let (text, attachments) = match (input.prompt, input.content) {
+            (Some(text), None) => (text, Vec::new()),
             (None, Some(parts)) => {
                 let mut text = String::new();
+                let mut attachments = Vec::new();
                 for part in parts {
-                    if part.kind != raep_types::Modality::Text {
-                        return Err(HostError::InvalidFrame(
-                            "non-text RAEP content requires an artifact adapter".to_owned(),
-                        ));
+                    if part.kind == raep_types::Modality::Text {
+                        text.push_str(part.text.as_deref().ok_or_else(|| {
+                            HostError::InvalidFrame("text content part is missing text".to_owned())
+                        })?);
+                        continue;
                     }
-                    text.push_str(part.text.as_deref().ok_or_else(|| {
-                        HostError::InvalidFrame("text content part is missing text".to_owned())
-                    })?);
+                    let source =
+                        part.source
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .ok_or_else(|| {
+                                HostError::InvalidFrame(
+                                    "non-text content requires an artifact source".to_owned(),
+                                )
+                            })?;
+                    let artifact_id = source
+                        .get("artifact_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            HostError::InvalidFrame(
+                                "artifact source requires artifact_id".to_owned(),
+                            )
+                        })?;
+                    let path = self
+                        .artifact_store
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HostError::Artifact("artifact storage is disabled".to_owned())
+                        })?
+                        .path(artifact_id)
+                        .await?;
+                    let mime = part.mime_type.clone().ok_or_else(|| {
+                        HostError::InvalidFrame("artifact content requires mime_type".to_owned())
+                    })?;
+                    let name = source
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(artifact_id)
+                        .to_owned();
+                    attachments.push(norte_code_protocol::Attachment {
+                        path: path.to_string_lossy().into_owned(),
+                        mime,
+                        name,
+                    });
                 }
-                text
+                (text, attachments)
             }
             _ => unreachable!("UserInput::validate enforces exactly one form"),
         };
@@ -503,7 +658,7 @@ impl NorteCodeRaepHost {
                 ClientRequestKind::SendMessage {
                     session: Some(SessionKey::new(frame.session_id.clone())),
                     text,
-                    attachments: Vec::new(),
+                    attachments,
                     budget: None,
                     reasoning: None,
                     replay: false,
