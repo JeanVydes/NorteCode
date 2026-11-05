@@ -1383,6 +1383,7 @@ impl Renderer {
         entry.push_text(&escaped);
         self.transcript.push(entry);
         self.last_char = Some('\n');
+        self.pinned.follow_tail();
     }
 
     /// Shows a message that reached the running request without the human
