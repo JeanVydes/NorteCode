@@ -72,6 +72,7 @@ use norte_code_agent::{
     EventStream, InProcessClient, ModelSpec, RuleScope, Service, VendorModels, effective_reasoning,
     model_list,
 };
+use norte_code_client::AgentClient;
 use norte_code_protocol::catalog::{Catalog, WireSchema};
 use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
@@ -629,6 +630,28 @@ fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Optio
     })
 }
 
+async fn create_session(client: &InProcessClient) -> Result<SessionKey, String> {
+    let mut stream = client
+        .submit(ClientRequest {
+            request_id: 0,
+            kind: ClientRequestKind::CreateSession { title: None },
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    while let Some(event) = stream.next().await {
+        match event.kind {
+            ServerEventKind::SessionCreated { .. } => {
+                return event
+                    .session
+                    .ok_or_else(|| "the service did not return the new session".to_owned());
+            }
+            ServerEventKind::Error { message, .. } => return Err(message),
+            _ => {}
+        }
+    }
+    Err("the service did not return the new session".to_owned())
+}
+
 /// Starts a new session and reads it from the terminal.
 ///
 /// `choice` is the provider and the model the startup flow chose, when it had
@@ -789,6 +812,7 @@ pub(crate) async fn new_session(
         .await
         .map_err(|e| e.to_string())?,
     );
+    let client = InProcessClient::new(Arc::clone(&service));
     service.install_subagent_runner();
     service.set_config_path(config_path);
     let pinned = Pinned::new();
@@ -833,10 +857,7 @@ pub(crate) async fn new_session(
     // The session exists before the first line is read, so the line's message
     // names it: a session created as a side effect of a message cannot be shown
     // in the footer before the message is sent.
-    let session = service
-        .start_session(None)
-        .await
-        .map_err(|error| error.to_string())?;
+    let session = create_session(&client).await?;
     if verbosity.at_least(Verbosity::Medium) {
         eprintln!(
             "{} {}",
@@ -849,7 +870,6 @@ pub(crate) async fn new_session(
     // catalogue, because what they offer belongs in it; the handle they were
     // given is the same one, and it now knows where to look.
     crate::plugins::attach(&service, Some(session.clone()));
-    let client = InProcessClient::new(Arc::clone(&service));
     if let Some(receiver) = input.as_mut() {
         interactive_loop(
             &service,
@@ -1170,7 +1190,7 @@ async fn resume_session(
         }
         let unit = parse_budget_unit(&args.budget_unit)?;
         let action = parse_budget_action(&args.budget_action)?;
-        let stream = service
+        let stream = client
             .submit(ClientRequest {
                 request_id: 1,
                 kind: ClientRequestKind::SetBudget {
@@ -1199,7 +1219,7 @@ async fn resume_session(
     // so the session's own rules judge it and a model it refuses is reported.
     // The provider is the session's own: a resume names a model, not a pair.
     if let Some(model) = args.model.clone() {
-        let stream = service
+        let stream = client
             .submit(ClientRequest {
                 request_id: 2,
                 kind: ClientRequestKind::SetModel {
@@ -1222,7 +1242,7 @@ async fn resume_session(
         .await?;
     }
     renderer.mark_working();
-    let stream = service
+    let stream = client
         .submit(ClientRequest {
             request_id: 2,
             kind: ClientRequestKind::Resume {

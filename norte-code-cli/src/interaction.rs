@@ -892,10 +892,12 @@ pub(crate) async fn interactive_loop(
                         break;
                     }
                 }
-                ChatCommand::Refresh => report_refresh(service, session.as_ref(), renderer).await,
+                ChatCommand::Refresh => {
+                    report_refresh(service, client, session.as_ref(), renderer).await;
+                }
                 ChatCommand::Rename { title } => match session.clone() {
                     Some(current) => {
-                        rename_session(service, current, title, renderer).await;
+                        rename_session(service, client, current, title, renderer).await;
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
@@ -927,7 +929,7 @@ pub(crate) async fn interactive_loop(
                 },
                 ChatCommand::Reasoning { scope, reasoning } => {
                     if let Some(current) = session.clone() {
-                        run_reasoning(service, current, scope, reasoning, renderer).await;
+                        run_reasoning(client, current, scope, reasoning, renderer).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -988,7 +990,7 @@ pub(crate) async fn interactive_loop(
                         let Some(choice) = choice else {
                             continue;
                         };
-                        run_model(service, current, choice, renderer, Some(input)).await;
+                        run_model(service, client, current, choice, renderer, Some(input)).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -1024,14 +1026,22 @@ pub(crate) async fn interactive_loop(
                         // pair no provider lists. Left separate once, which is why
                         // the held state never appeared at a turn boundary and
                         // neither half could be moved.
-                        switch_provider(service, &current, &provider, renderer, Some(input)).await;
+                        switch_provider(
+                            service,
+                            client,
+                            &current,
+                            &provider,
+                            renderer,
+                            Some(input),
+                        )
+                        .await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
                 }
                 ChatCommand::Jobs { action, id } => match session.clone() {
                     Some(current) => {
-                        report_jobs(service, client, current, action, id, renderer, style).await;
+                        report_jobs(client, current, action, id, renderer, style).await;
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
@@ -1122,7 +1132,7 @@ pub(crate) async fn interactive_loop(
                         renderer.notice("there is no session to delete yet; send a message first");
                         continue;
                     };
-                    match delete_current(service, &key).await {
+                    match delete_current(client, &key).await {
                         Ok(()) => {
                             // Cleared before the break, so the caller cannot
                             // write the session back: a session deleted here
@@ -1176,11 +1186,18 @@ pub(crate) async fn interactive_loop(
                 .trim_end()
                 .to_owned();
             if let Some(key) = session.as_ref() {
-                let _ = service.rename(key, &title).await;
+                let _ = drain_request(
+                    client,
+                    ClientRequestKind::RenameSession {
+                        session: key.clone(),
+                        title: title.clone(),
+                    },
+                )
+                .await;
                 renderer.set_title(title);
             }
         }
-        let stream = match service
+        let stream = match client
             .submit(ClientRequest {
                 request_id,
                 kind: ClientRequestKind::SendMessage {
@@ -1239,7 +1256,7 @@ pub(crate) async fn interactive_loop(
 }
 
 async fn run_reasoning(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     scope: ReasoningScope,
     reasoning: Reasoning,
@@ -1250,7 +1267,7 @@ async fn run_reasoning(
         scope,
         reasoning: reasoning.clone(),
     };
-    match drain_request(service, kind).await {
+    match drain_request(client, kind).await {
         Ok(events) => {
             if let Some(message) = stream_error(&events) {
                 renderer.failure(format!("could not set reasoning: {message}"));
@@ -1410,14 +1427,14 @@ fn models_panel_title(filter: &str) -> String {
 /// Steers a message into the running turn and names it, so the client can
 /// tell it apart when the engine reports it applied.
 async fn steer_text(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     text: String,
     renderer: &mut Renderer,
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let outcome = drain_request(
-        service,
+        client,
         ClientRequestKind::Steer {
             session,
             text,
@@ -1724,7 +1741,7 @@ async fn handle_live_command(
         ChatCommand::Compact => {
             renderer.notice("wait until the current turn finishes, then /compact");
         }
-        ChatCommand::Refresh => report_refresh(service, current, renderer).await,
+        ChatCommand::Refresh => report_refresh(service, client, current, renderer).await,
         ChatCommand::Mcp { action } => {
             report_mcp(service, action, renderer).await;
         }
@@ -1749,7 +1766,7 @@ async fn handle_live_command(
         },
         ChatCommand::Reasoning { scope, reasoning } => {
             if let Some(session) = current {
-                run_reasoning(service, session.clone(), scope, reasoning, renderer).await;
+                run_reasoning(client, session.clone(), scope, reasoning, renderer).await;
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
@@ -1761,7 +1778,7 @@ async fn handle_live_command(
                     // Mid-turn there is no prompt surface that can replace the
                     // running turn, so a missing key is reported by `SetModel`
                     // and the switch is made from the prompt afterwards.
-                    run_model(service, session.clone(), choice, renderer, None).await;
+                    run_model(service, client, session.clone(), choice, renderer, None).await;
                 }
             } else {
                 renderer.notice("the session is not ready yet; try again");
@@ -1771,23 +1788,14 @@ async fn handle_live_command(
             if provider.is_empty() {
                 renderer.notice("wait until the current turn finishes, then /provider");
             } else if let Some(session) = current {
-                switch_provider(service, session, &provider, renderer, None).await;
+                switch_provider(service, client, session, &provider, renderer, None).await;
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
         }
         ChatCommand::Jobs { action, id } => match current {
             Some(session) => {
-                report_jobs(
-                    service,
-                    client,
-                    session.clone(),
-                    action,
-                    id,
-                    renderer,
-                    style,
-                )
-                .await;
+                report_jobs(client, session.clone(), action, id, renderer, style).await;
             }
             None => renderer.notice("no session yet; send a message first"),
         },
@@ -1797,7 +1805,9 @@ async fn handle_live_command(
         // A restart ends the session, so it cannot wait for the turn; the
         // turn loop does it, where the boundary is known.
         ChatCommand::Rename { title } => match current {
-            Some(current) => rename_session(service, current.clone(), title, renderer).await,
+            Some(current) => {
+                rename_session(service, client, current.clone(), title, renderer).await;
+            }
             None => renderer.notice("no session yet; send a message first"),
         },
         // A restart ends the session, so it cannot wait for the turn; the
@@ -1830,11 +1840,11 @@ async fn handle_live_command(
 /// the ledgers keyed by either id. The tables carry no foreign keys, so a delete
 /// that cleared one row alone is what left requests pointing at a session the
 /// list no longer had.
-async fn delete_current(service: &Arc<Service>, session: &SessionKey) -> Result<(), String> {
+async fn delete_current(client: &dyn AgentClient, session: &SessionKey) -> Result<(), String> {
     let request = ClientRequestKind::DeleteSession {
         session: session.clone(),
     };
-    let events = drain_request(service, request).await?;
+    let events = drain_request(client, request).await?;
     if let Some(error) = stream_error(&events) {
         return Err(error);
     }
@@ -1848,6 +1858,7 @@ async fn delete_current(service: &Arc<Service>, session: &SessionKey) -> Result<
 /// for a model to agree. A bare `/rename` asks the model, from the first message
 async fn rename_session(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     title: Option<String>,
     renderer: &mut Renderer,
@@ -1878,7 +1889,7 @@ async fn rename_session(
         session: session.clone(),
         title: title.clone(),
     };
-    match drain_request(service, request).await {
+    match drain_request(client, request).await {
         Ok(events) => {
             if let Some(error) = stream_error(&events) {
                 renderer.failure(format!("could not rename: {error}"));
@@ -2001,9 +2012,10 @@ fn session_modal_rows(
     modal_rows
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn apply_tool_action(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: Option<&SessionKey>,
     renderer: &mut Renderer,
     style: Style,
@@ -2036,13 +2048,31 @@ async fn apply_tool_action(
         // A fresh session: the service creates an empty one and the loop
         // switches to it, so the next message lands in it.
         crate::modal::Action::NewSession => {
-            return match service.start_session(None).await {
-                Ok(key) => Some(key),
-                Err(error) => {
-                    renderer.failure(format!("could not start a session: {error}"));
-                    None
+            let events =
+                match drain_request(client, ClientRequestKind::CreateSession { title: None }).await
+                {
+                    Ok(events) => events,
+                    Err(error) => {
+                        renderer.failure(format!("could not start a session: {error}"));
+                        return None;
+                    }
+                };
+            for event in events {
+                match event.kind {
+                    ServerEventKind::SessionCreated { .. } => {
+                        if let Some(key) = event.session {
+                            return Some(key);
+                        }
+                    }
+                    ServerEventKind::Error { message, .. } => {
+                        renderer.failure(format!("could not start a session: {message}"));
+                        return None;
+                    }
+                    _ => {}
                 }
-            };
+            }
+            renderer.failure("the service did not return the new session".to_owned());
+            return None;
         }
         crate::modal::Action::ToggleSessionDay(day) => {
             if !renderer.session_days_expanded.remove(day) {
@@ -2089,7 +2119,7 @@ async fn apply_tool_action(
                 return None;
             };
             let choice = ModelChoice::new(provider.clone(), model.clone());
-            if run_model(service, current.clone(), choice, renderer, input).await {
+            if run_model(service, client, current.clone(), choice, renderer, input).await {
                 renderer.close_modal();
             }
             return None;
@@ -2193,7 +2223,7 @@ fn report_debug(
 /// A line that is not a limit is not thrown away: it is steered into the
 /// session, because the human may have been typing when the budget ran out.
 async fn prompt_budget_limit(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: &SessionKey,
     input: &mut InteractiveInput,
     interrupts: &mut mpsc::Receiver<()>,
@@ -2221,7 +2251,7 @@ async fn prompt_budget_limit(
                     Err(error) => {
                         renderer.notice(error);
                         renderer.notice("that is not a limit; it is steered into the session");
-                        steer_text(service, session.clone(), line.to_owned(), renderer).await;
+                        steer_text(client, session.clone(), line.to_owned(), renderer).await;
                     }
                 }
             }
@@ -2361,6 +2391,7 @@ fn plan_provider_switch(known: bool, model: Option<&str>, serves: bool) -> Provi
 /// model the session already had.
 async fn switch_provider(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: &SessionKey,
     provider: &str,
     renderer: &mut Renderer,
@@ -2397,7 +2428,7 @@ async fn switch_provider(
         ProviderSwitch::Move(model) => {
             let choice = ModelChoice::new(provider, model);
             renderer.pending_provider = None;
-            run_model(service, session.clone(), choice, renderer, input).await;
+            run_model(service, client, session.clone(), choice, renderer, input).await;
         }
     }
     // The completion follows the session: a `/model` line now offers the models
@@ -2487,6 +2518,7 @@ async fn ensure_provider_key(
 
 async fn run_model(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     choice: ModelChoice,
     renderer: &mut Renderer,
@@ -2498,7 +2530,7 @@ async fn run_model(
     // Cloned: the refresh below needs the key after the request consumed it.
     let key = session.clone();
     match drain_request(
-        service,
+        client,
         ClientRequestKind::SetModel {
             session,
             provider: choice.provider,
@@ -2679,7 +2711,6 @@ async fn handle_connection(
 /// rather than the registry read directly: the CLI has no registry, and a job
 /// may be running in a turn this client never started.
 async fn report_jobs(
-    service: &Arc<Service>,
     client: &dyn AgentClient,
     session: SessionKey,
     action: JobListAction,
@@ -2721,7 +2752,7 @@ async fn report_jobs(
             }
         }
         JobListAction::List | JobListAction::Check => {
-            let jobs = match fetch_jobs(service, session).await {
+            let jobs = match fetch_jobs(client, session).await {
                 Ok(jobs) => jobs,
                 Err(error) => {
                     renderer.failure(format!("could not list the jobs: {error}"));
@@ -2803,8 +2834,8 @@ fn job_state_label(state: JobState, style: Style) -> String {
 }
 
 /// Asks the service for the session's jobs.
-async fn fetch_jobs(service: &Arc<Service>, session: SessionKey) -> Result<Vec<JobInfo>, String> {
-    let events = drain_request(service, ClientRequestKind::ListJobs { session }).await?;
+async fn fetch_jobs(client: &dyn AgentClient, session: SessionKey) -> Result<Vec<JobInfo>, String> {
+    let events = drain_request(client, ClientRequestKind::ListJobs { session }).await?;
     for event in events {
         match event.kind {
             ServerEventKind::JobList { jobs } => return Ok(jobs),
@@ -2825,10 +2856,10 @@ async fn fetch_jobs(service: &Arc<Service>, session: SessionKey) -> Result<Vec<J
 /// channel, and why the reader selects over it.
 /// Sends one request and drains its acknowledgement.
 async fn drain_request(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     kind: ClientRequestKind,
 ) -> Result<Vec<ServerEvent>, String> {
-    let stream = service
+    let stream = client
         .submit(ClientRequest {
             request_id: 0,
             kind,
@@ -2853,12 +2884,24 @@ fn stream_error(events: &[ServerEvent]) -> Option<String> {
 /// three, and asking them to remember which is which was the mistake.
 async fn report_refresh(
     service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: Option<&SessionKey>,
     renderer: &mut Renderer,
 ) {
     report_reload(service, renderer);
-    let count = service.refresh_skills();
-    renderer.notice(format!("skills refreshed: {count}"));
+    match drain_request(client, ClientRequestKind::RefreshSkills).await {
+        Ok(events) => {
+            if let Some(message) = stream_error(&events) {
+                renderer.failure(format!("could not refresh skills: {message}"));
+            } else if let Some(count) = events.into_iter().find_map(|event| match event.kind {
+                ServerEventKind::SkillsUpdated { skills } => Some(skills),
+                _ => None,
+            }) {
+                renderer.notice(format!("skills refreshed: {count}"));
+            }
+        }
+        Err(error) => renderer.failure(format!("could not refresh skills: {error}")),
+    }
     // The connections are rebuilt, not merely retried: a server added, removed
     // or disabled in the file takes effect here, and one that is still failing
     // comes back in the failures list. A retry alone could only revive what was
@@ -3219,6 +3262,7 @@ pub(crate) async fn read_repl_line(
                 if let Some((decision, scope)) = renderer.modal_key(press)
                     && let Some(chosen) = apply_tool_action(
                         service,
+                        client,
                         session,
                         renderer,
                         style,
@@ -3526,6 +3570,7 @@ pub(crate) async fn drive_turns(
                                 if let Some((decision, scope)) = renderer.modal_key(press) {
                                     let Some(new_session) = apply_tool_action(
                                         service,
+                                        client,
                                         current.as_ref(),
                                         renderer,
                                         style,
@@ -3547,14 +3592,16 @@ pub(crate) async fn drive_turns(
                                 if let Some(session) = current.clone() {
                                     renderer.mark_cancelled();
                                     renderer.notice("cancelling the running turn…");
-                                    // Cancel directly: the service's cancel_turn signals the
-                                    // token without going through submit's request handler, which
-                                    // may be busy or blocked.
-                                    let found = service.cancel_turn(&session);
-                                    if !found {
-                                        renderer.notice(
-                                            "warning: no running turn to cancel".to_owned(),
-                                        );
+                                    if let Err(error) = client
+                                        .submit(ClientRequest {
+                                            request_id: 0,
+                                            kind: ClientRequestKind::CancelTurn { session },
+                                        })
+                                        .await
+                                    {
+                                        renderer.notice(format!(
+                                            "warning: could not cancel the turn: {error}"
+                                        ));
                                     }
                                 }
                                 continue;
@@ -3604,10 +3651,14 @@ pub(crate) async fn drive_turns(
                         renderer.notice(
                             "the running tool is being stopped; press Ctrl-C again to force quit",
                         );
-                        // Cancel directly.
-                        let found = service.cancel_turn(&session);
-                        if !found {
-                            renderer.notice("warning: no running turn to cancel".to_owned());
+                        if let Err(error) = client
+                            .submit(ClientRequest {
+                                request_id: 0,
+                                kind: ClientRequestKind::CancelTurn { session },
+                            })
+                            .await
+                        {
+                            renderer.notice(format!("warning: could not cancel the turn: {error}"));
                         }
                         continue;
                     }
@@ -3651,7 +3702,7 @@ pub(crate) async fn drive_turns(
                                 // into the transcript when the engine reports
                                 // that it landed.
                                 if let Some(id) =
-                                    steer_text(service, session, text.clone(), renderer).await
+                                    steer_text(client, session, text.clone(), renderer).await
                                 {
                                     steered.push((id, text));
                                     let waiting: Vec<String> =
@@ -3736,7 +3787,7 @@ pub(crate) async fn drive_turns(
                     && renderer.can_prompt()
                     && let (Some(receiver), Some(session)) = (input.as_deref_mut(), current.clone())
                     && let Some(limit) = prompt_budget_limit(
-                        service,
+                        client,
                         &session,
                         receiver,
                         &mut interrupt_rx,
@@ -3850,6 +3901,7 @@ mod tests {
     use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
     use crate::render::{Format, Renderer, Verbosity};
     use crate::style::Style;
+    use norte_code_client::AgentClient;
     use norte_code_protocol::ClientRequestKind;
     use norte_code_protocol::catalog::WireSchema;
 
@@ -4705,6 +4757,7 @@ mod tests {
             .expect("service"),
         );
 
+        let client = InProcessClient::new(Arc::clone(&service));
         let pinned = Pinned::new();
         let mut renderer = Renderer::new(
             Format::Text,
@@ -4714,7 +4767,7 @@ mod tests {
             Arc::clone(&pinned),
         );
 
-        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
+        let events = drain_request(&client, ClientRequestKind::CreateSession { title: None })
             .await
             .expect("create session");
         let session = events
@@ -4722,7 +4775,7 @@ mod tests {
             .find_map(|event| event.session.clone())
             .expect("session key");
         let other_session =
-            drain_request(&service, ClientRequestKind::CreateSession { title: None })
+            drain_request(&client, ClientRequestKind::CreateSession { title: None })
                 .await
                 .expect("create another session")
                 .into_iter()
@@ -4735,7 +4788,6 @@ mod tests {
         // takes, which is the thing that was wired wrong.
         let (tx, rx) = mpsc::unbounded_channel();
         let mut input = InteractiveInput::from_events(rx);
-        let client = InProcessClient::new(Arc::clone(&service));
         for line in ["/provider second", "/model other", "/exit"] {
             tx.send(EditorEvent::Line(line.to_owned(), Vec::new()))
                 .expect("line");
@@ -4783,7 +4835,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
-        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
+        use norte_code_agent::{InProcessClient, ModelFactory, ModelSpec, Service, ServiceError};
         use norte_code_protocol::catalog::Catalog;
         use norte_code_protocol::config::{ApiKey, Config};
         use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
@@ -4852,6 +4904,7 @@ mod tests {
             .expect("service"),
         );
 
+        let client = InProcessClient::new(Arc::clone(&service));
         let pinned = Pinned::new();
         let mut renderer = Renderer::new(
             Format::Text,
@@ -4860,7 +4913,7 @@ mod tests {
             Style::plain(),
             Arc::clone(&pinned),
         );
-        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
+        let events = drain_request(&client, ClientRequestKind::CreateSession { title: None })
             .await
             .expect("create session");
         let session = events
@@ -4886,7 +4939,7 @@ mod tests {
         // model the session is on, and the completion follows the held provider:
         // the next `/model` line offers `river`'s models, which is the list the
         // notice just told the person to pick from.
-        switch_provider(&service, &session, "river", &mut renderer, None).await;
+        switch_provider(&service, &client, &session, "river", &mut renderer, None).await;
         assert_eq!(renderer.pending_provider.as_deref(), Some("river"));
         let held = pinned.completion_names();
         assert_eq!(
@@ -5022,6 +5075,7 @@ mod tests {
             .expect("service"),
         );
 
+        let client = InProcessClient::new(Arc::clone(&service));
         let pinned = Pinned::new();
         let mut renderer = Renderer::new(
             Format::Text,
@@ -5035,7 +5089,7 @@ mod tests {
         let mut input = InteractiveInput::from_events(rx);
 
         // create session
-        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
+        let events = drain_request(&client, ClientRequestKind::CreateSession { title: None })
             .await
             .expect("create session");
         let session = events
@@ -5044,7 +5098,7 @@ mod tests {
             .expect("session");
 
         // send a message to start a turn
-        let stream = service
+        let stream = client
             .submit(ClientRequest {
                 request_id: 1,
                 kind: ClientRequestKind::SendMessage {
@@ -5067,7 +5121,6 @@ mod tests {
         let _ =
             tokio::time::timeout(std::time::Duration::from_millis(500), started.notified()).await;
 
-        let client = InProcessClient::new(Arc::clone(&service));
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             super::drive_turns(
