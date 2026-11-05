@@ -47,6 +47,53 @@ ready-made catalogue as a plugin:
 norte-code plugins add https://github.com/JeanVydes/catalog-plugin
 ```
 
+## RAEP server
+
+The RAEP server keeps the NorteCode harness on the server. A client does not
+send the provider request or rebuild the model history; it attaches to a
+session and sends the next user input. The server loads that session's
+durable history, appends the input, and runs the internal `generate` operation.
+
+An attach frame creates or opens a session:
+
+```json
+{
+  "version": "1.0",
+  "id": "attach-001",
+  "session_id": "",
+  "timestamp": 1730000000000,
+  "type": "session_attach",
+  "payload": {
+    "agent_id": "norte-code",
+    "create_if_missing": true,
+    "mode": "controller"
+  }
+}
+```
+
+The client then sends the user message on the returned session:
+
+```json
+{
+  "version": "1.0",
+  "id": "input-001",
+  "session_id": "session-123",
+  "timestamp": 1730000001000,
+  "type": "user_input",
+  "payload": {
+    "prompt": "Explícame cómo funciona RAEP"
+  }
+}
+```
+
+The server translates that frame to a NorteCode `SendMessage` request. The
+result is streamed as RAEP events, including text deltas, tool calls,
+approvals, questions, jobs, usage and completion. To recover events after a
+disconnect, the client attaches with `resume_from_seq`; it does not resend the
+conversation history. The `norte_code.command` extension is available when a
+client needs the complete NorteCode command surface, including model, budget,
+steering, jobs and session operations.
+
 ## Documentation
 
 - **[Guide](https://jeanvydes.github.io/NorteCode/)** — getting started,
