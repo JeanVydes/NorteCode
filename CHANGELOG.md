@@ -8,6 +8,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The remote client now detects a gap in RAEP sequence numbers, stops applying the stream and surfaces an error naming the missing frame, instead of silently splicing a discontinuous transcript. It also acknowledges the last applied sequence with `ACK`.
 - The SSE event stream now opens with `HELLO`, honors the standard `Last-Event-Id` header (with `resume_from_seq` kept as a fallback), and reports a dropped backlog as an `ERROR` with code `REPLAY_TRUNCATED` instead of silently skipping frames.
 - Attaching a session now returns `SESSION_ATTACHED` and `SESSION_STATE` with the schema-required `last_seq`, `replay` and `history_summary` fields, and no longer replays the whole transcript on a first attach.
 - Core RAEP service events now use schema-shaped standard payloads for token deltas, tool lifecycle, and turn state, and emitted frames now carry the envelope `turn_id` where available.

@@ -376,6 +376,9 @@ impl RemoteClient {
 
         let session = norte_code_protocol::SessionKey::new(session_id);
         let session_seq = Arc::clone(&self.session_seq);
+        let ack_http = self.http.clone();
+        let ack_url = self.command_url(session_id);
+        let ack_token = self.bearer_token.clone();
         let bytes = response.bytes_stream();
         let stream = stream::unfold(
             (
@@ -386,42 +389,95 @@ impl RemoteClient {
                 false,
                 session_seq,
             ),
-            |(mut bytes, mut buffer, mut pending, session, finished, session_seq)| async move {
-                loop {
-                    if let Some((event, terminal)) = pending.pop_front() {
-                        return Some((
-                            event,
-                            (
-                                bytes,
-                                buffer,
-                                pending,
-                                session,
-                                finished || terminal,
-                                session_seq,
-                            ),
-                        ));
-                    }
-                    if finished {
-                        return None;
-                    }
-                    for (event, terminal, seq) in drain_sse_buffer(&mut buffer) {
-                        if let Some(seq) = seq {
-                            let mut seqs = session_seq
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            seqs.entry(session.as_str().to_owned())
-                                .and_modify(|current| *current = (*current).max(seq))
-                                .or_insert(seq);
+            move |(mut bytes, mut buffer, mut pending, session, mut finished, session_seq)| {
+                let ack_http = ack_http.clone();
+                let ack_url = ack_url.clone();
+                let ack_token = ack_token.clone();
+                async move {
+                    loop {
+                        if let Some((event, terminal)) = pending.pop_front() {
+                            return Some((
+                                event,
+                                (
+                                    bytes,
+                                    buffer,
+                                    pending,
+                                    session,
+                                    finished || terminal,
+                                    session_seq,
+                                ),
+                            ));
                         }
-                        pending.push_back((event, terminal));
-                    }
-                    match bytes.next().await {
-                        Some(Ok(chunk)) => {
-                            buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        if finished {
+                            return None;
                         }
-                        Some(Err(_)) | None => {
-                            if pending.is_empty() {
-                                return None;
+                        let drained = drain_sse_buffer(&mut buffer);
+                        let mut last_applied = None;
+                        for (event, terminal, seq) in drained {
+                            if let Some(seq) = seq {
+                                let mut seqs = session_seq
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                match seq_step(seqs.get(session.as_str()).copied(), seq) {
+                                    SeqStep::Duplicate => continue,
+                                    SeqStep::Gap { expected } => {
+                                        drop(seqs);
+                                        finished = true;
+                                        pending.push_back((
+                                            ServerEvent {
+                                                request_id: 0,
+                                                session: Some(session.clone()),
+                                                kind: norte_code_protocol::ServerEventKind::Error {
+                                                    code: norte_code_protocol::ErrorCode::Internal,
+                                                    message: format!(
+                                                        "RAEP sequence gap: expected {expected}, received {seq}; reconnecting from {}",
+                                                        expected.saturating_sub(1)
+                                                    ),
+                                                },
+                                            },
+                                            true,
+                                        ));
+                                        break;
+                                    }
+                                    SeqStep::Apply => {}
+                                }
+                                seqs.insert(session.as_str().to_owned(), seq);
+                                drop(seqs);
+                                last_applied = Some(seq);
+                            }
+                            pending.push_back((event, terminal));
+                        }
+                        if let Some(seq) = last_applied {
+                            let mut headers = HeaderMap::new();
+                            if let Some(token) = &ack_token {
+                                headers.insert(AUTHORIZATION, token.clone());
+                            }
+                            let http = ack_http.clone();
+                            let url = ack_url.clone();
+                            tokio::spawn(async move {
+                                let _ = http
+                                    .post(url)
+                                    .headers(headers)
+                                    .json(&Envelope::new(
+                                        FrameType::Standard(StandardFrameType::Ack),
+                                        serde_json::json!({"last_seq": seq}),
+                                        timestamp_millis(),
+                                    ))
+                                    .send()
+                                    .await;
+                            });
+                        }
+                        if finished {
+                            continue;
+                        }
+                        match bytes.next().await {
+                            Some(Ok(chunk)) => {
+                                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                            }
+                            Some(Err(_)) | None => {
+                                if pending.is_empty() {
+                                    return None;
+                                }
                             }
                         }
                     }
@@ -585,6 +641,25 @@ impl AgentClient for RemoteClient {
 /// wedges the stream. Terminal events (`TurnFinished`, `TurnStopped`) are
 /// flagged but do not stop the drain: events the server sent after the
 /// terminal in the same flush must still reach the caller.
+/// Whether an arriving sequence can be applied, is a duplicate, or skipped a
+/// frame the client never saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeqStep {
+    Apply,
+    Duplicate,
+    Gap { expected: u64 },
+}
+
+fn seq_step(previous: Option<u64>, seq: u64) -> SeqStep {
+    match previous {
+        Some(previous) if seq <= previous => SeqStep::Duplicate,
+        Some(previous) if seq > previous.saturating_add(1) => SeqStep::Gap {
+            expected: previous.saturating_add(1),
+        },
+        _ => SeqStep::Apply,
+    }
+}
+
 fn drain_sse_buffer(buffer: &mut String) -> Vec<(ServerEvent, bool, Option<u64>)> {
     let mut events = Vec::new();
     while let Some(end) = buffer.find("\n\n") {
@@ -1090,6 +1165,16 @@ fn percent_encode(value: &str) -> String {
 mod tests {
     use super::*;
     use norte_code_protocol::{ClientRequestKind, SessionKey};
+
+    #[test]
+    fn classifies_sequence_steps() {
+        assert_eq!(seq_step(None, 1), SeqStep::Apply);
+        assert_eq!(seq_step(Some(4), 5), SeqStep::Apply);
+        assert_eq!(seq_step(Some(4), 4), SeqStep::Duplicate);
+        assert_eq!(seq_step(Some(4), 3), SeqStep::Duplicate);
+        assert_eq!(seq_step(Some(4), 6), SeqStep::Gap { expected: 5 });
+        assert_eq!(seq_step(Some(u64::MAX), u64::MAX), SeqStep::Duplicate);
+    }
 
     #[test]
     fn encodes_session_path_segments_without_reinterpreting_slashes() {
