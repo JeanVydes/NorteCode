@@ -9,6 +9,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Browser requests are checked against a new `allowed_origins` list: a request that carries an `Origin` header is rejected unless the origin is listed. A non-browser client sends no `Origin` and is unaffected.
+- The RAEP server now answers the session management resource: `GET /raep/v1/sessions` lists the principal's sessions, `GET /raep/v1/sessions/{session_id}` returns a `session_summary`, `POST` creates one and honors `Idempotency-Key`, `PATCH` renames it, and `DELETE` removes it. A session owned by one principal is invisible to another.
 
 ### Changed
 
