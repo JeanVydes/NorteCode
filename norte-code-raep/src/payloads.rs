@@ -13,6 +13,16 @@ use serde_json::{Value, json};
 #[allow(clippy::too_many_lines)]
 pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
     let payload = match kind {
+        ServerEventKind::SessionCreated { title } => CanonicalEvent::SessionCreated { title },
+        ServerEventKind::SessionList { sessions } => CanonicalEvent::SessionList {
+            sessions: serde_json::to_value(sessions).expect("session list is serializable"),
+        },
+        ServerEventKind::SessionDeleted => CanonicalEvent::SessionDeleted,
+        ServerEventKind::SessionRenamed { title } => CanonicalEvent::SessionRenamed { title },
+        ServerEventKind::SessionForked { from } => CanonicalEvent::SessionForked {
+            from: from.as_str(),
+        },
+        ServerEventKind::SessionSwitched => CanonicalEvent::SessionSwitched,
         ServerEventKind::TurnStarted { turn } => CanonicalEvent::TurnStarted { turn: *turn },
         ServerEventKind::Delta { turn, delta } => CanonicalEvent::TokenDelta {
             turn: *turn,
@@ -124,6 +134,45 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             cache_hit: *cache_hit,
             tools,
         },
+        ServerEventKind::Committed { turn, version } => CanonicalEvent::Committed {
+            turn: *turn,
+            version: *version,
+        },
+        ServerEventKind::MessageReplayed {
+            index,
+            role,
+            kind,
+            text,
+        } => CanonicalEvent::HistoryMessage {
+            index: *index,
+            role: serde_json::to_value(role).expect("message role is serializable"),
+            kind: serde_json::to_value(kind).expect("replay kind is serializable"),
+            text,
+        },
+        ServerEventKind::SessionTodos { todos } => CanonicalEvent::SessionTodos {
+            todos: serde_json::to_value(todos).expect("todo list is serializable"),
+        },
+        ServerEventKind::CompactionStarted { reason } => CanonicalEvent::ContextUpdate {
+            state: "started",
+            reason: Some(serde_json::to_value(reason).expect("compaction reason is serializable")),
+            compacted: None,
+            summary: None,
+            error: None,
+            north_session: None,
+        },
+        ServerEventKind::CompactionFinished {
+            compacted,
+            north_session,
+            summary,
+            error,
+        } => CanonicalEvent::ContextUpdate {
+            state: "finished",
+            reason: None,
+            compacted: Some(*compacted),
+            summary: summary.as_deref(),
+            error: error.as_deref(),
+            north_session: north_session.as_deref(),
+        },
         ServerEventKind::BudgetWarning {
             scope,
             unit,
@@ -148,6 +197,81 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             limit: *limit,
             action: serde_json::to_value(action).expect("budget action is serializable"),
         },
+        ServerEventKind::BudgetChanged { budget } => CanonicalEvent::BudgetChanged {
+            budget: budget
+                .as_ref()
+                .map(|value| serde_json::to_value(value).expect("budget is serializable")),
+        },
+        ServerEventKind::SessionStats {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd,
+            requests,
+            context_used,
+            context_window,
+        } => CanonicalEvent::SessionStats {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+            cache_read_tokens: *cache_read_tokens,
+            cache_write_tokens: *cache_write_tokens,
+            cost_usd: *cost_usd,
+            requests: *requests,
+            context_used: *context_used,
+            context_window: *context_window,
+        },
+        ServerEventKind::CostUpdated {
+            total_usd,
+            requests,
+        } => CanonicalEvent::CostUpdated {
+            total_usd: *total_usd,
+            requests: *requests,
+        },
+        ServerEventKind::CostNotReported { requests } => CanonicalEvent::CostNotReported {
+            requests: *requests,
+        },
+        ServerEventKind::SteerApplied { ids, messages } => {
+            CanonicalEvent::UserInputAccepted { ids, messages }
+        }
+        ServerEventKind::ModelChanged { provider, model } => CanonicalEvent::AgentChanged {
+            change: "model_changed",
+            provider: Some(provider),
+            model: Some(model),
+            details: None,
+        },
+        ServerEventKind::ModelQueued { provider, model } => CanonicalEvent::AgentChanged {
+            change: "model_queued",
+            provider: Some(provider),
+            model: Some(model),
+            details: None,
+        },
+        ServerEventKind::ReasoningDowngraded { from, to, reason } => CanonicalEvent::AgentChanged {
+            change: "reasoning_downgraded",
+            provider: None,
+            model: None,
+            details: Some(json!({"from": from, "to": to, "reason": reason})),
+        },
+        ServerEventKind::CatalogUpdated { models } => CanonicalEvent::AgentChanged {
+            change: "catalog_updated",
+            provider: None,
+            model: None,
+            details: Some(json!({"models": models})),
+        },
+        ServerEventKind::ModelList { models } => CanonicalEvent::AgentCatalog {
+            kind: "models",
+            entries: serde_json::to_value(models).expect("model list is serializable"),
+        },
+        ServerEventKind::SkillList { skills, warnings } => CanonicalEvent::AgentCatalog {
+            kind: "skills",
+            entries: json!({"skills": skills, "warnings": warnings}),
+        },
+        ServerEventKind::SkillsUpdated { skills } => CanonicalEvent::AgentChanged {
+            change: "skills_updated",
+            provider: None,
+            model: None,
+            details: Some(json!({"skills": skills})),
+        },
         ServerEventKind::RetryScheduled {
             turn,
             attempt,
@@ -171,9 +295,6 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             code: serde_json::to_value(code).expect("error code is serializable"),
             message,
         },
-        other => CanonicalEvent::NorteCode {
-            payload: serde_json::to_value(other).expect("protocol event is serializable"),
-        },
     };
     serde_json::to_value(payload).expect("canonical event is serializable")
 }
@@ -181,10 +302,36 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum CanonicalEvent<'a> {
+    /// A session was created.
+    SessionCreated {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: &'a Option<String>,
+    },
+    /// The current session list.
+    SessionList { sessions: Value },
+    /// A session was deleted.
+    SessionDeleted,
+    /// A session was renamed.
+    SessionRenamed { title: &'a str },
+    /// A session was forked.
+    SessionForked { from: &'a str },
+    /// The active session changed.
+    SessionSwitched,
     /// A turn began.
     TurnStarted { turn: u64 },
     /// A model token delta.
     TokenDelta { turn: u64, delta: Value },
+    /// A committed turn.
+    Committed { turn: u64, version: u64 },
+    /// A replayed history message.
+    HistoryMessage {
+        index: u64,
+        role: Value,
+        kind: Value,
+        text: &'a str,
+    },
+    /// The current session todos.
+    SessionTodos { todos: Value },
     /// A tool call began.
     ToolCallStarted {
         turn: u64,
@@ -251,6 +398,20 @@ enum CanonicalEvent<'a> {
         cache_hit: bool,
         tools: &'a Vec<String>,
     },
+    /// A context compaction lifecycle update.
+    ContextUpdate {
+        state: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        north_session: Option<&'a str>,
+    },
     /// A budget warning.
     BudgetWarning {
         scope: Value,
@@ -266,6 +427,44 @@ enum CanonicalEvent<'a> {
         limit: f64,
         action: Value,
     },
+    /// The session budget changed.
+    BudgetChanged {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        budget: Option<Value>,
+    },
+    /// Session usage totals.
+    SessionStats {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        cost_usd: f64,
+        requests: u64,
+        context_used: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
+    },
+    /// Running cost total changed.
+    CostUpdated { total_usd: f64, requests: u64 },
+    /// Provider did not report cost.
+    CostNotReported { requests: u64 },
+    /// Steering input was accepted.
+    UserInputAccepted {
+        ids: &'a Vec<String>,
+        messages: &'a Vec<String>,
+    },
+    /// Agent configuration changed.
+    AgentChanged {
+        change: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
+    },
+    /// An agent catalogue was returned.
+    AgentCatalog { kind: &'static str, entries: Value },
     /// A provider retry changed state.
     ProviderRetry {
         turn: u64,
@@ -276,8 +475,6 @@ enum CanonicalEvent<'a> {
     },
     /// A protocol error.
     Error { code: Value, message: &'a str },
-    /// An event not yet normalized by this adapter.
-    NorteCode { payload: Value },
 }
 
 #[cfg(test)]
@@ -301,13 +498,5 @@ mod tests {
         assert_eq!(payload["call_id"], "call-1");
         assert_eq!(payload["stream"], "stdout");
         assert_eq!(payload["last"], true);
-    }
-
-    #[test]
-    fn unnormalized_events_keep_their_typed_event_name() {
-        let payload = canonical_event_payload(&ServerEventKind::SessionDeleted);
-
-        assert_eq!(payload["event"], "norte_code");
-        assert_eq!(payload["payload"]["event"], "session_deleted");
     }
 }

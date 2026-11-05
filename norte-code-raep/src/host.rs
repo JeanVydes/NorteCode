@@ -885,18 +885,18 @@ impl NorteCodeRaepHost {
         kind: StandardFrameType,
         payload: Value,
     ) -> Result<Envelope<Value>, HostError> {
-        self.emit_with_extension(session_id, kind, payload, None)
+        self.emit_with_extension(session_id, standard(kind), payload, None)
             .await
     }
 
     async fn emit_with_extension(
         &self,
         session_id: &str,
-        kind: StandardFrameType,
+        kind: FrameType,
         payload: Value,
         ext: Option<Value>,
     ) -> Result<Envelope<Value>, HostError> {
-        let mut frame = Envelope::new(standard(kind), payload, now_millis());
+        let mut frame = Envelope::new(kind, payload, now_millis());
         frame.session_id = session_id.to_owned();
         frame.ext = ext;
         let mut state = self.state.lock().await;
@@ -927,7 +927,15 @@ impl NorteCodeRaepHost {
     }
 }
 
-fn frame_type_for_event(kind: &ServerEventKind) -> StandardFrameType {
+fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
+    if matches!(kind, ServerEventKind::QuestionAsked { .. }) {
+        FrameType::Extension("norte_code.question_asked".to_owned())
+    } else {
+        standard(standard_frame_type_for_event(kind))
+    }
+}
+
+fn standard_frame_type_for_event(kind: &ServerEventKind) -> StandardFrameType {
     match kind {
         ServerEventKind::Delta { .. } => StandardFrameType::TokenDelta,
         ServerEventKind::ToolStarted { .. } => StandardFrameType::ToolCallStarted,
@@ -1103,5 +1111,20 @@ mod tests {
         let host = NorteCodeRaepHost::new(service, config).expect("host");
         let error = host.put_artifact("text/plain", b"123").await;
         assert!(matches!(error, Err(HostError::Artifact(message)) if message.contains("limit")));
+    }
+
+    #[test]
+    fn questions_use_a_namespaced_server_frame() {
+        let frame = frame_type_for_event(&ServerEventKind::QuestionAsked {
+            turn: 1,
+            question: "approval".to_owned(),
+            prompt: "Continue?".to_owned(),
+            options: Vec::new(),
+            multiple: false,
+        });
+        assert_eq!(
+            frame,
+            FrameType::Extension("norte_code.question_asked".to_owned())
+        );
     }
 }
