@@ -11,7 +11,7 @@
 mod host;
 mod http;
 
-pub use host::{HostConfig, HostError, NorteCodeRaepHost};
+pub use host::{FileReplayStore, HostConfig, HostError, NorteCodeRaepHost, ReplayStore};
 pub use http::router;
 
 /// Extensions owned by the `NorteCode` server.
