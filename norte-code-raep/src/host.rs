@@ -815,6 +815,57 @@ impl NorteCodeRaepHost {
         }
     }
 
+    /// Returns the `agent_summary` for every agent this host serves.
+    #[must_use]
+    pub fn agents(&self) -> Vec<Value> {
+        let mut ids = self.services.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                let mut summary = json!({"id": id, "version": self.config.server_version});
+                if let Some(service) = self.services.get(&id)
+                    && let Some(spec) = service.default_spec()
+                    && let Some(object) = summary.as_object_mut()
+                {
+                    object.insert("provider".to_owned(), json!({"id": spec.provider}));
+                    object.insert("model".to_owned(), json!({"id": spec.model}));
+                }
+                summary
+            })
+            .collect()
+    }
+
+    /// Returns one `agent_summary` and its latest version, or `None` when the
+    /// agent is unknown.
+    #[must_use]
+    pub fn agent(&self, agent_id: &str) -> Option<Value> {
+        let summary = self
+            .agents()
+            .into_iter()
+            .find(|summary| summary["id"].as_str() == Some(agent_id))?;
+        Some(json!({
+            "agent": summary,
+            "latest_version": {
+                "version": self.config.server_version,
+                "created_at": 0,
+                "deprecated": false,
+            },
+        }))
+    }
+
+    /// Returns the versions an agent has, or `None` when the agent is unknown.
+    #[must_use]
+    pub fn agent_versions(&self, agent_id: &str) -> Option<Value> {
+        self.services.get(agent_id)?;
+        Some(json!({
+            "versions": [{
+                "version": self.config.server_version,
+                "created_at": 0,
+                "deprecated": false,
+            }],
+        }))
+    }
+
     /// Returns the configured bearer token, when transport authentication is enabled.
     #[must_use]
     pub fn auth_token(&self) -> Option<&str> {
@@ -912,6 +963,8 @@ impl NorteCodeRaepHost {
                 "capabilities": [
                     "transport.ws",
                     "transport.sse",
+                    "resume",
+                    "manage",
                     "agent.norte_code",
                     "agent.commands",
                     "events.replay",
@@ -948,6 +1001,8 @@ impl NorteCodeRaepHost {
             "capabilities": [
                 "transport.ws",
                 "transport.sse",
+                "resume",
+                "manage",
                 "agent.norte_code",
                 "agent.commands",
                 "events.replay",
