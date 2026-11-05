@@ -1337,11 +1337,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "norte-code-protocol",
- "raep-types",
- "reqwest",
- "serde_json",
  "thiserror",
- "tokio-stream",
 ]
 
 [[package]]
