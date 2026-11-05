@@ -38,6 +38,11 @@ pub struct HostConfig {
     pub auth_token: Option<String>,
     /// Optional bearer-token to principal mappings for multi-user ownership.
     pub auth_principals: HashMap<String, String>,
+    /// Browser origins allowed to call the HTTP API.
+    ///
+    /// A request that carries `Origin` is rejected unless the value is listed
+    /// here. A non-browser client sends no `Origin` and is unaffected.
+    pub allowed_origins: Vec<String>,
     /// Maximum size accepted for one uploaded artifact.
     pub max_artifact_bytes: usize,
     /// Maximum concurrent WebSocket and SSE connections.
@@ -56,6 +61,7 @@ impl Default for HostConfig {
             max_frame_bytes: 1024 * 1024,
             auth_token: None,
             auth_principals: HashMap::new(),
+            allowed_origins: Vec::new(),
             max_artifact_bytes: 16 * 1024 * 1024,
             max_connections: 256,
             command_timeout_ms: 120_000,
@@ -672,6 +678,15 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn authentication_enabled(&self) -> bool {
         self.config.auth_token.is_some() || !self.config.auth_principals.is_empty()
+    }
+
+    /// Returns whether a browser origin may call the HTTP API.
+    #[must_use]
+    pub fn origin_allowed(&self, origin: &str) -> bool {
+        self.config
+            .allowed_origins
+            .iter()
+            .any(|allowed| allowed == origin)
     }
 
     /// Attempts to reserve one long-lived transport connection.
