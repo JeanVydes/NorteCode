@@ -19,14 +19,15 @@
 //! can find later, an end reported to a model that has no call left to answer
 //! — is the host's business, and the engine knows nothing about it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use norte::{Cancellation, FnExecutor, Part, SessionId, ToolContext, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::Service;
 use super::detach::DetachRegistry;
 use super::jobs::JobRegistry;
 use super::steering::{Steered, Steering};
@@ -128,6 +129,9 @@ pub(super) struct SubagentTool {
     jobs: Arc<JobRegistry>,
     steering: Arc<Steering>,
     detaches: Arc<DetachRegistry>,
+    /// The service, so a finished subagent can start a turn of its own when
+    /// the flag is on.
+    service: Arc<RwLock<Option<Arc<Service>>>>,
     gate: Gate,
 }
 
@@ -138,6 +142,7 @@ impl SubagentTool {
         jobs: Arc<JobRegistry>,
         steering: Arc<Steering>,
         detaches: Arc<DetachRegistry>,
+        service: Arc<RwLock<Option<Arc<Service>>>>,
         max_concurrent: usize,
     ) -> Self {
         Self {
@@ -145,6 +150,7 @@ impl SubagentTool {
             jobs,
             steering,
             detaches,
+            service,
             gate: Gate {
                 cap: max_concurrent.max(1),
                 running: AtomicUsize::new(0),
@@ -273,6 +279,14 @@ impl FnExecutor<SubagentArgs, ToolOutput> for SubagentTool {
                 parent,
                 Steered::new(format!("subagent:{id}"), report(id, &outcome)),
             );
+            if let Some(service) = self
+                .service
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                service.schedule_auto_turn(parent);
+            }
         }
 
         match (detached_early, &job) {

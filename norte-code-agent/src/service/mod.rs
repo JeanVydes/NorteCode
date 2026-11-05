@@ -29,14 +29,16 @@ mod tooling;
 mod turns;
 mod workspace;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::runtime::TurnInterceptor;
 use crate::runtime::{Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, Store};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use norte::http::{HttpClient, HttpMedia};
 use norte::{
     AnyFunction, BlobStore, Layer, LayerStack, MediaAdapter, Model, ToolArgs, ToolDeclaration,
@@ -59,7 +61,7 @@ use norte_code_protocol::catalog::{Catalog, load_catalog_files};
 use norte_code_protocol::config::{ApiKey, CompactionTrigger, Config};
 use norte_code_protocol::keys::KeyStore;
 use norte_code_protocol::plugins::ContextUsage;
-use norte_code_protocol::{Reasoning, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_protocol::{Phase, Reasoning, ServerEvent, ServerEventKind, SessionKey};
 
 use crate::ServiceError;
 use crate::provider::{ModelFactory, ModelSpec};
@@ -184,6 +186,16 @@ pub struct Service {
     mcp_servers: RwLock<McpServers>,
     /// The runner the `subagent` tool asks, set once the service is built.
     subagent_runner: RwLock<Option<Arc<dyn SubagentRunner>>>,
+    /// The service reference the shell calls hold, so a finished job can
+    /// start a turn of its own when the flag is on. Set the same way the
+    /// subagent runner is.
+    job_host: Arc<RwLock<Option<Arc<Service>>>>,
+    /// Sessions with an auto-turn already running, so a second job end for the
+    /// same session does not start a duplicate one at the same time.
+    auto_turns: Mutex<BTreeSet<SessionKey>>,
+    /// The request ids handed to auto-turns, so their events are not mistaken
+    /// for a client request's.
+    auto_request_id: AtomicU64,
     budget_states: Mutex<BTreeMap<SessionKey, Arc<Mutex<BudgetBook>>>>,
     approval_rules: Arc<ApprovalRules>,
     config_path: Mutex<Option<PathBuf>>,
@@ -381,6 +393,9 @@ impl Service {
             // Connected in `with_directory`, which can await; `new` cannot.
             mcp_servers: RwLock::new(McpServers::none()),
             subagent_runner: RwLock::new(None),
+            job_host: Arc::new(RwLock::new(None)),
+            auto_turns: Mutex::new(BTreeSet::new()),
+            auto_request_id: AtomicU64::new(1 << 62),
             budget_states: Mutex::new(BTreeMap::new()),
             approval_rules,
             config_path: Mutex::new(norte_code_protocol::config::user_config_path()),
@@ -710,6 +725,7 @@ impl Service {
             Arc::clone(&self.jobs),
             Arc::clone(&self.steering),
             Arc::clone(&self.detaches),
+            Arc::clone(&self.job_host),
         );
         self.register_tool(tools, disabled, command)?;
         self.register_tool(
@@ -794,6 +810,7 @@ impl Service {
                     Arc::clone(&self.jobs),
                     Arc::clone(&self.steering),
                     Arc::clone(&self.detaches),
+                    Arc::clone(&self.job_host),
                     max_concurrent,
                 )
                 .into_declaration(),
@@ -1959,6 +1976,92 @@ impl Service {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some(Arc::new(SubagentRunnerImpl::new(Some(Arc::clone(self)))) as _);
+        *self
+            .job_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(self));
+    }
+
+    /// Schedules an auto-turn after a detached job reports its result.
+    pub(super) fn schedule_auto_turn(self: &Arc<Self>, session: norte::SessionId) {
+        if !self.config().tools.auto_turn_on_job_end {
+            return;
+        }
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            service.auto_turn_on_job_end(session).await;
+        });
+    }
+
+    /// The next request id for an auto-turn.
+    fn next_auto_request_id(&self) -> u64 {
+        self.auto_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Starts a turn on its own because a job ended with a result to read.
+    ///
+    /// The `SessionId` is the same one the tool calls got so the surface and
+    /// the service, then map it back to the key and check whether it is worth
+    /// starting: the flag is on, the session is idle, and no other auto-turn
+    /// is running for it.
+    ///
+    /// `start_turn` with `input: None` only, and then drain the events —
+    /// the client sees the turn happen through them.
+    pub(super) async fn auto_turn_on_job_end(self: &Arc<Self>, session: norte::SessionId) {
+        if !self.config().tools.auto_turn_on_job_end {
+            return;
+        }
+        let key = {
+            let sessions = self.lock_sessions();
+            sessions
+                .iter()
+                .find(|(_, record)| record.id == session)
+                .map(|(key, _)| key.clone())
+        };
+        let Some(key) = key else {
+            return;
+        };
+        {
+            let sessions = self.lock_sessions();
+            let is_idle = sessions
+                .get(&key)
+                .is_some_and(|record| record.phase == Phase::Idle);
+            if !is_idle {
+                return;
+            }
+        }
+        {
+            let mut auto_turns = self
+                .auto_turns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !auto_turns.insert(key.clone()) {
+                // An auto-turn for this session is already in progress.
+                return;
+            }
+        }
+        let request_id = self.next_auto_request_id();
+        match self
+            .start_turn(
+                request_id,
+                Some(key.clone()),
+                None,
+                Vec::new(),
+                None,
+                None,
+                false,
+            )
+            .await
+        {
+            Ok(mut stream) => while stream.next().await.is_some() {},
+            Err(error) => {
+                tracing::warn!(session = %key, %error, "auto-turn could not start");
+            }
+        }
+        self.auto_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
     }
 }
 

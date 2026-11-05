@@ -27,7 +27,7 @@
 //! without touching the turn, and cancelling the turn still kills the call.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use norte::{
@@ -36,6 +36,7 @@ use norte::{
 };
 use norte_tools::ShellRequest;
 
+use super::Service;
 use super::detach::DetachRegistry;
 use super::jobs::{JobRegistry, JobSummary};
 use super::steering::{Steered, Steering};
@@ -71,6 +72,9 @@ pub(super) struct ShellCalls {
     steering: Arc<Steering>,
     /// Where the running call's detach token is published, so `Ctrl-G` reaches it.
     detaches: Arc<DetachRegistry>,
+    /// The service, so a finished job can start a turn of its own when the
+    /// flag is on. Set the same way the subagent runner is, at startup.
+    service: Arc<RwLock<Option<Arc<Service>>>>,
 }
 
 impl ShellCalls {
@@ -80,6 +84,7 @@ impl ShellCalls {
         jobs: Arc<JobRegistry>,
         steering: Arc<Steering>,
         detaches: Arc<DetachRegistry>,
+        service: Arc<RwLock<Option<Arc<Service>>>>,
     ) -> ToolDeclaration<ShellRequest> {
         ToolDeclaration {
             name: declaration.name,
@@ -90,6 +95,7 @@ impl ShellCalls {
                 jobs,
                 steering,
                 detaches,
+                service,
             }),
         }
     }
@@ -160,6 +166,7 @@ impl FnExecutor<ShellRequest, ToolOutput> for ShellCalls {
             engine: context.progress(),
             jobs: Arc::clone(&self.jobs),
             steering: Arc::clone(&self.steering),
+            service: Arc::clone(&self.service),
             session,
             call_id,
             script,
@@ -255,6 +262,9 @@ struct ShellProgress {
     engine: Option<Arc<dyn ProgressSink>>,
     jobs: Arc<JobRegistry>,
     steering: Arc<Steering>,
+    /// The service, so a finished job can start a turn of its own when the
+    /// flag is on. Read once per job end, not per chunk.
+    service: Arc<RwLock<Option<Arc<Service>>>>,
     session: SessionId,
     call_id: CallId,
     script: String,
@@ -368,10 +378,19 @@ impl ShellProgress {
         // was answered when it let go — so it arrives as a user message: the
         // model reads it at the next safe point of the turn, or at the start of
         // the next one.
+        let session = self.session;
         self.steering.push(
-            self.session,
+            session,
             Steered::new(format!("job:{id}"), report(&id, &text)),
         );
+        if let Some(service) = self
+            .service
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            service.schedule_auto_turn(session);
+        }
     }
 }
 
@@ -437,6 +456,7 @@ mod tests {
             engine: None,
             jobs: Arc::clone(&jobs),
             steering: Arc::clone(&steering),
+            service: Arc::new(RwLock::new(None)),
             session,
             call_id,
             script: "echo hi".to_owned(),
@@ -486,6 +506,7 @@ mod tests {
             engine: None,
             jobs: Arc::clone(&jobs),
             steering: Arc::clone(&steering),
+            service: Arc::new(RwLock::new(None)),
             session,
             call_id,
             script: "echo hi".to_owned(),

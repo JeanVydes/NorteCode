@@ -788,6 +788,7 @@ pub(crate) async fn new_session(
         .await
         .map_err(|e| e.to_string())?,
     );
+    service.install_subagent_runner();
     service.set_config_path(config_path);
     let pinned = Pinned::new();
 
@@ -1100,6 +1101,7 @@ async fn resume_session(
         .await
         .map_err(|e| e.to_string())?,
     );
+    service.install_subagent_runner();
     service.set_config_path(config_path);
     let pinned = Pinned::new();
     let mut renderer = Renderer::new(
