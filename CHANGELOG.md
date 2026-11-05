@@ -8,6 +8,12 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Subagents have a separate configurable system prompt
+  (`tools.subagent.system_prompt`) while retaining the parent's skills and
+  project instructions. Child turns share the parent's request, token and
+  reported-cost budget ledger; providers that omit costs remain unsupported
+  for USD budget validation.
+
 - Plugin installation selects one `cdylib` package from a Cargo workspace.
   Single-plugin repositories remain automatic; when a workspace exposes
   several plugins, `norte-code plugins add URL --package NAME` or

@@ -539,6 +539,8 @@ impl Default for ToolsConfig {
 pub struct SubagentConfig {
     /// Whether the `subagent` tool is registered.
     pub enabled: bool,
+    /// Base system prompt for child sessions. `None` uses the built-in prompt.
+    pub system_prompt: Option<String>,
     /// Provider override for child sessions. `None` inherits the parent.
     pub provider: Option<String>,
     /// Model override for child sessions. `None` inherits the parent.
@@ -564,6 +566,7 @@ impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            system_prompt: None,
             provider: None,
             model: None,
             allow: None,
@@ -2292,11 +2295,15 @@ mod subagent_tests {
     #[test]
     fn subagent_settings_round_trip() {
         let loaded = Config::from_json(
-            r#"{"tools":{"subagent":{"enabled":true,"provider":"test","model":"scripted","allow":["read"],"deny":["shell"],"max_concurrent":5,"max_iterations":12}}}"#,
+            r#"{"tools":{"subagent":{"enabled":true,"system_prompt":"work independently","provider":"test","model":"scripted","allow":["read"],"deny":["shell"],"max_concurrent":5,"max_iterations":12}}}"#,
         )
         .expect("config");
         let config = loaded.config;
         assert!(config.tools.subagent.enabled);
+        assert_eq!(
+            config.tools.subagent.system_prompt.as_deref(),
+            Some("work independently")
+        );
         assert_eq!(config.tools.subagent.provider.as_deref(), Some("test"));
         assert_eq!(config.tools.subagent.model.as_deref(), Some("scripted"));
         assert_eq!(
