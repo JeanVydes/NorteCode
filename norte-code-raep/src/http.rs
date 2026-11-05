@@ -35,6 +35,9 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .route("/raep/v1/artifacts/{artifact_id}", get(download_artifact))
         .route("/raep/v1/health/live", get(health_live))
         .route("/raep/v1/health/ready", get(health_ready))
+        .route("/raep/v1/agents", get(list_agents))
+        .route("/raep/v1/agents/{agent_id}", get(read_agent))
+        .route("/raep/v1/agents/{agent_id}/versions", get(agent_versions))
         .route("/raep/v1/sessions", get(list_sessions).post(create_session))
         .route(
             "/raep/v1/sessions/{session_id}",
@@ -117,15 +120,19 @@ async fn telemetry(
     }
 }
 
-fn not_found() -> Response {
+fn not_found_message(message: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({
             "accepted": false,
-            "error": {"code": "NOT_FOUND", "message": "session not found"}
+            "error": {"code": "NOT_FOUND", "message": message}
         })),
     )
         .into_response()
+}
+
+fn not_found() -> Response {
+    not_found_message("session not found")
 }
 
 fn invalid(message: &str) -> Response {
@@ -137,6 +144,45 @@ fn invalid(message: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+async fn list_agents(State(host): State<Arc<NorteCodeRaepHost>>, headers: HeaderMap) -> Response {
+    if let Err(response) = principal(&host, &headers) {
+        return response;
+    }
+    Json(json!({
+        "agents": host.agents(),
+        "next_cursor": Value::Null,
+    }))
+    .into_response()
+}
+
+async fn read_agent(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Response {
+    if let Err(response) = principal(&host, &headers) {
+        return response;
+    }
+    match host.agent(&agent_id) {
+        Some(agent) => Json(agent).into_response(),
+        None => not_found_message("agent not found"),
+    }
+}
+
+async fn agent_versions(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Response {
+    if let Err(response) = principal(&host, &headers) {
+        return response;
+    }
+    match host.agent_versions(&agent_id) {
+        Some(versions) => Json(versions).into_response(),
+        None => not_found_message("agent not found"),
+    }
 }
 
 async fn list_sessions(State(host): State<Arc<NorteCodeRaepHost>>, headers: HeaderMap) -> Response {
@@ -1000,6 +1046,78 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn agent_resource_lists_reads_and_versions() {
+        let app = router(test_host(None));
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/agents")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let list: Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            list["agents"]
+                .as_array()
+                .expect("agents")
+                .iter()
+                .any(|agent| agent["id"] == "norte-code")
+        );
+
+        let read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/agents/norte-code")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(read.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(read.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let agent: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(agent["agent"]["id"], "norte-code");
+
+        let versions = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/agents/norte-code/versions")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(versions.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(versions.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let versions: Value = serde_json::from_slice(&body).expect("json");
+        assert_ne!(versions["versions"].as_array().expect("versions").len(), 0);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/agents/absent")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
