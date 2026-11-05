@@ -9,8 +9,8 @@
       "author": "Jean Vides",
       "subagent": "norte-code-subagent",
       "version": 1,
-      "default_provider": "openrouter",
-      "default_model": "stealth/crouton-alpha",
+      "default_provider": null,
+      "default_model": null,
       "compaction": {
         "enabled": true,
         "threshold": 0.9,
@@ -76,8 +76,8 @@
       "author": "Jean Vides",
       "subagent": null,
       "version": 1,
-      "default_provider": "openrouter",
-      "default_model": "cohere/north-mini-code:free",
+      "default_provider": null,
+      "default_model": null,
       "compaction": {
         "enabled": true,
         "threshold": 0.9,
