@@ -1388,6 +1388,7 @@ dependencies = [
  "norte-code-plugin-host",
  "norte-code-protocol",
  "raep-types",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

@@ -762,6 +762,107 @@ impl NorteCodeRaepHost {
         })
     }
 
+    /// Returns readiness and basic operational counters for health probes.
+    #[must_use]
+    pub fn readiness(&self) -> Value {
+        json!({
+            "status": "ready",
+            "agent_id": self.config.agent_id,
+            "agents": self.services.len(),
+            "replay": self.replay_store.is_some(),
+            "artifacts": self.artifact_store.is_some(),
+            "limits": {
+                "max_connections": self.config.max_connections,
+                "command_timeout_ms": self.config.command_timeout_ms
+            }
+        })
+    }
+
+    /// Returns a structured telemetry report for operational dashboards.
+    ///
+    /// The command remains the source of truth for the records. This method
+    /// adds stable aggregate counters without changing the streaming wire
+    /// event consumed by existing clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the telemetry command cannot be routed or its
+    /// response cannot be serialized.
+    pub async fn telemetry_report(
+        &self,
+        session: Option<&str>,
+        principal: &str,
+    ) -> Result<Value, HostError> {
+        let session_key = session.map(SessionKey::new);
+        let request = ClientRequest {
+            request_id: 0,
+            kind: ClientRequestKind::ListTelemetry {
+                session: session_key,
+            },
+        };
+        let frame = Envelope::new(
+            FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
+            serde_json::to_value(request)?,
+            now_millis(),
+        );
+        let frames = self.handle_as(frame, Some(principal)).await?;
+        let records = frames
+            .iter()
+            .find_map(|frame| match &frame.payload {
+                Value::Object(payload)
+                    if payload.get("event").and_then(Value::as_str) == Some("service_data")
+                        && payload.get("kind").and_then(Value::as_str) == Some("telemetry") =>
+                {
+                    payload.get("data").cloned()
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let rows = records.as_array().cloned().unwrap_or_default();
+        let mut input_tokens = 0_u64;
+        let mut output_tokens = 0_u64;
+        let mut cache_read_tokens = 0_u64;
+        let mut cache_write_tokens = 0_u64;
+        let mut errors = 0_u64;
+        let mut cancelled = 0_u64;
+        let mut duration_ms = 0_u64;
+        for row in &rows {
+            input_tokens += row.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            output_tokens += row
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            cache_read_tokens += row
+                .get("cache_read_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            cache_write_tokens += row
+                .get("cache_write_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            duration_ms += row.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
+            match row.get("status").and_then(Value::as_str) {
+                Some("error") => errors += 1,
+                Some("cancelled") => cancelled += 1,
+                _ => {}
+            }
+        }
+        Ok(json!({
+            "session": session,
+            "records": records,
+            "summary": {
+                "requests": rows.len(),
+                "errors": errors,
+                "cancelled": cancelled,
+                "duration_ms": duration_ms,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens
+            }
+        }))
+    }
+
     /// Handles one decoded RAEP frame.
     ///
     /// Service events are published as soon as they arrive, while the
@@ -1656,6 +1757,68 @@ mod tests {
         let host = NorteCodeRaepHost::new(service, config).expect("host");
         let error = host.put_artifact("text/plain", b"123").await;
         assert!(matches!(error, Err(HostError::Artifact(message)) if message.contains("limit")));
+    }
+
+    #[tokio::test]
+    async fn command_frames_are_idempotent_and_reject_unknown_wire_versions() {
+        let service = Arc::new(
+            Service::new(
+                norte_code_protocol::config::Config::default(),
+                Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                None,
+                Arc::new(norte_code_agent::VendorModels),
+                Arc::new(norte_code_protocol::InMemoryStore::new()),
+                Arc::new(norte::InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let host = NorteCodeRaepHost::new(service, HostConfig::default()).expect("host");
+        let mut frame = Envelope::new(
+            FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
+            serde_json::to_value(ClientRequest {
+                request_id: 1,
+                kind: ClientRequestKind::ListSessions,
+            })
+            .expect("request"),
+            1,
+        );
+        let first = host.handle(frame.clone()).await.expect("first request");
+        let second = host.handle(frame.clone()).await.expect("duplicate request");
+        assert_eq!(first, second);
+        frame.version = "unsupported".to_owned();
+        assert!(matches!(
+            host.handle(frame).await,
+            Err(HostError::InvalidFrame(message)) if message.contains("wire version")
+        ));
+    }
+
+    #[tokio::test]
+    async fn connection_limit_is_enforced_without_waiting() {
+        let service = Arc::new(
+            Service::new(
+                norte_code_protocol::config::Config::default(),
+                Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                None,
+                Arc::new(norte_code_agent::VendorModels),
+                Arc::new(norte_code_protocol::InMemoryStore::new()),
+                Arc::new(norte::InMemoryBlobStore::new()),
+                "system",
+            )
+            .expect("service"),
+        );
+        let host = NorteCodeRaepHost::new(
+            service,
+            HostConfig {
+                max_connections: 1,
+                ..HostConfig::default()
+            },
+        )
+        .expect("host");
+        let permit = host.try_connection().expect("first connection");
+        assert!(host.try_connection().is_none());
+        drop(permit);
+        assert!(host.try_connection().is_some());
     }
 
     #[test]

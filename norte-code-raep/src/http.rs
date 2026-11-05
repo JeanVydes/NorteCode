@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, HeaderValue, StatusCode},
@@ -30,6 +30,7 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
     Router::new()
         .route("/raep/v1/ws", get(websocket))
         .route("/raep/v1/info", get(info))
+        .route("/raep/v1/telemetry", get(telemetry))
         .route("/raep/v1/artifacts", post(upload_artifact))
         .route("/raep/v1/artifacts/{artifact_id}", get(download_artifact))
         .route("/raep/v1/health/live", get(health_live))
@@ -68,12 +69,42 @@ async fn info(State(host): State<Arc<NorteCodeRaepHost>>) -> Json<Value> {
     Json(host.info())
 }
 
-async fn health_live() -> StatusCode {
-    StatusCode::NO_CONTENT
+async fn health_live() -> Json<Value> {
+    Json(json!({"status": "live"}))
 }
 
-async fn health_ready(State(_host): State<Arc<NorteCodeRaepHost>>) -> StatusCode {
-    StatusCode::NO_CONTENT
+async fn health_ready(State(host): State<Arc<NorteCodeRaepHost>>) -> Json<Value> {
+    Json(host.readiness())
+}
+
+#[derive(serde::Deserialize)]
+struct TelemetryQuery {
+    session: Option<String>,
+}
+
+async fn telemetry(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host
+        .telemetry_report(query.session.as_deref(), &principal)
+        .await
+    {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "status": "error",
+                "error": {"code": "TELEMETRY_FAILED", "message": error.to_string()}
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn upload_artifact(
@@ -535,7 +566,14 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(health.status(), StatusCode::NO_CONTENT);
+        assert_eq!(health.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(health.into_body(), 1024)
+            .await
+            .expect("health body");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("health"),
+            json!({"status": "live"})
+        );
 
         let info = app
             .oneshot(
