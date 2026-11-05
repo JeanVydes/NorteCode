@@ -12,7 +12,11 @@ authors.workspace = true
 async-trait = { workspace = true }
 futures-core = { workspace = true }
 norte-code-protocol = { path = "../norte-code-protocol" }
+raep-types = { path = "../../raep/raep-types" }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio-stream = { workspace = true }
 
 [lints]
 workspace = true
