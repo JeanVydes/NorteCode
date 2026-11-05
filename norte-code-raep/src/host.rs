@@ -420,6 +420,8 @@ struct HostState {
     session_owners: HashMap<String, String>,
     artifact_owners: HashMap<String, String>,
     session_agents: HashMap<String, String>,
+    session_create_keys: HashMap<String, String>,
+    session_create_order: VecDeque<String>,
 }
 
 /// A Norte Code service exposed through the RAEP wire.
@@ -637,6 +639,180 @@ impl NorteCodeRaepHost {
             .get(session_id)
             .map_or(self.config.agent_id.as_str(), String::as_str);
         self.service_for_agent(agent_id)
+    }
+
+    /// Returns the RAEP `session_summary` for every session `principal` may see.
+    ///
+    /// A session with no recorded owner is visible to everyone; a session with
+    /// an owner is visible only to that principal.
+    pub async fn session_summaries(&self, principal: &str) -> Vec<Value> {
+        let owners = {
+            let state = self.state.lock().await;
+            state.session_owners.clone()
+        };
+        let now = now_millis();
+        self.service
+            .sessions()
+            .into_iter()
+            .filter(|info| {
+                owners
+                    .get(info.session.as_str())
+                    .is_none_or(|owner| owner == principal)
+            })
+            .map(|info| self.session_summary_value(&info, now))
+            .collect()
+    }
+
+    /// Returns one `session_summary`.
+    ///
+    /// `None` means the session does not exist or belongs to another principal,
+    /// which the HTTP resource answers as `404` rather than leaking existence.
+    pub async fn session_summary(&self, session_id: &str, principal: &str) -> Option<Value> {
+        let owner = self
+            .state
+            .lock()
+            .await
+            .session_owners
+            .get(session_id)
+            .cloned();
+        if owner.is_some_and(|owner| owner != principal) {
+            return None;
+        }
+        let info = self
+            .service
+            .sessions()
+            .into_iter()
+            .find(|info| info.session.as_str() == session_id)?;
+        Some(self.session_summary_value(&info, now_millis()))
+    }
+
+    fn session_summary_value(&self, info: &norte_code_protocol::SessionInfo, now: i64) -> Value {
+        let created_at = info
+            .created_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map_or(now, |value| value.timestamp_millis());
+        let mut summary = json!({
+            "session_id": info.session.as_str(),
+            "title_source": "user",
+            "labels": {},
+            "pinned": false,
+            "archived": false,
+            "status": "ACTIVE",
+            "agent": {
+                "id": self.config.agent_id,
+                "version": self.config.server_version,
+            },
+            "created_at": created_at,
+            "updated_at": now,
+            "last_activity_at": now,
+            "turn_count": 0,
+            "has_pending": false,
+        });
+        if let Some(title) = &info.title
+            && let Some(object) = summary.as_object_mut()
+        {
+            object.insert("title".to_owned(), Value::String(title.clone()));
+        }
+        summary
+    }
+
+    /// Creates a session through the management API and records its owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns a service error when the session cannot be created.
+    pub async fn create_session(
+        &self,
+        title: Option<String>,
+        principal: &str,
+    ) -> Result<String, HostError> {
+        let key = self
+            .service
+            .start_session(title)
+            .await
+            .map_err(|error| HostError::Service(error.to_string()))?;
+        self.claim_session(key.as_str(), principal).await?;
+        Ok(key.to_string())
+    }
+
+    /// Renames a session through the management API.
+    ///
+    /// Returns `false` when the session is unknown or belongs to another
+    /// principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a service error when the rename cannot be persisted.
+    pub async fn rename_session(
+        &self,
+        session_id: &str,
+        title: &str,
+        principal: &str,
+    ) -> Result<bool, HostError> {
+        if self.session_summary(session_id, principal).await.is_none() {
+            return Ok(false);
+        }
+        self.service
+            .rename(&SessionKey::new(session_id), title)
+            .await
+            .map_err(|error| HostError::Service(error.to_string()))?;
+        Ok(true)
+    }
+
+    /// Deletes a session through the management API.
+    ///
+    /// Returns `false` when the session is unknown or belongs to another
+    /// principal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a service error when the delete is rejected.
+    pub async fn delete_session(
+        &self,
+        session_id: &str,
+        principal: &str,
+    ) -> Result<bool, HostError> {
+        if self.session_summary(session_id, principal).await.is_none() {
+            return Ok(false);
+        }
+        self.submit_service(
+            session_id,
+            ClientRequestKind::DeleteSession {
+                session: SessionKey::new(session_id),
+            },
+        )
+        .await?;
+        self.state.lock().await.attached.remove(session_id);
+        Ok(true)
+    }
+
+    /// Returns the session a previous `Idempotency-Key` created.
+    pub async fn session_for_create_key(&self, key: &str) -> Option<String> {
+        self.state
+            .lock()
+            .await
+            .session_create_keys
+            .get(key)
+            .cloned()
+    }
+
+    /// Remembers the session created for an `Idempotency-Key`.
+    ///
+    /// The map keeps the same bound as the command idempotency cache so a
+    /// client that sends a fresh key on every create cannot grow it without
+    /// limit.
+    pub async fn remember_create_key(&self, key: &str, session_id: &str) {
+        let mut state = self.state.lock().await;
+        state
+            .session_create_keys
+            .insert(key.to_owned(), session_id.to_owned());
+        state.session_create_order.push_back(key.to_owned());
+        while state.session_create_order.len() > self.config.idempotency_capacity {
+            if let Some(oldest) = state.session_create_order.pop_front() {
+                state.session_create_keys.remove(&oldest);
+            }
+        }
     }
 
     /// Returns the configured bearer token, when transport authentication is enabled.

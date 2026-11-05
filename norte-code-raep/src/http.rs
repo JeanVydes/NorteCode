@@ -35,6 +35,13 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .route("/raep/v1/artifacts/{artifact_id}", get(download_artifact))
         .route("/raep/v1/health/live", get(health_live))
         .route("/raep/v1/health/ready", get(health_ready))
+        .route("/raep/v1/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/raep/v1/sessions/{session_id}",
+            get(read_session)
+                .patch(patch_session)
+                .delete(delete_session),
+        )
         .route("/raep/v1/sessions/{session_id}/events", get(events))
         .route("/raep/v1/sessions/{session_id}/commands", post(commands))
         .layer(RequestBodyLimitLayer::new(
@@ -107,6 +114,161 @@ async fn telemetry(
             })),
         )
             .into_response(),
+    }
+}
+
+fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "accepted": false,
+            "error": {"code": "NOT_FOUND", "message": "session not found"}
+        })),
+    )
+        .into_response()
+}
+
+fn invalid(message: &str) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "accepted": false,
+            "error": {"code": "INVALID_FRAME", "message": message}
+        })),
+    )
+        .into_response()
+}
+
+async fn list_sessions(State(host): State<Arc<NorteCodeRaepHost>>, headers: HeaderMap) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    Json(json!({
+        "sessions": host.session_summaries(&principal).await,
+        "next_cursor": Value::Null,
+    }))
+    .into_response()
+}
+
+async fn create_session(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let body = body.map_or(Value::Null, |Json(value)| value);
+    if let Some(agent) = body.get("agent_id").and_then(Value::as_str)
+        && !agent.is_empty()
+        && agent != host.agent_id()
+    {
+        return invalid(&format!("unknown agent `{agent}`"));
+    }
+    if body.get("labels").is_some_and(|value| !value.is_null()) {
+        return invalid("labels are not supported by this host");
+    }
+    let idempotency = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(key) = &idempotency
+        && let Some(session) = host.session_for_create_key(key).await
+    {
+        return match host.session_summary(&session, &principal).await {
+            Some(summary) => (StatusCode::OK, Json(summary)).into_response(),
+            None => not_found(),
+        };
+    }
+    let title = body.get("title").and_then(Value::as_str).map(str::to_owned);
+    let session = match host.create_session(title, &principal).await {
+        Ok(session) => session,
+        Err(error) => return invalid(&error.to_string()),
+    };
+    if let Some(key) = &idempotency {
+        host.remember_create_key(key, &session).await;
+    }
+    match host.session_summary(&session, &principal).await {
+        Some(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
+        None => invalid("created session could not be read back"),
+    }
+}
+
+async fn read_session(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.session_summary(&session_id, &principal).await {
+        Some(summary) => Json(summary).into_response(),
+        None => not_found(),
+    }
+}
+
+async fn patch_session(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Option<Json<Value>>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let body = body.map_or(Value::Null, |Json(value)| value);
+    let Some(object) = body.as_object() else {
+        return invalid("PATCH body must be a JSON object");
+    };
+    let mut title = None;
+    for (key, value) in object {
+        match key.as_str() {
+            "title" => {
+                let Some(text) = value.as_str() else {
+                    return invalid("title must be a string");
+                };
+                title = Some(text.to_owned());
+            }
+            "labels" | "pinned" | "archived" => {
+                if !value.is_null() {
+                    return invalid(&format!("{key} is not supported by this host"));
+                }
+            }
+            other => return invalid(&format!("unknown field `{other}`")),
+        }
+    }
+    let Some(title) = title else {
+        return invalid("PATCH must set the title");
+    };
+    match host.rename_session(&session_id, &title, &principal).await {
+        Ok(true) => match host.session_summary(&session_id, &principal).await {
+            Some(summary) => Json(summary).into_response(),
+            None => not_found(),
+        },
+        Ok(false) => not_found(),
+        Err(error) => invalid(&error.to_string()),
+    }
+}
+
+async fn delete_session(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.delete_session(&session_id, &principal).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(),
+        Err(error) => invalid(&error.to_string()),
     }
 }
 
@@ -838,6 +1000,224 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn session_resource_lists_reads_updates_and_deletes() {
+        let app = router(test_host(None));
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "create-1")
+                    .body(Body::from(
+                        r#"{"agent_id":"norte-code","title":"resource harness"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(create.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let summary: Value = serde_json::from_slice(&body).expect("json");
+        let session = summary["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_owned();
+        assert_eq!(summary["title"], "resource harness");
+        assert_eq!(summary["status"], "ACTIVE");
+        assert!(summary["created_at"].as_i64().is_some());
+
+        let repeat = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "create-1")
+                    .body(Body::from(r#"{"agent_id":"norte-code"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(repeat.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(repeat.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let repeat: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(repeat["session_id"], session);
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/sessions")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let list: Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            list["sessions"]
+                .as_array()
+                .expect("sessions")
+                .iter()
+                .any(|entry| entry["session_id"] == session)
+        );
+
+        let read = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(read.status(), StatusCode::OK);
+
+        let patch = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/raep/v1/sessions/{session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":"renamed"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(patch.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(patch.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let patched: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(patched["title"], "renamed");
+
+        let unsupported = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/raep/v1/sessions/{session}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"pinned":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unsupported.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let delete = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/raep/v1/sessions/{session}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_session_is_hidden_from_another_principal() {
+        let host = Arc::new(
+            NorteCodeRaepHost::new(
+                test_service(),
+                HostConfig {
+                    auth_principals: std::collections::HashMap::from([
+                        ("token-a".to_owned(), "alice".to_owned()),
+                        ("token-b".to_owned(), "bob".to_owned()),
+                    ]),
+                    ..HostConfig::default()
+                },
+            )
+            .expect("host"),
+        );
+        let app = router(host);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions")
+                    .header("authorization", "Bearer token-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"norte-code"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(created.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let summary: Value = serde_json::from_slice(&body).expect("json");
+        let session = summary["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_owned();
+
+        let stolen = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}"))
+                    .header("authorization", "Bearer token-b")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stolen.status(), StatusCode::NOT_FOUND);
+
+        let list = app
+            .oneshot(
+                Request::builder()
+                    .uri("/raep/v1/sessions")
+                    .header("authorization", "Bearer token-b")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let list: Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            list["sessions"].as_array().expect("sessions").is_empty(),
+            "a principal must not see another principal's sessions"
+        );
     }
 
     async fn create_session(app: &Router) -> String {
