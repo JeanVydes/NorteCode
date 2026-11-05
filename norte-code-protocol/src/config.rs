@@ -539,6 +539,14 @@ impl Default for ToolsConfig {
 pub struct SubagentConfig {
     /// Whether the `subagent` tool is registered.
     pub enabled: bool,
+    /// Provider override for child sessions. `None` inherits the parent.
+    pub provider: Option<String>,
+    /// Model override for child sessions. `None` inherits the parent.
+    pub model: Option<String>,
+    /// Tools to expose to child sessions. `None` inherits the parent's set.
+    pub allow: Option<Vec<String>>,
+    /// Tools to withhold from child sessions. `None` inherits the parent's set.
+    pub deny: Option<Vec<String>>,
     /// How many subagents may run at once.
     ///
     /// A semaphore: past this many, a new spawn is refused with an error the
@@ -556,6 +564,10 @@ impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: None,
+            model: None,
+            allow: None,
+            deny: None,
             max_concurrent: DEFAULT_SUBAGENT_MAX_CONCURRENT,
             max_iterations: None,
         }
@@ -2280,11 +2292,21 @@ mod subagent_tests {
     #[test]
     fn subagent_settings_round_trip() {
         let loaded = Config::from_json(
-            r#"{"tools":{"subagent":{"enabled":true,"max_concurrent":5,"max_iterations":12}}}"#,
+            r#"{"tools":{"subagent":{"enabled":true,"provider":"test","model":"scripted","allow":["read"],"deny":["shell"],"max_concurrent":5,"max_iterations":12}}}"#,
         )
         .expect("config");
         let config = loaded.config;
         assert!(config.tools.subagent.enabled);
+        assert_eq!(config.tools.subagent.provider.as_deref(), Some("test"));
+        assert_eq!(config.tools.subagent.model.as_deref(), Some("scripted"));
+        assert_eq!(
+            config.tools.subagent.allow.as_deref(),
+            Some(&vec!["read".to_owned()][..])
+        );
+        assert_eq!(
+            config.tools.subagent.deny.as_deref(),
+            Some(&vec!["shell".to_owned()][..])
+        );
         assert_eq!(config.tools.subagent.max_concurrent, 5);
         assert_eq!(config.tools.subagent.max_iterations, Some(12));
     }

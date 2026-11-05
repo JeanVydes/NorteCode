@@ -40,10 +40,6 @@ pub(super) struct SubagentArgs {
     pub prompt: String,
     /// The child session's title.
     pub title: Option<String>,
-    /// The provider the model asks for, or none to inherit the parent's.
-    pub provider: Option<String>,
-    /// The model the model asks for, or none to inherit the parent's.
-    pub model: Option<String>,
     /// Whether the call is let go of as a job.
     pub detach: bool,
 }

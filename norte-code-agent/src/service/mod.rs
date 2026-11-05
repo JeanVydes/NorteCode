@@ -210,7 +210,68 @@ fn withheld(disabled: &[String], name: &str) -> bool {
     disabled.iter().any(|entry| entry == name)
 }
 
+const SUBAGENT_TOOL_NAMES: &[&str] = &[
+    "read",
+    "write",
+    "edit",
+    "plan",
+    "browser_use",
+    "shell",
+    "manage_jobs",
+    "grep",
+    "todo",
+    "ask_user",
+    "subagent",
+    "web_fetch",
+    "skill",
+    "skill_resource",
+];
+
 impl Service {
+    /// Resolves the model and tool policy for a child session.
+    fn subagent_settings(
+        &self,
+        parent: &SessionKey,
+    ) -> Result<(ModelSpec, Vec<String>), ServiceError> {
+        let (_, parent_spec, _) = self.require_record(parent)?;
+        let parent_spec =
+            parent_spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
+        let config = self.config();
+        let subagent = &config.tools.subagent;
+        let spec = match (&subagent.provider, &subagent.model) {
+            (None, None) => parent_spec,
+            (provider, model) => {
+                let provider = provider.as_deref().unwrap_or(&parent_spec.provider);
+                let model = model.as_deref().unwrap_or(&parent_spec.model);
+                self.default_spec_for(&config, &self.lock_catalog(), provider, model)?
+            }
+        };
+        let parent_disabled = self
+            .lock_sessions()
+            .get(parent)
+            .map(|record| record.disabled_tools.clone())
+            .unwrap_or_default();
+        let mut disabled = parent_disabled;
+        if let Some(allow) = &subagent.allow {
+            for name in SUBAGENT_TOOL_NAMES {
+                if !allow.iter().any(|allowed| allowed == name) {
+                    disabled.push((*name).to_owned());
+                }
+            }
+        }
+        if let Some(deny) = &subagent.deny {
+            disabled.extend(deny.iter().cloned());
+        }
+        disabled.extend([
+            "ask_user".to_owned(),
+            "browser_use".to_owned(),
+            "subagent".to_owned(),
+        ]);
+        disabled.sort();
+        disabled.dedup();
+        Ok((spec, disabled))
+    }
+
     /// Builds a service with an in-memory session directory.
     ///
     /// The default spec is used for new sessions; every turn builds an engine
@@ -2082,6 +2143,7 @@ impl SubagentRunnerImpl {
 
 #[async_trait::async_trait]
 impl SubagentRunner for SubagentRunnerImpl {
+    #[allow(clippy::too_many_lines)]
     async fn run(
         &self,
         prompt: &str,
@@ -2096,9 +2158,8 @@ impl SubagentRunner for SubagentRunnerImpl {
                 is_error: true,
             };
         };
-        // The parent's key, so the child inherits its model. The parent's
-        // session id is a `SessionId`; the service maps it back to the key
-        // it holds.
+        // The parent's key lets the service resolve the configured child
+        // model and tool policy. The session id is mapped back to that key.
         let parent_key = {
             let sessions = service.lock_sessions();
             sessions
@@ -2112,7 +2173,19 @@ impl SubagentRunner for SubagentRunnerImpl {
                 is_error: true,
             };
         };
-        let child_key = match service.create_session_child(&parent_key).await {
+        let (child_spec, child_disabled) = match service.subagent_settings(&parent_key) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return SubagentOutcome {
+                    text: format!("subagent: could not resolve child settings: {error}"),
+                    is_error: true,
+                };
+            }
+        };
+        let child_key = match service
+            .create_session_child(child_spec, child_disabled)
+            .await
+        {
             Ok(key) => key,
             Err(error) => {
                 return SubagentOutcome {
