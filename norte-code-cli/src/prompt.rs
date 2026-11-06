@@ -3,9 +3,11 @@
 use std::sync::Arc;
 
 use super::{
-    ClientRequest, ClientRequestKind, Renderer, ServerEvent, ServerEventKind, Service, SessionKey,
+    ClientRequest, ClientRequestKind, Renderer, ServerEvent, ServerEventKind, SessionKey,
     StreamExt, mpsc,
 };
+use crate::remote_state::RemoteState;
+use norte_code_client::AgentClient;
 
 /// How often the question on screen is repainted while it waits for an answer.
 ///
@@ -25,7 +27,8 @@ const PLAN_REVIEW_PREFIX: &str = "NORTE_CODE_PLAN_REVIEW\n";
 /// A multi-select answer takes every marked choice, in the order they were
 /// marked, and composes them the way a single answer composes one.
 pub(crate) async fn answer_if_asked(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     pinned: &Arc<crate::input::Pinned>,
     event: &ServerEvent,
     input: Option<&mut crate::input::InteractiveInput>,
@@ -53,6 +56,7 @@ pub(crate) async fn answer_if_asked(
             eprintln!("(no interactive client; the saved plan remains pending)");
             return submit_answer(
                 service,
+                client,
                 session,
                 question,
                 "Plan review left pending".to_owned(),
@@ -63,7 +67,7 @@ pub(crate) async fn answer_if_asked(
         eprintln!("(no interactive client; answering with a note)");
         let answer =
             "(no interactive client is attached; continue with your best judgment)".to_owned();
-        return submit_answer(service, session, question, answer).await;
+        return submit_answer(service, client, session, question, answer).await;
     };
     // Plans are already saved as Markdown before this event is emitted. Show
     // that exact file content in the scrollable report modal, while the
@@ -141,12 +145,13 @@ pub(crate) async fn answer_if_asked(
             "(the question was left unanswered; continue with your best judgment)".to_owned()
         }
     };
-    submit_answer(service, session, question, answer).await
+    submit_answer(service, client, session, question, answer).await
 }
 
 /// Sends one answer and drains its acknowledgement.
 pub(crate) async fn submit_answer(
-    service: &Arc<Service>,
+    _service: &RemoteState,
+    client: &dyn AgentClient,
     session: SessionKey,
     question: String,
     answer: String,
@@ -159,50 +164,9 @@ pub(crate) async fn submit_answer(
             answer,
         },
     };
-    let mut acknowledgement = service.submit(response).await.map_err(|e| e.to_string())?;
+    let mut acknowledgement = client.submit(response).await.map_err(|e| e.to_string())?;
     while acknowledgement.next().await.is_some() {}
     Ok(false)
-}
-
-/// Asks for a secret without ever drawing it.
-///
-/// The box is the one a model question uses, already open and masked. `None`
-/// means the person left it (Escape, Ctrl-C or Ctrl-G), which is a decision and
-/// not an error. The caller owns the value: it is saved to the key store and
-/// never sent as a line or a question.
-pub(crate) async fn ask_secret(
-    prompt: &str,
-    pinned: &Arc<crate::input::Pinned>,
-    input: &mut crate::input::InteractiveInput,
-    draw: &mut impl FnMut() -> Result<(), String>,
-) -> Result<Option<String>, String> {
-    pinned.ask_masked(crate::text::terminal(prompt).into_owned());
-    draw()?;
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(QUESTION_TICK_MS));
-    let answer = loop {
-        let next = tokio::select! {
-            biased;
-            event = input.recv() => event,
-            _ = tick.tick() => {
-                draw()?;
-                continue;
-            }
-        };
-        match next {
-            Some(crate::input::EditorEvent::Question(crate::input::Answer::Typed(text))) => {
-                break Some(text);
-            }
-            Some(
-                crate::input::EditorEvent::Question(crate::input::Answer::Left)
-                | crate::input::EditorEvent::End,
-            )
-            | None => break None,
-            _ => {}
-        }
-    };
-    pinned.retire();
-    draw()?;
-    Ok(answer)
 }
 
 /// The three outcomes of waiting for one line of input.

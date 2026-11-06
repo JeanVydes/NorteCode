@@ -35,7 +35,7 @@ arbitrary code execution by design: only install sources you trust.)
 
 ## The two catalogue files
 
-Both live beside `config.json` and are yours to edit. Nothing is fetched or
+Both live beside `service.json` and are yours to edit. Nothing is fetched or
 bundled: a missing file is written empty and the next error names it.
 
 `providers.json` — who serves models, over which wires:
@@ -89,7 +89,7 @@ set and non-blank wins), then from `secrets.json` beside the config
 
 If the key is still missing when you pick a model in `/model` or `/models`,
 a masked prompt asks for it and saves it. There is no plaintext key field
-in `config.json`: the environment and the 0600 file are the sources.
+in `service.json`: the environment and the 0600 file are the sources.
 
 ## Common providers
 

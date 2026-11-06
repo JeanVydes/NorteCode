@@ -2,22 +2,24 @@
 
 use super::{
     BTreeMap, BTreeSet, Catalog, Cli, Command, Config, CostArgs, CostSummary, DateTime, McpArgs,
-    McpCommand, Path, PathBuf, PluginsArgs, PluginsCommand, RequestRecord, ResumeArgs,
-    SessionDirectory, SessionsArgs, SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand,
-    SqliteStore, Style, TelemetryArgs, Utc, by_day, by_session, by_turn, cache_percent_label,
-    discovery_roots, find_project_config, human_tokens, list_models, new_session, open_session,
-    resume_named, short, summarize, user_config_path,
+    McpCommand, Path, PathBuf, PluginsArgs, PluginsCommand, ResumeArgs, ServiceArgs,
+    ServiceCommand, SessionsArgs, SessionsCommand, SkillRegistry, SkillsArgs, SkillsCommand, Style,
+    TelemetryArgs, Utc, by_day, by_session, by_turn, cache_percent_label, discovery_roots,
+    human_tokens, list_models, new_session, open_session, resume_named, short, summarize,
 };
-use norte_code_protocol::catalog::{ensure_catalog_files, models_path, providers_path};
-use norte_code_protocol::config::{
-    add_user_mcp_server, remove_user_mcp_server, set_user_mcp_enabled,
-};
+use futures_util::StreamExt;
+use norte_code_client::AgentClient;
+use norte_code_protocol::config::{CliConfig, ServiceType, project_cli_path, user_cli_path};
 use norte_code_protocol::sqlite::RequestStatus;
+use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore};
+use std::fs::{self, OpenOptions};
+use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, Instant};
 
 #[allow(clippy::large_futures)]
 pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
-    let config_path = cli.config.clone();
-    let user_config = config_path.clone().or_else(user_config_path);
     // Where the work happens. The whole process moves, not just the tools:
     // everything downstream — the skills roots, the project instructions, the
     // tools, the sandbox — is built from the process's own directory, and one
@@ -26,11 +28,11 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     //
     // It moves before the config is loaded, so a project config in the named
     // directory is the one that applies: `norte-code ./other` picking up this
-    // directory's `.norte-code/config.json` would be the wrong project.
+    // directory's `.norte-code/cli.json` would be the wrong project.
     if let Some(dir) = cli.dir.as_deref() {
         enter_workdir(dir)?;
     }
-    let config = load_config(config_path)?;
+    let config = load_config(cli.config_path.clone())?;
     let verbose = resolve_verbosity(cli.verbose.as_deref(), &config);
     // A bare `norte-code` is the startup flow with nothing else on the line:
     // `None` is not a missing subcommand but the whole point of the command.
@@ -41,45 +43,37 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
         Command::Skills(args) => skills_command(&config, &args),
         Command::Sessions(args) => sessions_command(&args).await,
         Command::Cost(args) => cost_command(&config, &args).await,
-        Command::Telemetry(args) => telemetry_command(&args).await,
-        Command::Mcp(args) => mcp_command(&config, user_config, &args),
-        Command::Plugins(args) => Ok(plugins_command(&args)),
+        Command::Telemetry(args) => telemetry_command(&config, &args).await,
+        Command::Mcp(args) => mcp_command(&config, &args).await,
+        Command::Plugins(args) => plugins_command(&config, &args).await,
+        Command::Service(args) => service_command(&config, &args).await,
         command => {
-            // The catalogue is not optional. A session is opened on a model, a
-            // model is in `models.json` and its provider is in `providers.json`,
-            // and a process with neither has nothing to talk to. Failing here
-            // names the file to write instead of failing later on the first
-            // message.
-            let catalog = load_catalogue()?;
             match command {
                 // `new` names its model with a flag when it wants one and
                 // falls back to `default_model` when it does not, so the flow
                 // is not consulted: a session asked for on the command line is
                 // not a session the menu should ask about.
                 Command::New(args) => {
-                    new_session(config, catalog, None, args, &verbose, user_config).await
+                    new_session(config, Catalog::default(), None, args, &verbose, None).await
                 }
                 Command::Resume(args) => match args.session.clone() {
                     // A named session is resumed even with no terminal, which is
                     // what a scripted client uses.
                     Some(key) => {
-                        resume_named(config, catalog, key, args, &verbose, user_config).await
+                        resume_named(config, Catalog::default(), key, args, &verbose, None).await
                     }
                     // No key: nothing to continue until someone says what, so
                     // the startup flow asks.
-                    None => open_session(config, catalog, args, &verbose, user_config).await,
+                    None => open_session(config, Catalog::default(), args, &verbose, None).await,
                 },
-                Command::Models(args) => {
-                    let providers = providers_path()?;
-                    let models = models_path()?;
-                    list_models(&catalog, &args, &providers, &models)
-                }
+                Command::Models(args) => list_models(&config, &args).await,
                 Command::Skills(_)
                 | Command::Sessions(_)
                 | Command::Cost(_)
                 | Command::Telemetry(_)
                 | Command::Mcp(_)
-                | Command::Plugins(_) => {
+                | Command::Plugins(_)
+                | Command::Service(_) => {
                     unreachable!("these commands do not need the catalogue")
                 }
             }
@@ -87,66 +81,462 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
     }
 }
 
-/// Adds, toggles or removes an MCP server in the config file.
+/// Lists and toggles MCP servers managed by the remote service.
 ///
-/// It writes the file and stops: the process that carries the change is the one
-/// that reloads it — `/refresh` in a running client, or the next `norte-code`
-/// — and a command that also tried to connect would start a server the person
-/// has not asked to run in this process.
-fn mcp_command(
-    config: &Config,
-    config_path: Option<PathBuf>,
-    args: &McpArgs,
-) -> Result<u8, String> {
-    let path = config_path
-        .or_else(user_config_path)
-        .ok_or_else(|| "no user config path; pass --config".to_owned())?;
-    match &args.command {
-        McpCommand::List => {
-            if config.mcp_servers.is_empty() {
-                println!("no MCP server is configured");
+/// Adding or removing a server changes `service.json`, so it deliberately
+/// remains an explicit host-side operation followed by a service restart.
+async fn mcp_command(config: &Config, args: &McpArgs) -> Result<u8, String> {
+    let client = crate::remote_client(config)?;
+    let kind = match &args.command {
+        McpCommand::List => norte_code_protocol::ClientRequestKind::ListMcp,
+        McpCommand::Enable { name } => norte_code_protocol::ClientRequestKind::SetMcpActive {
+            name: name.clone(),
+            active: true,
+        },
+        McpCommand::Disable { name } => norte_code_protocol::ClientRequestKind::SetMcpActive {
+            name: name.clone(),
+            active: false,
+        },
+        McpCommand::Add { .. } | McpCommand::Remove { .. } => {
+            return Err("MCP entries are configured by the service; edit service.json and restart the service".to_owned());
+        }
+    };
+    let mut stream = client
+        .submit(norte_code_protocol::ClientRequest {
+            request_id: 0,
+            kind,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    while let Some(event) = stream.next().await {
+        match event.kind {
+            norte_code_protocol::ServerEventKind::McpList { servers, failures } => {
+                for server in servers {
+                    println!(
+                        "{}\t{}\t{}",
+                        server.name,
+                        if server.active { "enabled" } else { "disabled" },
+                        server.tools.join(",")
+                    );
+                }
+                for failure in failures {
+                    eprintln!("{}\tfailed\t{}", failure.name, failure.reason);
+                }
                 return Ok(0);
             }
-            for (name, server) in &config.mcp_servers {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    crate::text::terminal(name),
-                    if server.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                    crate::text::terminal(&server.command),
-                    crate::text::terminal(&server.args.join(" ")),
-                );
+            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            _ => {}
+        }
+    }
+    Err("the service did not return MCP status".to_owned())
+}
+
+async fn service_command(config: &Config, args: &ServiceArgs) -> Result<u8, String> {
+    match &args.command {
+        ServiceCommand::Catalog { json } => {
+            let client = crate::remote_client(config)?;
+            let models = crate::models::remote_model_list(&client).await?;
+            if *json {
+                for model in models {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&model).map_err(|error| error.to_string())?
+                    );
+                }
+            } else {
+                println!("catalogue: {} models", models.len());
+                for model in models {
+                    println!("{}/{}", model.provider, model.model);
+                }
             }
             Ok(0)
         }
-        McpCommand::Add {
-            name,
-            command,
-            args,
-        } => {
-            add_user_mcp_server(&path, name, command, args).map_err(|error| error.to_string())?;
-            println!("added mcp server `{}`", crate::text::terminal(name));
-            println!("run `/refresh` in a client, or start one, to connect it");
-            Ok(0)
+        ServiceCommand::Status => service_status(config).await,
+        ServiceCommand::Start { follow } => {
+            ensure_local_service(config)?;
+            start_local_service(config, *follow).await
         }
-        McpCommand::Enable { name } => {
-            set_user_mcp_enabled(&path, name, true).map_err(|error| error.to_string())?;
-            println!("enabled mcp server `{}`", crate::text::terminal(name));
-            Ok(0)
+        ServiceCommand::Stop => {
+            ensure_local_service(config)?;
+            stop_local_service().await
         }
-        McpCommand::Disable { name } => {
-            set_user_mcp_enabled(&path, name, false).map_err(|error| error.to_string())?;
-            println!("disabled mcp server `{}`", crate::text::terminal(name));
-            Ok(0)
+        ServiceCommand::Restart => {
+            ensure_local_service(config)?;
+            stop_local_service().await?;
+            start_local_service(config, false).await
         }
-        McpCommand::Remove { name } => {
-            remove_user_mcp_server(&path, name).map_err(|error| error.to_string())?;
-            println!("removed mcp server `{}`", crate::text::terminal(name));
-            Ok(0)
+    }
+}
+
+fn ensure_local_service(config: &Config) -> Result<(), String> {
+    if config.ui.service_type == ServiceType::Remote {
+        return Err(
+            "service lifecycle commands are only available when service_type is `local`".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn service_state_dir() -> Result<PathBuf, String> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .ok_or("cannot determine the service state directory")?;
+    let dir = base.join("norte-code");
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
+    Ok(dir)
+}
+
+fn service_pid_path() -> Result<PathBuf, String> {
+    Ok(service_state_dir()?.join("service.pid"))
+}
+
+fn service_log_path() -> Result<PathBuf, String> {
+    Ok(service_state_dir()?.join("service.log"))
+}
+
+fn running_pid() -> Result<Option<i32>, String> {
+    let path = service_pid_path()?;
+    let Ok(value) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let pid = value
+        .trim()
+        .parse::<i32>()
+        .map_err(|error| format!("invalid service pid file {}: {error}", path.display()))?;
+    let running = ProcessCommand::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("could not inspect service process: {error}"))?
+        .success();
+    let zombie = running
+        && ProcessCommand::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+            });
+    if running && !zombie {
+        Ok(Some(pid))
+    } else {
+        let _ = fs::remove_file(path);
+        Ok(None)
+    }
+}
+
+async fn start_local_service(config: &Config, follow: bool) -> Result<u8, String> {
+    if let Some(pid) = running_pid()? {
+        if service_binary_is_deleted(pid) {
+            eprintln!("restarting stale service process (pid {pid})");
+            terminate_pids(&[pid]).await?;
+            let _ = fs::remove_file(service_pid_path()?);
+        } else {
+            println!("service already running (pid {pid})");
+            if follow {
+                follow_service_log().await?;
+            }
+            return Ok(0);
         }
+    }
+    let address = service_address(&config.ui.service_url)?;
+    if let Some(pids) = listening_pids(address.port())? {
+        let process_list = pids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !confirm_kill_port(address, &process_list)? {
+            return Err(format!(
+                "port {} is occupied by process(es) {process_list}",
+                address.port()
+            ));
+        }
+
+        terminate_pids(&pids).await?;
+    }
+    let log_path = service_log_path()?;
+    let stdout_log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| format!("could not open service log: {error}"))?;
+    let stderr_log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| format!("could not open service log: {error}"))?;
+    let server = server_binary();
+    let mut child = ProcessCommand::new(&server)
+        .envs(service_bind_env(&config.ui.service_url))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log))
+        .spawn()
+        .map_err(|error| format!("could not start {}: {error}", server.display()))?;
+    fs::write(service_pid_path()?, child.id().to_string())
+        .map_err(|error| format!("could not write service pid: {error}"))?;
+    let pid = child.id();
+    wait_for_service(&mut child, address).await?;
+    let info = crate::remote_client(config)
+        .map_err(|error| error.clone())?
+        .info()
+        .await
+        .map_err(|error| {
+            let _ = fs::remove_file(service_pid_path().unwrap_or_default());
+            format!(
+                "service started but discovery failed: {error}; see {}",
+                log_path.display()
+            )
+        })?;
+    let agents = info
+        .get("agents")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let default_agent = info
+        .get("default_agent")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    println!(
+        "\
+service started
+  address:       http://{}
+  pid:           {}
+  agents:        {}
+  default agent: {}
+  log:           {}",
+        address,
+        pid,
+        agents,
+        default_agent,
+        log_path.display()
+    );
+    if follow {
+        follow_service_log().await?;
+    }
+    Ok(0)
+}
+
+fn service_binary_is_deleted(pid: i32) -> bool {
+    fs::read_link(format!("/proc/{pid}/exe"))
+        .is_ok_and(|path| path.to_string_lossy().ends_with(" (deleted)"))
+}
+
+async fn follow_service_log() -> Result<(), String> {
+    let path = service_log_path()?;
+    let mut file = fs::File::open(&path)
+        .map_err(|error| format!("could not open service log {}: {error}", path.display()))?;
+    file.seek(SeekFrom::End(0))
+        .map_err(|error| format!("could not seek service log: {error}"))?;
+    println!("following service log; press Ctrl-C to stop following");
+    loop {
+        let mut buffer = [0_u8; 8192];
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read service log: {error}"))?;
+        if bytes > 0 {
+            print!("{}", String::from_utf8_lossy(&buffer[..bytes]));
+            io::stdout()
+                .flush()
+                .map_err(|error| format!("could not flush service log: {error}"))?;
+            continue;
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nstopped following service log");
+                return Ok(());
+            }
+            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
+fn service_address(url: &str) -> Result<SocketAddr, String> {
+    let authority = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .and_then(|value| value.split('/').next())
+        .ok_or_else(|| format!("service_url must include http:// and a port: {url}"))?;
+    authority
+        .parse()
+        .map_err(|error| format!("service_url has an invalid address `{authority}`: {error}"))
+}
+
+fn listening_pids(port: u16) -> Result<Option<Vec<i32>>, String> {
+    let output = ProcessCommand::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .map_err(|error| format!("could not inspect port {port}: {error}"))?;
+    if !output.status.success() && output.stdout.is_empty() {
+        return Ok(None);
+    }
+    let mut pids = output
+        .stdout
+        .split(u8::is_ascii_whitespace)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| std::str::from_utf8(value).ok()?.parse().ok())
+        .collect::<Vec<i32>>();
+    pids.sort_unstable();
+    pids.dedup();
+    Ok((!pids.is_empty()).then_some(pids))
+}
+
+fn confirm_kill_port(address: SocketAddr, pids: &str) -> Result<bool, String> {
+    if !io::stdin().is_terminal() {
+        return Err(format!(
+            "port {} is occupied by process(es) {pids}; run this command from a terminal to confirm termination",
+            address.port()
+        ));
+    }
+    print!(
+        "port {} ({}) is occupied by process(es) {pids}. Terminate them and start Norte Code? [Y/n] ",
+        address.port(),
+        address.ip()
+    );
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("could not flush confirmation prompt: {error}"))?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| format!("could not read confirmation: {error}"))?;
+    Ok(answer.trim().is_empty()
+        || answer.eq_ignore_ascii_case("y")
+        || answer.eq_ignore_ascii_case("yes"))
+}
+
+async fn terminate_pids(pids: &[i32]) -> Result<(), String> {
+    for pid in pids {
+        let status = ProcessCommand::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not terminate port process {pid}: {error}"))?;
+        if !status.success() {
+            return Err(format!("could not terminate port process {pid}"));
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if pids.iter().all(|pid| {
+            ProcessCommand::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| !status.success())
+        }) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "port process(es) {} did not stop gracefully",
+        pids.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+async fn wait_for_service(
+    child: &mut std::process::Child,
+    address: SocketAddr,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not inspect service process: {error}"))?
+        {
+            let _ = fs::remove_file(service_pid_path()?);
+            return Err(format!(
+                "service exited during startup ({status}); inspect the service log"
+            ));
+        }
+        if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = fs::remove_file(service_pid_path()?);
+    Err(format!(
+        "service did not listen on {address} within 5 seconds; inspect the service log"
+    ))
+}
+
+fn server_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("NORTE_CODE_SERVER_BIN") {
+        return PathBuf::from(path);
+    }
+    if let Ok(cli) = std::env::current_exe()
+        && let Some(sibling) = cli.parent().map(|dir| dir.join("norte-code-server"))
+        && sibling.is_file()
+    {
+        return sibling;
+    }
+    PathBuf::from("norte-code-server")
+}
+
+fn service_bind_env(url: &str) -> Option<(&'static str, String)> {
+    let authority = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?
+        .split('/')
+        .next()?;
+    authority
+        .contains(':')
+        .then(|| ("NORTE_CODE_BIND", authority.to_owned()))
+}
+
+async fn stop_local_service() -> Result<u8, String> {
+    let Some(pid) = running_pid()? else {
+        println!("service is not running");
+        return Ok(0);
+    };
+    let status = ProcessCommand::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("could not stop service {pid}: {error}"))?;
+    if !status.success() {
+        return Err(format!("could not stop service process {pid}"));
+    }
+    for _ in 0..30 {
+        if running_pid()?.is_none() {
+            println!("service stopped");
+            return Ok(0);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!("service process {pid} did not stop gracefully"))
+}
+
+async fn service_status(config: &Config) -> Result<u8, String> {
+    if config.ui.service_type == ServiceType::Remote {
+        let client = crate::remote_client(config)?;
+        match crate::models::remote_model_list(&client).await {
+            Ok(models) => {
+                println!("remote service reachable ({} models)", models.len());
+                Ok(0)
+            }
+            Err(error) => {
+                println!("remote service unreachable: {error}");
+                Ok(1)
+            }
+        }
+    } else if let Some(pid) = running_pid()? {
+        println!("local service running (pid {pid})");
+        Ok(0)
+    } else {
+        println!("local service stopped");
+        Ok(1)
     }
 }
 
@@ -211,6 +601,7 @@ pub(crate) fn skills_command(config: &Config, args: &SkillsArgs) -> Result<u8, S
 /// The plugins are loaded when the client starts, so an installed one is used
 /// after a restart. The command says so rather than letting a person install
 /// a plugin and wonder why its command is not there.
+#[cfg(any())]
 #[allow(clippy::too_many_lines)]
 fn plugins_command(args: &PluginsArgs) -> u8 {
     match &args.command {
@@ -220,6 +611,7 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
                 println!("no plugins installed");
                 return 0;
             }
+
             let mut failed = false;
             for path in entries {
                 let file = path
@@ -342,6 +734,68 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
             }
         }
     }
+}
+
+async fn plugins_command(config: &Config, args: &PluginsArgs) -> Result<u8, String> {
+    let client = crate::remote_client(config)?;
+    let kind = match &args.command {
+        PluginsCommand::List => norte_code_protocol::ClientRequestKind::ListPlugins,
+        PluginsCommand::Add { url, package, all } => {
+            norte_code_protocol::ClientRequestKind::InstallPlugin {
+                url: url.clone(),
+                package: package.clone(),
+                all: *all,
+            }
+        }
+        PluginsCommand::Rm { name } => {
+            norte_code_protocol::ClientRequestKind::RemovePlugin { name: name.clone() }
+        }
+        PluginsCommand::Enable { name } => {
+            norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                name: name.clone(),
+                enabled: true,
+            }
+        }
+        PluginsCommand::Disable { name } => {
+            norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                name: name.clone(),
+                enabled: false,
+            }
+        }
+        PluginsCommand::Update { name } => {
+            norte_code_protocol::ClientRequestKind::UpdatePlugins { name: name.clone() }
+        }
+    };
+    let mut events = client
+        .submit(norte_code_protocol::ClientRequest {
+            request_id: 1,
+            kind,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    while let Some(event) = events.next().await {
+        match event.kind {
+            norte_code_protocol::ServerEventKind::PluginList { plugins } => {
+                for plugin in plugins {
+                    println!(
+                        "{}\t{}",
+                        plugin.name,
+                        if plugin.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                }
+            }
+            norte_code_protocol::ServerEventKind::PluginChanged { operation, name } => {
+                println!("plugin {name} {operation}");
+            }
+            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            _ => {}
+        }
+    }
+    Ok(0)
 }
 
 /// Where Norte Code keeps its database.
@@ -498,17 +952,7 @@ pub(crate) async fn cost_command(config: &Config, args: &CostArgs) -> Result<u8,
         eprintln!("cost display is off (cost.show = false)");
         return Ok(0);
     }
-    let path = database_path()?;
-    if !path.exists() {
-        println!("no cost records yet (the database is {})", path.display());
-        return Ok(0);
-    }
-    let store = SqliteStore::open(&path)
-        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
-    let records = store
-        .costs(args.session.as_deref())
-        .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let records = remote_cost_records(config, args.session.as_deref()).await?;
     if records.is_empty() {
         println!("no cost records yet");
         return Ok(0);
@@ -814,21 +1258,8 @@ fn top(groups: &BTreeMap<String, RequestSummary>) -> Vec<(&String, &RequestSumma
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String> {
-    let path = database_path()?;
-    if !path.exists() {
-        println!(
-            "no request telemetry yet (the database is {})",
-            path.display()
-        );
-        return Ok(0);
-    }
-    let store = SqliteStore::open(&path)
-        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
-    let records = store
-        .requests(args.session.as_deref())
-        .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+pub(crate) async fn telemetry_command(config: &Config, args: &TelemetryArgs) -> Result<u8, String> {
+    let records = remote_request_records(config, args.session.as_deref()).await?;
     let records: Vec<_> = records
         .into_iter()
         .filter(|record| args.provider.as_ref().is_none_or(|p| &record.provider == p))
@@ -838,6 +1269,7 @@ pub(crate) async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String
         println!("no matching request telemetry");
         return Ok(0);
     }
+
     let mut total = RequestSummary::default();
     let mut buckets: BTreeMap<String, RequestSummary> = BTreeMap::new();
     let mut providers: BTreeMap<String, RequestSummary> = BTreeMap::new();
@@ -915,6 +1347,54 @@ pub(crate) async fn telemetry_command(args: &TelemetryArgs) -> Result<u8, String
         )
     );
     Ok(0)
+}
+
+async fn remote_request_records(
+    config: &Config,
+    session: Option<&str>,
+) -> Result<Vec<RequestRecord>, String> {
+    let client = crate::remote_client(config)?;
+    let mut stream = client
+        .submit(norte_code_protocol::ClientRequest {
+            request_id: 0,
+            kind: norte_code_protocol::ClientRequestKind::ListTelemetry {
+                session: session.map(norte_code_protocol::SessionKey::new),
+            },
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    while let Some(event) = stream.next().await {
+        match event.kind {
+            norte_code_protocol::ServerEventKind::Telemetry { records } => return Ok(records),
+            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            _ => {}
+        }
+    }
+    Err("the service did not return telemetry".to_owned())
+}
+
+async fn remote_cost_records(
+    config: &Config,
+    session: Option<&str>,
+) -> Result<Vec<norte_code_protocol::costs::CostRecord>, String> {
+    let records = remote_request_records(config, session).await?;
+    Ok(records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| norte_code_protocol::costs::CostRecord {
+            session: record.session,
+            turn: record.turn,
+            index: u64::try_from(index + 1).unwrap_or(u64::MAX),
+            model: format!("{}/{}", record.provider, record.model),
+            input_tokens: record.input_tokens,
+            output_tokens: record.output_tokens,
+            reasoning_tokens: record.reasoning_tokens,
+            cache_read_tokens: record.cache_read_tokens,
+            cache_write_tokens: record.cache_write_tokens,
+            cost_usd: record.cost_usd,
+            recorded_at: record.started_at,
+        })
+        .collect())
 }
 
 /// The width of the bar that shows how many tokens a group moved.
@@ -1182,17 +1662,64 @@ pub(crate) fn resolve_verbosity(flag: Option<&str>, config: &Config) -> String {
 }
 
 pub(crate) fn load_config(path: Option<PathBuf>) -> Result<Config, String> {
-    let user = path.or_else(user_config_path);
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let project = find_project_config(&cwd);
-    let loaded = Config::load(user.as_deref(), project.as_deref()).map_err(|e| e.to_string())?;
+    let project = project_cli_path(&cwd);
+    let user = path.or_else(user_cli_path);
+    if let Some(user) = user.as_ref()
+        && !user.exists()
+    {
+        ensure_user_cli_config_at(user).map_err(|error| error.to_string())?;
+    }
+    let loaded = CliConfig::load(user.as_deref(), Some(&project)).map_err(|e| e.to_string())?;
     for warning in &loaded.warnings {
         eprintln!(
-            "warning: unknown config key `{}`",
+            "warning: unknown ui key `{}`",
             crate::text::terminal(warning)
         );
     }
-    Ok(loaded.config)
+    let mut config = Config::default();
+    config.ui = loaded.config;
+    Ok(config)
+}
+
+fn ensure_user_cli_config_at(path: &Path) -> Result<(), norte_code_protocol::config::ConfigError> {
+    if path.exists() {
+        return Ok(());
+    }
+    let contents = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../default/cli.json"));
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|source| {
+            norte_code_protocol::config::ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+    }
+    // Keep creation atomic and avoid replacing a file another process created.
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    match options.open(path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(contents.as_bytes()).map_err(|source| {
+                norte_code_protocol::config::ConfigError::Write {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(source) => {
+            return Err(norte_code_protocol::config::ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Applies `--extension KEY=JSON` values over the loaded config.
@@ -1211,47 +1738,6 @@ pub(crate) fn apply_extensions(config: &mut Config, values: &[String]) -> Result
         config.extensions.insert(key.to_owned(), value);
     }
     Ok(())
-}
-
-/// Reads the two catalogue files, naming what to write when one is missing.
-///
-/// Every command that needs a model calls this, and nothing is fetched: the
-/// files are a person's, and a plugin that builds them writes them. A file that
-/// is missing is written empty first, because the first run of a new install is
-/// exactly where this is reached, and the person is told what was written and
-/// where.
-///
-/// A plugin may offer providers and models of its own, and what it offers is
-/// added to the catalogue in memory: the files are not written, and what is
-/// there stays what the person chose.
-///
-/// # Errors
-///
-/// Returns the catalogue's own message when a file cannot be written, is
-/// unreadable, too large or malformed, and the warnings it produced when it
-/// loaded.
-pub(crate) fn load_catalogue() -> Result<Catalog, String> {
-    let providers = providers_path()?;
-    let models = models_path()?;
-    let created = ensure_catalog_files().map_err(|error| error.to_string())?;
-    if created.any() {
-        eprintln!(
-            "created {} and {}: add a provider and a model to begin",
-            providers.display(),
-            models.display()
-        );
-    }
-    let mut catalog = Catalog::load(&providers, &models).map_err(|error| error.to_string())?;
-    for warning in catalog.validate() {
-        eprintln!("warning: {}", crate::text::terminal(&warning));
-    }
-    // The plugins are loaded before the catalogue is read, because what they
-    // offer belongs in it.
-    let offered = crate::plugins::init().catalogue();
-    for skipped in catalog.extend(offered.providers, offered.models) {
-        eprintln!("warning: {}", crate::text::terminal(&skipped));
-    }
-    Ok(catalog)
 }
 
 #[cfg(test)]
@@ -1284,5 +1770,26 @@ mod tests {
         // keep behaving exactly as it did before `ui` existed.
         let config = Config::default();
         assert_eq!(resolve_verbosity(None, &config), "medium");
+    }
+
+    #[test]
+    fn remote_services_cannot_be_managed_as_local_processes() {
+        let mut config = Config::default();
+        config.ui.service_type = ServiceType::Remote;
+        let error = ensure_local_service(&config).expect_err("remote lifecycle must be rejected");
+        assert!(error.contains("service_type"));
+    }
+
+    #[test]
+    fn local_service_uses_the_configured_http_authority() {
+        assert_eq!(
+            service_bind_env("http://127.0.0.1:8899/raep"),
+            Some(("NORTE_CODE_BIND", "127.0.0.1:8899".to_owned()))
+        );
+        assert_eq!(
+            service_bind_env("https://agent.example/raep"),
+            None,
+            "a hostname without an explicit port lets the server keep its default"
+        );
     }
 }

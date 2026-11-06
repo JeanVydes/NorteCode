@@ -8,11 +8,62 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Subagents have a separate configurable system prompt
-  (`tools.subagent.system_prompt`) while retaining the parent's skills and
-  project instructions. Child turns share the parent's request, token and
-  reported-cost budget ledger; providers that omit costs remain unsupported
-  for USD budget validation.
+- `ui.queue_mode` in `cli.json` chooses what a message typed while a turn runs does: `reject` starts a new turn, `queue` steers into the running one, and `interrupt` cancels the turn first. `Steer` now carries the policy, and the RAEP host maps `USER_INPUT.queue_policy` onto it.
+- A steering message that reached the request in flight is now also reported as a standard `USER_INPUT_ACCEPTED` frame, with the accepted `content` and an `origin` (`kind: "user"`); the queued-input limit (`limits.max_queued_inputs`, default 8) now fails with `SESSION_BUSY` instead of growing the queue without bound.
+- Browser requests are checked against a new `allowed_origins` list: a request that carries an `Origin` header is rejected unless the origin is listed. A non-browser client sends no `Origin` and is unaffected.
+- The RAEP server now answers the session management resource: `GET /raep/v1/sessions` lists the principal's sessions, `GET /raep/v1/sessions/{session_id}` returns a `session_summary`, `POST` creates one and honors `Idempotency-Key`, `PATCH` renames it, and `DELETE` removes it. A session owned by one principal is invisible to another.
+- The RAEP server now serves the read-only agent resource: `GET /raep/v1/agents`, `GET /raep/v1/agents/{agent_id}` and `GET /raep/v1/agents/{agent_id}/versions`. `HELLO` and `/raep/v1/info` now advertise `manage` and `resume` because both are implemented.
+
+### Changed
+
+- A streaming client request now waits for the command POST and reports a non-2xx answer instead of ignoring it in a detached task, so a rejected message no longer looks like an empty stream.
+- A streaming client request no longer stalls until the turn ends: the command POST runs in the background while SSE is consumed immediately, eliminating the ~10s delay before output. A failed command is still reported as an error event.
+- The remote client no longer reports a false sequence gap on every message: control frames such as `SESSION_ATTACHED` and `SESSION_STATE` advance the sequence cursor even though they are not Norte Code events.
+- The RAEP server keeps idempotent command results in a bounded cache, so a long-lived session cannot grow it without limit, and job progress frames now carry the envelope `job_id`.
+- The remote client now validates the RAEP wire version and reads the standard payload before the `ext.norte_code` compatibility copy, so a server that follows the spec no longer depends on the extension. SSE chunks are buffered as bytes, which keeps a multi-byte character split across chunks from being replaced with `�`.
+- Events without a faithful standard frame are now sent as namespaced extensions instead of being forced into unrelated standard frames, so no standard frame carries a payload the spec does not define. Tool output now uses `TOOL_OUTPUT_DELTA`, a job listing uses `JOB_LIST_RESULT`, and replayed history uses `HISTORY_PAGE`.
+- The remote client now detects a gap in RAEP sequence numbers, stops applying the stream and surfaces an error naming the missing frame, instead of silently splicing a discontinuous transcript. It also acknowledges the last applied sequence with `ACK`.
+- The SSE event stream now opens with `HELLO`, honors the standard `Last-Event-Id` header (with `resume_from_seq` kept as a fallback), and reports a dropped backlog as an `ERROR` with code `REPLAY_TRUNCATED` instead of silently skipping frames.
+- Attaching a session now returns `SESSION_ATTACHED` and `SESSION_STATE` with the schema-required `last_seq`, `replay` and `history_summary` fields, and no longer replays the whole transcript on a first attach.
+- Core RAEP service events now use schema-shaped standard payloads for token deltas, tool lifecycle, and turn state, and emitted frames now carry the envelope `turn_id` where available.
+- Sending a message no longer replays the whole session history into the transcript: the client now tracks the last RAEP sequence per session and reopens the event stream with `resume_from_seq`, so the server only sends frames after the cursor.
+- The event stream now drains events buffered after `TurnFinished` in wire order instead of stopping at the terminal, so trailing usage and stats events are no longer lost.
+- Sending a message now returns the transcript view to the tail, so the fresh message and its answer are not hidden behind an earlier scroll.
+- The session line at connect time and the final newline now go through the frame instead of bare writes, which left doubled fragments on the alternate screen.
+
+- The RAEP server now exposes JSON liveness/readiness data, a structured
+  telemetry report with aggregate counters, and an end-to-end harness that
+  starts the real `norte-code-server` binary and exercises HTTP plus SSE.
+- The server harness covers idempotent commands, wire-version rejection,
+  connection limits, session creation, replay attachment and telemetry
+  delivery over SSE.
+- Medium-verbosity transcript replay no longer exposes assistant reasoning,
+  and the default agent prompt avoids emitting identity or instruction-hierarchy
+  narration as conversation text.
+
+- `/refresh` and `/reload` now reread only the client's `cli.json`; service
+  configuration, catalogues, skills and MCP servers require `service restart`.
+- The RAEP replay journal uses a separate SQLite database from session data to
+  prevent concurrent event and session writes from locking each other.
+
+### Deferred
+
+- Production exposure still needs TLS/reverse-proxy guidance, credential
+  rotation, per-agent authorization policy and explicit CORS/origin controls.
+
+### Added
+
+- Remote sessions now expose persisted telemetry and tool rules through the
+  RAEP extension contract, so `/telemetry`, `/tools`, `/allow` and `/deny`
+  operate against the service. Tool decisions are deterministic; the removed
+  Approval rules are now explicit `allow`/`deny` decisions handled by the
+  remote service; there is no interactive `approval_mode` setting.
+
+- Reusable halftone line, pie and radar charts in the CLI telemetry panel,
+  with shared `ui.charts` contrast, density and dot-size settings.
+
+- Agents can name a separate configured agent for delegated subagent turns;
+  leaving `subagent` null inherits the parent's provider and model.
 
 - Plugin installation selects one `cdylib` package from a Cargo workspace.
   Single-plugin repositories remain automatic; when a workspace exposes
@@ -86,9 +137,9 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   when they finish. Enable `tools.auto_turn_on_job_end` to let the model read
   the queued result without waiting for another user message; it is disabled
   by default to avoid unrequested token usage.
-- Subagents can use a configured provider/model and tool allow/deny policy.
-  Missing values inherit the parent session, while `ask_user`, `browser_use`
-  and nested `subagent` delegation are always unavailable to children.
+- Subagents can use another configured agent's provider/model and disabled-tool
+  policy; `ask_user`, `browser_use` and nested `subagent` delegation remain
+  unavailable to children.
 
 - The model can delegate one turn to a subagent. The `subagent` tool starts
   a new session, runs one turn on it, and returns what it said; the child
@@ -96,8 +147,8 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `detach: true` the run becomes a job the registry holds, like a detached
   shell: `manage_jobs` reads and stops it, and its result arrives as a
   message when it ends. A child never has `subagent`, so nesting stops at
-  one. It is off by default and capped at three concurrent runs; both are
-  configured under `tools.subagent`.
+  one. It is capped at three concurrent runs and is controlled through the
+  selected agent's `tools.disabled` list.
 
 ### Fixed
 

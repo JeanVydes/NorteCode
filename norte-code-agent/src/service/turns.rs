@@ -4,6 +4,7 @@
 //! cost. The steering messages the running turns have not reached are handed
 //! to the engine here, at the boundary where the turn begins.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Utc;
@@ -31,9 +32,9 @@ use super::compaction::{
     COMPACTION_SAFE_POINT, CompactionGate, is_compaction_abort, is_compaction_message, used_context,
 };
 use super::mapping::{
-    call_arguments, configured_budget, emit, error_code, reported_cost, request_metrics,
-    retry_plan, shorten_tool_output, stream_label, to_delta, to_phase, to_usage, tool_error,
-    tool_result_text,
+    ToolResultText, call_arguments, configured_budget, emit, error_code, reported_cost,
+    request_metrics, retry_plan, shorten_tool_output, stream_label, to_delta, to_phase, to_usage,
+    tool_result_index,
 };
 use super::models::resolve_reasoning;
 
@@ -98,11 +99,15 @@ impl Service {
                 .ok_or(ServiceError::Unsupported("no model is configured"))?;
             (key, nid, spec)
         };
+        // A session has one durable turn owner. Without this gate, two
+        // simultaneous messages can both read version N, then one loses its
+        // optimistic commit at N+1. Steering remains independent and can still
+        // be queued while the owner is running.
+        let turn_guard = self.turn_lock(&key).lock_owned().await;
         // Registered before the first await: a cancel that lands while the
         // turn boundary compacts must survive the compaction, not be lost.
         let cancellation = CancellationToken::new();
-        self.lock_cancels()
-            .insert(key.clone(), cancellation.clone());
+        let cancel_generation = self.register_cancel(key.clone(), cancellation.clone());
         let result: Result<EventStream, ServiceError> = async {
             let mut leading = Vec::new();
             if let Some(changed) = self.apply_pending_model(request_id, &key).await? {
@@ -250,7 +255,7 @@ impl Service {
                 // that is looking at the approval it owes.
                 let phase = to_phase(state.phase);
                 self.set_phase(&key, phase).await;
-                self.lock_cancels().remove(&key);
+                self.remove_cancel(&key, cancel_generation);
                 let stream: EventStream = Box::pin(futures_util::stream::iter(vec![
                     ServerEvent::new(
                         request_id,
@@ -286,6 +291,7 @@ impl Service {
             let this = Arc::clone(self);
             let task_key = key.clone();
             tokio::spawn(async move {
+                let _turn_guard = turn_guard;
                 let runner = Arc::clone(&this);
                 let result = runner
                     .run_turn(
@@ -314,7 +320,7 @@ impl Service {
                         ))
                         .await;
                 }
-                this.lock_cancels().remove(&task_key);
+                this.remove_cancel(&task_key, cancel_generation);
             });
 
             Ok(Box::pin(futures_util::stream::iter(leading).chain(
@@ -325,7 +331,7 @@ impl Service {
         }
         .await;
         if result.is_err() {
-            self.lock_cancels().remove(&key);
+            self.remove_cancel(&key, cancel_generation);
         }
         result
     }
@@ -433,6 +439,7 @@ impl Service {
             let mut interrupted = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
+            let mut tool_results: Option<HashMap<String, ToolResultText>> = None;
 
             while let Some(event) = running_turn.next().await {
                 if is_compaction_abort(&event) {
@@ -470,6 +477,7 @@ impl Service {
                                 gate: gate.as_deref(),
                             },
                             &event,
+                            &mut tool_results,
                         )
                         .await
                 {
@@ -780,6 +788,21 @@ impl Service {
                         ServerEvent::error(request_id, Some(key.clone()), code, message),
                     )
                     .await;
+                    if code == ErrorCode::Conflict {
+                        // The failed turn may have raced with another writer.
+                        // Send the committed history before closing the stream so
+                        // a client can reconcile its view without resending the
+                        // user's message or requiring a manual resume.
+                        let ancestors =
+                            compaction_ancestors(self.directory.as_ref(), current_nid).await;
+                        for replay in
+                            replay_events(request_id, key, &engine, current_nid, &ancestors).await
+                        {
+                            if !emit(tx, replay).await {
+                                break;
+                            }
+                        }
+                    }
                     self.finish_turn(
                         &mut TurnContext {
                             engine: &engine,
@@ -894,7 +917,12 @@ impl Service {
     /// Maps one engine event and answers whether to keep going (the client is
     /// still reading).
     #[allow(clippy::too_many_lines)]
-    async fn handle(&self, ctx: &mut TurnContext<'_>, event: &EngineEvent) -> bool {
+    async fn handle(
+        &self,
+        ctx: &mut TurnContext<'_>,
+        event: &EngineEvent,
+        tool_results: &mut Option<HashMap<String, ToolResultText>>,
+    ) -> bool {
         let (engine, request_id, key, nid, tx, gate) = (
             ctx.engine,
             ctx.request_id,
@@ -961,11 +989,23 @@ impl Service {
                 self.effects
                     .finished(nid, *call_id, tool.as_str(), *is_error);
                 let recorded = self.activity.finished(call_id);
+                let fallback = if recorded.as_ref().and_then(output_text).is_none() {
+                    if tool_results.is_none() {
+                        *tool_results = tool_result_index(engine, nid).await;
+                    }
+                    tool_results
+                        .as_ref()
+                        .and_then(|results| results.get(&call_id.to_string()))
+                        .filter(|result| result.is_error == *is_error)
+                        .map(|result| result.text.clone())
+                } else {
+                    None
+                };
                 let error = if *is_error {
                     if let Some(text) = recorded.as_ref().and_then(output_text) {
                         Some(text)
                     } else {
-                        tool_error(engine, nid, call_id).await
+                        fallback.clone()
                     }
                 } else {
                     None
@@ -973,10 +1013,7 @@ impl Service {
                 let (output, truncated) = if *is_error {
                     (None, false)
                 } else {
-                    let text = recorded
-                        .as_ref()
-                        .and_then(output_text)
-                        .or(tool_result_text(engine, nid, call_id).await);
+                    let text = recorded.as_ref().and_then(output_text).or(fallback);
                     text.map_or((None, false), |text| {
                         let (text, truncated) = shorten_tool_output(text);
                         (Some(text), truncated)
@@ -1503,17 +1540,25 @@ impl Service {
     ) -> std::result::Result<Option<MediaPart>, String> {
         let mime = MimeType::new(attachment.mime.clone())
             .map_err(|_| format!("attachment: `{}` is not a media type", attachment.mime))?;
-        let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
-            format!("attachment: could not read `{}`: {error}", attachment.path)
-        })?;
-        // The bytes go where the model's own media would: the host stores them
-        // and sends a reference, so the graph holds one blob and the provider is
-        // handed bytes on the way out (the adapter resolves it).
-        let id = self
-            .blobs
-            .put(&bytes)
-            .await
-            .map_err(|error| error.to_string())?;
+        let id = if let Some(id) = attachment.blob {
+            if !self
+                .blobs
+                .contains(id)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!("attachment: blob `{id}` was not found"));
+            }
+            id
+        } else {
+            let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
+                format!("attachment: could not read `{}`: {error}", attachment.path)
+            })?;
+            self.blobs
+                .put(&bytes)
+                .await
+                .map_err(|error| error.to_string())?
+        };
         Ok(Some(MediaPart::new(
             kind_of_mime(&attachment.mime),
             MediaSource::Blob(id),

@@ -1,10 +1,11 @@
 //! The headless `norte-code` command.
 //!
-//! `norte-code run "prompt"` builds the service in memory, sends one message
-//! and streams the answer. With `--interactive` the same session stays open and
-//! reads the next message from the terminal. Text goes to stdout; diagnostics,
-//! reasoning and tool activity go to stderr. `--jsonl` writes one protocol
-//! event per line on stdout instead, for scripts and tests.
+//! `norte-code run "prompt"` sends one message to the configured RAEP service
+//! and renders the returned events. With `--interactive` the same remote
+//! session stays open and reads the next message from the terminal. Text goes
+//! to stdout; diagnostics, reasoning and tool activity go to stderr.
+//! `--jsonl` writes one protocol event per line on stdout instead, for scripts
+//! and tests.
 //!
 //! `norte-code models` lists what the catalogue knows, filtered by provider,
 //! tool calling or reasoning.
@@ -16,15 +17,13 @@ mod commands_registry;
 mod input;
 mod installs;
 mod interaction;
-mod keys;
 mod markdown;
 mod modal;
 mod models;
-mod plugin_loader;
-mod plugin_manager;
 mod plugins;
 mod preview;
 mod prompt;
+mod remote_state;
 mod render;
 mod select;
 mod startup;
@@ -35,17 +34,32 @@ mod text;
 mod transcript;
 mod ui;
 
-use commands::{apply_extensions, database_path, duration_label, enter_workdir, run};
+use commands::{apply_extensions, duration_label, run};
 use input::{InteractiveInput, Pinned};
-use interaction::{drive_turns, interactive_loop, refresh_effort};
-use models::{ModelChoice, list_models, resolve_spec, session_choice};
+use interaction::{drive_turns, headless_messages, interactive_loop, refresh_effort};
+use models::{ModelChoice, list_models, remote_model_list, resolve_remote_spec, session_choice};
+use norte_code_protocol::QueueMode;
 use preview::{clip_text, compact_json};
 use render::{
-    Format, HostFacts, Renderer, Verbosity, cache_percent_label, find_project_config, human_tokens,
-    parse_budget_action, parse_budget_unit, parse_reasoning_setting, reasoning_label,
-    reasoning_setting_label, select_system_prompt, short,
+    Format, HostFacts, Renderer, Verbosity, cache_percent_label, human_tokens, parse_budget_action,
+    parse_budget_unit, parse_reasoning_setting, reasoning_label, reasoning_setting_label,
+    select_system_prompt, short,
 };
 use startup::Open;
+
+/// What `ui.queue_mode` names, as the typed wire enum.
+///
+/// The config stays a `String` so a bad value can be reported beside the
+/// ones the client knows instead of failing the whole file, exactly like
+/// `verbosity`. Anything unrecognised falls back to `queue`, the behaviour
+/// the client has always had while a turn runs.
+fn queue_mode(value: &str) -> QueueMode {
+    match value {
+        "reject" => QueueMode::Reject,
+        "interrupt" => QueueMode::Interrupt,
+        _ => QueueMode::Queue,
+    }
+}
 
 #[cfg(test)]
 #[cfg(test)]
@@ -68,21 +82,22 @@ use norte::{
     CacheMode, Feature, Modality, ReasoningEffort, StreamingGranularity, StructuredOutputMode,
     ToolKind,
 };
-use norte_code_agent::{
-    EventStream, ModelSpec, RuleScope, Service, VendorModels, effective_reasoning, model_list,
-};
+use norte_code_client::{AgentClient, EventStream, RemoteClient};
+use norte_code_protocol::ModelInfo as ModelSpec;
 use norte_code_protocol::catalog::{Catalog, WireSchema};
-use norte_code_protocol::config::{Config, DiffStyle, user_config_path};
+use norte_code_protocol::config::{Config, DiffStyle};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
-use norte_code_protocol::sqlite::{RequestRecord, SessionDirectory, SqliteStore, StoredSession};
+#[cfg(test)]
+use norte_code_protocol::sqlite::StoredSession;
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
     ErrorCode, JobInfo, MessageRole, ModelInfo, OutputStream, Phase, Reasoning, ReasoningInfo,
-    ReasoningScope, ServerEvent, ServerEventKind, SessionKey,
+    ReasoningScope, ServerEvent, ServerEventKind, SessionInfo, SessionKey,
 };
 use tokio::sync::mpsc;
 
+use crate::remote_state::{ModelInfoExt, RemoteState, effective_reasoning};
 use crate::style::Style;
 
 #[derive(Parser)]
@@ -102,9 +117,9 @@ struct Cli {
     /// other command line means by a leading path.
     #[arg(value_name = "DIR")]
     dir: Option<PathBuf>,
-    /// The user configuration file.
-    #[arg(long, global = true, value_name = "PATH")]
-    config: Option<PathBuf>,
+    /// The client configuration file.
+    #[arg(long = "cli-config", global = true, value_name = "PATH")]
+    config_path: Option<PathBuf>,
     /// How much of the conversation to show: `low` (the answer alone),
     /// `medium` (also that tools run and that the model is thinking) or `high`
     /// (the reasoning, what each tool was asked and what it returned).
@@ -140,6 +155,37 @@ enum Command {
     Mcp(McpArgs),
     /// Manage the installed plugins.
     Plugins(PluginsArgs),
+    /// Manage or inspect the RAEP service.
+    Service(ServiceArgs),
+}
+
+#[derive(Args)]
+struct ServiceArgs {
+    /// The local-service operation.
+    #[command(subcommand)]
+    command: ServiceCommand,
+}
+
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Start the configured local service.
+    Start {
+        /// Keep the terminal attached to the service log until Ctrl-C.
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
+    /// Gracefully stop the configured local service.
+    Stop,
+    /// Restart the configured local service.
+    Restart,
+    /// Show local process or remote endpoint status.
+    Status,
+    /// Query the server-owned model catalogue.
+    Catalog {
+        /// Emit one JSON object per model.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -290,6 +336,9 @@ struct NewArgs {
     /// `openai.chat:provider={"order":["deepinfra"]}` chooses the upstream.
     #[arg(long, value_name = "KEY=JSON")]
     extension: Vec<String>,
+    /// Write one JSON protocol event per line and avoid the TUI.
+    #[arg(long)]
+    jsonl: bool,
 }
 
 #[derive(Args)]
@@ -360,6 +409,7 @@ impl NewArgs {
             reasoning: None,
             max_iterations: None,
             extension: Vec::new(),
+            jsonl: false,
         }
     }
 }
@@ -589,9 +639,8 @@ async fn main() -> ExitCode {
 
 /// Parses `--wire`, the schema a run speaks.
 ///
-/// The names are the ones `providers.json` writes, so a person who reads the
-/// file knows what to type here. `openai` is the chat completions surface and
-/// not the Responses API: this host speaks the shape the three schemas share.
+/// Parses the wire spelling accepted by the command line for compatibility.
+/// Remote sessions apply the wire on the server.
 fn parse_schema(value: &str) -> Result<WireSchema, String> {
     for schema in WireSchema::ALL {
         if schema.label() == value {
@@ -628,6 +677,66 @@ fn budget_warning(provider: &str, config: &Config, budget_is_usd: bool) -> Optio
     })
 }
 
+pub(crate) fn remote_client(config: &Config) -> Result<RemoteClient, String> {
+    RemoteClient::new(
+        &config.ui.service_url,
+        config
+            .ui
+            .service_auth
+            .as_deref()
+            .filter(|token| !token.trim().is_empty()),
+        None,
+    )
+    .map(|client| client.with_agent_id(config.ui.agent_id.clone()))
+    .map_err(|error| error.to_string())
+}
+
+async fn remote_session(client: &dyn AgentClient, key: &str) -> Result<SessionInfo, String> {
+    let sessions = client
+        .list_sessions()
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(norte_code_client::SessionSummary::into_session_info)
+        .collect::<Vec<_>>();
+    if let Some(session) = sessions
+        .iter()
+        .find(|session| session.session.as_str() == key)
+    {
+        return Ok(session.clone());
+    }
+    let mut matches = sessions
+        .into_iter()
+        .filter(|session| session.session.as_str().starts_with(key));
+    let Some(session) = matches.next() else {
+        return Err(format!("no remote session matches `{key}`"));
+    };
+    if matches.next().is_some() {
+        return Err(format!("more than one remote session matches `{key}`"));
+    }
+    Ok(session)
+}
+
+#[cfg(test)]
+fn matching_stored_session(sessions: Vec<StoredSession>, key: &str) -> Option<StoredSession> {
+    if let Some(session) = sessions.iter().find(|session| session.key == key) {
+        return Some(session.clone());
+    }
+    let mut matches = sessions
+        .into_iter()
+        .filter(|session| session.key.starts_with(key));
+    let session = matches.next()?;
+    matches.next().is_none().then_some(session)
+}
+
+async fn create_session(client: &dyn AgentClient) -> Result<SessionKey, String> {
+    let summary = client
+        .create_session(None)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(SessionKey::new(summary.session_id))
+}
+
 /// Starts a new session and reads it from the terminal.
 ///
 /// `choice` is the provider and the model the startup flow chose, when it had
@@ -650,20 +759,36 @@ pub(crate) async fn new_session(
     verbosity: &str,
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
-    // Installed before the first spec is resolved: the mask is what lets a key
-    // saved in the OS store answer a model that has no environment variable.
+    if args.endpoint.is_some() || args.wire.is_some() {
+        return Err(
+            "--endpoint and --wire are server configuration; set them in service.json on the host"
+                .to_owned(),
+        );
+    }
     let mut config = config;
-    config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
-    let (provider, model) =
+    let (mut provider, mut model) =
         session_choice(choice.as_ref(), args.provider.clone(), args.model.clone());
-    let effective_provider = provider
-        .clone()
-        .or_else(|| config.default_provider.clone())
-        .filter(|p| !p.is_empty());
-    let effective_model = model
-        .clone()
-        .or_else(|| config.default_model.clone())
-        .filter(|m| !m.is_empty());
+    if provider.is_none() || model.is_none() {
+        let client = remote_client(&config)?;
+        let info = client.info().await.map_err(|error| error.to_string())?;
+        if let Some(default_model) = info
+            .get("default_model")
+            .and_then(serde_json::Value::as_object)
+        {
+            provider = default_model
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            model = default_model
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+    // Defaults and catalogue entries belong to the server. The CLI only
+    // forwards explicit overrides and asks the server for their metadata.
+    let effective_provider = provider.clone().filter(|p| !p.is_empty());
+    let effective_model = model.clone().filter(|m| !m.is_empty());
 
     // No model is configured: do not fail here. Reach the interface and let the
     // person pick one with `/models`; a message sent in the meantime is refused
@@ -673,33 +798,33 @@ pub(crate) async fn new_session(
     let spec: Option<ModelSpec> = if model_unset {
         None
     } else {
-        if let Some(p) = effective_provider.as_deref() {
-            startup::ensure_provider_key(&config, &catalog, p)?;
-        }
-        Some(resolve_spec(
-            &config,
-            &catalog,
-            effective_provider.clone(),
-            effective_model.clone(),
-            args.endpoint.clone(),
-            args.wire,
+        let client = remote_client(&config)?;
+        let models = remote_model_list(&client).await?;
+        Some(resolve_remote_spec(
+            &models,
+            effective_provider.as_deref().unwrap_or_default(),
+            effective_model.as_deref().unwrap_or_default(),
         )?)
     };
-    let model_label = spec.as_ref().map(ModelSpec::label);
+    let model_label = spec.as_ref().map(ModelInfoExt::label);
     let provider = spec
         .as_ref()
         .map(|s| s.provider.clone())
         .unwrap_or_default();
+    if let Some(spec) = &spec {
+        config.default_provider = Some(spec.provider.clone());
+        config.default_model = Some(spec.model.clone());
+    }
     CommonOptions {
         max_iterations: args.max_iterations,
         compaction_threshold: args.compaction_threshold,
         sandbox: &args.sandbox,
         extensions: &args.extension,
-        interactive: true,
-        jsonl: false,
+        interactive: !args.jsonl,
+        jsonl: args.jsonl,
     }
     .apply(&mut config)?;
-    let (system_prompt_source, system_prompt) =
+    let (system_prompt_source, _system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     let reasoning = args
         .reasoning
@@ -710,9 +835,9 @@ pub(crate) async fn new_session(
         effective_reasoning(
             reasoning.as_ref(),
             &config.reasoning.default,
-            &spec.capabilities.reasoning,
+            &spec.reasoning,
         )
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.clone())?
     } else {
         norte_code_protocol::Reasoning::Automatic
     };
@@ -761,57 +886,55 @@ pub(crate) async fn new_session(
     let show_cost = config.cost.show;
     // The footer's context dial needs the window and the compaction threshold
     // before the config and spec are moved into the service.
-    let max_context = spec.as_ref().and_then(|s| s.capabilities.max_context);
+    let max_context = spec.as_ref().and_then(|s| s.max_context);
     let compaction_threshold = config.compaction.threshold;
-    let database = database_path()?;
-    let store = Arc::new(
-        SqliteStore::open(&database)
-            .map_err(|error| format!("could not open {}: {error}", database.display()))?,
-    );
-    let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
-    let blobs: Arc<dyn norte::BlobStore> = store.clone();
-    let directory: Arc<dyn SessionDirectory> = store;
-    // Read before the config moves into the service: the renderer draws the diff
-    // and the configuration is what says in which shape.
     let diff_style = config.ui.diff_style;
-    let service = Arc::new(
-        Service::with_directory(
-            config,
-            Arc::new(catalog),
-            spec,
-            Arc::new(VendorModels),
-            session_store,
-            blobs,
-            directory,
-            system_prompt,
-        )
-        .await
-        .map_err(|e| e.to_string())?,
+    let client = Arc::new(remote_client(&config)?);
+    let remote_models = remote_model_list(client.as_ref()).await?;
+    let remote_model_count = remote_models.len();
+    let state = RemoteState::new(
+        Arc::clone(&client),
+        remote_models,
+        config.clone(),
+        config_path,
     );
-    service.install_subagent_runner();
-    service.set_config_path(config_path);
     let pinned = Pinned::new();
 
     let mut renderer = Renderer::new(
-        Format::Text,
+        if args.jsonl {
+            Format::Jsonl
+        } else {
+            Format::Text
+        },
         verbosity,
         show_cost,
         style,
         Arc::clone(&pinned),
     );
+    let diagnostic_model = model_label.clone();
+    renderer.queue_mode = queue_mode(&config.ui.queue_mode);
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
+    renderer.set_chart_config(&config.ui.charts);
     renderer.model_name = model_label;
     renderer.model_unset = model_unset;
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
+    renderer.diagnostic(
+        "connected",
+        &serde_json::json!({
+            "service_url": config.ui.service_url,
+            "model": diagnostic_model,
+            "catalogue_models": remote_model_count,
+        }),
+    );
     // The facts `/debug` reports that only the CLI knows: which file the
     // catalogue came from, the database it opened and where the system prompt
     // came from. Set once here, like the model name and the context window.
     renderer.host_facts = Some(HostFacts {
-        database: database.clone(),
-        providers_path: norte_code_protocol::catalog::providers_path().unwrap_or_default(),
-        models_path: norte_code_protocol::catalog::models_path().unwrap_or_default(),
+        database: PathBuf::from("(remote host)"),
+        providers_path: PathBuf::from("(remote host)"),
+        models_path: PathBuf::from("(remote host)"),
         prompt_source: system_prompt_source,
     });
     // The effort the next turn will ask for, on the footer where the session
@@ -821,36 +944,156 @@ pub(crate) async fn new_session(
     // The catalogue names the completion offers. A new session has no key yet,
     // so only the provider list is offered until one exists: `/model` needs a
     // session to know which provider's models to list.
-    crate::interaction::refresh_completions(&service, None, &mut renderer);
+    crate::interaction::refresh_completions(&state, None, &mut renderer);
     // The terminal belongs to the renderer: it is what knows when something
     // changed, so it is what draws. A process with no terminal keeps the
     // plain-text path and draws nothing.
-    if crate::terminal::is_interactive() {
+    if !args.jsonl && crate::terminal::is_interactive() {
         renderer.screen = Some(crate::terminal::Guard::enter()?);
+        renderer.set_input_ready(false);
+        renderer.mark_working();
+        renderer.notice(format!("⟳ connecting to {}", config.ui.service_url));
+        renderer.draw()?;
     }
-    let mut input = Some(InteractiveInput::start(Arc::clone(&pinned))?);
     // The session exists before the first line is read, so the line's message
     // names it: a session created as a side effect of a message cannot be shown
     // in the footer before the message is sent.
-    let session = service
-        .start_session(None)
-        .await
-        .map_err(|error| error.to_string())?;
-    if verbosity.at_least(Verbosity::Medium) {
-        eprintln!(
-            "{} {}",
-            style.dim("session"),
-            style.faint(short(session.as_str()).to_owned())
+    renderer.diagnostic("session_create_started", &serde_json::json!({}));
+    let session = match create_session(client.as_ref()).await {
+        Ok(session) => session,
+        Err(error) => {
+            renderer.mark_ready();
+            renderer.failure(format!("✗ connection failed: {error}"));
+            renderer.draw()?;
+            return Err(error);
+        }
+    };
+    renderer.diagnostic(
+        "session_created",
+        &serde_json::json!({
+            "session": session,
+        }),
+    );
+    if let (Some(provider), Some(model)) = (effective_provider, effective_model) {
+        let events = match client
+            .submit(ClientRequest {
+                request_id: 1,
+                kind: ClientRequestKind::SetModel {
+                    session: session.clone(),
+                    provider,
+                    model,
+                },
+            })
+            .await
+        {
+            Ok(stream) => stream.collect::<Vec<_>>().await,
+            Err(error) => {
+                renderer.mark_ready();
+                renderer.failure(format!("✗ connection failed: {error}"));
+                renderer.draw()?;
+                return Err(error.to_string());
+            }
+        };
+        if let Some(message) = events.into_iter().find_map(|event| match event.kind {
+            ServerEventKind::Error { message, .. } => Some(message),
+            _ => None,
+        }) {
+            renderer.diagnostic(
+                "session_configuration_failed",
+                &serde_json::json!({
+                    "operation": "set_model",
+                    "error": message,
+                }),
+            );
+            renderer.mark_ready();
+            renderer.failure(format!("✗ connection failed: {message}"));
+            renderer.draw()?;
+            return Err(format!("could not configure remote session: {message}"));
+        }
+        renderer.diagnostic(
+            "session_configured",
+            &serde_json::json!({
+                "operation": "set_model",
+            }),
         );
+    }
+    if verbosity.at_least(Verbosity::Medium) && !args.jsonl {
+        // The alternate screen owns the terminal once Guard has entered:
+        // a bare write here lands at the cursor and the next frame's diff
+        // never repaints it, which is what left fragments doubled on
+        // screen. With a screen up the line goes through the transcript;
+        // without one (pipe, headless) the plain write stands.
+        if renderer.screen.is_some() {
+            renderer.notice(format!("session {}", short(session.as_str())));
+        } else {
+            eprintln!(
+                "{} {}",
+                style.dim("session"),
+                style.faint(short(session.as_str()).to_owned())
+            );
+        }
     }
     // Hand the service and session to the plugins so they can reach them when
     // they run a command or redraw. The plugins were loaded before the
     // catalogue, because what they offer belongs in it; the handle they were
     // given is the same one, and it now knows where to look.
-    crate::plugins::attach(&service, Some(session.clone()));
-    if let Some(receiver) = input.as_mut() {
+    crate::plugins::attach(Some(session.clone()));
+    if !args.jsonl && crate::terminal::is_interactive() {
+        renderer.mark_ready();
+        renderer.notice(format!("✓ connected to {}", config.ui.service_url));
+        renderer.set_input_ready(true);
+        renderer.draw()?;
+    }
+    let mut input = if args.jsonl {
+        None
+    } else {
+        Some(InteractiveInput::start(Arc::clone(&pinned))?)
+    };
+    if args.jsonl {
+        use std::io::Read as _;
+        let mut text = String::new();
+        if let Err(error) = std::io::stdin().read_to_string(&mut text) {
+            let message = format!("could not read headless input: {error}");
+            renderer.diagnostic(
+                "client_failed",
+                &serde_json::json!({
+                    "stage": "input",
+                    "error": message,
+                }),
+            );
+            return Err(message);
+        }
+        renderer.diagnostic(
+            "input_stream_finished",
+            &serde_json::json!({
+                "messages": text.lines().count(),
+                "bytes": text.len(),
+            }),
+        );
+        if let Err(error) = headless_messages(
+            &state,
+            client.as_ref(),
+            session.clone(),
+            &mut renderer,
+            style,
+            text.lines().map(str::to_owned),
+        )
+        .await
+        {
+            renderer.diagnostic(
+                "client_failed",
+                &serde_json::json!({
+                    "stage": "request",
+                    "error": error,
+                }),
+            );
+            return Err(error);
+        }
+        renderer.diagnostic("client_finished", &serde_json::json!({}));
+    } else if let Some(receiver) = input.as_mut() {
         interactive_loop(
-            &service,
+            &state,
+            client.as_ref(),
             Some(session),
             &mut renderer,
             style,
@@ -875,26 +1118,6 @@ pub(crate) async fn new_session(
 ///
 /// A database that cannot be read is not a reason to refuse the resume: the
 /// session is usable here, and the directory is where it would have gone.
-async fn stored_session(database: &Path, key: &str) -> Option<StoredSession> {
-    if !database.exists() {
-        return None;
-    }
-    let store = SqliteStore::open(database).ok()?;
-    let sessions = store.sessions().await.ok()?;
-    matching_stored_session(sessions, key)
-}
-
-fn matching_stored_session(sessions: Vec<StoredSession>, key: &str) -> Option<StoredSession> {
-    if let Some(session) = sessions.iter().find(|session| session.key == key) {
-        return Some(session.clone());
-    }
-    let mut matches = sessions
-        .into_iter()
-        .filter(|session| session.key.starts_with(key));
-    let session = matches.next()?;
-    matches.next().is_none().then_some(session)
-}
-
 /// Continues a session named on the command line.
 ///
 /// The name is required: without one there is nothing to continue, and the
@@ -921,8 +1144,8 @@ async fn resume_session(
     config_path: Option<PathBuf>,
 ) -> Result<u8, String> {
     let mut config = config;
-    config.keys = Some(std::sync::Arc::new(crate::keys::PlatformKeys::new()));
-    let mut session_key = args
+    let client = Arc::new(remote_client(&config)?);
+    let requested_key = args
         .session
         .clone()
         .ok_or("resume needs a session key; run `norte-code` to pick one")?;
@@ -934,37 +1157,8 @@ async fn resume_session(
     //
     // A session stored before the field existed has none, and the directory the
     // command was typed in stands — which is what `resume` always did.
-    let stored = stored_session(&database_path()?, &session_key).await;
-    if let Some(stored) = &stored {
-        session_key = stored.key.clone();
-    }
-    if let Some(dir) = stored
-        .as_ref()
-        .and_then(|session| session.workdir.clone())
-        .filter(|dir| !dir.trim().is_empty())
-    {
-        let here = std::env::current_dir().ok();
-        let there = std::fs::canonicalize(&dir).ok();
-        let elsewhere = match (&here, &there) {
-            (Some(here), Some(there)) => here != there,
-            _ => false,
-        };
-        if elsewhere {
-            if there.is_some() {
-                enter_workdir(Path::new(&dir))?;
-                eprintln!("{}", crate::style::Style::stderr().dim(format!("in {dir}")));
-            } else {
-                eprintln!(
-                    "warning: this session worked in {dir}, which is gone; \
-                     staying in {}",
-                    here.as_ref().map_or_else(
-                        || "the current directory".to_owned(),
-                        |here| here.display().to_string()
-                    )
-                );
-            }
-        }
-    }
+    let stored = remote_session(client.as_ref(), &requested_key).await?;
+    let session_key = stored.session.as_str().to_owned();
     CommonOptions {
         max_iterations: args.max_iterations,
         compaction_threshold: args.compaction_threshold,
@@ -974,7 +1168,7 @@ async fn resume_session(
         jsonl: args.jsonl,
     }
     .apply(&mut config)?;
-    let (system_prompt_source, system_prompt) =
+    let (system_prompt_source, _system_prompt) =
         select_system_prompt(args.system_prompt, config.system_prompt.clone());
     // A session resumes on the provider and the model it was saved with: the
     // configuration may have been changed since, and a resume that silently
@@ -985,67 +1179,32 @@ async fn resume_session(
     // so does a pair the catalogue does not carry anymore: the configuration's
     // answer stands, which is what a session on a provider the catalogue lost
     // does.
-    let saved = stored.as_ref().and_then(|session| {
-        let provider = session.provider.trim();
-        let model = session.model.trim();
-        if provider.is_empty() || model.is_empty() {
-            return None;
-        }
-        Some((provider.to_owned(), model.to_owned()))
-    });
+    let saved = stored.provider.clone().zip(stored.model.clone());
     let saved_provider = saved.as_ref().map(|(p, _)| p.clone());
     let saved_model = saved.as_ref().map(|(_, m)| m.clone());
-    let effective_provider = saved_provider
-        .clone()
-        .or_else(|| config.default_provider.clone())
-        .filter(|p| !p.is_empty());
-    let effective_model = saved_model
-        .clone()
-        .or_else(|| config.default_model.clone())
-        .filter(|m| !m.is_empty());
+    let effective_provider = saved_provider.clone().filter(|p| !p.is_empty());
+    let effective_model = saved_model.clone().filter(|m| !m.is_empty());
 
     let model_unset = effective_provider.is_none() || effective_model.is_none();
 
-    // Keys for whichever provider may be used, only when a model is configured.
-    if !model_unset {
-        if let Some(provider) = &saved_provider {
-            startup::ensure_provider_key(&config, &catalog, provider)?;
-        }
-        if let Some(provider) = &config.default_provider {
-            startup::ensure_provider_key(&config, &catalog, provider)?;
-        }
-    }
-
+    let remote_models = remote_model_list(client.as_ref()).await?;
     let spec: Option<ModelSpec> = if model_unset {
         None
     } else {
-        match saved {
-            Some((provider, model)) => Some(
-                resolve_spec(&config, &catalog, Some(provider), Some(model), None, None).or_else(
-                    |error| {
-                        eprintln!(
-                            "warning: this session was on a model the catalogue does not carry \
-                      ({error}); the configured default is used instead"
-                        );
-                        resolve_spec(&config, &catalog, None, None, None, None)
-                    },
-                )?,
-            ),
-            None => Some(resolve_spec(&config, &catalog, None, None, None, None)?),
-        }
+        Some(resolve_remote_spec(
+            &remote_models,
+            effective_provider.as_deref().unwrap_or_default(),
+            effective_model.as_deref().unwrap_or_default(),
+        )?)
     };
-    let model_label = spec.as_ref().map(ModelSpec::label);
+    let model_label = spec.as_ref().map(ModelInfoExt::label);
     let provider = spec
         .as_ref()
         .map(|s| s.provider.clone())
         .unwrap_or_default();
     let effective = if let Some(spec) = &spec {
-        effective_reasoning(
-            None,
-            &config.reasoning.default,
-            &spec.capabilities.reasoning,
-        )
-        .map_err(|error| error.to_string())?
+        effective_reasoning(None, &config.reasoning.default, &spec.reasoning)
+            .map_err(|error| error.clone())?
     } else {
         norte_code_protocol::Reasoning::Automatic
     };
@@ -1074,35 +1233,15 @@ async fn resume_session(
     let show_cost = config.cost.show;
     // The footer's context dial needs the window and the compaction threshold
     // before the config and spec are moved into the service.
-    let max_context = spec.as_ref().and_then(|s| s.capabilities.max_context);
+    let max_context = spec.as_ref().and_then(|s| s.max_context);
     let compaction_threshold = config.compaction.threshold;
-    let database = database_path()?;
-    let store = Arc::new(
-        SqliteStore::open(&database)
-            .map_err(|error| format!("could not open {}: {error}", database.display()))?,
-    );
-    let session_store: Arc<dyn norte_code_protocol::Store> = store.clone();
-    let blobs: Arc<dyn norte::BlobStore> = store.clone();
-    let directory: Arc<dyn SessionDirectory> = store;
-    // Read before the config moves into the service: the renderer draws the diff
-    // and the configuration is what says in which shape.
     let diff_style = config.ui.diff_style;
-    let service = Arc::new(
-        Service::with_directory(
-            config,
-            Arc::new(catalog),
-            spec,
-            Arc::new(VendorModels),
-            session_store,
-            blobs,
-            directory,
-            system_prompt,
-        )
-        .await
-        .map_err(|e| e.to_string())?,
+    let state = RemoteState::new(
+        Arc::clone(&client),
+        remote_models,
+        config.clone(),
+        config_path,
     );
-    service.install_subagent_runner();
-    service.set_config_path(config_path);
     let pinned = Pinned::new();
     let mut renderer = Renderer::new(
         if args.jsonl {
@@ -1115,16 +1254,18 @@ async fn resume_session(
         style,
         Arc::clone(&pinned),
     );
+    renderer.queue_mode = queue_mode(&config.ui.queue_mode);
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
+    renderer.set_chart_config(&config.ui.charts);
     renderer.model_name = model_label;
     renderer.model_unset = model_unset;
     renderer.max_context = max_context;
     renderer.compaction_threshold = compaction_threshold;
     renderer.host_facts = Some(HostFacts {
-        database: database.clone(),
-        providers_path: norte_code_protocol::catalog::providers_path().unwrap_or_default(),
-        models_path: norte_code_protocol::catalog::models_path().unwrap_or_default(),
+        database: PathBuf::from("(remote host)"),
+        providers_path: PathBuf::from("(remote host)"),
+        models_path: PathBuf::from("(remote host)"),
         prompt_source: system_prompt_source,
     });
     renderer.set_reasoning(reasoning_setting_label(&effective));
@@ -1133,16 +1274,16 @@ async fn resume_session(
     // they run a command or redraw. The plugins were loaded before the
     // catalogue, because what they offer belongs in it; the handle they were
     // given is the same one, and it now knows where to look.
-    crate::plugins::attach(&service, Some(session.clone()));
+    crate::plugins::attach(Some(session.clone()));
     // The session may carry a reasoning override of its own — `/reasoning max`
     // leaves one — and that is what the next turn sends. The line above is the
     // configuration's answer, which is what a session with no override is on;
     // this is the session's, which is what the footer has to show.
-    refresh_effort(&service, &session, &mut renderer);
+    refresh_effort(&state, &session, &mut renderer);
     // The catalogue names the completion offers: `/provider` and `/model` take
     // one, and the list lives here rather than in the registry, which cannot
     // read the catalogue and is built before this point.
-    crate::interaction::refresh_completions(&service, Some(&session), &mut renderer);
+    crate::interaction::refresh_completions(&state, Some(&session), &mut renderer);
     let interactive = args.interactive;
     // The terminal belongs to the renderer, exactly as it does for a new
     // session: it is what knows when something changed, so it is what draws,
@@ -1166,7 +1307,7 @@ async fn resume_session(
         }
         let unit = parse_budget_unit(&args.budget_unit)?;
         let action = parse_budget_action(&args.budget_action)?;
-        let stream = service
+        let stream = client
             .submit(ClientRequest {
                 request_id: 1,
                 kind: ClientRequestKind::SetBudget {
@@ -1181,7 +1322,8 @@ async fn resume_session(
             .await
             .map_err(|e| e.to_string())?;
         drive_turns(
-            &service,
+            &state,
+            client.as_ref(),
             stream,
             &mut renderer,
             style,
@@ -1194,7 +1336,7 @@ async fn resume_session(
     // so the session's own rules judge it and a model it refuses is reported.
     // The provider is the session's own: a resume names a model, not a pair.
     if let Some(model) = args.model.clone() {
-        let stream = service
+        let stream = client
             .submit(ClientRequest {
                 request_id: 2,
                 kind: ClientRequestKind::SetModel {
@@ -1206,7 +1348,8 @@ async fn resume_session(
             .await
             .map_err(|e| e.to_string())?;
         drive_turns(
-            &service,
+            &state,
+            client.as_ref(),
             stream,
             &mut renderer,
             style,
@@ -1216,17 +1359,19 @@ async fn resume_session(
         .await?;
     }
     renderer.mark_working();
-    let stream = service
+    let stream = client
         .submit(ClientRequest {
             request_id: 2,
             kind: ClientRequestKind::Resume {
                 session: session.clone(),
+                replay: true,
             },
         })
         .await
         .map_err(|e| e.to_string())?;
     let outcome = drive_turns(
-        &service,
+        &state,
+        client.as_ref(),
         stream,
         &mut renderer,
         style,
@@ -1241,7 +1386,8 @@ async fn resume_session(
         && let Some(receiver) = input.as_mut()
     {
         interactive_loop(
-            &service,
+            &state,
+            client.as_ref(),
             Some(session),
             &mut renderer,
             style,
@@ -1287,10 +1433,11 @@ async fn open_session(
         );
     }
     let mut config = config;
+    let client = remote_client(&config)?;
     let chosen = startup::startup(
         &mut config,
         &catalog,
-        &database_path()?,
+        &client,
         config_path.as_deref(),
         style,
     )

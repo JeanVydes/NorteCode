@@ -1,5 +1,6 @@
 # Build output
 /target
+**/target
 /guide/book
 **/*.rs.bk
 *.pdb
@@ -9,6 +10,7 @@
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
 .sqlx/
 .cache/
 /.norte-code/cache/
@@ -21,6 +23,7 @@ norte-code.local.*
 /build
 /out
 /tmp
+*.tmp
 
 # Secrets
 .env

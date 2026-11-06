@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// The per-project overlay config path, searched from `start` upwards.
+/// The per-project UI overlay path, searched from `start` upwards.
 pub(crate) fn find_project_config(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
-        .map(|dir| dir.join(".norte-code").join("config.json"))
+        .map(|dir| dir.join(".norte-code").join("cli.json"))
         .find(|path| path.exists())
 }
 

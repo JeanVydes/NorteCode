@@ -27,10 +27,10 @@
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style as RatatuiStyle};
-use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Chart, Clear, Dataset, GraphType, Paragraph, Widget as _};
+use ratatui::widgets::{Clear, Paragraph, Widget as _};
 
+use crate::render::HalftoneConfig;
 use crate::style::{ALTERNATE, GREEN, PRIMARY, Style, YELLOW};
 use crate::terminal::Draw;
 use norte_code_protocol::SessionKey;
@@ -250,6 +250,8 @@ pub(crate) struct Modal {
     /// rebuilt from that state on every frame, and the keys move the state and
     /// not a cursor over text.
     pub(crate) telemetry: Option<crate::telemetry_panel::Panel>,
+    /// Shared visual configuration for telemetry charts.
+    chart_config: HalftoneConfig,
     /// Whether report rows contain Markdown to render.
     markdown: bool,
 }
@@ -266,6 +268,7 @@ impl Modal {
             scope: Scope::Session,
             editable: false,
             telemetry: None,
+            chart_config: HalftoneConfig::default(),
             markdown: false,
         }
     }
@@ -289,6 +292,7 @@ impl Modal {
             scope: Scope::Session,
             editable: true,
             telemetry: None,
+            chart_config: HalftoneConfig::default(),
             markdown: false,
         };
         modal.cursor = modal.first_actable();
@@ -297,7 +301,11 @@ impl Modal {
 
     /// A panel that draws the telemetry charts and walks its own tabs.
     #[must_use]
-    pub(crate) fn telemetry(panel: crate::telemetry_panel::Panel) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn telemetry(
+        panel: crate::telemetry_panel::Panel,
+        chart_config: HalftoneConfig,
+    ) -> Self {
         Self {
             title: "telemetry".to_owned(),
             rows: Vec::new(),
@@ -306,6 +314,7 @@ impl Modal {
             scope: Scope::Session,
             editable: false,
             telemetry: Some(panel),
+            chart_config,
             markdown: false,
         }
     }
@@ -520,6 +529,12 @@ impl Modal {
                 }
                 Choice::None
             }
+            Key::Char('c' | 'C') => {
+                if let Some(panel) = self.telemetry.as_mut() {
+                    panel.next_chart();
+                }
+                Choice::None
+            }
             Key::PrevMetric => {
                 if let Some(panel) = self.telemetry.as_mut() {
                     panel.prev_metric();
@@ -584,6 +599,7 @@ impl Modal {
                 frame,
                 chart_area,
                 self.telemetry.as_ref().expect("telemetry chart"),
+                self.chart_config,
             );
         }
         let text_inner = Rect::new(
@@ -686,8 +702,9 @@ impl Modal {
             use std::fmt::Write as _;
             let _ = write!(
                 hint,
-                "· tab {} · [ ] range · r/R metric · ↑↓ scroll · ^c copy · esc close ",
-                panel.tab.label()
+                "· tab {} · c chart:{} · [ ] range · r/R metric · ↑↓ scroll · ^c copy · esc close ",
+                panel.tab.label(),
+                panel.chart.label()
             );
         } else if self.editable {
             use std::fmt::Write as _;
@@ -706,108 +723,83 @@ impl Modal {
 /// How far a page key moves the cursor.
 const PAGE: isize = 10;
 
-fn draw_telemetry_charts(frame: &mut Draw<'_>, area: Rect, panel: &crate::telemetry_panel::Panel) {
-    let layout = Layout::vertical([Constraint::Length(5), Constraint::Length(4)]).split(area);
-    let (labels, model_series) = panel.chart_series(panel.metric, 4);
-    let (request_labels, requests) = panel.aggregate_series(crate::telemetry_panel::Metric::Tokens);
-    let max_x = chart_index(labels.len());
-    let max_y = model_series
-        .iter()
-        .flat_map(|series| series.points.iter().map(|(_, value)| *value))
-        .fold(1.0, f64::max);
-    let palette = [PRIMARY, GREEN, YELLOW, ALTERNATE];
-    let datasets = model_series
-        .iter()
-        .enumerate()
-        .map(|(index, series)| {
-            Dataset::default()
-                .name(series.name.clone())
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Line)
-                .style(RatatuiStyle::default().fg(ratatui::style::Color::Rgb(
-                    palette[index % palette.len()].0,
-                    palette[index % palette.len()].1,
-                    palette[index % palette.len()].2,
-                )))
-                .data(&series.points)
-        })
-        .collect::<Vec<_>>();
-    let x_labels = chart_labels(&labels);
-    let chart = Chart::new(datasets)
-        .block(Block::bordered().title(format!(" {} by model ", panel.metric.label())))
-        .x_axis(
-            Axis::default()
-                .bounds([0.0, max_x])
-                .labels(x_labels.clone()),
-        )
-        .y_axis(Axis::default().bounds([0.0, max_y]).labels(vec![
-            Span::raw("0"),
-            Span::raw(metric_axis_label(max_y, panel.metric)),
-        ]));
-    frame.render_widget(chart, layout[0]);
-
-    let request_max = requests
-        .points
-        .iter()
-        .map(|(_, value)| *value)
-        .fold(1.0, f64::max);
-    let request_chart = Chart::new(vec![
-        Dataset::default()
-            .name("tokens")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(
-                RatatuiStyle::default()
-                    .fg(ratatui::style::Color::Rgb(PRIMARY.0, PRIMARY.1, PRIMARY.2)),
-            )
-            .data(&requests.points),
-    ])
-    .block(Block::bordered().title(" activity "))
-    .x_axis(
-        Axis::default()
-            .bounds([0.0, chart_index(request_labels.len())])
-            .labels(chart_labels(&request_labels)),
-    )
-    .y_axis(
-        Axis::default()
-            .bounds([0.0, request_max])
-            .labels(vec![Span::raw("0"), Span::raw(human_chart(request_max))]),
-    );
-    frame.render_widget(request_chart, layout[1]);
-}
-
-fn chart_index(length: usize) -> f64 {
-    f64::from(u32::try_from(length.saturating_sub(1).max(1)).unwrap_or(u32::MAX))
-}
-
-fn chart_labels(labels: &[String]) -> Vec<Span<'static>> {
-    match (labels.first(), labels.last()) {
-        (Some(first), Some(last)) if first != last => {
-            vec![Span::raw(first.clone()), Span::raw(last.clone())]
+fn draw_telemetry_charts(
+    frame: &mut Draw<'_>,
+    area: Rect,
+    panel: &crate::telemetry_panel::Panel,
+    config: HalftoneConfig,
+) {
+    let colors = [
+        ratatui::style::Color::Rgb(PRIMARY.0, PRIMARY.1, PRIMARY.2),
+        ratatui::style::Color::Rgb(GREEN.0, GREEN.1, GREEN.2),
+        ratatui::style::Color::Rgb(YELLOW.0, YELLOW.1, YELLOW.2),
+        ratatui::style::Color::Rgb(ALTERNATE.0, ALTERNATE.1, ALTERNATE.2),
+    ];
+    match panel.chart {
+        crate::telemetry_panel::ChartKind::Line => {
+            let (_, model_series) = panel.chart_series(panel.metric, 4);
+            let series = model_series
+                .iter()
+                .enumerate()
+                .map(|(index, series)| crate::render::halftone::Series {
+                    points: &series.points,
+                    color: colors[index % colors.len()],
+                })
+                .collect::<Vec<_>>();
+            crate::render::halftone::line(
+                frame,
+                area,
+                &format!(" {} by model · halftone ", panel.metric.label()),
+                &series,
+                config,
+            );
         }
-        (Some(label), _) => vec![Span::raw(label.clone())],
-        _ => vec![Span::raw("no data")],
-    }
-}
-
-fn human_chart(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("{:.1}M", value / 1_000_000.0)
-    } else if value >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else {
-        format!("{value:.0}")
-    }
-}
-
-fn metric_axis_label(value: f64, metric: crate::telemetry_panel::Metric) -> String {
-    match metric {
-        crate::telemetry_panel::Metric::Cost => format!("${:.4}", value / 1_000_000.0),
-        crate::telemetry_panel::Metric::CacheRate => format!("{value:.0}%"),
-        crate::telemetry_panel::Metric::Latency | crate::telemetry_panel::Metric::FirstToken => {
-            format!("{value:.0}ms")
+        crate::telemetry_panel::ChartKind::Pie => {
+            let distribution = panel.distribution(panel.metric, 5);
+            let slices = distribution
+                .iter()
+                .enumerate()
+                .map(|(index, (name, value))| (name.as_str(), *value, colors[index % colors.len()]))
+                .collect::<Vec<_>>();
+            crate::render::halftone::pie(
+                frame,
+                area,
+                &format!(" {} distribution · halftone ", panel.metric.label()),
+                &slices,
+                config,
+            );
         }
-        _ => human_chart(value),
+        crate::telemetry_panel::ChartKind::Radar => {
+            let profiles = panel.radar_profiles(2);
+            let profiles = profiles
+                .iter()
+                .map(|(name, values)| {
+                    let max = values.iter().copied().fold(1.0, f64::max);
+                    (
+                        name,
+                        values.iter().map(|value| value / max).collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let profiles = profiles
+                .iter()
+                .enumerate()
+                .map(|(index, (name, values))| {
+                    (
+                        name.as_str(),
+                        values.as_slice(),
+                        colors[index % colors.len()],
+                    )
+                })
+                .collect::<Vec<_>>();
+            crate::render::halftone::radar(
+                frame,
+                area,
+                " model profile · halftone ",
+                &profiles,
+                config,
+            );
+        }
     }
 }
 
@@ -834,12 +826,18 @@ fn row_line(row: &Row, under_cursor: bool, _style: Style) -> Line<'static> {
             let _ = write!(text, "  {note}");
         }
     }
-    let ink = if row.heading {
-        Style::bold_span()
-    } else if under_cursor {
+    let ink = if under_cursor {
         Style::selected()
+    } else if row.heading {
+        Style::bold_span().fg(ratatui::style::Color::Rgb(PRIMARY.0, PRIMARY.1, PRIMARY.2))
     } else if row.dim {
         ratatui::style::Style::new().add_modifier(ratatui::style::Modifier::DIM)
+    } else if row.action.is_some() {
+        ratatui::style::Style::new().fg(ratatui::style::Color::Rgb(
+            ALTERNATE.0,
+            ALTERNATE.1,
+            ALTERNATE.2,
+        ))
     } else {
         ratatui::style::Style::new()
     };

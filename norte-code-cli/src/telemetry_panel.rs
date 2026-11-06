@@ -5,6 +5,8 @@
 //! provider and its models, a series over time, and the ranks a person switches
 //! between. It holds no terminal and no state: a function of the rows, so the
 //! panel's numbers can be checked without drawing a frame.
+
+#![allow(dead_code)]
 //!
 //! # Models are not merged
 //!
@@ -501,6 +503,40 @@ pub(crate) enum Tab {
     Time,
 }
 
+/// The visualisation shown above the time report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ChartKind {
+    /// A time series for the selected metric.
+    #[default]
+    Line,
+    /// The selected metric's share by model.
+    Pie,
+    /// A normalized six-metric comparison of the busiest models.
+    Radar,
+}
+
+impl ChartKind {
+    /// Every chart in the cycle order.
+    pub(crate) const ALL: [Self; 3] = [Self::Line, Self::Pie, Self::Radar];
+
+    /// The short label shown in the panel footer.
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Pie => "pie",
+            Self::Radar => "radar",
+        }
+    }
+
+    /// The next chart, wrapping.
+    #[must_use]
+    pub(crate) fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+}
+
 impl Tab {
     /// Every tab, in the order the key walks them.
     pub(crate) const ALL: [Self; 3] = [Self::ThisSession, Self::Providers, Self::Time];
@@ -543,6 +579,8 @@ pub(crate) struct Panel {
     pub(crate) range: Range,
     /// What the ranks are ordered by.
     pub(crate) metric: Metric,
+    /// Which halftone chart is shown in the time tab.
+    pub(crate) chart: ChartKind,
     /// The providers whose models are shown, by provider id.
     open: BTreeSet<String>,
     /// Which provider row the cursor is on, in the `providers` tab.
@@ -567,6 +605,7 @@ impl Panel {
             tab: Tab::ThisSession,
             range: Range::Today,
             metric: Metric::Tokens,
+            chart: ChartKind::default(),
             open: BTreeSet::new(),
             cursor: 0,
             frame: 0,
@@ -647,6 +686,11 @@ impl Panel {
     /// Walks the metric the ranks are ordered by.
     pub(crate) fn next_metric(&mut self) {
         self.metric = self.metric.next();
+    }
+
+    /// Cycles the halftone chart shown above the time report.
+    pub(crate) fn next_chart(&mut self) {
+        self.chart = self.chart.next();
     }
 
     /// Walks the metric back.
@@ -895,6 +939,39 @@ impl Panel {
                 points,
             },
         )
+    }
+
+    /// Returns model values suitable for a distribution chart.
+    #[must_use]
+    pub(crate) fn distribution(&self, metric: Metric, limit: usize) -> Vec<(String, f64)> {
+        self.report()
+            .models_by(metric)
+            .into_iter()
+            .take(limit)
+            .map(|(name, slice)| (name.to_owned(), metric.value(slice)))
+            .collect()
+    }
+
+    /// Returns normalized profiles for the radar chart.
+    #[must_use]
+    pub(crate) fn radar_profiles(&self, limit: usize) -> Vec<(String, Vec<f64>)> {
+        let report = self.report();
+        report
+            .models_by(Metric::Tokens)
+            .into_iter()
+            .take(limit)
+            .map(|(name, slice)| {
+                let values = [
+                    slice.tokens() as f64,
+                    slice.output_tokens as f64,
+                    slice.cache_rate().unwrap_or(0) as f64,
+                    slice.p50_ms() as f64,
+                    slice.p50_ttft_ms() as f64,
+                    slice.cost_usd,
+                ];
+                (name.to_owned(), values.to_vec())
+            })
+            .collect()
     }
 
     /// One point per bucket, per model, for the metric in force.

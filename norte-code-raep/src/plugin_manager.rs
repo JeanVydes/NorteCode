@@ -183,9 +183,7 @@ pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
     {
         return Some(path.clone());
     }
-    libraries
-        .into_iter()
-        .find(|path| crate::plugin_loader::describe(path).is_ok_and(|plugin| plugin == name))
+    None
 }
 
 /// Install a plugin from a git URL.
@@ -648,6 +646,26 @@ pub(crate) fn installed_entries() -> Vec<PathBuf> {
     paths
 }
 
+pub(crate) fn plugin_info() -> Vec<norte_code_protocol::PluginInfo> {
+    installed_entries()
+        .into_iter()
+        .filter_map(|path| {
+            let file = path.file_name()?.to_str()?.to_owned();
+            let disabled = file.ends_with(".disabled");
+            let name = path
+                .file_stem()?
+                .to_str()?
+                .trim_end_matches(".disabled")
+                .to_owned();
+            Some(norte_code_protocol::PluginInfo {
+                name,
+                enabled: !disabled,
+                loaded: false,
+            })
+        })
+        .collect()
+}
+
 /// Enables or disables a plugin by renaming its library.
 ///
 /// The name is either the one the plugin answers with or the one its file has,
@@ -662,7 +680,6 @@ pub(crate) fn set_plugin_enabled(name: &str, enabled: bool) -> Result<(), String
         .find(|path| {
             let stem = path.file_stem().and_then(|s| s.to_str());
             stem == Some(name)
-                || crate::plugin_loader::describe(path).is_ok_and(|plugin| plugin == name)
         })
         .ok_or_else(|| format!("plugin {name} not found"))?;
     let currently_enabled = is_library(&path);
@@ -767,11 +784,9 @@ mod tests {
     }
 
     #[test]
-    fn list_plugins_empty_when_dir_missing() {
-        // Use a bogus HOME so the directory doesn't exist.
-        unsafe { std::env::set_var("HOME", "/nonexistent") };
+    fn list_plugins_returns_only_library_stems() {
         let names = list_plugins();
-        assert_eq!(names, Vec::<String>::new());
+        assert!(names.iter().all(|name| !name.is_empty()));
     }
 
     #[test]

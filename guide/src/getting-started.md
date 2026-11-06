@@ -22,44 +22,57 @@ cargo run -p norte-code-cli -- --help
 
 ## Name a model and a key
 
-Norte Code reads a user config from the platform config directory, merged with
-an optional `.norte-code/config.json` project overlay. The smallest useful user
-file is:
+The server reads its configuration from the platform config directory, merged
+with an optional `.norte-code/service.json` project overlay. The CLI reads only
+its own `cli.json`; it does not load providers, models, keys or server
+settings. Start the local service first:
+
+```sh
+norte-code service start
+```
+
+Use `-f` to keep following the service log after startup; press Ctrl-C to
+stop following without stopping the service:
+
+```sh
+norte-code service start -f
+```
+
+The smallest useful server file is:
 
 ```json
 {
-  "version": 1,
-  "default_provider": "openrouter",
-  "default_model": "anthropic/claude-sonnet-4"
+  "version": 1
 }
 ```
 
-Then export the key:
+Install the recommended OpenRouter catalogue:
+
+```sh
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
+```
+
+Then export the key and check the server catalogue:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-```
-
-Check the catalogue knows the model:
-
-```sh
 norte-code models --provider openrouter --tools
 ```
 
 The catalogue is two files you own beside the config — `providers.json` (who
 serves models) and `models.json` (the models). Nothing is fetched or bundled:
-if a file is missing it is written empty and the error names it.
+the bundled files are empty and a missing file is also created empty.
 
-**Not maintaining those files?** Install the
-[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead — it
-offers a ready-made catalogue as a plugin, no files to write:
+**Recommended for OpenRouter:** install its catalogue from the trusted
+[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead — no
+catalogue files to maintain:
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package openrouter
 ```
 
-It loads before the catalogue is read, so its providers and models appear in
-`norte-code models` and `/model` for that run, and your files stay untouched.
+The server loads it before the catalogue is read, so its providers and models
+appear in `norte-code models` and `/model`, and your files stay untouched.
 (Installing a plugin clones and builds untrusted code — including its
 `build.rs` — so only do it for sources you trust.)
 
@@ -74,13 +87,14 @@ norte-code new
 ```
 
 `new` creates a session and stays in it: the first line you type is the first
-message. Speech-to-text style one-liners do not exist here — to send one
-message and exit, use the protocol (see
-[Script against the protocol](guides/script-with-jsonl.md)).
+message. For a headless one-shot, pipe newline-delimited messages:
 
 ```sh
-norte-code new --model openrouter/anthropic/claude-sonnet-4
+printf '%s\n' 'Explain this project' | norte-code new --jsonl
 ```
+
+`--jsonl` emits every service event plus client diagnostics (connection,
+input, request lifecycle, errors and completion), one JSON object per line.
 
 It prints the session key, so the next command can continue it:
 

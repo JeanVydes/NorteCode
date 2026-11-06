@@ -55,6 +55,9 @@ pub enum ServiceError {
     /// An approval rule could not be read or written.
     #[error("approval: {0}")]
     Approval(String),
+    /// Host telemetry could not be read.
+    #[error("telemetry: {0}")]
+    Telemetry(String),
     /// Compaction could not produce a safe summary.
     #[error("compaction: {0}")]
     Compaction(String),
@@ -64,4 +67,8 @@ pub enum ServiceError {
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),
+    /// The session is already running a turn and the input policy forbids
+    /// queueing another one.
+    #[error("the session is busy: a turn is already running")]
+    SessionBusy,
 }

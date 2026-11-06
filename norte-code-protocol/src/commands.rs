@@ -360,7 +360,7 @@ impl Registry {
                 command: spec.name.clone(),
                 args,
             }),
-            Err(problem) => Err(format!("{problem}\nusage: {}", spec.usage())),
+            Err(problem) => Err(format!("{problem} Usage: {}", spec.usage())),
         })
     }
 
@@ -600,14 +600,14 @@ fn assign(spec: &CommandSpec, rest: &str) -> Result<BTreeMap<String, String>, St
             // is a different title.
             filled.insert(arg.name.clone(), trimmed[offset..].to_owned());
             return match missing(spec, &filled) {
-                Some(arg) => Err(format!("`{}` needs {}", spec.name, arg.name)),
+                Some(arg) => Err(format!("Command {} needs a {}.", spec.name, arg.name)),
                 None => Ok(filled),
             };
         }
         filled.insert(arg.name.clone(), token.to_owned());
     }
     match missing(spec, &filled) {
-        Some(arg) => Err(format!("`{}` needs {}", spec.name, arg.name)),
+        Some(arg) => Err(format!("Command {} needs a {}.", spec.name, arg.name)),
         None => Ok(filled),
     }
 }
@@ -703,7 +703,7 @@ mod tests {
             .expect_err("the tool is required");
         assert!(refused.contains("tool"), "{refused}");
         assert!(
-            refused.contains("usage: /allow <tool> [session|global]"),
+            refused.contains("Usage: /allow <tool> [session|global]"),
             "the error says what would have worked: {refused}"
         );
     }

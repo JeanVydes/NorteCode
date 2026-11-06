@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use norte::BlobId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -40,19 +41,21 @@ impl fmt::Display for SessionKey {
 
 /// One piece of media travelling with a message.
 ///
-/// It is a path, not the bytes: the client and the service share a filesystem,
-/// and a pasted photo is a file either way. The service reads it where its blob
-/// store is and files it there, so the bytes never travel on the wire.
+/// Local clients may provide `path`; remote clients should provide `blob` after
+/// uploading through the host. The latter avoids shared-filesystem assumptions
+/// and lets the service use its content-addressed store directly.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attachment {
-    /// The path to the file, as the client named it.
-    ///
-    /// A path and not bytes: the client and the service share a filesystem as
-    /// well as a blob store, and a pasted photo is a file either way. Reading it
-    /// where the store is keeps the bytes off the wire and out of the editor's
-    /// thread, and the service is what files it.
+    /// The path to a local file, for in-process clients.
+    #[serde(default)]
     pub path: String,
+    /// A content-addressed blob already stored by the host.
+    ///
+    /// When present, the service uses this reference directly and does not
+    /// read `path`. This is the remote-client form used by RAEP uploads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<BlobId>,
     /// The media type, as `type/subtype`.
     pub mime: String,
     /// What the client called it, for a person reading the transcript.
@@ -79,6 +82,44 @@ pub struct SessionInfo {
     pub created_at: Option<String>,
     /// Where it currently is.
     pub phase: Phase,
+}
+
+/// Metadata for one plugin managed by the remote host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginInfo {
+    /// Plugin name or installed library stem.
+    pub name: String,
+    /// Whether the plugin is enabled for the next host start.
+    pub enabled: bool,
+    /// Whether the host currently loaded it successfully.
+    pub loaded: bool,
+}
+
+/// One MCP server visible to the service.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpInfo {
+    /// Configuration name.
+    pub name: String,
+    /// Command label.
+    pub command: String,
+    /// Published tool names.
+    pub tools: Vec<String>,
+    /// Tools filtered by configuration.
+    pub filtered: Vec<String>,
+    /// Whether its tools are enabled.
+    pub active: bool,
+}
+
+/// An MCP server that could not be started.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpFailure {
+    /// Configuration name.
+    pub name: String,
+    /// Startup failure.
+    pub reason: String,
 }
 
 /// One task in a session's list, as a client renders it.
