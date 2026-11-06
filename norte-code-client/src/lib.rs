@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use futures_util::stream::{self, StreamExt};
 use norte_code_protocol::AgentCommand;
-use norte_code_protocol::{ClientRequest, ServerEvent};
-use raep_types::{Ack, Envelope, FrameType, SessionAttach, StandardFrameType};
+use norte_code_protocol::{ClientRequest, QueueMode, ServerEvent};
+use raep_types::{Ack, Envelope, FrameType, SessionAttach, StandardFrameType, UserInput};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -307,7 +307,6 @@ enum CanonicalKind {
     SessionDeleted,
     SessionRenamed,
     SessionForked,
-    SessionSwitched,
     TurnStarted,
     TokenDelta,
     Committed,
@@ -346,7 +345,6 @@ impl CanonicalKind {
             "session_deleted" => Self::SessionDeleted,
             "session_renamed" => Self::SessionRenamed,
             "session_forked" => Self::SessionForked,
-            "session_switched" => Self::SessionSwitched,
             "turn_started" => Self::TurnStarted,
             "token_delta" => Self::TokenDelta,
             "committed" => Self::Committed,
@@ -828,6 +826,17 @@ pub trait AgentClient: Send + Sync {
         attachments: &[norte_code_protocol::Attachment],
     ) -> Result<EventStream, ClientError>;
 
+    /// Sends one user message through the standard `UserInput` frame and
+    /// streams the resulting events. The wire policy comes from the
+    /// client's `queue_mode`: `reject` starts a new turn, `queue` steers,
+    /// and `interrupt` cancels-then-steers on the server.
+    async fn steer_message(
+        &self,
+        session: &str,
+        text: &str,
+        queue_mode: QueueMode,
+    ) -> Result<EventStream, ClientError>;
+
     /// Cancels the session's running turn through `CancelTurn`.
     async fn cancel_turn(&self, session: &str) -> Result<(), ClientError>;
 
@@ -1207,6 +1216,45 @@ impl RemoteClient {
             self.base_url,
             percent_encode(session_id)
         )
+    }
+
+    /// RAEP `QueuePolicy` for a [`QueueMode`]: the two enums spell the
+    /// same three values, so the mapping is exhaustive and cannot fall
+    /// through to a default.
+    fn raep_queue_policy(mode: QueueMode) -> raep_types::QueuePolicy {
+        match mode {
+            QueueMode::Reject => raep_types::QueuePolicy::Reject,
+            QueueMode::Queue => raep_types::QueuePolicy::Queue,
+            QueueMode::Interrupt => raep_types::QueuePolicy::Interrupt,
+        }
+    }
+
+    /// Submits one `UserInput` frame and maps its immediate reply onto the
+    /// `NorteCode` event stream.
+    async fn post_user_input(
+        &self,
+        session: &str,
+        text: &str,
+        queue_policy: raep_types::QueuePolicy,
+    ) -> Result<EventStream, ClientError> {
+        let input = UserInput {
+            prompt: Some(text.to_owned()),
+            queue_policy: Some(queue_policy),
+            ..UserInput::default()
+        };
+        let frames = self
+            .post_standard(
+                session,
+                FrameType::Standard(StandardFrameType::UserInput),
+                serde_json::to_value(input)
+                    .map_err(|error| ClientError::new(format!("serialize prompt: {error}")))?,
+            )
+            .await?;
+        let events = frames
+            .iter()
+            .map(server_event_from_frame)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::pin(iter(events)))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1639,6 +1687,16 @@ impl AgentClient for RemoteClient {
             },
         )
         .await
+    }
+
+    async fn steer_message(
+        &self,
+        session: &str,
+        text: &str,
+        queue_mode: QueueMode,
+    ) -> Result<EventStream, ClientError> {
+        self.post_user_input(session, text, Self::raep_queue_policy(queue_mode))
+            .await
     }
 
     async fn cancel_turn(&self, session: &str) -> Result<(), ClientError> {
@@ -2119,7 +2177,6 @@ fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, Clien
                 from: norte_code_protocol::SessionKey::new(decoded.from),
             }
         }
-        CanonicalKind::SessionSwitched => norte_code_protocol::ServerEventKind::SessionSwitched,
         CanonicalKind::TurnStarted => {
             let decoded: CanonicalTurnStarted = canonical.decode()?;
             norte_code_protocol::ServerEventKind::TurnStarted { turn: decoded.turn }
@@ -2440,8 +2497,7 @@ fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, Clien
 fn session_from_request(request: &ClientRequest) -> Option<String> {
     use norte_code_protocol::ClientRequestKind;
     let session = match &request.kind {
-        ClientRequestKind::SwitchSession { session }
-        | ClientRequestKind::ForkSession { session, .. }
+        ClientRequestKind::ForkSession { session, .. }
         | ClientRequestKind::RenameSession { session, .. }
         | ClientRequestKind::DeleteSession { session }
         | ClientRequestKind::Steer { session, .. }

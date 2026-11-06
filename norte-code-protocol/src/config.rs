@@ -489,6 +489,11 @@ pub struct CliConfig {
     /// so a value the client does not know is reported beside the ones it does,
     /// instead of failing the whole file.
     pub verbosity: String,
+    /// What happens to a message typed while a turn is running: `reject`,
+    /// `queue` or `interrupt`. An unknown value is reported beside the ones
+    /// the client knows instead of failing the whole file, so the
+    /// renderer can name them.
+    pub queue_mode: String,
     /// How an `edit` call's diff is drawn.
     pub diff_style: DiffStyle,
     /// Configuration shared by the terminal's halftone charts.
@@ -575,6 +580,7 @@ impl Default for CliConfig {
             service_auth: None,
             agent_id: "norte-code".to_owned(),
             verbosity: "medium".to_owned(),
+            queue_mode: "queue".to_owned(),
             diff_style: DiffStyle::default(),
             charts: ChartConfig::default(),
         }

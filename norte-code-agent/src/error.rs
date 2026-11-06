@@ -67,4 +67,8 @@ pub enum ServiceError {
     /// The feature exists on the wire but is not built yet.
     #[error("not implemented yet: {0}")]
     Unsupported(&'static str),
+    /// The session is already running a turn and the input policy forbids
+    /// queueing another one.
+    #[error("the session is busy: a turn is already running")]
+    SessionBusy,
 }

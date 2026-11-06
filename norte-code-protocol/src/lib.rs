@@ -28,7 +28,7 @@ pub mod tools;
 pub mod types;
 pub mod wire;
 
-pub use agent_commands::AgentCommand;
+pub use agent_commands::{AgentCommand, QueueMode};
 pub use store::*;
 pub use types::*;
 pub use wire::*;

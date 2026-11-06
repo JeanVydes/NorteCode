@@ -181,7 +181,6 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::SessionForked { from } => CanonicalEvent::SessionForked {
             from: from.as_str(),
         },
-        ServerEventKind::SessionSwitched => CanonicalEvent::SessionSwitched,
         ServerEventKind::TurnStarted { turn } => CanonicalEvent::TurnStarted { turn: *turn },
         ServerEventKind::Delta { turn, delta } => CanonicalEvent::TokenDelta {
             turn: *turn,
@@ -691,8 +690,6 @@ enum CanonicalEvent<'a> {
     SessionRenamed { title: &'a str },
     /// A session was forked.
     SessionForked { from: &'a str },
-    /// The active session changed.
-    SessionSwitched,
     /// A turn began.
     TurnStarted { turn: u64 },
     /// A model token delta.

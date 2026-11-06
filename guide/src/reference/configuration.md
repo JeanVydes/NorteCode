@@ -28,6 +28,7 @@ Its service settings are:
 | `service_auth` | string or null | null | Raw bearer token, without the `Bearer` prefix. |
 | `agent_id` | string | `norte-code` | Agent identifier sent during RAEP attachment. |
 | `verbosity` | `low`, `medium` or `high` | `medium` | Output detail for the terminal client. |
+| `queue_mode` | `reject`, `queue` or `interrupt` | `queue` | What a message typed while a turn runs does. |
 
 ## Service envelope and agents
 
@@ -99,6 +100,7 @@ What the client shows, as opposed to what the engine does.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `verbosity` | string | `medium` | `low` (answer alone), `medium` (also tools and thinking), `high` (also arguments and results). |
+| `queue_mode` | string | `queue` | `reject` (refuse while busy), `queue` (steer into the running turn), `interrupt` (cancel the turn, then steer). |
 | `diff_style` | `unified`, `split` | `unified` | How an `edit` diff is drawn. |
 
 `--verbose` overrides `ui.verbosity` for one run. `diff_style` is the same

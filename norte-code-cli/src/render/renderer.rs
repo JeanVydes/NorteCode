@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::input::{Pinned, TodoItem};
+use norte_code_protocol::QueueMode;
 
 /// The ink a row of the transcript is written in.
 use crate::transcript::Ink;
@@ -119,6 +120,8 @@ pub(crate) struct BudgetPrompt {
 pub(crate) struct Renderer {
     pub(crate) format: Format,
     pub(crate) verbosity: Verbosity,
+    /// What a message typed while a turn runs does, from `ui.queue_mode`.
+    pub(crate) queue_mode: QueueMode,
     /// The session key, for the footer. The server sends it on every event.
     pub(crate) session: Option<String>,
     /// Whether the footer names the directory the work is in.
@@ -357,6 +360,7 @@ impl Renderer {
         Self {
             format,
             verbosity,
+            queue_mode: QueueMode::Queue,
             session: None,
             show_workdir: true,
             title: None,

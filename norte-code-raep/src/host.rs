@@ -1737,8 +1737,13 @@ impl NorteCodeRaepHost {
             }
             _ => unreachable!("UserInput::validate enforces exactly one form"),
         };
-        let mut output = self
-            .submit_service(
+        let queue_mode = match input.queue_policy.clone() {
+            Some(raep_types::QueuePolicy::Queue) => norte_code_protocol::QueueMode::Queue,
+            Some(raep_types::QueuePolicy::Interrupt) => norte_code_protocol::QueueMode::Interrupt,
+            Some(raep_types::QueuePolicy::Reject) | None => norte_code_protocol::QueueMode::Reject,
+        };
+        let mut output = if queue_mode == norte_code_protocol::QueueMode::Reject {
+            self.submit_service(
                 &frame.session_id,
                 ClientRequestKind::SendMessage {
                     session: Some(SessionKey::new(frame.session_id.clone())),
@@ -1749,7 +1754,19 @@ impl NorteCodeRaepHost {
                     replay: false,
                 },
             )
-            .await?;
+            .await?
+        } else {
+            self.submit_service(
+                &frame.session_id,
+                ClientRequestKind::Steer {
+                    session: SessionKey::new(frame.session_id.clone()),
+                    text,
+                    id: String::new(),
+                    queue_mode,
+                },
+            )
+            .await?
+        };
         if output.is_empty() {
             output.push(
                 self.emit(
@@ -2112,8 +2129,7 @@ fn extension_name_for_event(kind: &ServerEventKind) -> String {
 
 fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
     match kind {
-        ClientRequestKind::SwitchSession { session }
-        | ClientRequestKind::RenameSession { session, .. }
+        ClientRequestKind::RenameSession { session, .. }
         | ClientRequestKind::DeleteSession { session }
         | ClientRequestKind::Steer { session, .. }
         | ClientRequestKind::CancelTurn { session }

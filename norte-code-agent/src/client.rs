@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use norte_code_client::{AgentClient, ClientError, EventStream, SessionSummary};
-use norte_code_protocol::{ClientRequest, ClientRequestKind, ServerEventKind, SessionKey};
+use norte_code_protocol::{
+    ClientRequest, ClientRequestKind, QueueMode, ServerEventKind, SessionKey,
+};
 
 use crate::Service;
 
@@ -151,6 +153,26 @@ impl AgentClient for InProcessClient {
                     budget: None,
                     reasoning: None,
                     replay: false,
+                },
+            })
+            .await
+            .map_err(|error| ClientError::new(error.to_string()))
+    }
+
+    async fn steer_message(
+        &self,
+        session: &str,
+        text: &str,
+        queue_mode: QueueMode,
+    ) -> Result<EventStream, ClientError> {
+        self.service
+            .submit(ClientRequest {
+                request_id: 0,
+                kind: ClientRequestKind::Steer {
+                    session: SessionKey::new(session),
+                    text: text.to_owned(),
+                    id: String::new(),
+                    queue_mode,
                 },
             })
             .await

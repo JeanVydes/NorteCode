@@ -4,6 +4,7 @@
   "service_auth": null,
   "agent_id": "norte-code",
   "verbosity": "medium",
+  "queue_mode": "queue",
   "diff_style": "unified",
   "charts": {
     "contrast": 75,

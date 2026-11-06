@@ -38,6 +38,7 @@ use commands::{apply_extensions, duration_label, run};
 use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, headless_messages, interactive_loop, refresh_effort};
 use models::{ModelChoice, list_models, remote_model_list, resolve_remote_spec, session_choice};
+use norte_code_protocol::QueueMode;
 use preview::{clip_text, compact_json};
 use render::{
     Format, HostFacts, Renderer, Verbosity, cache_percent_label, human_tokens, parse_budget_action,
@@ -45,6 +46,20 @@ use render::{
     select_system_prompt, short,
 };
 use startup::Open;
+
+/// What `ui.queue_mode` names, as the typed wire enum.
+///
+/// The config stays a `String` so a bad value can be reported beside the
+/// ones the client knows instead of failing the whole file, exactly like
+/// `verbosity`. Anything unrecognised falls back to `queue`, the behaviour
+/// the client has always had while a turn runs.
+fn queue_mode(value: &str) -> QueueMode {
+    match value {
+        "reject" => QueueMode::Reject,
+        "interrupt" => QueueMode::Interrupt,
+        _ => QueueMode::Queue,
+    }
+}
 
 #[cfg(test)]
 #[cfg(test)]
@@ -897,6 +912,7 @@ pub(crate) async fn new_session(
         Arc::clone(&pinned),
     );
     let diagnostic_model = model_label.clone();
+    renderer.queue_mode = queue_mode(&config.ui.queue_mode);
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
     renderer.set_chart_config(&config.ui.charts);
@@ -1238,6 +1254,7 @@ async fn resume_session(
         style,
         Arc::clone(&pinned),
     );
+    renderer.queue_mode = queue_mode(&config.ui.queue_mode);
     renderer.set_cost_silent(matches!(provider.as_str(), "anthropic" | "google"));
     renderer.set_diff_style(diff_style);
     renderer.set_chart_config(&config.ui.charts);
