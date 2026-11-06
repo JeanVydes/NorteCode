@@ -3531,6 +3531,12 @@ pub(crate) async fn drive_turns(
                                 let waiting: Vec<String> =
                                     queued.iter().map(|(text, _)| text.clone()).collect();
                                 renderer.pinned.set_pending_steers(waiting);
+                                // The message stays queued until the turn's
+                                // TurnFinished/TurnStopped arrives; the
+                                // dispatch gate below requires `committed`,
+                                // which only those events set. Guessing the
+                                // turn is over from the spinner would race
+                                // the server's own commit.
                             }
                         }
                         continue;
