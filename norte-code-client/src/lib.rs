@@ -817,17 +817,14 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
             event(norte_code_protocol::ServerEventKind::Delta { turn, delta })
         }
         "TURN_STATE_CHANGED" => {
-            // RAEP `TurnStateChanged.state` is a `TurnState` enum serialized as
-            // a plain string (`QUEUED`, `COMPLETED`, `CANCELLED`, ...). Decode
-            // it through `raep_types::TurnState` so an unknown state is an
-            // error, not a silent drop, and so the spelling stays owned by
-            // the spec crate.
-            let state: raep_types::TurnState =
-                serde_json::from_value(payload.get("state").cloned().unwrap_or(Value::Null))
-                    .map_err(|error| {
-                        ClientError::new(format!("invalid TURN_STATE_CHANGED state: {error}"))
-                    })?;
-            match state {
+            // The payload is the spec's own `TurnStateChanged` struct: decode
+            // it whole, so an unknown state or a missing field is an error
+            // from serde, not a silent drop or a hand-rolled lookup.
+            let changed: raep_types::TurnStateChanged = serde_json::from_value(payload.clone())
+                .map_err(|error| {
+                    ClientError::new(format!("invalid TURN_STATE_CHANGED payload: {error}"))
+                })?;
+            match changed.state {
                 raep_types::TurnState::Queued => {
                     event(norte_code_protocol::ServerEventKind::TurnStarted { turn })
                 }
@@ -857,11 +854,15 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
                     })
                 }
                 raep_types::TurnState::Cancelled | raep_types::TurnState::Failed => {
-                    let reason = payload
-                        .get("stop_reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("cancelled")
-                        .to_owned();
+                    let reason = match changed.stop_reason {
+                        Some(raep_types::StopReason::EndTurn) => "end_turn",
+                        Some(raep_types::StopReason::MaxTokens) => "max_tokens",
+                        Some(raep_types::StopReason::Error) => "error",
+                        Some(raep_types::StopReason::ToolLimit) => "tool_limit",
+                        Some(raep_types::StopReason::BudgetExceeded) => "budget_exceeded",
+                        Some(raep_types::StopReason::Cancelled) | None => "cancelled",
+                    }
+                    .to_owned();
                     event(norte_code_protocol::ServerEventKind::TurnStopped { reason })
                 }
                 // Intermediate states carry no turn-boundary meaning for the

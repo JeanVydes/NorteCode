@@ -1,8 +1,15 @@
 //! Canonical RAEP payloads emitted by the `NorteCode` adapter.
 
 use norte_code_protocol::{Delta, ServerEventKind};
+use raep_types::{ErrorPayload, HistoryItem, HistoryPage, StopReason, TurnState, TurnStateChanged};
 use serde::Serialize;
 use serde_json::{Value, json};
+
+/// Serializes a typed RAEP payload. The payloads are closed structs, so this
+/// cannot fail; the helper exists so call sites never build wire JSON by hand.
+fn payload<T: Serialize>(value: T) -> Value {
+    serde_json::to_value(value).expect("typed RAEP payload is serializable")
+}
 
 /// Converts a `NorteCode` event into the stable payload understood by RAEP
 /// clients.
@@ -323,7 +330,12 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
     match kind {
-        ServerEventKind::TurnStarted { .. } => Some(json!({"state": "QUEUED"})),
+        ServerEventKind::TurnStarted { .. } => Some(payload(TurnStateChanged {
+            state: TurnState::Queued,
+            stop_reason: None,
+            usage: None,
+            error: None,
+        })),
         ServerEventKind::Delta { delta, .. } => {
             let (text, index, channel) = match delta {
                 Delta::Text { index, text } | Delta::Refusal { index, text } => {
@@ -402,12 +414,23 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
         // `phase`/`committed` are NorteCode's own and travel in the
         // compatibility extension (see `canonical_event_payload`), never
         // smuggled into the canonical payload.
-        ServerEventKind::TurnFinished { .. } => {
-            Some(json!({"state": "COMPLETED", "stop_reason": "end_turn"}))
-        }
-        ServerEventKind::TurnStopped { reason } => {
-            Some(json!({"state": "CANCELLED", "stop_reason": reason}))
-        }
+        ServerEventKind::TurnFinished { .. } => Some(payload(TurnStateChanged {
+            state: TurnState::Completed,
+            stop_reason: Some(StopReason::EndTurn),
+            usage: None,
+            error: None,
+        })),
+        ServerEventKind::TurnStopped { reason } => Some(payload(TurnStateChanged {
+            state: TurnState::Cancelled,
+            stop_reason: Some(match reason.as_str() {
+                "max_tokens" => StopReason::MaxTokens,
+                "tool_limit" => StopReason::ToolLimit,
+                "budget" | "budget_exceeded" => StopReason::BudgetExceeded,
+                _ => StopReason::Cancelled,
+            }),
+            usage: None,
+            error: None,
+        })),
         ServerEventKind::JobList { jobs } => {
             let jobs = jobs
                 .iter()
@@ -440,15 +463,26 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 norte_code_protocol::MessageRole::User => "user",
                 norte_code_protocol::MessageRole::Assistant => "assistant",
             };
-            Some(json!({
-                "items": [{"role": role, "content": text}],
-                "has_more": false
+            Some(payload(HistoryPage {
+                items: vec![HistoryItem {
+                    id: String::new(),
+                    kind: role.to_owned(),
+                    content: json!({"role": role, "content": text}),
+                    created_at: 0,
+                }],
+                next: None,
             }))
         }
-        ServerEventKind::Error { code, message } => Some(json!({
-            "code": serde_json::to_value(code).unwrap_or_else(|_| json!("INTERNAL")),
-            "message": message,
-            "retryable": false
+        ServerEventKind::Error { code, message } => Some(payload(ErrorPayload {
+            code: match serde_json::to_value(code)
+                .and_then(|value| serde_json::from_value::<String>(value.clone()))
+            {
+                Ok(text) => text,
+                Err(_) => "INTERNAL".to_owned(),
+            },
+            message: message.clone(),
+            retryable: Some(false),
+            details: None,
         })),
         _ => None,
     }
@@ -693,8 +727,12 @@ mod tests {
         assert_eq!(
             history,
             json!({
-                "items": [{"role": "user", "content": "hi"}],
-                "has_more": false
+                "items": [{
+                    "id": "",
+                    "kind": "user",
+                    "content": {"role": "user", "content": "hi"},
+                    "created_at": 0
+                }]
             })
         );
 
