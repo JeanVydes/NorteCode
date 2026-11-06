@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use futures_util::stream::{self, StreamExt};
 use norte_code_protocol::{ClientRequest, ServerEvent};
-use raep_types::{Envelope, FrameType, StandardFrameType};
+use raep_types::{Ack, Envelope, FrameType, SessionAttach, StandardFrameType};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -526,7 +526,8 @@ impl RemoteClient {
                                     .headers(headers)
                                     .json(&Envelope::new(
                                         FrameType::Standard(StandardFrameType::Ack),
-                                        serde_json::json!({"last_seq": seq}),
+                                        serde_json::to_value(Ack { last_seq: seq })
+                                            .unwrap_or(Value::Null),
                                         timestamp_millis(),
                                     ))
                                     .send()
@@ -685,11 +686,18 @@ impl RemoteClient {
             .headers(headers)
             .json(&Envelope::new(
                 FrameType::Standard(StandardFrameType::SessionAttach),
-                serde_json::json!({
-                    "agent_id": &self.agent_id,
-                    "create_if_missing": false,
-                    "resume_from_seq": self.last_seq(session_id),
-                }),
+                serde_json::to_value(SessionAttach {
+                    agent_id: self.agent_id.clone(),
+                    agent_override: None,
+                    create_if_missing: Some(false),
+                    mode: None,
+                    takeover: None,
+                    resume_from_seq: self.last_seq(session_id),
+                    capabilities: None,
+                    client_info: None,
+                    options: None,
+                })
+                .unwrap_or(Value::Null),
                 timestamp_millis(),
             ))
             .send()
@@ -887,7 +895,7 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
                 payload
                     .get("stream")
                     .cloned()
-                    .unwrap_or_else(|| json!("stdout")),
+                    .unwrap_or(Value::String("stdout".to_owned())),
             )
             .unwrap_or(norte_code_protocol::types::OutputStream::Stdout),
             text: required_string(payload, "delta")?,
