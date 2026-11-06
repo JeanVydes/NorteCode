@@ -359,6 +359,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
         }
         ServerEventKind::ToolFinished {
             call_id,
+            tool,
             is_error,
             detached,
             output,
@@ -377,6 +378,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             let summary = error.clone().or_else(|| output.clone()).unwrap_or_default();
             Some(json!({
                 "tool_call_id": call_id,
+                "tool_name": tool,
                 "status": status,
                 "duration_ms": duration_ms,
                 "result_summary": summary,
@@ -789,6 +791,7 @@ mod tests {
             tool_finished,
             json!({
                 "tool_call_id": "call-1",
+                "tool_name": "shell",
                 "status": "OK",
                 "duration_ms": 12,
                 "result_summary": "done",
