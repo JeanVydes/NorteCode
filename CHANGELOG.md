@@ -9,6 +9,7 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `ui.queue_mode` in `cli.json` chooses what a message typed while a turn runs does: `reject` starts a new turn, `queue` steers into the running one, and `interrupt` cancels the turn first. `Steer` now carries the policy, and the RAEP host maps `USER_INPUT.queue_policy` onto it.
+- A steering message that reached the request in flight is now also reported as a standard `USER_INPUT_ACCEPTED` frame, with the accepted `content` and an `origin` (`kind: "user"`); the queued-input limit (`limits.max_queued_inputs`, default 8) now fails with `SESSION_BUSY` instead of growing the queue without bound.
 - Browser requests are checked against a new `allowed_origins` list: a request that carries an `Origin` header is rejected unless the origin is listed. A non-browser client sends no `Origin` and is unaffected.
 - The RAEP server now answers the session management resource: `GET /raep/v1/sessions` lists the principal's sessions, `GET /raep/v1/sessions/{session_id}` returns a `session_summary`, `POST` creates one and honors `Idempotency-Key`, `PATCH` renames it, and `DELETE` removes it. A session owned by one principal is invisible to another.
 - The RAEP server now serves the read-only agent resource: `GET /raep/v1/agents`, `GET /raep/v1/agents/{agent_id}` and `GET /raep/v1/agents/{agent_id}/versions`. `HELLO` and `/raep/v1/info` now advertise `manage` and `resume` because both are implemented.

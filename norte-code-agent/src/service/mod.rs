@@ -157,6 +157,12 @@ pub(super) struct CancelRegistration {
 
 /// The Norte Code service.
 pub struct Service {
+    /// How many inputs may wait for the turn in flight (RFC 12.1:
+    /// `limits.max_queued_inputs`, default 8).
+    ///
+    /// One more is refused with `SessionBusy` (`ERROR SESSION_BUSY` on the
+    /// wire) instead of growing `pending_steers` without bound.
+    max_queued_inputs: usize,
     config: RwLock<Config>,
     agent_profiles: RwLock<BTreeMap<String, Config>>,
     catalog: RwLock<Arc<Catalog>>,
@@ -455,6 +461,7 @@ impl Service {
         let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
         let agent_profiles = BTreeMap::from([(config.name.clone(), config.clone())]);
         let service = Self {
+            max_queued_inputs: 8,
             config: RwLock::new(config),
             agent_profiles: RwLock::new(agent_profiles),
             catalog: RwLock::new(catalog),
@@ -2184,6 +2191,9 @@ impl Service {
             let record = sessions
                 .get_mut(&key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            if record.pending_steers.len() >= self.max_queued_inputs {
+                return Err(ServiceError::SessionBusy);
+            }
             record.pending_steers.push(steered.clone());
         }
         self.persist(&key).await?;
