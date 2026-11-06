@@ -349,7 +349,21 @@ fn fallback_edit_box(
     if omitted > 0 {
         rows.truncate(EDIT_MAX_ROWS);
     }
-    (rows, None, None, false, omitted)
+    // Without the source there is no line to count from, but the block
+    // itself still says how many lines it covers on each side: that is
+    // honest, and it keeps the header from claiming the location is
+    // unavailable when the edit plainly has one.
+    let old_range = if left.is_empty() {
+        None
+    } else {
+        Some((1, left.len()))
+    };
+    let new_range = if right.is_empty() {
+        None
+    } else {
+        Some((1, right.len()))
+    };
+    (rows, old_range, new_range, false, omitted)
 }
 
 /// Reads the file an edit will touch, but only when it is a regular file inside
@@ -600,7 +614,7 @@ pub(crate) fn edit_range(edit: &EditBox) -> String {
             )
         }
         (Some((start, end)), None) => format!("{} → deleted", line_range(start, end)),
-        (None, _) => "location unavailable".to_owned(),
+        (None, _) => "location unknown".to_owned(),
     }
 }
 
@@ -810,7 +824,7 @@ mod tests {
         // A deletion: there is no new range.
         let deleted = edit_range(&boxed(Some((3, 5)), None));
         assert!(deleted.contains("deleted"), "{deleted}");
-        // An insertion has no old range, which is what "unavailable" covers.
-        assert_eq!(edit_range(&boxed(None, None)), "location unavailable");
+        // An insertion has no old range, which is what "unknown" covers.
+        assert_eq!(edit_range(&boxed(None, None)), "location unknown");
     }
 }
