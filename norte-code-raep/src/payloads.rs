@@ -7,8 +7,63 @@ use serde_json::{Value, json};
 
 /// Serializes a typed RAEP payload. The payloads are closed structs, so this
 /// cannot fail; the helper exists so call sites never build wire JSON by hand.
-fn payload<T: Serialize>(value: T) -> Value {
+pub(crate) fn payload<T: Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("typed RAEP payload is serializable")
+}
+
+/// A token delta frame. RAEP has no struct for this, so the adapter owns one
+/// here and serializes it; the shape is the wire contract, not a literal.
+#[derive(Debug, Serialize)]
+struct TokenDeltaPayload {
+    delta: String,
+    index: u32,
+    channel: &'static str,
+}
+
+/// A tool call start frame.
+#[derive(Debug, Serialize)]
+struct ToolCallStartedPayload<'a> {
+    tool_call_id: &'a str,
+    tool_name: &'a str,
+    arguments: Value,
+    requires_approval: bool,
+    executor: &'static str,
+    attempt: u32,
+}
+
+/// A tool call finish frame.
+#[derive(Debug, Serialize)]
+struct ToolCallFinishedPayload<'a> {
+    tool_call_id: &'a str,
+    tool_name: &'a str,
+    status: &'static str,
+    duration_ms: u64,
+    result_summary: String,
+    result_truncated: bool,
+}
+
+/// A tool output delta frame.
+#[derive(Debug, Serialize)]
+struct ToolOutputDeltaPayload<'a> {
+    tool_call_id: &'a str,
+    tool_name: &'a str,
+    stream: &'a norte_code_protocol::types::OutputStream,
+    delta: &'a str,
+    index: u32,
+}
+
+/// One job in a job list frame.
+#[derive(Debug, Serialize)]
+struct JobEntryPayload {
+    job_id: String,
+    command: String,
+    status: &'static str,
+}
+
+/// A job list frame.
+#[derive(Debug, Serialize)]
+struct JobListPayload {
+    jobs: Vec<JobEntryPayload>,
 }
 
 /// Converts a `NorteCode` event into the stable payload understood by RAEP
@@ -347,7 +402,11 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 } => (arguments.clone(), *index, "text"),
                 Delta::Media { index, .. } => (String::new(), *index, "text"),
             };
-            Some(json!({"delta": text, "index": index, "channel": channel}))
+            Some(payload(TokenDeltaPayload {
+                delta: text,
+                index,
+                channel,
+            }))
         }
         ServerEventKind::ToolStarted {
             call_id,
@@ -360,13 +419,13 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 .and_then(|arguments| arguments.as_object())
                 .cloned()
                 .map_or_else(|| json!({}), Value::Object);
-            Some(json!({
-                "tool_call_id": call_id,
-                "tool_name": tool,
-                "arguments": arguments,
-                "requires_approval": false,
-                "executor": "server",
-                "attempt": 1
+            Some(payload(ToolCallStartedPayload {
+                tool_call_id: call_id,
+                tool_name: tool,
+                arguments,
+                requires_approval: false,
+                executor: "server",
+                attempt: 1,
             }))
         }
         ServerEventKind::ToolFinished {
@@ -388,13 +447,13 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 "OK"
             };
             let summary = error.clone().or_else(|| output.clone()).unwrap_or_default();
-            Some(json!({
-                "tool_call_id": call_id,
-                "tool_name": tool,
-                "status": status,
-                "duration_ms": duration_ms,
-                "result_summary": summary,
-                "result_truncated": truncated
+            Some(payload(ToolCallFinishedPayload {
+                tool_call_id: call_id,
+                tool_name: tool,
+                status,
+                duration_ms: *duration_ms,
+                result_summary: summary,
+                result_truncated: *truncated,
             }))
         }
         ServerEventKind::ToolOutput {
@@ -403,12 +462,12 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             stream,
             text,
             ..
-        } => Some(json!({
-            "tool_call_id": call_id,
-            "tool_name": tool,
-            "stream": stream,
-            "delta": text,
-            "index": 0
+        } => Some(payload(ToolOutputDeltaPayload {
+            tool_call_id: call_id,
+            tool_name: tool,
+            stream,
+            delta: text,
+            index: 0,
         })),
         // RAEP `TurnStateChanged` carries only `state` and `stop_reason`;
         // `phase`/`committed` are NorteCode's own and travel in the
@@ -445,14 +504,14 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                     } else {
                         job.script.clone()
                     };
-                    json!({
-                        "job_id": job.id,
-                        "command": command,
-                        "status": status
-                    })
+                    JobEntryPayload {
+                        job_id: job.id.clone(),
+                        command,
+                        status,
+                    }
                 })
                 .collect::<Vec<_>>();
-            Some(json!({ "jobs": jobs }))
+            Some(payload(JobListPayload { jobs }))
         }
         ServerEventKind::MessageReplayed { role, text, .. } => {
             let role = match role {
