@@ -14,6 +14,7 @@ mod http;
 mod payloads;
 mod plugin_manager;
 
+pub use commands::AgentCommand;
 pub use host::{
     ArtifactRef, ArtifactStore, BlobArtifactStore, FileReplayStore, HostConfig, HostError,
     NorteCodeRaepHost, ReplayStore, SqliteReplayStore,

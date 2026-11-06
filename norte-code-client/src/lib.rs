@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use futures_core::Stream;
 use futures_util::stream::{self, StreamExt};
+use norte_code_protocol::AgentCommand;
 use norte_code_protocol::{ClientRequest, ServerEvent};
 use raep_types::{Ack, Envelope, FrameType, SessionAttach, StandardFrameType};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
@@ -67,6 +68,13 @@ impl FrameWire {
             ext: self.ext,
         }
     }
+}
+
+/// A fork request payload. `raep-types` defines the `SessionFork` frame
+/// but no payload struct for it yet, so the client owns this one shape.
+#[derive(Debug, serde::Serialize)]
+struct ForkPayload {
+    session_id: String,
 }
 
 /// A command response body: the events a command produced, or the error
@@ -789,9 +797,11 @@ impl ClientError {
 /// event stream in every case.
 ///
 /// Session management goes through the RAEP standard resource
-/// (`/raep/v1/sessions`), not through `submit`: creating, listing, renaming
-/// and deleting sessions are management operations the spec owns, so they
-/// are typed methods here, not extension requests.
+/// (`/raep/v1/sessions`), turn input through `UserInput`, cancellation
+/// through `CancelTurn`, and configuration through `SessionConfigure`:
+/// those are operations the spec owns, so they are typed methods here, not
+/// extension requests. Everything the spec does not cover (plugins, skills,
+/// MCP, approvals, observability) still goes through `submit`.
 #[async_trait]
 pub trait AgentClient: Send + Sync {
     /// Submits one request and returns its event stream.
@@ -808,6 +818,50 @@ pub trait AgentClient: Send + Sync {
 
     /// Deletes a session and everything keyed by it.
     async fn delete_session(&self, session: &str) -> Result<(), ClientError>;
+
+    /// Sends one user message as a standard `UserInput` frame and streams
+    /// the turn's events.
+    async fn send_message(
+        &self,
+        session: &str,
+        text: &str,
+        attachments: &[norte_code_protocol::Attachment],
+    ) -> Result<EventStream, ClientError>;
+
+    /// Cancels the session's running turn through `CancelTurn`.
+    async fn cancel_turn(&self, session: &str) -> Result<(), ClientError>;
+
+    /// Changes the session's model through `SessionConfigure`.
+    async fn set_model(
+        &self,
+        session: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<EventStream, ClientError>;
+
+    /// Changes the session's reasoning through `SessionConfigure`.
+    async fn set_reasoning(
+        &self,
+        session: &str,
+        reasoning: norte_code_protocol::Reasoning,
+    ) -> Result<EventStream, ClientError>;
+
+    /// Sets the session's budget through `SessionConfigure`.
+    async fn set_budget(
+        &self,
+        session: &str,
+        budget: norte_code_protocol::Budget,
+    ) -> Result<EventStream, ClientError>;
+
+    /// Replays the session's history through `SessionAttach` with
+    /// `resume_from_seq`, instead of a `Resume` command.
+    async fn resume(&self, session: &str) -> Result<EventStream, ClientError>;
+
+    /// Forks a session through `SessionFork`.
+    async fn fork_session(&self, session: &str) -> Result<SessionSummary, ClientError>;
+
+    /// Compacts a session through `SessionCompact`.
+    async fn compact_session(&self, session: &str) -> Result<EventStream, ClientError>;
 }
 
 /// A session summary as the RAEP management resource returns it.
@@ -1028,6 +1082,65 @@ impl RemoteClient {
             self.base_url,
             percent_encode(session_id)
         )
+    }
+
+    /// Posts a standard frame to the command endpoint and returns the
+    /// response's frames. The payload is already a typed value; this is
+    /// the one place the standard-command POST is built.
+    async fn post_standard(
+        &self,
+        session: &str,
+        kind: FrameType,
+        payload: Value,
+    ) -> Result<Vec<Envelope<Value>>, ClientError> {
+        self.ensure_attached(session).await?;
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let mut frame = Envelope::new(kind, payload, timestamp_millis());
+        frame.session_id = session.to_owned();
+        let response = self
+            .http
+            .post(self.command_url(session))
+            .headers(headers)
+            .json(&frame)
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP command failed: {error}")))?;
+        let status = response.status();
+        let body: CommandResponseBody = response
+            .json()
+            .await
+            .map_err(|error| ClientError::new(format!("invalid RAEP command response: {error}")))?;
+        if !status.is_success() {
+            return Err(ClientError::new(body.error_message()));
+        }
+        Ok(body.events)
+    }
+
+    /// Posts a `SessionConfigure`-style agent command and streams the
+    /// resulting events. `SessionConfigure` is the standard frame for
+    /// model/reasoning/budget/resume/compact changes; the host maps the
+    /// operation onto its service.
+    async fn submit_configure(
+        &self,
+        session: &str,
+        command: AgentCommand,
+    ) -> Result<EventStream, ClientError> {
+        let frames = self
+            .post_standard(
+                session,
+                FrameType::Standard(StandardFrameType::SessionConfigure),
+                serde_json::to_value(command)
+                    .map_err(|error| ClientError::new(format!("serialize command: {error}")))?,
+            )
+            .await?;
+        let events = frames
+            .iter()
+            .map(server_event_from_frame)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::pin(iter(events)))
     }
 
     async fn submit_http(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
@@ -1503,6 +1616,111 @@ impl RemoteClient {
 impl AgentClient for RemoteClient {
     async fn submit(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
         self.submit_http(request).await
+    }
+
+    async fn send_message(
+        &self,
+        session: &str,
+        text: &str,
+        attachments: &[norte_code_protocol::Attachment],
+    ) -> Result<EventStream, ClientError> {
+        self.submit_streaming(
+            session,
+            ClientRequest {
+                request_id: 0,
+                kind: norte_code_protocol::ClientRequestKind::SendMessage {
+                    session: Some(norte_code_protocol::SessionKey::new(session)),
+                    text: text.to_owned(),
+                    attachments: attachments.to_vec(),
+                    budget: None,
+                    reasoning: None,
+                    replay: false,
+                },
+            },
+        )
+        .await
+    }
+
+    async fn cancel_turn(&self, session: &str) -> Result<(), ClientError> {
+        self.post_standard(
+            session,
+            FrameType::Standard(StandardFrameType::CancelTurn),
+            serde_json::to_value(raep_types::CancelTurn { reason: None }).unwrap_or(Value::Null),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn set_model(
+        &self,
+        session: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<EventStream, ClientError> {
+        self.submit_configure(
+            session,
+            AgentCommand::SetModel {
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+            },
+        )
+        .await
+    }
+
+    async fn set_reasoning(
+        &self,
+        session: &str,
+        reasoning: norte_code_protocol::Reasoning,
+    ) -> Result<EventStream, ClientError> {
+        self.submit_configure(session, AgentCommand::SetReasoning { reasoning })
+            .await
+    }
+
+    async fn set_budget(
+        &self,
+        session: &str,
+        budget: norte_code_protocol::Budget,
+    ) -> Result<EventStream, ClientError> {
+        self.submit_configure(session, AgentCommand::SetBudget { budget })
+            .await
+    }
+
+    async fn resume(&self, session: &str) -> Result<EventStream, ClientError> {
+        self.submit_configure(session, AgentCommand::Resume).await
+    }
+
+    async fn fork_session(&self, session: &str) -> Result<SessionSummary, ClientError> {
+        // `SessionFork` has no payload struct in raep-types yet, so the
+        // standard frame carries the session id it forks, in the shape the
+        // spec's fork request uses.
+        let events = self
+            .post_standard(
+                session,
+                FrameType::Standard(StandardFrameType::SessionFork),
+                serde_json::to_value(ForkPayload {
+                    session_id: session.to_owned(),
+                })
+                .unwrap_or(Value::Null),
+            )
+            .await?;
+        for frame in events {
+            if let Some(event) = server_event_from_frame(&frame).ok()
+                && let norte_code_protocol::ServerEventKind::SessionForked { .. } = event.kind
+                && let Some(key) = event.session
+            {
+                return Ok(SessionSummary {
+                    session_id: key.as_str().to_owned(),
+                    title: None,
+                });
+            }
+        }
+        Err(ClientError::new(
+            "the server did not return the forked session",
+        ))
+    }
+
+    async fn compact_session(&self, session: &str) -> Result<EventStream, ClientError> {
+        self.submit_configure(session, AgentCommand::Compact).await
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ClientError> {
