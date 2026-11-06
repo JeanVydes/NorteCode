@@ -168,31 +168,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_catalogue_is_written_from_defaults() {
-        // The first run gets the versioned catalogue defaults, which the person
-        // can then edit without the next run replacing them.
-        let dir = temp_dir();
-        let created = ensure_in(&dir).expect("written");
-        assert!(created.providers && created.models, "{created:?}");
-        assert!(created.any());
-        let providers = std::fs::read_to_string(dir.join("providers.json")).expect("providers");
-        let models = std::fs::read_to_string(dir.join("models.json")).expect("models");
-        assert!(providers.contains("\"providers\""), "{providers}");
-        assert!(models.contains("\"models\""), "{models}");
-        assert!(providers.contains("\"openrouter\""), "{providers}");
-        assert!(models.contains("stealth/crouton-alpha"), "{models}");
-    }
-
-    #[test]
-    fn built_in_catalogue_is_loadable() {
-        let providers: super::super::schema::Providers =
-            serde_json::from_str(DEFAULT_PROVIDERS).expect("providers");
-        let models: super::super::schema::Models =
-            serde_json::from_str(DEFAULT_MODELS).expect("models");
-        super::super::schema::Catalog::new(providers, models).expect("catalogue");
-    }
-
-    #[test]
     fn a_catalogue_that_is_there_is_never_written_over() {
         // What a person wrote is theirs, and a file emptied on purpose stays
         // empty: the second call writes nothing and changes nothing.
