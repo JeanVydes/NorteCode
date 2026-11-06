@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_commands;
 pub mod catalog;
 pub mod commands;
 pub mod config;
@@ -27,6 +28,7 @@ pub mod tools;
 pub mod types;
 pub mod wire;
 
+pub use agent_commands::AgentCommand;
 pub use store::*;
 pub use types::*;
 pub use wire::*;

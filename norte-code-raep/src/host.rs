@@ -1470,9 +1470,9 @@ impl NorteCodeRaepHost {
                 provider,
                 model,
             },
-            AgentCommand::SetReasoning { scope, reasoning } => ClientRequestKind::SetReasoning {
+            AgentCommand::SetReasoning { reasoning } => ClientRequestKind::SetReasoning {
                 session,
-                scope,
+                scope: norte_code_protocol::ReasoningScope::Session,
                 reasoning,
             },
             AgentCommand::SetBudget { budget } => ClientRequestKind::SetBudget { session, budget },
