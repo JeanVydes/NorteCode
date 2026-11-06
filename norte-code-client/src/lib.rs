@@ -816,22 +816,61 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
             };
             event(norte_code_protocol::ServerEventKind::Delta { turn, delta })
         }
-        "TURN_STATE_CHANGED" => match required_string(payload, "state")?.as_str() {
-            "QUEUED" => event(norte_code_protocol::ServerEventKind::TurnStarted { turn }),
-            "COMPLETED" => event(norte_code_protocol::ServerEventKind::TurnFinished {
-                turn,
-                phase: norte_code_protocol::Phase::Idle,
-                committed: true,
-            }),
-            "CANCELLED" => event(norte_code_protocol::ServerEventKind::TurnStopped {
-                reason: payload
-                    .get("stop_reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("cancelled")
-                    .to_owned(),
-            }),
-            _ => return Ok(None),
-        },
+        "TURN_STATE_CHANGED" => {
+            // RAEP `TurnStateChanged.state` is a `TurnState` enum serialized as
+            // a plain string (`QUEUED`, `COMPLETED`, `CANCELLED`, ...). Decode
+            // it through `raep_types::TurnState` so an unknown state is an
+            // error, not a silent drop, and so the spelling stays owned by
+            // the spec crate.
+            let state: raep_types::TurnState =
+                serde_json::from_value(payload.get("state").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| {
+                        ClientError::new(format!("invalid TURN_STATE_CHANGED state: {error}"))
+                    })?;
+            match state {
+                raep_types::TurnState::Queued => {
+                    event(norte_code_protocol::ServerEventKind::TurnStarted { turn })
+                }
+                raep_types::TurnState::Completed => {
+                    // `phase`/`committed` are NorteCode's own fields: the RAEP
+                    // spec has no equivalent, so they travel inside the
+                    // compatibility extension the server writes, not in the
+                    // canonical payload. Read them from there, defaulting to
+                    // the only honest values (idle, committed) when absent.
+                    let extension = frame
+                        .get("ext")
+                        .and_then(|ext| ext.get("norte_code"))
+                        .and_then(|event| event.get("kind"))
+                        .and_then(|kind| kind.get("TurnFinished"));
+                    let phase = extension
+                        .and_then(|finished| finished.get("phase"))
+                        .and_then(|phase| serde_json::from_value(phase.clone()).ok())
+                        .unwrap_or(norte_code_protocol::Phase::Idle);
+                    let committed = extension
+                        .and_then(|finished| finished.get("committed"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    event(norte_code_protocol::ServerEventKind::TurnFinished {
+                        turn,
+                        phase,
+                        committed,
+                    })
+                }
+                raep_types::TurnState::Cancelled | raep_types::TurnState::Failed => {
+                    let reason = payload
+                        .get("stop_reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("cancelled")
+                        .to_owned();
+                    event(norte_code_protocol::ServerEventKind::TurnStopped { reason })
+                }
+                // Intermediate states carry no turn-boundary meaning for the
+                // client; the next terminal state will arrive on its own.
+                raep_types::TurnState::CallingProvider
+                | raep_types::TurnState::ExecutingTool
+                | raep_types::TurnState::AwaitingApproval => return Ok(None),
+            }
+        }
         "TOOL_CALL_STARTED" => event(norte_code_protocol::ServerEventKind::ToolStarted {
             turn,
             call_id: required_string(payload, "tool_call_id")?,
@@ -953,6 +992,9 @@ fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
             raep_types::WIRE_VERSION
         )));
     }
+    // A canonical frame that fails to decode is a wire error, not a reason
+    // to fall back to the extension: silently splicing in the compatibility
+    // copy would hide a server that stopped following the spec.
     if let Some(event) = standard_event_from_frame(frame)? {
         return Ok(event);
     }
