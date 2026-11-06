@@ -26,6 +26,8 @@ struct ToolCallStartedPayload<'a> {
     tool_call_id: &'a str,
     tool_name: &'a str,
     arguments: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     requires_approval: bool,
     executor: &'static str,
     attempt: u32,
@@ -412,6 +414,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             call_id,
             tool,
             arguments,
+            source,
             ..
         } => {
             let arguments = arguments
@@ -423,6 +426,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 tool_call_id: call_id,
                 tool_name: tool,
                 arguments,
+                source: source.as_deref(),
                 requires_approval: false,
                 executor: "server",
                 attempt: 1,

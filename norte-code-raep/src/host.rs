@@ -203,11 +203,27 @@ struct ReadinessLimits {
     command_timeout_ms: u64,
 }
 
+/// The kind of a canonical `service_data` payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ServiceDataKind {
+    Telemetry,
+    ToolList,
+    McpList,
+}
+
+/// A canonical `service_data` payload, decoded to find the telemetry rows.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalServiceData {
+    kind: ServiceDataKind,
+    data: Value,
+}
+
 /// The telemetry report payload.
 #[derive(Debug, serde::Serialize)]
 struct TelemetryReport {
     session: Option<String>,
-    records: Value,
+    records: Vec<norte_code_protocol::sqlite::RequestRecord>,
     summary: TelemetrySummary,
 }
 
@@ -1302,19 +1318,18 @@ impl NorteCodeRaepHost {
             now_millis(),
         );
         let frames = self.handle_as(frame, Some(principal)).await?;
-        let records = frames
+        // The telemetry records are the service's own `RequestRecord` struct
+        // inside the canonical `service_data` payload: decode them through
+        // the type instead of reading token counters by string key.
+        let records: Vec<norte_code_protocol::sqlite::RequestRecord> = frames
             .iter()
-            .find_map(|frame| match &frame.payload {
-                Value::Object(payload)
-                    if payload.get("event").and_then(Value::as_str) == Some("service_data")
-                        && payload.get("kind").and_then(Value::as_str) == Some("telemetry") =>
-                {
-                    payload.get("data").cloned()
-                }
-                _ => None,
+            .find_map(|frame| {
+                let event: CanonicalServiceData =
+                    serde_json::from_value(frame.payload.clone()).ok()?;
+                (event.kind == ServiceDataKind::Telemetry).then_some(event.data)
             })
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        let rows = records.as_array().cloned().unwrap_or_default();
+            .and_then(|data| serde_json::from_value(data).ok())
+            .unwrap_or_default();
         let mut input_tokens = 0_u64;
         let mut output_tokens = 0_u64;
         let mut cache_read_tokens = 0_u64;
@@ -1322,32 +1337,24 @@ impl NorteCodeRaepHost {
         let mut errors = 0_u64;
         let mut cancelled = 0_u64;
         let mut duration_ms = 0_u64;
-        for row in &rows {
-            input_tokens += row.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-            output_tokens += row
-                .get("output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            cache_read_tokens += row
-                .get("cache_read_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            cache_write_tokens += row
-                .get("cache_write_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            duration_ms += row.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
-            match row.get("status").and_then(Value::as_str) {
-                Some("error") => errors += 1,
-                Some("cancelled") => cancelled += 1,
-                _ => {}
+        for row in &records {
+            input_tokens += row.input_tokens.unwrap_or(0);
+            output_tokens += row.output_tokens.unwrap_or(0);
+            cache_read_tokens += row.cache_read_tokens.unwrap_or(0);
+            cache_write_tokens += row.cache_write_tokens.unwrap_or(0);
+            duration_ms += row.duration_ms;
+            match row.status {
+                norte_code_protocol::sqlite::RequestStatus::Error => errors += 1,
+                norte_code_protocol::sqlite::RequestStatus::Cancelled => cancelled += 1,
+                norte_code_protocol::sqlite::RequestStatus::Ok => {}
             }
         }
+        let request_count = records.len();
         Ok(payload(TelemetryReport {
             session: session.map(str::to_owned),
             records,
             summary: TelemetrySummary {
-                requests: rows.len(),
+                requests: request_count,
                 errors,
                 cancelled,
                 duration_ms,

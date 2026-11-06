@@ -90,6 +90,8 @@ struct ToolCallStartedPayload {
     tool_name: String,
     #[serde(default)]
     arguments: Option<Value>,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// A tool output delta payload.
@@ -212,6 +214,477 @@ impl FrameView {
 fn from_payload<T: serde::de::DeserializeOwned>(payload: Value) -> Result<T, ClientError> {
     serde_json::from_value(payload)
         .map_err(|error| ClientError::new(format!("invalid RAEP payload: {error}")))
+}
+
+/// The canonical event tag, as the wire spells it in snake case. The closed
+/// set of canonical events the client understands — a new canonical event is
+/// a compile error here, not a runtime `unsupported event` string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalKind {
+    SessionCreated,
+    SessionList,
+    SessionDeleted,
+    SessionRenamed,
+    SessionForked,
+    SessionSwitched,
+    TurnStarted,
+    TokenDelta,
+    Committed,
+    HistoryMessage,
+    SessionTodos,
+    ToolCallStarted,
+    JobProgressDelta,
+    ToolCallFinished,
+    OutputPartFinished,
+    ApprovalResolved,
+    UserInputAccepted,
+    ProviderRetry,
+    AgentChanged,
+    AgentCatalog,
+    SessionStats,
+    JobList,
+    TurnStateChanged,
+    ContextUpdate,
+    BudgetWarning,
+    BudgetExceeded,
+    BudgetChanged,
+    CostUpdated,
+    CostNotReported,
+    PluginList,
+    PluginChanged,
+    ServiceData,
+    Error,
+    Other,
+}
+
+impl CanonicalKind {
+    fn from_wire(name: &str) -> Self {
+        match name {
+            "session_created" => Self::SessionCreated,
+            "session_list" => Self::SessionList,
+            "session_deleted" => Self::SessionDeleted,
+            "session_renamed" => Self::SessionRenamed,
+            "session_forked" => Self::SessionForked,
+            "session_switched" => Self::SessionSwitched,
+            "turn_started" => Self::TurnStarted,
+            "token_delta" => Self::TokenDelta,
+            "committed" => Self::Committed,
+            "history_message" => Self::HistoryMessage,
+            "session_todos" => Self::SessionTodos,
+            "tool_call_started" => Self::ToolCallStarted,
+            "job_progress_delta" => Self::JobProgressDelta,
+            "tool_call_finished" => Self::ToolCallFinished,
+            "output_part_finished" => Self::OutputPartFinished,
+            "approval_resolved" => Self::ApprovalResolved,
+            "user_input_accepted" => Self::UserInputAccepted,
+            "provider_retry" => Self::ProviderRetry,
+            "agent_changed" => Self::AgentChanged,
+            "agent_catalog" => Self::AgentCatalog,
+            "session_stats" => Self::SessionStats,
+            "job_list" => Self::JobList,
+            "turn_state_changed" => Self::TurnStateChanged,
+            "context_update" => Self::ContextUpdate,
+            "budget_warning" => Self::BudgetWarning,
+            "budget_exceeded" => Self::BudgetExceeded,
+            "budget_changed" => Self::BudgetChanged,
+            "cost_updated" => Self::CostUpdated,
+            "cost_not_reported" => Self::CostNotReported,
+            "plugin_list" => Self::PluginList,
+            "plugin_changed" => Self::PluginChanged,
+            "service_data" => Self::ServiceData,
+            "error" => Self::Error,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// How a turn state changed, in the canonical payload's spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CanonicalTurnState {
+    Finished,
+    Stopped,
+}
+
+/// How a context (compaction) update went, in the canonical spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CanonicalContextState {
+    Started,
+    Finished,
+}
+
+/// What kind of agent change a canonical payload describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentChange {
+    ModelChanged,
+    ModelQueued,
+    ReasoningDowngraded,
+}
+
+/// What kind of catalogue a canonical payload carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CatalogKind {
+    Models,
+    Skills,
+}
+
+/// What kind of service data a canonical payload carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ServiceDataKind {
+    Telemetry,
+    ToolList,
+    McpList,
+}
+
+/// How a provider retry is going, in the canonical spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RetryState {
+    Scheduled,
+    Started,
+}
+
+/// A canonical payload, decoded once into the pieces every arm needs.
+///
+/// The tag is an enum, the fields are read by serde into typed structs per
+/// arm, and there is no `payload.get("...")` anywhere: a renamed wire field
+/// is a serde error naming the field.
+#[derive(Debug)]
+struct CanonicalPayload {
+    kind: CanonicalKind,
+    value: Value,
+}
+
+impl CanonicalPayload {
+    fn from_value(payload: Value) -> Result<Self, ClientError> {
+        let kind = payload
+            .get("event")
+            .and_then(Value::as_str)
+            .map(CanonicalKind::from_wire)
+            .ok_or_else(|| ClientError::new("RAEP canonical payload omitted event"))?;
+        Ok(Self {
+            kind,
+            value: payload,
+        })
+    }
+
+    /// Decodes the whole payload into `T`.
+    fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClientError> {
+        serde_json::from_value(self.value.clone())
+            .map_err(|error| ClientError::new(format!("invalid RAEP canonical payload: {error}")))
+    }
+}
+
+/// A canonical `session_created` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalSessionCreated {
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// A canonical `session_list` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalSessionList {
+    #[serde(default)]
+    sessions: Vec<norte_code_protocol::SessionInfo>,
+}
+
+/// A canonical `session_forked` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalSessionForked {
+    from: String,
+}
+
+/// A canonical `turn_started` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalTurnStarted {
+    turn: u64,
+}
+
+/// A canonical `token_delta` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalTokenDelta {
+    turn: u64,
+    delta: norte_code_protocol::Delta,
+}
+
+/// A canonical `committed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalCommitted {
+    turn: u64,
+    version: u64,
+}
+
+/// A canonical `history_message` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalHistoryMessage {
+    index: u64,
+    role: norte_code_protocol::MessageRole,
+    kind: norte_code_protocol::ReplayedKind,
+    text: String,
+}
+
+/// A canonical `session_todos` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalSessionTodos {
+    todos: Vec<norte_code_protocol::TodoInfo>,
+}
+
+/// A canonical `tool_call_started` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalToolCallStarted {
+    turn: u64,
+    call_id: String,
+    tool: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// A canonical `job_progress_delta` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalJobProgressDelta {
+    turn: u64,
+    call_id: String,
+    tool: String,
+    stream: norte_code_protocol::types::OutputStream,
+    text: String,
+    #[serde(default)]
+    last: bool,
+}
+
+/// A canonical `tool_call_finished` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalToolCallFinished {
+    turn: u64,
+    call_id: String,
+    tool: String,
+    is_error: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    output: Option<String>,
+    truncated: bool,
+    detached: bool,
+    duration_ms: u64,
+}
+
+/// A canonical `output_part_finished` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalOutputPartFinished {
+    turn: u64,
+    index: u64,
+    usage: norte_code_protocol::Usage,
+    #[serde(default)]
+    cost_usd: Option<f64>,
+    truncated: bool,
+    duration_ms: u64,
+    #[serde(default)]
+    first_token_ms: Option<u64>,
+    #[serde(default)]
+    tokens_per_second: Option<f64>,
+    cache_hit: bool,
+    tools: Vec<String>,
+}
+
+/// A canonical `approval_resolved` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalApprovalResolved {
+    approval_id: String,
+}
+
+/// A canonical `user_input_accepted` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalUserInputAccepted {
+    ids: Vec<String>,
+    messages: Vec<String>,
+}
+
+/// A canonical `provider_retry` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalProviderRetry {
+    state: RetryState,
+    turn: u64,
+    attempt: u32,
+    #[serde(default)]
+    delay_ms: u64,
+    #[serde(default)]
+    reason: String,
+}
+
+/// A canonical `agent_changed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalAgentChanged {
+    change: AgentChange,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    details: Option<Value>,
+}
+
+/// The `details` of a `reasoning_downgraded` change.
+#[derive(Debug, serde::Deserialize)]
+struct ReasoningDowngradedDetails {
+    from: String,
+    to: String,
+    reason: String,
+}
+
+/// A canonical `agent_catalog` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalAgentCatalog {
+    kind: CatalogKind,
+    #[serde(default)]
+    entries: Value,
+}
+
+/// The `entries` of a `skills` catalogue.
+#[derive(Debug, serde::Deserialize)]
+struct SkillCatalogEntries {
+    #[serde(default)]
+    skills: Vec<norte_code_protocol::SkillInfo>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+/// A canonical `session_renamed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalSessionRenamed {
+    title: String,
+}
+
+/// A canonical `session_stats` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalSessionStats {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    cost_usd: f64,
+    requests: u64,
+    context_used: u64,
+    #[serde(default)]
+    context_window: Option<u64>,
+}
+
+/// A canonical `job_list` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalJobList {
+    #[serde(default)]
+    jobs: Vec<norte_code_protocol::JobInfo>,
+}
+
+/// A canonical `turn_state_changed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalTurnStateChanged {
+    state: CanonicalTurnState,
+    turn: u64,
+    #[serde(default)]
+    phase: Option<norte_code_protocol::Phase>,
+    #[serde(default)]
+    committed: Option<bool>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// A canonical `context_update` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalContextUpdate {
+    state: CanonicalContextState,
+    #[serde(default)]
+    reason: Option<norte_code_protocol::CompactionReason>,
+    #[serde(default)]
+    compacted: Option<bool>,
+    #[serde(default)]
+    north_session: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// A canonical `budget_warning` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalBudgetWarning {
+    scope: norte_code_protocol::BudgetScope,
+    unit: norte_code_protocol::BudgetUnit,
+    spent: f64,
+    limit: f64,
+}
+
+/// A canonical `budget_exceeded` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalBudgetExceeded {
+    scope: norte_code_protocol::BudgetScope,
+    unit: norte_code_protocol::BudgetUnit,
+    spent: f64,
+    limit: f64,
+    action: norte_code_protocol::BudgetAction,
+}
+
+/// A canonical `budget_changed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalBudgetChanged {
+    #[serde(default)]
+    budget: Option<norte_code_protocol::Budget>,
+}
+
+/// A canonical `cost_updated` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalCostUpdated {
+    total_usd: f64,
+    requests: u64,
+}
+
+/// A canonical `cost_not_reported` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalCostNotReported {
+    requests: u64,
+}
+
+/// A canonical `plugin_list` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalPluginList {
+    plugins: Vec<norte_code_protocol::PluginInfo>,
+}
+
+/// A canonical `plugin_changed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalPluginChanged {
+    operation: String,
+    name: String,
+}
+
+/// A canonical `service_data` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalServiceData {
+    kind: ServiceDataKind,
+    data: Value,
+}
+
+/// The `data` of an `mcp_list` service payload.
+#[derive(Debug, serde::Deserialize)]
+struct McpListData {
+    #[serde(default)]
+    servers: Vec<norte_code_protocol::McpInfo>,
+    #[serde(default)]
+    failures: Vec<norte_code_protocol::McpFailure>,
+}
+
+/// A canonical `error` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalError {
+    #[serde(default)]
+    code: Value,
+    #[serde(default)]
+    message: String,
 }
 
 /// An error raised before a request can produce an event stream.
@@ -1077,7 +1550,7 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
                         call_id: decoded.tool_call_id,
                         tool: decoded.tool_name,
                         arguments: decoded.arguments,
-                        source: None,
+                        source: decoded.source,
                     })
                 }
                 FrameKind::ToolOutputDelta => {
@@ -1185,312 +1658,336 @@ fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(norte_code_protocol::SessionKey::new);
-    let kind = payload
-        .get("event")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ClientError::new("RAEP canonical payload omitted event"))?;
-    let kind = match kind {
-        "session_created" => norte_code_protocol::ServerEventKind::SessionCreated {
-            title: payload
-                .get("title")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| ClientError::new(format!("invalid session title: {error}")))?,
-        },
-        "session_list" => norte_code_protocol::ServerEventKind::SessionList {
-            sessions: serde_json::from_value(
-                payload
-                    .get("sessions")
-                    .cloned()
-                    .unwrap_or(Value::Array(Vec::new())),
-            )
-            .map_err(|error| ClientError::new(format!("invalid session list: {error}")))?,
-        },
-        "session_deleted" => norte_code_protocol::ServerEventKind::SessionDeleted,
-        "session_forked" => norte_code_protocol::ServerEventKind::SessionForked {
-            from: norte_code_protocol::SessionKey::new(required_string(&payload, "from")?),
-        },
-        "session_switched" => norte_code_protocol::ServerEventKind::SessionSwitched,
-        "turn_started" => norte_code_protocol::ServerEventKind::TurnStarted {
-            turn: number(&payload, "turn")?,
-        },
-        "token_delta" => norte_code_protocol::ServerEventKind::Delta {
-            turn: number(&payload, "turn")?,
-            delta: from_field(&payload, "delta")?,
-        },
-        "committed" => norte_code_protocol::ServerEventKind::Committed {
-            turn: number(&payload, "turn")?,
-            version: number(&payload, "version")?,
-        },
-        "history_message" => norte_code_protocol::ServerEventKind::MessageReplayed {
-            index: number(&payload, "index")?,
-            role: from_field(&payload, "role")?,
-            kind: from_field(&payload, "kind")?,
-            text: required_string(&payload, "text")?,
-        },
-        "session_todos" => norte_code_protocol::ServerEventKind::SessionTodos {
-            todos: from_field(&payload, "todos")?,
-        },
-        "tool_call_started" => norte_code_protocol::ServerEventKind::ToolStarted {
-            turn: number(&payload, "turn")?,
-            call_id: required_string(&payload, "call_id")?,
-            tool: required_string(&payload, "tool")?,
-            arguments: optional_field(&payload, "arguments")?,
-            source: optional_field(&payload, "source")?,
-        },
-        "job_progress_delta" => norte_code_protocol::ServerEventKind::ToolOutput {
-            turn: number(&payload, "turn")?,
-            call_id: required_string(&payload, "call_id")?,
-            tool: required_string(&payload, "tool")?,
-            stream: from_field(&payload, "stream")?,
-            text: required_string(&payload, "text")?,
-            last: payload
-                .get("last")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        },
-        "tool_call_finished" => norte_code_protocol::ServerEventKind::ToolFinished {
-            turn: number(&payload, "turn")?,
-            call_id: required_string(&payload, "call_id")?,
-            tool: required_string(&payload, "tool")?,
-            is_error: required_bool(&payload, "is_error")?,
-            error: optional_field(&payload, "error")?,
-            output: optional_field(&payload, "output")?,
-            truncated: required_bool(&payload, "truncated")?,
-            detached: required_bool(&payload, "detached")?,
-            duration_ms: number(&payload, "duration_ms")?,
-        },
-        "output_part_finished" => norte_code_protocol::ServerEventKind::RequestReconstructed {
-            turn: number(&payload, "turn")?,
-            index: number(&payload, "index")?,
-            usage: from_field(&payload, "usage")?,
-            cost_usd: optional_field(&payload, "cost_usd")?,
-            truncated: required_bool(&payload, "truncated")?,
-            duration_ms: number(&payload, "duration_ms")?,
-            first_token_ms: optional_field(&payload, "first_token_ms")?,
-            tokens_per_second: optional_field(&payload, "tokens_per_second")?,
-            cache_hit: required_bool(&payload, "cache_hit")?,
-            tools: from_field(&payload, "tools")?,
-        },
-        "approval_resolved" => norte_code_protocol::ServerEventKind::QuestionAnswered {
-            question: required_string(&payload, "approval_id")?,
-        },
-        "user_input_accepted" => norte_code_protocol::ServerEventKind::SteerApplied {
-            ids: from_field(&payload, "ids")?,
-            messages: from_field(&payload, "messages")?,
-        },
-        "provider_retry" => {
-            let state = required_string(&payload, "state")?;
-            if state == "scheduled" {
-                norte_code_protocol::ServerEventKind::RetryScheduled {
-                    turn: number(&payload, "turn")?,
-                    attempt: u32_number(&payload, "attempt")?,
-                    delay_ms: number(&payload, "delay_ms")?,
-                    reason: required_string(&payload, "reason")?,
-                }
-            } else {
-                norte_code_protocol::ServerEventKind::RetryStarted {
-                    turn: number(&payload, "turn")?,
-                    attempt: u32_number(&payload, "attempt")?,
+    let canonical = CanonicalPayload::from_value(payload)?;
+    let kind = match canonical.kind {
+        CanonicalKind::SessionCreated => {
+            let decoded: CanonicalSessionCreated = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SessionCreated {
+                title: decoded.title,
+            }
+        }
+        CanonicalKind::SessionList => {
+            let decoded: CanonicalSessionList = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SessionList {
+                sessions: decoded.sessions,
+            }
+        }
+        CanonicalKind::SessionDeleted => norte_code_protocol::ServerEventKind::SessionDeleted,
+        CanonicalKind::SessionForked => {
+            let decoded: CanonicalSessionForked = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SessionForked {
+                from: norte_code_protocol::SessionKey::new(decoded.from),
+            }
+        }
+        CanonicalKind::SessionSwitched => norte_code_protocol::ServerEventKind::SessionSwitched,
+        CanonicalKind::TurnStarted => {
+            let decoded: CanonicalTurnStarted = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::TurnStarted { turn: decoded.turn }
+        }
+        CanonicalKind::TokenDelta => {
+            let decoded: CanonicalTokenDelta = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::Delta {
+                turn: decoded.turn,
+                delta: decoded.delta,
+            }
+        }
+        CanonicalKind::Committed => {
+            let decoded: CanonicalCommitted = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::Committed {
+                turn: decoded.turn,
+                version: decoded.version,
+            }
+        }
+        CanonicalKind::HistoryMessage => {
+            let decoded: CanonicalHistoryMessage = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::MessageReplayed {
+                index: decoded.index,
+                role: decoded.role,
+                kind: decoded.kind,
+                text: decoded.text,
+            }
+        }
+        CanonicalKind::SessionTodos => {
+            let decoded: CanonicalSessionTodos = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SessionTodos {
+                todos: decoded.todos,
+            }
+        }
+        CanonicalKind::ToolCallStarted => {
+            let decoded: CanonicalToolCallStarted = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::ToolStarted {
+                turn: decoded.turn,
+                call_id: decoded.call_id,
+                tool: decoded.tool,
+                arguments: decoded.arguments,
+                source: decoded.source,
+            }
+        }
+        CanonicalKind::JobProgressDelta => {
+            let decoded: CanonicalJobProgressDelta = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::ToolOutput {
+                turn: decoded.turn,
+                call_id: decoded.call_id,
+                tool: decoded.tool,
+                stream: decoded.stream,
+                text: decoded.text,
+                last: decoded.last,
+            }
+        }
+        CanonicalKind::ToolCallFinished => {
+            let decoded: CanonicalToolCallFinished = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::ToolFinished {
+                turn: decoded.turn,
+                call_id: decoded.call_id,
+                tool: decoded.tool,
+                is_error: decoded.is_error,
+                error: decoded.error,
+                output: decoded.output,
+                truncated: decoded.truncated,
+                detached: decoded.detached,
+                duration_ms: decoded.duration_ms,
+            }
+        }
+        CanonicalKind::OutputPartFinished => {
+            let decoded: CanonicalOutputPartFinished = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::RequestReconstructed {
+                turn: decoded.turn,
+                index: decoded.index,
+                usage: decoded.usage,
+                cost_usd: decoded.cost_usd,
+                truncated: decoded.truncated,
+                duration_ms: decoded.duration_ms,
+                first_token_ms: decoded.first_token_ms,
+                tokens_per_second: decoded.tokens_per_second,
+                cache_hit: decoded.cache_hit,
+                tools: decoded.tools,
+            }
+        }
+        CanonicalKind::ApprovalResolved => {
+            let decoded: CanonicalApprovalResolved = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::QuestionAnswered {
+                question: decoded.approval_id,
+            }
+        }
+        CanonicalKind::UserInputAccepted => {
+            let decoded: CanonicalUserInputAccepted = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SteerApplied {
+                ids: decoded.ids,
+                messages: decoded.messages,
+            }
+        }
+        CanonicalKind::ProviderRetry => {
+            let decoded: CanonicalProviderRetry = canonical.decode()?;
+            match decoded.state {
+                RetryState::Scheduled => norte_code_protocol::ServerEventKind::RetryScheduled {
+                    turn: decoded.turn,
+                    attempt: decoded.attempt,
+                    delay_ms: decoded.delay_ms,
+                    reason: decoded.reason,
+                },
+                RetryState::Started => norte_code_protocol::ServerEventKind::RetryStarted {
+                    turn: decoded.turn,
+                    attempt: decoded.attempt,
+                },
+            }
+        }
+        CanonicalKind::AgentChanged => {
+            let decoded: CanonicalAgentChanged = canonical.decode()?;
+            match decoded.change {
+                AgentChange::ModelChanged => norte_code_protocol::ServerEventKind::ModelChanged {
+                    provider: decoded.provider.unwrap_or_default(),
+                    model: decoded.model.unwrap_or_default(),
+                },
+                AgentChange::ModelQueued => norte_code_protocol::ServerEventKind::ModelQueued {
+                    provider: decoded.provider.unwrap_or_default(),
+                    model: decoded.model.unwrap_or_default(),
+                },
+                AgentChange::ReasoningDowngraded => {
+                    let details: ReasoningDowngradedDetails = decoded
+                        .details
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|error| {
+                            ClientError::new(format!("invalid reasoning downgrade: {error}"))
+                        })?
+                        .unwrap_or(ReasoningDowngradedDetails {
+                            from: String::new(),
+                            to: String::new(),
+                            reason: String::new(),
+                        });
+                    norte_code_protocol::ServerEventKind::ReasoningDowngraded {
+                        from: details.from,
+                        to: details.to,
+                        reason: details.reason,
+                    }
                 }
             }
         }
-        "agent_changed" => match required_string(&payload, "change")?.as_str() {
-            "model_changed" => norte_code_protocol::ServerEventKind::ModelChanged {
-                provider: required_string(&payload, "provider")?,
-                model: required_string(&payload, "model")?,
-            },
-            "model_queued" => norte_code_protocol::ServerEventKind::ModelQueued {
-                provider: required_string(&payload, "provider")?,
-                model: required_string(&payload, "model")?,
-            },
-            "reasoning_downgraded" => {
-                let details = payload.get("details").cloned().unwrap_or(Value::Null);
-                norte_code_protocol::ServerEventKind::ReasoningDowngraded {
-                    from: from_field(&details, "from")?,
-                    to: from_field(&details, "to")?,
-                    reason: from_field(&details, "reason")?,
-                }
-            }
-            other => {
-                return Err(ClientError::new(format!(
-                    "unsupported agent change `{other}`"
-                )));
-            }
-        },
-        "agent_catalog" => {
-            let kind = required_string(&payload, "kind")?;
-            let entries = payload
-                .get("entries")
-                .cloned()
-                .unwrap_or(Value::Array(Vec::new()));
-            match kind.as_str() {
-                "models" => norte_code_protocol::ServerEventKind::ModelList {
-                    models: serde_json::from_value(entries).map_err(|error| {
+        CanonicalKind::AgentCatalog => {
+            let decoded: CanonicalAgentCatalog = canonical.decode()?;
+            match decoded.kind {
+                CatalogKind::Models => norte_code_protocol::ServerEventKind::ModelList {
+                    models: serde_json::from_value(decoded.entries).map_err(|error| {
                         ClientError::new(format!("invalid model list: {error}"))
                     })?,
                 },
-                "skills" => {
-                    let skills = from_field(&entries, "skills")?;
-                    let warnings = from_field(&entries, "warnings")?;
-                    norte_code_protocol::ServerEventKind::SkillList { skills, warnings }
-                }
-                _ => {
-                    return Err(ClientError::new(format!(
-                        "unsupported agent catalog `{kind}`"
-                    )));
-                }
-            }
-        }
-        "session_renamed" => norte_code_protocol::ServerEventKind::SessionRenamed {
-            title: payload
-                .get("title")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ClientError::new("session_renamed omitted title"))?
-                .to_owned(),
-        },
-        "session_stats" => norte_code_protocol::ServerEventKind::SessionStats {
-            input_tokens: number(&payload, "input_tokens")?,
-            output_tokens: number(&payload, "output_tokens")?,
-            cache_read_tokens: number(&payload, "cache_read_tokens")?,
-            cache_write_tokens: number(&payload, "cache_write_tokens")?,
-            cost_usd: payload
-                .get("cost_usd")
-                .and_then(Value::as_f64)
-                .ok_or_else(|| ClientError::new("session_stats omitted cost_usd"))?,
-            requests: number(&payload, "requests")?,
-            context_used: number(&payload, "context_used")?,
-            context_window: payload.get("context_window").and_then(Value::as_u64),
-        },
-        "job_list" => norte_code_protocol::ServerEventKind::JobList {
-            jobs: serde_json::from_value(
-                payload
-                    .get("jobs")
-                    .cloned()
-                    .unwrap_or(Value::Array(Vec::new())),
-            )
-            .map_err(|error| ClientError::new(format!("invalid job list: {error}")))?,
-        },
-        "turn_state_changed" => {
-            let state = required_string(&payload, "state")?;
-            match state.as_str() {
-                "finished" => norte_code_protocol::ServerEventKind::TurnFinished {
-                    turn: number(&payload, "turn")?,
-                    phase: from_field(&payload, "phase")?,
-                    committed: required_bool(&payload, "committed")?,
-                },
-                "stopped" => norte_code_protocol::ServerEventKind::TurnStopped {
-                    reason: required_string(&payload, "reason")?,
-                },
-                _ => {
-                    return Err(ClientError::new(format!(
-                        "unsupported turn state `{state}`"
-                    )));
+                CatalogKind::Skills => {
+                    let entries: SkillCatalogEntries = serde_json::from_value(decoded.entries)
+                        .map_err(|error| {
+                            ClientError::new(format!("invalid skill list: {error}"))
+                        })?;
+                    norte_code_protocol::ServerEventKind::SkillList {
+                        skills: entries.skills,
+                        warnings: entries.warnings,
+                    }
                 }
             }
         }
-        "context_update" => {
-            let state = required_string(&payload, "state")?;
-            match state.as_str() {
-                "started" => norte_code_protocol::ServerEventKind::CompactionStarted {
-                    reason: from_field(&payload, "reason")?,
+        CanonicalKind::SessionRenamed => {
+            let decoded: CanonicalSessionRenamed = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SessionRenamed {
+                title: decoded.title,
+            }
+        }
+        CanonicalKind::SessionStats => {
+            let decoded: CanonicalSessionStats = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::SessionStats {
+                input_tokens: decoded.input_tokens,
+                output_tokens: decoded.output_tokens,
+                cache_read_tokens: decoded.cache_read_tokens,
+                cache_write_tokens: decoded.cache_write_tokens,
+                cost_usd: decoded.cost_usd,
+                requests: decoded.requests,
+                context_used: decoded.context_used,
+                context_window: decoded.context_window,
+            }
+        }
+        CanonicalKind::JobList => {
+            let decoded: CanonicalJobList = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::JobList { jobs: decoded.jobs }
+        }
+        CanonicalKind::TurnStateChanged => {
+            let decoded: CanonicalTurnStateChanged = canonical.decode()?;
+            match decoded.state {
+                CanonicalTurnState::Finished => {
+                    norte_code_protocol::ServerEventKind::TurnFinished {
+                        turn: decoded.turn,
+                        phase: decoded.phase.unwrap_or(norte_code_protocol::Phase::Idle),
+                        committed: decoded.committed.unwrap_or(true),
+                    }
+                }
+                CanonicalTurnState::Stopped => norte_code_protocol::ServerEventKind::TurnStopped {
+                    reason: decoded.reason.unwrap_or_default(),
                 },
-                "finished" => norte_code_protocol::ServerEventKind::CompactionFinished {
-                    compacted: required_bool(&payload, "compacted")?,
-                    north_session: optional_field(&payload, "north_session")?,
-                    summary: optional_field(&payload, "summary")?,
-                    error: optional_field(&payload, "error")?,
-                },
-                _ => {
-                    return Err(ClientError::new(format!(
-                        "unsupported context state `{state}`"
-                    )));
+            }
+        }
+        CanonicalKind::ContextUpdate => {
+            let decoded: CanonicalContextUpdate = canonical.decode()?;
+            match decoded.state {
+                CanonicalContextState::Started => {
+                    norte_code_protocol::ServerEventKind::CompactionStarted {
+                        reason: decoded.reason.unwrap_or_default(),
+                    }
+                }
+                CanonicalContextState::Finished => {
+                    norte_code_protocol::ServerEventKind::CompactionFinished {
+                        compacted: decoded.compacted.unwrap_or(false),
+                        north_session: decoded.north_session,
+                        summary: decoded.summary,
+                        error: decoded.error,
+                    }
                 }
             }
         }
-        "budget_warning" => norte_code_protocol::ServerEventKind::BudgetWarning {
-            scope: from_field(&payload, "scope")?,
-            unit: from_field(&payload, "unit")?,
-            spent: required_number(&payload, "spent")?,
-            limit: required_number(&payload, "limit")?,
-        },
-        "budget_exceeded" => norte_code_protocol::ServerEventKind::BudgetExceeded {
-            scope: from_field(&payload, "scope")?,
-            unit: from_field(&payload, "unit")?,
-            spent: required_number(&payload, "spent")?,
-            limit: required_number(&payload, "limit")?,
-            action: from_field(&payload, "action")?,
-        },
-        "budget_changed" => norte_code_protocol::ServerEventKind::BudgetChanged {
-            budget: optional_field(&payload, "budget")?,
-        },
-        "cost_updated" => norte_code_protocol::ServerEventKind::CostUpdated {
-            total_usd: required_number(&payload, "total_usd")?,
-            requests: number(&payload, "requests")?,
-        },
-        "cost_not_reported" => norte_code_protocol::ServerEventKind::CostNotReported {
-            requests: number(&payload, "requests")?,
-        },
-        "plugin_list" => norte_code_protocol::ServerEventKind::PluginList {
-            plugins: from_field(&payload, "plugins")?,
-        },
-        "plugin_changed" => norte_code_protocol::ServerEventKind::PluginChanged {
-            operation: required_string(&payload, "operation")?,
-            name: required_string(&payload, "name")?,
-        },
-        "service_data" => {
-            let data = payload.get("data").cloned().unwrap_or(Value::Null);
-            match payload.get("kind").and_then(Value::as_str) {
-                Some("telemetry") => norte_code_protocol::ServerEventKind::Telemetry {
-                    records: serde_json::from_value(data).map_err(|error| {
+        CanonicalKind::BudgetWarning => {
+            let decoded: CanonicalBudgetWarning = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::BudgetWarning {
+                scope: decoded.scope,
+                unit: decoded.unit,
+                spent: decoded.spent,
+                limit: decoded.limit,
+            }
+        }
+        CanonicalKind::BudgetExceeded => {
+            let decoded: CanonicalBudgetExceeded = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::BudgetExceeded {
+                scope: decoded.scope,
+                unit: decoded.unit,
+                spent: decoded.spent,
+                limit: decoded.limit,
+                action: decoded.action,
+            }
+        }
+        CanonicalKind::BudgetChanged => {
+            let decoded: CanonicalBudgetChanged = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::BudgetChanged {
+                budget: decoded.budget,
+            }
+        }
+        CanonicalKind::CostUpdated => {
+            let decoded: CanonicalCostUpdated = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::CostUpdated {
+                total_usd: decoded.total_usd,
+                requests: decoded.requests,
+            }
+        }
+        CanonicalKind::CostNotReported => {
+            let decoded: CanonicalCostNotReported = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::CostNotReported {
+                requests: decoded.requests,
+            }
+        }
+        CanonicalKind::PluginList => {
+            let decoded: CanonicalPluginList = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::PluginList {
+                plugins: decoded.plugins,
+            }
+        }
+        CanonicalKind::PluginChanged => {
+            let decoded: CanonicalPluginChanged = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::PluginChanged {
+                operation: decoded.operation,
+                name: decoded.name,
+            }
+        }
+        CanonicalKind::ServiceData => {
+            let decoded: CanonicalServiceData = canonical.decode()?;
+            match decoded.kind {
+                ServiceDataKind::Telemetry => norte_code_protocol::ServerEventKind::Telemetry {
+                    records: serde_json::from_value(decoded.data).map_err(|error| {
                         ClientError::new(format!("invalid telemetry payload: {error}"))
                     })?,
                 },
-                Some("tool_list") => norte_code_protocol::ServerEventKind::ToolList {
-                    tools: serde_json::from_value(data).map_err(|error| {
+                ServiceDataKind::ToolList => norte_code_protocol::ServerEventKind::ToolList {
+                    tools: serde_json::from_value(decoded.data).map_err(|error| {
                         ClientError::new(format!("invalid tool list payload: {error}"))
                     })?,
                 },
-                Some("mcp_list") => {
-                    let servers = serde_json::from_value(
-                        data.get("servers")
-                            .cloned()
-                            .unwrap_or(Value::Array(Vec::new())),
-                    )
-                    .map_err(|error| ClientError::new(format!("invalid MCP payload: {error}")))?;
-                    let failures = serde_json::from_value(
-                        data.get("failures")
-                            .cloned()
-                            .unwrap_or(Value::Array(Vec::new())),
-                    )
-                    .map_err(|error| {
-                        ClientError::new(format!("invalid MCP failure payload: {error}"))
-                    })?;
-                    norte_code_protocol::ServerEventKind::McpList { servers, failures }
+                ServiceDataKind::McpList => {
+                    let data: McpListData =
+                        serde_json::from_value(decoded.data).map_err(|error| {
+                            ClientError::new(format!("invalid MCP payload: {error}"))
+                        })?;
+                    norte_code_protocol::ServerEventKind::McpList {
+                        servers: data.servers,
+                        failures: data.failures,
+                    }
                 }
-
-                Some(other) => {
-                    return Err(ClientError::new(format!(
-                        "unsupported Norte Code service payload `{other}`"
-                    )));
-                }
-                None => return Err(ClientError::new("service payload omitted kind")),
             }
         }
-        "error" => norte_code_protocol::ServerEventKind::Error {
-            code: serde_json::from_value(payload.get("code").cloned().unwrap_or(Value::Null))
-                .map_err(|error| ClientError::new(format!("invalid error code: {error}")))?,
-            message: payload
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("RAEP command failed")
-                .to_owned(),
-        },
-        other => {
-            return Err(ClientError::new(format!(
-                "unsupported RAEP canonical event `{other}`"
-            )));
+        CanonicalKind::Error => {
+            let decoded: CanonicalError = canonical.decode()?;
+            let code = serde_json::from_value(decoded.code.clone())
+                .unwrap_or(norte_code_protocol::ErrorCode::Internal);
+            norte_code_protocol::ServerEventKind::Error {
+                code,
+                message: decoded.message,
+            }
+        }
+        CanonicalKind::Other => {
+            return Err(ClientError::new(
+                "unsupported RAEP canonical event".to_owned(),
+            ));
         }
     };
     Ok(ServerEvent {
@@ -1498,68 +1995,6 @@ fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
         session,
         kind,
     })
-}
-
-fn number(payload: &Value, field: &str) -> Result<u64, ClientError> {
-    payload
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| ClientError::new(format!("canonical payload omitted {field}")))
-}
-
-fn u32_number(payload: &Value, field: &str) -> Result<u32, ClientError> {
-    u32::try_from(number(payload, field)?)
-        .map_err(|_| ClientError::new(format!("canonical field {field} exceeds u32")))
-}
-
-fn required_string(payload: &Value, field: &str) -> Result<String, ClientError> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| ClientError::new(format!("canonical payload omitted {field}")))
-}
-
-fn required_bool(payload: &Value, field: &str) -> Result<bool, ClientError> {
-    payload
-        .get(field)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| ClientError::new(format!("canonical payload omitted {field}")))
-}
-
-fn required_number(payload: &Value, field: &str) -> Result<f64, ClientError> {
-    payload
-        .get(field)
-        .and_then(Value::as_f64)
-        .ok_or_else(|| ClientError::new(format!("canonical payload omitted {field}")))
-}
-
-fn from_field<T: serde::de::DeserializeOwned>(
-    payload: &Value,
-    field: &str,
-) -> Result<T, ClientError> {
-    serde_json::from_value(
-        payload
-            .get(field)
-            .cloned()
-            .ok_or_else(|| ClientError::new(format!("canonical payload omitted {field}")))?,
-    )
-    .map_err(|error| ClientError::new(format!("invalid canonical field {field}: {error}")))
-}
-
-fn optional_field<T: serde::de::DeserializeOwned>(
-    payload: &Value,
-    field: &str,
-) -> Result<Option<T>, ClientError> {
-    payload
-        .get(field)
-        .cloned()
-        .map(|value| {
-            serde_json::from_value(value).map_err(|error| {
-                ClientError::new(format!("invalid canonical field {field}: {error}"))
-            })
-        })
-        .transpose()
 }
 
 fn response_error(body: &Value) -> String {
