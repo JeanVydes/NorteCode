@@ -11,6 +11,7 @@ use crate::models::ModelChoice;
 use crate::remote_state::{ModelInfoExt, RemoteState, effective_reasoning};
 use futures_util::StreamExt;
 use norte_code_client::AgentClient;
+use norte_code_protocol::QueueMode;
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
@@ -1394,11 +1395,15 @@ fn models_panel_title(filter: &str) -> String {
 }
 
 /// Steers a message into the running turn and names it, so the client can
-/// tell it apart when the engine reports it applied.
+/// tell it apart when the engine reports it applied. The policy that
+/// decides what happens when the session is busy comes from the
+/// connection's `queue_mode`; `Steer` keeps its own `queue_mode` field for
+/// callers that already know what they want.
 async fn steer_text(
     client: &dyn AgentClient,
     session: SessionKey,
     text: String,
+    queue_mode: QueueMode,
     renderer: &mut Renderer,
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -1408,6 +1413,7 @@ async fn steer_text(
             session,
             text,
             id: id.clone(),
+            queue_mode,
         },
     )
     .await;
@@ -2249,7 +2255,14 @@ async fn prompt_budget_limit(
                     Err(error) => {
                         renderer.notice(error);
                         renderer.notice("that is not a limit; it is steered into the session");
-                        steer_text(client, session.clone(), line.to_owned(), renderer).await;
+                        steer_text(
+                            client,
+                            session.clone(),
+                            line.to_owned(),
+                            renderer.queue_mode,
+                            renderer,
+                        )
+                        .await;
                     }
                 }
             }

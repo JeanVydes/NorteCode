@@ -1707,9 +1707,6 @@ impl Service {
         use norte_code_protocol::ClientRequestKind as Kind;
         let resolve = |key: SessionKey| self.resolve_key(&key);
         Ok(match kind {
-            Kind::SwitchSession { session } => Kind::SwitchSession {
-                session: resolve(session)?,
-            },
             Kind::ForkSession { session, title } => Kind::ForkSession {
                 session: resolve(session)?,
                 title,
@@ -1736,10 +1733,16 @@ impl Service {
                 reasoning,
                 replay,
             },
-            Kind::Steer { session, text, id } => Kind::Steer {
+            Kind::Steer {
+                session,
+                text,
+                id,
+                queue_mode,
+            } => Kind::Steer {
                 session: resolve(session)?,
                 text,
                 id,
+                queue_mode,
             },
             Kind::CancelTurn { session } => Kind::CancelTurn {
                 session: resolve(session)?,
@@ -1837,14 +1840,6 @@ impl Service {
                     sessions: self.list_sessions(),
                 },
             )),
-            Kind::SwitchSession { session } => {
-                self.require_record(&session)?;
-                Ok(single(
-                    request_id,
-                    Some(session),
-                    ServerEventKind::SessionSwitched,
-                ))
-            }
             Kind::ForkSession { session, title } => {
                 let key = self.fork_session(&session, title.clone()).await?;
                 Ok(single(
@@ -2029,7 +2024,12 @@ impl Service {
                 self.answer_question(request_id, session, question, answer)
                     .await
             }
-            Kind::Steer { session, text, id } => self.steer(request_id, session, text, id).await,
+            Kind::Steer {
+                session,
+                text,
+                id,
+                queue_mode,
+            } => self.steer(request_id, session, text, id, queue_mode).await,
             Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
             Kind::ListPlugins
             | Kind::InstallPlugin { .. }
@@ -2155,11 +2155,24 @@ impl Service {
         key: SessionKey,
         text: String,
         id: String,
+        queue_mode: norte_code_protocol::QueueMode,
     ) -> Result<EventStream, ServiceError> {
         // The message takes the request already in flight. The durable copy
         // stays in the session until the engine reports that it applied it, so
         // a crash cannot lose it.
         let (nid, _, _) = self.require_record(&key)?;
+        let busy = self.turn_lock(&key).try_lock().is_err();
+        match queue_mode {
+            norte_code_protocol::QueueMode::Reject if busy => {
+                return Err(ServiceError::SessionBusy);
+            }
+            norte_code_protocol::QueueMode::Interrupt if busy => {
+                self.cancel_turn(&key);
+            }
+            norte_code_protocol::QueueMode::Reject
+            | norte_code_protocol::QueueMode::Queue
+            | norte_code_protocol::QueueMode::Interrupt => {}
+        }
         let id = if id.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {

@@ -31,7 +31,7 @@ use norte_code_protocol::config::{ApiKey, BudgetConfig, CompactionTrigger, Retry
 use norte_code_protocol::sqlite::{RequestStatus, SqliteStore};
 use norte_code_protocol::{
     Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, CompactionReason, Delta,
-    ErrorCode, Reasoning as ProtocolReasoning, ReasoningScope,
+    ErrorCode, QueueMode, Reasoning as ProtocolReasoning, ReasoningScope,
 };
 use norte_testing::ScriptedModel;
 use norte_tools::{ShellLimits, ShellRequest, ShellTool};
@@ -1699,13 +1699,14 @@ async fn a_session_can_be_named_by_the_prefix_the_footer_shows() {
 
     let listed = drain(
         &service,
-        ClientRequestKind::SwitchSession {
+        ClientRequestKind::RenameSession {
             session: SessionKey::new(prefix.clone()),
+            title: "renamed by prefix".to_owned(),
         },
     )
     .await;
     assert!(
-        matches!(listed[0].kind, ServerEventKind::SessionSwitched),
+        matches!(listed[0].kind, ServerEventKind::SessionRenamed { .. }),
         "the footer's eight characters name the session: {listed:#?}"
     );
 
@@ -1714,8 +1715,9 @@ async fn a_session_can_be_named_by_the_prefix_the_footer_shows() {
     let result = service
         .submit(ClientRequest {
             request_id: 1,
-            kind: ClientRequestKind::SwitchSession {
+            kind: ClientRequestKind::RenameSession {
                 session: SessionKey::new("ffffffff".to_owned()),
+                title: "unreachable".to_owned(),
             },
         })
         .await;
@@ -1757,8 +1759,9 @@ async fn a_prefix_that_matches_two_sessions_is_refused_by_name() {
     let result = service
         .submit(ClientRequest {
             request_id: 1,
-            kind: ClientRequestKind::SwitchSession {
+            kind: ClientRequestKind::RenameSession {
                 session: SessionKey::new(prefix.clone()),
+                title: "unreachable".to_owned(),
             },
         })
         .await;
@@ -2897,6 +2900,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             session: key.clone(),
             text: "two".to_owned(),
             id: String::new(),
+            queue_mode: QueueMode::Queue,
         },
     )
     .await;
@@ -2950,6 +2954,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
             session: key.clone(),
             text: "a".to_owned(),
             id: String::new(),
+            queue_mode: QueueMode::Queue,
         },
     )
     .await;
@@ -2959,6 +2964,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
             session: key.clone(),
             text: "b".to_owned(),
             id: String::new(),
+            queue_mode: QueueMode::Queue,
         },
     )
     .await;
@@ -3465,6 +3471,7 @@ async fn reasoning_and_steering_survive_a_restart() {
             session: key.clone(),
             text: "steered".to_owned(),
             id: String::new(),
+            queue_mode: QueueMode::Queue,
         },
     )
     .await;
@@ -5518,6 +5525,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
                         session: session.clone().expect("session"),
                         text: "also run the tests".to_owned(),
                         id: "steer-1".to_owned(),
+                        queue_mode: QueueMode::Queue,
                     },
                 )
                 .await;

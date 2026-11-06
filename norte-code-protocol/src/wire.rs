@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_commands::QueueMode;
 use crate::types::*;
 
 fn default_resume_replay() -> bool {
@@ -45,11 +46,6 @@ pub enum ClientRequestKind {
     },
     /// List the known sessions.
     ListSessions,
-    /// Make a session the caller's current one.
-    SwitchSession {
-        /// The session.
-        session: SessionKey,
-    },
     /// Copy a session's history into a new session.
     ForkSession {
         /// The session to copy.
@@ -100,6 +96,11 @@ pub enum ClientRequestKind {
         replay: bool,
     },
     /// Queue a message to apply at the next turn boundary.
+    ///
+    /// The `queue_mode` on the queued message decides what happens when
+    /// the session is already running a turn: `Reject` answers
+    /// `SessionBusy`, `Queue` puts the message in front of the request in
+    /// flight, and `Interrupt` cancels that turn before queueing.
     Steer {
         /// The session.
         session: SessionKey,
@@ -110,6 +111,9 @@ pub enum ClientRequestKind {
         /// it then.
         #[serde(default)]
         id: String,
+        /// What to do when the session is already running a turn.
+        #[serde(default)]
+        queue_mode: QueueMode,
     },
     /// Ask the running turn to stop.
     CancelTurn {
@@ -327,8 +331,6 @@ pub enum ServerEventKind {
         /// The session the copy was made from.
         from: SessionKey,
     },
-    /// The caller's current session changed.
-    SessionSwitched,
     /// A turn started.
     TurnStarted {
         /// The turn number.
