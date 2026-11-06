@@ -1,0 +1,40 @@
+[package]
+name = "norte-code-raep"
+description = "RAEP server adapter for the Norte Code agent host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "norte-code-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+norte-code-agent = { path = "../norte-code-agent" }
+norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-plugin-host = { path = "../norte-code-plugin-host" }
+norte = { workspace = true }
+raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

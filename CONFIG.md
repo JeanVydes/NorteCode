@@ -3,15 +3,23 @@
 Norte Code reads two kinds of file: its own settings, and the catalogue of
 providers and models.
 
-**Settings** are `config.json`, merged from two optional files:
+**Server settings** are `service.json`, merged from two optional files:
 
-1. `$XDG_CONFIG_HOME/norte-code/config.json`, else
-   `~/.config/norte-code/config.json`, else `%APPDATA%\norte-code\config.json`.
-   `--config PATH` replaces this path.
-2. `.norte-code/config.json` in the workspace or the nearest parent directory
+1. `$XDG_CONFIG_HOME/norte-code/service.json`, else
+   `~/.config/norte-code/service.json`, else `%APPDATA%\norte-code\service.json`.
+2. `.norte-code/service.json` in the workspace or the nearest parent directory
    that has one. The project overlay wins key by key over the user file.
 
-**The catalogue** is two files beside the user configuration, not inside it:
+**Client settings** are `cli.json`, read only by `norte-code`:
+
+1. `$XDG_CONFIG_HOME/norte-code/cli.json`, else
+   `~/.config/norte-code/cli.json`, else `%APPDATA%\norte-code\cli.json`.
+2. `.norte-code/cli.json` in the workspace or nearest parent directory.
+
+The client never reads `service.json`, `providers.json` or `models.json`; the
+server owns execution, configuration and catalogue discovery.
+
+**The catalogue** is two files beside the server configuration, not inside it:
 `providers.json` and `models.json`. They are written empty when missing, never
 fetched, and never overwritten once they exist.
 
@@ -32,109 +40,65 @@ or fix.
 ```json
 {
   "version": 1,
-  "default_provider": "openrouter",
-  "default_model": "anthropic/claude-sonnet-4",
-  "compaction": {
-    "enabled": true,
-    "threshold": 0.90,
-    "trigger": "idle",
-    "keep_recent": 6,
-    "provider": null,
-    "model": null,
-    "reasoning": "lowest"
-  },
-  "retry": {
-    "max_attempts": 4,
-    "max_delay_ms": 60000,
-    "backoff_ms": 5000
-  },
-  "reasoning": {
-    "default": "auto"
-  },
-  "system_prompt": null,
-  "approval_mode": "ask",
-  "approvals": {
-    "allow": [],
-    "deny": []
-  },
-  "max_iterations": null,
-  "extensions": {
-    "openai.chat:provider": {
-      "order": ["deepinfra"]
-    }
-  },
-  "cost": {
-    "show": true
-  },
-  "ui": {
-    "verbosity": "medium",
-    "diff_style": "unified"
-  },
-  "budgets": {
-    "message": null,
-    "session": {
-      "unit": "usd",
-      "limit": 2.0,
-      "action": "ask"
-    },
-    "global_daily": null
-  },
-  "tools": {
-    "web_fetch": false,
-    "command_max_model_bytes": 131072,
-    "disabled": [],
-    "confinement": {
-      "workspace_only": true,
-      "sandbox": {
-        "enabled": false,
-        "network": false,
-        "writable": []
-      }
-    },
-    "screenshots": {
+  "default_agent": "norte-code",
+  "agents": [{
+    "name": "norte-code",
+    "description": "Default assistant",
+    "origin_url": null,
+    "author": null,
+    "default_provider": "openrouter",
+    "default_model": "anthropic/claude-sonnet-4",
+    "compaction": {
       "enabled": true,
-      "max_dimension": 1568,
-      "max_bytes": 4000000
-    }
-  },
-  "skills": {
-    "enabled": true,
-    "paths": [],
-    "interop": true,
-    "allow_scripts": false,
-    "honor_allowed_tools": false,
-    "max_skills": 128
-  },
-  "mcpServers": {}
+      "threshold": 0.90,
+      "trigger": "idle",
+      "keep_recent": 6
+    },
+    "retry": {
+      "max_attempts": 4,
+      "max_delay_ms": 5000,
+      "backoff_ms": 5000
+    },
+    "reasoning": { "default": "auto" },
+
+    "max_iterations": null,
+    "extensions": {},
+    "cost": { "show": true },
+    "budgets": {},
+    "tools": {},
+    "skills": {},
+    "mcpServers": {}
+  }]
 }
 ```
 
-## Top level
+## Service envelope and agents
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `version` | integer | `1` | Schema revision; must be `1`. |
-| `default_provider` | string or `null` | `null` | Provider for a new session without `--provider`. |
-| `default_model` | string or `null` | `null` | Model id for a new session without `--model`; an opaque string that may contain slashes. The provider is its own key and never joined with it. Set with `default_provider` or not at all. |
+| `default_agent` | string | `"norte-code"` | Agent selected for new attachments. |
+| `agents` | array | one default agent | Named server-owned agent definitions. |
 | `compaction` | object | see below | Automatic context compaction. |
 | `retry` | object | see below | Bounded retries for transient provider failures. |
 | `reasoning` | object | see below | Default reasoning setting. |
 | `system_prompt` | string or `null` | `null` | Replaces the built-in base prompt. `AGENTS.md` is appended after it. |
-| `approval_mode` | `"ask"`, `"auto-edit"` or `"yolo"` | `"ask"` | The default approval mode. |
 | `approvals` | object | `{"allow":[],"deny":[]}` | Tool-wide rules that outlive a session. |
 | `max_iterations` | integer or `null` | `null` | Model iterations per turn; `null` is unlimited. |
 | `extensions` | object | `{}` | Vendor request fields keyed `<wire-family>:<dotted.path>`. |
 | `cost` | object | `{"show":true}` | Whether to display reported cost. |
-| `ui` | object | see below | Verbosity and diff style. |
 | `budgets` | object | all `null` | Optional message, session and daily limits. |
 | `tools` | object | see below | Tool switches, confinement and screenshots. |
 | `skills` | object | see below | Agent Skills discovery and execution. |
 | `mcpServers` | object | `{}` | MCP servers whose tools the agent may call. |
 
-`providers` and `catalog` are not configuration keys: providers and models live
-in `providers.json` and `models.json`, and the configuration only names the
-default provider/model pair. The configuration never overrides a model's
-capabilities — the catalogue is the only authority on what a model accepts.
+Every object in `agents` has a required unique `name`; `description`,
+`origin_url` and `author` are optional metadata. The remaining fields in an
+agent are the operational settings shown below. Providers and models live in
+`providers.json` and `models.json`; an agent only names its default pair. The
+configuration never overrides a model's capabilities — the catalogue is the
+only authority on what a model accepts. The RAEP server exposes every named
+agent; `cli.json.agent_id` selects which one the CLI attaches to.
 
 ## `providers.json`
 
@@ -254,17 +218,12 @@ what the provider said a request cost and derives nothing from a list price.
 | `threshold` | number in `(0,1]` | `0.90` | Fraction of the model context that triggers a summary. |
 | `trigger` | `"idle"` or `"eager"` | `"idle"` | `idle` compacts at a turn boundary; `eager` compacts at the first safe request boundary inside a turn. |
 | `keep_recent` | integer | `6` | Recent messages copied verbatim into the new session. |
-| `provider` | string or `null` | `null` | Provider of the summary model; set with `model` or not at all. |
-| `model` | string or `null` | `null` | Model id used for the summary; `null` uses the session model. |
-| `reasoning` | string | `"lowest"` | Reasoning effort for the summary request: `off`, `lowest`, or an effort such as `low`, `high`, `xhigh` or `max`. |
 
 Eager compaction never splits a tool call from its result, and runs at most once
 per turn. `/compact` triggers the same path on demand. A failed summary leaves
 the old history and session id unchanged.
 
-`provider` and `model` are two keys and never one `provider/model` string: a
-model id may carry slashes of its own, so the two are set apart. Both or neither:
-one without the other cannot be resolved.
+Compaction always uses the session's provider, model and effective reasoning.
 
 ## `retry`
 
@@ -286,21 +245,13 @@ appended twice.
 resume. The value is checked against the selected model before the turn starts,
 so `xhigh` and `max` are accepted only where the model declares them.
 
-## `approval_mode`
-
-How a tool call is decided when no `/allow`, `/deny` or session rule names it.
-`ask` (the default) asks before every write and command; `auto-edit` allows
-edits without asking and still asks for commands; `yolo` allows everything.
-`--approval-mode` overrides it for one run.
-
 ## `approvals`
 
 `approvals.allow` and `approvals.deny` contain tool names. A denied tool is
-refused before it runs; an allowed tool runs without asking. Denial wins when
-both lists name the same tool. These rules apply to every session. In the
-interactive prompt, `/allow <tool> [session|global]` and `/deny <tool>
-[session|global]` edit the same rules; `session` is the default and `global`
-writes this file.
+refused before it runs; an allowed tool runs. Denial wins when both lists name
+the same tool. These rules apply to every session. In the interactive prompt,
+`/allow <tool> [session|global]` and `/deny <tool> [session|global]` edit the
+same rules; `session` is the default and `global` writes this file.
 
 A rule outlives the turn it was written in. A session rule is kept with the
 session and survives a restart; a global rule lives in this file. The engine
@@ -324,12 +275,21 @@ notice rather than opening a prompt: raise the budget and resume to continue.
 Cost is only the amount the provider reports; Norte Code never derives a price
 from the catalogue.
 
-## `ui`
+## `cli.json`
+
+The CLI-only file contains:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `service_url` | string | `"http://127.0.0.1:8787"` | RAEP service endpoint. |
+| `service_type` | `"local"` or `"remote"` | `"local"` | Local enables lifecycle commands; remote rejects start/stop/restart. |
+| `service_auth` | string or `null` | `null` | Raw bearer token. Leave `null` for an unauthenticated local service. |
+| `agent_id` | string | `"norte-code"` | Agent identifier sent during RAEP attachment. |
 | `verbosity` | `"low"`, `"medium"` or `"high"` | `"medium"` | `low` shows the answer alone, `medium` also shows that tools run and that the model is thinking, `high` adds reasoning, tool arguments and results. `--verbose` overrides it for one run. |
 | `diff_style` | `"unified"` or `"split"` | `"unified"` | How an `edit` call is drawn: a patch (`-`/`+`) or two columns before/after. |
+| `charts.contrast` | integer `0..=100` | `75` | Strength of the halftone dot ramp. |
+| `charts.density` | integer `0..=100` | `82` | Coverage of candidate dots in halftone charts. |
+| `charts.dot_size` | `"small"`, `"medium"` or `"large"` | `"medium"` | Character scale used by line, pie and radar charts. |
 
 ## `tools`
 
@@ -431,8 +391,8 @@ with the reason.
 | `honor_allowed_tools` | boolean | `false` | Let a skill's `allowed-tools` pre-approve calls. |
 | `max_skills` | integer `>= 1` | `128` | Maximum number of valid skills kept. |
 
-`/refresh` in the interactive prompt re-scans these roots; the next turn
-registers the refreshed tools.
+Skills are owned by the service. Changes to these keys take effect after
+`norte-code service restart`; `/refresh` only rereads the client's `cli.json`.
 
 ## `extensions`
 

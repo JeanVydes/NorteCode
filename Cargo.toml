@@ -2,8 +2,11 @@
 resolver = "3"
 members = [
     "norte-code-agent",
+    "norte-code-client",
     "norte-code-cli",
     "norte-code-protocol",
+    "norte-code-raep",
+    "norte-code-plugin-host",
 ]
 
 [workspace.package]
@@ -24,6 +27,7 @@ norte-mcp = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
 norte-tools = { git = "https://github.com/JeanVydes/Norte.git", branch = "dev" }
 
 async-trait = "0.1.89"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
@@ -42,6 +46,9 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs", "signal", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["limit", "timeout", "trace"] }
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 

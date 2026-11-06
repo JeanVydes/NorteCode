@@ -3,6 +3,8 @@
 //! They serialize as snake case; these keep the debug output readable without
 //! a serialization dependency.
 
+#![allow(dead_code)]
+
 use norte::Reasoning as ReasoningCapability;
 
 use super::{

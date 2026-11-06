@@ -8,8 +8,9 @@ said.
   there is no shared context with the parent.
 - A child **never has `subagent`**, so nesting stops at one. A delegation
   is one level deep by construction, not by a flag a child could flip.
-- The child inherits the **parent's model** (it already has credentials
-  for it). `provider` and `model` can ask for another one.
+- The child inherits the **parent's provider and model** when the agent's
+  `subagent` field is `null`. Set it to another configured agent name to use
+  that agent's defaults; the name may also refer to the parent agent.
 
 ## Detaching
 
@@ -19,6 +20,6 @@ reads and stops it, and its result arrives as a message when it ends.
 
 ## Cost and trust
 
-Every child spends tokens on its own turn. The tool is off by default
-and capped at three concurrent runs — past the cap a spawn is an error
-the model reads, not a queue. Configure it under `tools.subagent`.
+Every child spends tokens on its own turn. The tool is enabled unless the
+agent lists `subagent` in `tools.disabled`; it is capped at three concurrent
+runs. Configure the target agent in the `agents` array of `service.json`.

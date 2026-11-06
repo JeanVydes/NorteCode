@@ -47,6 +47,8 @@ pub(crate) struct State {
     pub(crate) transcript: Transcript,
     /// The draft being typed, as the editor holds it.
     pub(crate) input: String,
+    /// Whether the service connection is ready to accept input.
+    pub(crate) input_ready: bool,
     /// Where the cursor is in the draft, in characters.
     pub(crate) cursor: usize,
     /// The other end of the draft's selection, when there is one.
@@ -152,7 +154,10 @@ impl State {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            input_ready: true,
+            ..Self::default()
+        }
     }
 
     /// The rows each band asks for at this width.
@@ -186,7 +191,7 @@ impl State {
         });
         // A question holds the draft: the answer is typed into the question's
         // own box, so the draft band is empty while it is up.
-        let input = if self.question.is_some() {
+        let input = if self.question.is_some() || !self.input_ready {
             0
         } else {
             self.draft_rows(width)
@@ -309,7 +314,7 @@ impl State {
             if let Some(question) = self.question.as_ref().filter(|_| areas.question.height > 0) {
                 draw_question(frame, areas.question, question, self, style);
             }
-            if areas.input.height > 0 {
+            if areas.input.height > 0 && self.input_ready {
                 draw_input(frame, areas.input, self, style);
             }
             if areas.completion.height > 0
@@ -796,12 +801,14 @@ pub(crate) fn transcript_lines(transcript: &Transcript, width: u16) -> Vec<Row> 
         // The render is where the width is known and where an emphasis becomes a
         // run the widget draws: the data holds what arrived, and how it is drawn
         // is the view's.
-        if entry.kind == Kind::Answer {
-            let body: Vec<String> = entry
-                .lines
-                .iter()
-                .map(crate::transcript::Line::text)
-                .collect();
+        let body: Vec<String> = entry
+            .lines
+            .iter()
+            .map(crate::transcript::Line::text)
+            .collect();
+        let render_markdown = entry.kind == Kind::Answer
+            || (entry.kind == Kind::ToolOutput && body.iter().any(|line| line.contains('`')));
+        if render_markdown {
             for rendered in crate::markdown::render(&body.join("\n"), usize::from(width)) {
                 push_rendered(&mut out, entry.kind, &rendered, width);
             }

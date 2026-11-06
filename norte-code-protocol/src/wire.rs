@@ -7,7 +7,23 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_commands::QueueMode;
 use crate::types::*;
+
+fn default_resume_replay() -> bool {
+    true
+}
+
+/// One tool and the rule currently deciding whether it may run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ToolInfo {
+    /// The tool name.
+    pub name: String,
+    /// Whether a call is allowed.
+    pub allowed: bool,
+    /// `session`, `global`, or `default`.
+    pub scope: String,
+}
 
 /// A client request: a numbered command for the service.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,11 +46,6 @@ pub enum ClientRequestKind {
     },
     /// List the known sessions.
     ListSessions,
-    /// Make a session the caller's current one.
-    SwitchSession {
-        /// The session.
-        session: SessionKey,
-    },
     /// Copy a session's history into a new session.
     ForkSession {
         /// The session to copy.
@@ -85,6 +96,11 @@ pub enum ClientRequestKind {
         replay: bool,
     },
     /// Queue a message to apply at the next turn boundary.
+    ///
+    /// The `queue_mode` on the queued message decides what happens when
+    /// the session is already running a turn: `Reject` answers
+    /// `SessionBusy`, `Queue` puts the message in front of the request in
+    /// flight, and `Interrupt` cancels that turn before queueing.
     Steer {
         /// The session.
         session: SessionKey,
@@ -95,6 +111,9 @@ pub enum ClientRequestKind {
         /// it then.
         #[serde(default)]
         id: String,
+        /// What to do when the session is already running a turn.
+        #[serde(default)]
+        queue_mode: QueueMode,
     },
     /// Ask the running turn to stop.
     CancelTurn {
@@ -126,6 +145,9 @@ pub enum ClientRequestKind {
     Resume {
         /// The session.
         session: SessionKey,
+        /// Whether to replay the committed transcript before continuing.
+        #[serde(default = "default_resume_replay")]
+        replay: bool,
     },
     /// Answer a question a running turn is waiting on.
     AnswerQuestion {
@@ -178,10 +200,79 @@ pub enum ClientRequestKind {
     ListSkills,
     /// Re-scan the skills roots.
     RefreshSkills,
+    /// List plugins installed on the remote host.
+    ListPlugins,
+    /// Install one plugin from a remote git repository.
+    InstallPlugin {
+        /// Repository URL.
+        url: String,
+        /// Optional workspace package.
+        package: Option<String>,
+        /// Install every plugin package in the workspace.
+        all: bool,
+    },
+    /// Update one plugin, or every plugin with a recorded source.
+    UpdatePlugins {
+        /// Optional plugin name.
+        name: Option<String>,
+    },
+    /// Remove one plugin.
+    RemovePlugin {
+        /// Plugin name.
+        name: String,
+    },
+    /// Enable or disable one plugin on the remote host.
+    SetPluginEnabled {
+        /// Plugin name.
+        name: String,
+        /// Desired state.
+        enabled: bool,
+    },
     /// Report the ledger's totals.
     CostReport {
         /// One session, or every session.
         session: Option<SessionKey>,
+    },
+    /// Return provider request telemetry from the service host.
+    ListTelemetry {
+        /// One session, or every session.
+        session: Option<SessionKey>,
+    },
+    /// Return tool rules as evaluated by the service host.
+    ListTools {
+        /// The session whose rules should be shown.
+        session: Option<SessionKey>,
+    },
+    /// Return MCP server state from the service host.
+    ListMcp,
+    /// Rebuild MCP connections from the service configuration.
+    RefreshMcp,
+    /// Enable or disable one connected MCP server.
+    SetMcpActive {
+        /// Server name.
+        name: String,
+        /// Desired state.
+        active: bool,
+    },
+    /// Set an allow or deny rule.
+    SetApprovalRule {
+        /// The session rule belongs to, when it is not global.
+        session: Option<SessionKey>,
+        /// Tool name.
+        tool: String,
+        /// Whether the tool is allowed.
+        allow: bool,
+        /// Persist for every session.
+        global: bool,
+    },
+    /// Remove an allow or deny rule.
+    ForgetApprovalRule {
+        /// The session rule belongs to, when it is not global.
+        session: Option<SessionKey>,
+        /// Tool name.
+        tool: String,
+        /// Remove the global rule.
+        global: bool,
     },
 }
 
@@ -240,8 +331,6 @@ pub enum ServerEventKind {
         /// The session the copy was made from.
         from: SessionKey,
     },
-    /// The caller's current session changed.
-    SessionSwitched,
     /// A turn started.
     TurnStarted {
         /// The turn number.
@@ -477,6 +566,35 @@ pub enum ServerEventKind {
     CostNotReported {
         /// How many requests so far carried no cost.
         requests: u64,
+    },
+    /// Provider request telemetry from the service host.
+    Telemetry {
+        /// Request rows, oldest first.
+        records: Vec<crate::sqlite::RequestRecord>,
+    },
+    /// Tool approval state from the service host.
+    ToolList {
+        /// Tool rules, sorted by tool name.
+        tools: Vec<ToolInfo>,
+    },
+    /// MCP server state from the service host.
+    McpList {
+        /// Connected servers.
+        servers: Vec<McpInfo>,
+        /// Servers that failed to start.
+        failures: Vec<McpFailure>,
+    },
+    /// The plugins installed on the remote host.
+    PluginList {
+        /// Plugin metadata.
+        plugins: Vec<PluginInfo>,
+    },
+    /// A plugin lifecycle operation completed.
+    PluginChanged {
+        /// Operation description.
+        operation: String,
+        /// Affected plugin name.
+        name: String,
     },
     /// The host ended the turn on purpose.
     TurnStopped {

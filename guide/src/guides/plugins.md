@@ -7,10 +7,10 @@ banner line, or providers and models in the catalogue. The
 ready-made example: it offers a catalogue so you do not write
 `providers.json` and `models.json` by hand.
 
-## Install one
+## Install the OpenRouter catalogue
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin
+norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
 ```
 
 For a workspace with several plugin packages, `--all` installs every one,
@@ -50,14 +50,14 @@ A package with several `cdylib` targets is refused with their names.
 ```sh
 norte-code plugins list            # installed, enabled or not, and why not
 norte-code plugins update [NAME]   # rebuild one, or every one with a recorded source
-norte-code plugins enable NAME     # load it again at next start
-norte-code plugins disable NAME    # skip it at next start
+norte-code plugins enable NAME     # load it again at the next service start
+norte-code plugins disable NAME    # skip it at the next service start
 norte-code plugins rm NAME         # remove the library and its recorded source
 ```
 
-The same commands exist in the chat under `/plugins …`. Changes take
-effect at the next start: plugins load once, before the catalogue is read,
-so an installed plugin is not picked up until you restart.
+The same commands exist in the chat under `/plugins …`. The server owns plugin
+loading and the catalogue: changes take effect after the service restarts
+(or its catalogue is refreshed), not when the stateless CLI reconnects.
 
 `enable` and `disable` rename the library between `.so` and
 `.so.disabled`. The loader only opens `.so`/`.dll`/`.dylib`, so a disabled
@@ -80,7 +80,7 @@ it: the current session, its model, provider, title and how much of the
 context window it uses. It asks for these when it needs them, because the
 session moves (compaction opens another one).
 
-A plugin that fails to load is reported and skipped — the client starts
+A plugin that fails to load is reported and skipped — the server starts
 either way. The host checks the library's `norte_plugin_abi_version`
 against its own before loading it; a mismatch is refused with both
 numbers named, never loaded on a guess.

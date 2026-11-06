@@ -21,14 +21,13 @@
 //! in raw mode for the length of the question and restores it after, which is
 //! what makes an arrow key arrive as an arrow key instead of as three bytes.
 
+use norte_code_client::AgentClient;
+use norte_code_protocol::config::Config;
+#[cfg(test)]
+use norte_code_protocol::sqlite::StoredSession;
+use norte_code_protocol::{Phase, SessionInfo, SessionKey};
 use std::io::IsTerminal as _;
 use std::path::Path;
-
-use norte_code_protocol::catalog::Catalog;
-use norte_code_protocol::config::{Config, update_user_default};
-use norte_code_protocol::sqlite::{SessionDirectory as _, SqliteStore, StoredSession};
-use norte_code_protocol::store::Store as _;
-use norte_code_protocol::{Phase, SessionKey};
 
 use crate::models::ModelChoice;
 use crate::select::{self, Item, Outcome};
@@ -149,45 +148,49 @@ impl SessionRow {
 /// The repair runs here for the same reason `sessions_command` runs it: a
 /// session a hard kill left `streaming` is not streaming now, and a list that
 /// says otherwise offers to continue a turn that is already over.
-pub(crate) async fn session_rows(path: &Path) -> Result<Vec<SessionRow>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let store = SqliteStore::open(path)
-        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
-    if let Err(error) = store.repair_interrupted().await {
-        eprintln!("warning: could not repair interrupted sessions: {error}");
-    }
-    let sessions = store
-        .sessions()
+pub(crate) async fn session_rows(client: &dyn AgentClient) -> Result<Vec<SessionRow>, String> {
+    let sessions = client
+        .list_sessions()
         .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let mut rows = Vec::with_capacity(sessions.len());
-    for session in sessions {
-        let updated_at = store
-            .load(session.north)
-            .await
-            .map_or(session.created_at, |north| north.updated_at);
-        rows.push(row_of(session, updated_at));
-    }
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(norte_code_client::SessionSummary::into_session_info)
+        .collect::<Vec<_>>();
+    let mut rows = sessions.into_iter().map(row_of_info).collect::<Vec<_>>();
     rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
     Ok(rows)
 }
 
 /// One stored session as a row.
-fn row_of(session: StoredSession, updated_at: chrono::DateTime<chrono::Utc>) -> SessionRow {
+fn row_of_info(session: SessionInfo) -> SessionRow {
     let phase = session.phase;
+    let created_at = session
+        .created_at
+        .as_deref()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(chrono::Utc::now);
     SessionRow {
-        // A phase a live turn writes is a phase that outlived it: no process is
-        // streaming a session it has just opened, so it is work to continue. A
-        // tool that was about to run is not: nothing re-runs it yet, and calling
-        // that unfinished would offer a resume that finds nothing to do.
         unfinished: matches!(phase, Phase::Streaming),
+        key: session.session.as_str().to_owned(),
+        title: session.title,
+        provider: session.provider.unwrap_or_default(),
+        model: session.model.unwrap_or_default(),
+        phase,
+        created_at,
+        updated_at: created_at,
+        context_used: 0,
+    }
+}
+
+#[cfg(test)]
+fn row_of(session: StoredSession, updated_at: chrono::DateTime<chrono::Utc>) -> SessionRow {
+    SessionRow {
+        unfinished: matches!(session.phase, Phase::Streaming),
         key: session.key,
         title: session.title,
         provider: session.provider,
         model: session.model,
-        phase,
+        phase: session.phase,
         created_at: session.created_at,
         updated_at,
         context_used: session
@@ -206,13 +209,13 @@ fn row_of(session: StoredSession, updated_at: chrono::DateTime<chrono::Utc>) -> 
 pub(crate) async fn startup(
     _config: &mut Config,
     _catalog: &norte_code_protocol::catalog::Catalog,
-    database: &Path,
+    client: &dyn AgentClient,
     _config_path: Option<&Path>,
     _style: Style,
 ) -> Result<Startup, String> {
     // The default entrypoint is a new session: the session picker moved to
     // the `/sessions` command, so a bare run no longer stops on a menu.
-    let _ = session_rows(database).await?;
+    let _ = session_rows(client).await?;
     let open = Open::New;
     // No terminal picker any more: when no default is configured the interface
     // opens without a model and the person chooses one with `/models`.
@@ -277,9 +280,11 @@ pub(crate) fn choose_model(
     providers.sort();
     eprintln!("{}", style.bold("no default model is configured"));
     if providers.is_empty() {
-        return Err("no model selected: providers.json defines no provider; \
-             add one, or name a model with `--model`"
-            .to_owned());
+        return Err(
+            "no model selected: the server catalogue defines no provider; \
+             configure one on the server, or name a model with `--model`"
+                .to_owned(),
+        );
     }
     let items: Vec<Item> = providers
         .iter()
@@ -330,14 +335,11 @@ pub(crate) fn choose_model(
         .collect();
     models.sort();
     if models.is_empty() {
-        // A provider with no models is one somebody added to `providers.json`
-        // and has not written a model for yet. The name is asked for rather than
-        // refused: the endpoint may serve a model the file has not caught up
-        // with, and the spec is built from the provider's wire either way.
+        // A provider with no models is a server-side catalogue inconsistency.
         eprintln!(
             "  {}",
             style.dim(format!(
-                "{provider} lists no models in models.json; type the model it serves"
+                "{provider} lists no models in the server catalogue; type the model it serves"
             ))
         );
         let model = prompt_line("model> ", style)?.ok_or_else(|| "no model chosen".to_owned())?;
@@ -383,39 +385,19 @@ pub(crate) fn choose_model(
 /// with the keys to set. Either way the pair is what the caller resolves, so the
 /// session opens on the provider and the model that were chosen.
 fn remember(
-    config: &mut Config,
-    config_path: Option<&Path>,
+    _config: &mut Config,
+    _config_path: Option<&Path>,
     provider: &str,
     model: &str,
     style: Style,
 ) -> ModelChoice {
     let choice = ModelChoice::new(provider, model);
-    let path = config_path
-        .map(Path::to_path_buf)
-        .or_else(norte_code_protocol::config::user_config_path);
-    let Some(path) = path else {
-        eprintln!(
-            "{}",
-            style.yellow(format!(
-                "nowhere to write the choice; set default_provider to `{provider}` and default_model to `{model}` yourself"
-            ))
-        );
-        return choice;
-    };
-    match update_user_default(&path, provider, model) {
-        Ok(()) => {
-            config.default_provider = Some(provider.to_owned());
-            config.default_model = Some(model.to_owned());
-            eprintln!("{}", style.dim(format!("saved to {}", path.display())));
-        }
-        Err(error) => eprintln!(
-            "{}",
-            style.yellow(format!(
-                "could not write {}: {error}; set default_provider to `{provider}` and default_model to `{model}` yourself",
-                path.display()
-            ))
-        ),
-    }
+    eprintln!(
+        "{}",
+        style.dim(format!(
+            "selected {provider}/{model}; persistent defaults are managed by the server"
+        ))
+    );
     choice
 }
 
@@ -445,53 +427,6 @@ pub(crate) fn has_terminal() -> bool {
 ///
 /// Returns the resolver's missing-key message when the key is left empty or the
 /// process has no terminal, and the read error when the terminal refuses it.
-pub(crate) fn ensure_provider_key(
-    config: &Config,
-    catalog: &Catalog,
-    provider: &str,
-) -> Result<(), String> {
-    let Some(store) = &config.keys else {
-        return Ok(());
-    };
-    let Some(entry) = catalog.provider(provider) else {
-        return Ok(());
-    };
-    if store.resolve(provider, &entry.environment_keys).is_ok() {
-        return Ok(());
-    }
-    let missing = || {
-        format!(
-            "could not resolve the API key for {provider}: no value in any of: {}",
-            entry.environment_keys.join(", ")
-        )
-    };
-    if !std::io::stdin().is_terminal() {
-        return Err(missing());
-    }
-    let prompt = format!(
-        "API key for {provider} (input is hidden, tried {}): ",
-        entry.environment_keys.join(", ")
-    );
-    let key = rpassword::prompt_password(prompt)
-        .map_err(|error| format!("could not read the API key for {provider}: {error}"))?;
-    let key = key.trim();
-    if key.is_empty() {
-        return Err(missing());
-    }
-    match store.save(provider, key) {
-        Ok(_) => {
-            eprintln!("saved the key for {provider} in secrets.json (0600)");
-        }
-        Err(error) => {
-            eprintln!(
-                "warning: the key for {provider} could not be saved ({error}); \
-                 it is used for this run only"
-            );
-        }
-    }
-    Ok(())
-}
-
 fn prompt_line(question: &str, style: Style) -> Result<Option<String>, String> {
     use std::io::Write as _;
 
@@ -670,17 +605,11 @@ mod tests {
     }
 
     #[test]
-    fn the_choice_is_written_to_the_file_it_was_given() {
-        let dir = std::env::temp_dir().join(format!("norte-startup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("config.json");
-        std::fs::write(&path, r#"{"version":1,"cost":{"show":false}}"#).expect("write");
-        let mut config = Config::from_json("{}").expect("config").config;
-        assert_eq!(config.default_model, None);
-        assert_eq!(config.default_provider, None);
+    fn the_choice_is_returned_without_writing_server_configuration() {
+        let mut config = Config::default();
         let choice = remember(
             &mut config,
-            Some(&path),
+            None,
             "river",
             "deepseek-ai/DeepSeek-V4.1-Flash",
             Style::plain(),
@@ -689,23 +618,7 @@ mod tests {
         // keeps its slash, so neither is ever taken from a joined string.
         assert_eq!(choice.provider, "river");
         assert_eq!(choice.model, "deepseek-ai/DeepSeek-V4.1-Flash");
-        // The two are written apart, and the model keeps its slash: a name is a
-        // string and the provider is its own key.
-        assert_eq!(config.default_provider.as_deref(), Some("river"));
-        assert_eq!(
-            config.default_model.as_deref(),
-            Some("deepseek-ai/DeepSeek-V4.1-Flash")
-        );
-        // The rest of the file survives, and what was written is a config the
-        // next run can load.
-        let written = std::fs::read_to_string(&path).expect("read");
-        assert!(written.contains("\"show\": false"), "{written}");
-        let reloaded = Config::from_json(&written).expect("reload");
-        assert_eq!(reloaded.config.default_provider.as_deref(), Some("river"));
-        assert_eq!(
-            reloaded.config.default_model.as_deref(),
-            Some("deepseek-ai/DeepSeek-V4.1-Flash")
-        );
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(config.default_provider.is_none());
+        assert!(config.default_model.is_none());
     }
 }

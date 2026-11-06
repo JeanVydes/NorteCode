@@ -1,7 +1,8 @@
 # Approve a tool
 
 Rules decide whether a tool call runs, before anything happens. Denial
-wins over allow, and a global deny wins over a session allow. A rule naming
+wins over a matching rule at the same scope; an explicit session rule overrides
+a global rule. A rule naming
 a tool that does not exist does nothing — and does not say so.
 
 ## Write rules at the prompt
@@ -12,7 +13,8 @@ a tool that does not exist does nothing — and does not say so.
 /deny shell global
 ```
 
-`/tools` lists every tool with its rule state (`allow`, `deny` or `ask`) and
+`/tools` lists every tool with its rule state (`allow` or `deny`, otherwise
+`default`) and
 whether the rule is this session's or global. It is the fastest way to check
 a rule names a real tool.
 

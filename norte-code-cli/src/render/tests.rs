@@ -3,7 +3,9 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use norte_code_protocol::{Delta, OutputStream, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_protocol::{
+    Delta, MessageRole, OutputStream, ReplayedKind, ServerEvent, ServerEventKind, SessionKey,
+};
 
 use crate::input::{Pinned, TodoItem, TodoStatus};
 use crate::render::argument::todo_items;
@@ -78,6 +80,10 @@ fn reasoning_renderer(pinned: &Arc<Pinned>) -> Renderer {
     renderer
 }
 
+fn tool_renderer(pinned: &Arc<Pinned>) -> Renderer {
+    reasoning_renderer(pinned)
+}
+
 /// A `ToolStarted` kind for a shell call, with the arguments as the tool sends
 /// them now: flat, `script` at the top level.
 fn shell_started(call_id: &str, arguments: serde_json::Value) -> ServerEventKind {
@@ -97,7 +103,7 @@ fn the_command_that_ran_is_shown_under_the_call() {
     // since then missed the lookup, so the transcript showed a command's output
     // with no line saying what produced it.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     let started_event = shell_started(
         "call-1",
         serde_json::json!({ "script": "cargo test --workspace", "shell": "sh" }),
@@ -109,7 +115,12 @@ fn the_command_that_ran_is_shown_under_the_call() {
             kind: started_event.clone(),
         })
         .expect("started event");
-    let started = renderer.transcript.entries().last().expect("started entry");
+    let started = renderer
+        .transcript
+        .entries()
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("call-1"))
+        .expect("started entry");
     assert_eq!(started.lines[0].text(), "shell $ cargo test --workspace");
 
     renderer.tool_event(&ServerEventKind::ToolOutput {
@@ -135,7 +146,7 @@ fn the_command_that_ran_is_shown_under_the_call() {
         .transcript
         .entries()
         .iter()
-        .find(|entry| entry.boxed)
+        .find(|entry| entry.boxed && entry.call_id.as_deref() == Some("call-1"))
         .expect("output entry");
     assert_eq!(output.title, None);
     let ending = renderer
@@ -168,6 +179,67 @@ fn the_command_that_ran_is_shown_under_the_call() {
         Renderer::command_summary(Some(&serde_json::json!({ "path": "a.rs" }))),
         None
     );
+}
+
+#[test]
+fn medium_shows_tool_status_without_payload() {
+    // Medium keeps the live tail of a running call — the last rows that
+    // say it is alive — but the finished result is not repeated: the
+    // closing row is the status, and the payload stays at high.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    let started = shell_started("call-1", serde_json::json!({ "script": "printf payload" }));
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: started,
+        })
+        .expect("started event");
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolOutput {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                stream: OutputStream::Stdout,
+                text: "output-payload\n".to_owned(),
+                last: false,
+            },
+        })
+        .expect("output event");
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolFinished {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                is_error: false,
+                error: None,
+                output: Some("output-payload".to_owned()),
+                detached: false,
+                truncated: false,
+                duration_ms: 10,
+            },
+        })
+        .expect("finish event");
+
+    let transcript_text: String = renderer
+        .transcript
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.lines.iter().map(crate::transcript::Line::text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(transcript_text.contains("✓ shell in 10 ms"));
+    // The streamed chunk was the live tail, shown once; the finished
+    // result is not printed a second time at medium.
+    let hits = transcript_text.matches("output-payload").count();
+    assert_eq!(hits, 1, "{transcript_text}");
 }
 
 #[test]
@@ -528,7 +600,7 @@ fn a_detached_call_is_not_drawn_as_a_failure() {
 #[test]
 fn a_streamed_chunk_is_recorded_once() {
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     renderer
         .event(&ServerEvent {
             request_id: 1,
@@ -543,6 +615,15 @@ fn a_streamed_chunk_is_recorded_once() {
             },
         })
         .expect("event");
+    assert!(
+        renderer
+            .transcript
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.lines.iter())
+            .any(|line| line.text().contains("only once")),
+        "streamed output is visible before the tool finishes"
+    );
     renderer
         .event(&ServerEvent {
             request_id: 1,
@@ -571,6 +652,109 @@ fn a_streamed_chunk_is_recorded_once() {
 }
 
 #[test]
+fn streamed_tool_output_is_hidden_at_medium_verbosity() {
+    // Medium keeps a live, bounded tail while the call runs — the last
+    // few rows that say it is alive — but the finished result still shows
+    // only at high. The tail is the box, and the box is collapsible.
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolOutput {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                stream: OutputStream::Stdout,
+                text: "live tail row\n".to_owned(),
+                last: false,
+            },
+        })
+        .expect("event");
+    assert!(
+        renderer
+            .transcript
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.lines.iter())
+            .any(|line| line.text().contains("live tail row")),
+        "medium shows a live tail while the call runs"
+    );
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolFinished {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                is_error: false,
+                error: None,
+                output: Some("finished payload\n".to_owned()),
+                truncated: false,
+                detached: false,
+                duration_ms: 3,
+            },
+        })
+        .expect("event");
+    assert!(
+        !renderer
+            .transcript
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.lines.iter())
+            .any(|line| line.text().contains("finished payload")),
+        "medium does not repeat the finished result"
+    );
+}
+
+#[test]
+fn a_finished_tool_result_is_not_rendered_twice_at_high_verbosity() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.verbosity = Verbosity::High;
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolStarted {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                arguments: None,
+                source: None,
+            },
+        })
+        .expect("start event");
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolFinished {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                is_error: false,
+                error: None,
+                output: Some("only once\n".to_owned()),
+                truncated: false,
+                detached: false,
+                duration_ms: 3,
+            },
+        })
+        .expect("finish event");
+    let hits: usize = renderer
+        .transcript
+        .entries()
+        .iter()
+        .flat_map(|entry| entry.lines.iter())
+        .filter(|line| line.text().contains("only once"))
+        .count();
+    assert_eq!(hits, 1, "a finished result is drawn once at high verbosity");
+}
+
+#[test]
 fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
     // A shell's process can outlive its call, and its last chunk can arrive
     // after the finish was drawn: the reader hands over whatever a pipe read
@@ -578,7 +762,7 @@ fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
     // second box for the same call reads as two calls, and the output of the one
     // that is still running belongs to its job rather than to the transcript.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     renderer.tool_event(&ServerEventKind::ToolOutput {
         turn: 1,
         call_id: "call-1".to_owned(),
@@ -634,12 +818,65 @@ fn a_chunk_after_a_call_finished_does_not_open_a_second_box() {
 }
 
 #[test]
+fn finishing_one_parallel_call_does_not_close_another_output_box() {
+    let pinned = Pinned::new();
+    let mut renderer = tool_renderer(&pinned);
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-a".to_owned(),
+        tool: "shell".to_owned(),
+        stream: OutputStream::Stdout,
+        text: "a\n".to_owned(),
+        last: false,
+    });
+    renderer.tool_event(&ServerEventKind::ToolOutput {
+        turn: 1,
+        call_id: "call-b".to_owned(),
+        tool: "shell".to_owned(),
+        stream: OutputStream::Stdout,
+        text: "b\n".to_owned(),
+        last: false,
+    });
+    renderer.tool_event(&ServerEventKind::ToolFinished {
+        turn: 1,
+        call_id: "call-a".to_owned(),
+        tool: "shell".to_owned(),
+        is_error: false,
+        error: None,
+        output: Some("a\n".to_owned()),
+        truncated: false,
+        detached: false,
+        duration_ms: 3,
+    });
+    assert_eq!(
+        renderer.output_gutter(),
+        Some("call-b"),
+        "finishing call-a must not close call-b's active output"
+    );
+    renderer.tool_event(&ServerEventKind::ToolFinished {
+        turn: 1,
+        call_id: "call-b".to_owned(),
+        tool: "shell".to_owned(),
+        is_error: false,
+        error: None,
+        output: Some("b\n".to_owned()),
+        truncated: false,
+        detached: false,
+        duration_ms: 3,
+    });
+    assert!(
+        renderer.output_gutter().is_none(),
+        "the active output closes when call-b finishes"
+    );
+}
+
+#[test]
 fn a_streamed_call_is_remembered_so_its_finish_does_not_repeat_it() {
     // A shell streams its output while it runs; the finish event carries the
     // same text. Without the record the transcript would show it twice, once as
     // it arrived and once in the result block right after.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     renderer.tool_event(&ServerEventKind::ToolOutput {
         turn: 1,
         call_id: "call-1".to_owned(),
@@ -1091,7 +1328,11 @@ fn edit_preview_without_a_source_has_no_row_numbers() {
         None,
     );
     let edit = &preview.boxes[0];
-    assert!(edit.old_range.is_none());
+    // Without the source there are no line numbers, but the block still
+    // covers lines on each side: the header names that count instead of
+    // disclaiming the location.
+    assert_eq!(edit.old_range, Some((1, 2)));
+    assert_eq!(edit.new_range, Some((1, 1)));
     assert_eq!(edit.rows[0].left.as_ref().expect("old").number, None);
     assert_eq!(edit.rows[0].left.as_ref().expect("old").text, "one");
     assert_eq!(edit.rows[1].left.as_ref().expect("old").text, "two");
@@ -1126,7 +1367,7 @@ fn streamed_output_is_boxed_and_closed_by_a_chunk_with_no_bytes() {
     // the `╰` landed after whatever printed next. The box also stays open across
     // the partial lines a pipe read hands over.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     let output = |renderer: &mut Renderer, text: &str, last: bool| {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1157,7 +1398,7 @@ fn a_finished_call_closes_the_box_and_its_result_is_not_repeated() {
     // The streamed text was already shown, so the finish must not print it
     // again; and it has to close the box first, or the bracket is orphaned.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     renderer.tool_event(&ServerEventKind::ToolOutput {
         turn: 1,
         call_id: "call-1".to_owned(),
@@ -1194,7 +1435,7 @@ fn a_line_split_across_chunks_waits_until_it_is_whole() {
     // `stdout[01] p` then `arcial... completa`. Writing each chunk as it came
     // put half a word on a row of its own, which is what the screen showed.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     let chunk = |renderer: &mut Renderer, stream: &str, text: &str| {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1213,7 +1454,7 @@ fn a_line_split_across_chunks_waits_until_it_is_whole() {
     chunk(&mut renderer, "stdout", "stdout[01] p");
     assert_eq!(
         renderer.output_pending(),
-        [("stdout".to_owned(), "stdout[01] p".to_owned())],
+        [("call-1:stdout".to_owned(), "stdout[01] p".to_owned())],
         "a line without a newline waits for the rest of itself"
     );
 
@@ -1232,8 +1473,8 @@ fn a_line_split_across_chunks_waits_until_it_is_whole() {
     assert_eq!(
         waiting,
         [
-            ("stderr".to_owned(), "dos ".to_owned()),
-            ("stdout".to_owned(), "uno ".to_owned()),
+            ("call-1:stderr".to_owned(), "dos ".to_owned()),
+            ("call-1:stdout".to_owned(), "uno ".to_owned()),
         ],
         "each stream waits on its own line"
     );
@@ -1244,7 +1485,7 @@ fn a_line_that_never_ends_is_shown_once_it_is_long_enough() {
     // A progress bar writes without newlines. Holding it for a newline that
     // never comes would show nothing at all while the tool runs.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     let chunk = |renderer: &mut Renderer, text: &str| {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1272,7 +1513,7 @@ fn the_output_box_keeps_a_bounded_tail_for_expansion() {
     // The screen starts with four rows, but the transcript retains a bounded
     // tail so the rest can be expanded when it is useful.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     assert_eq!(
         renderer.output_rows_len(),
         0,
@@ -1312,7 +1553,7 @@ fn the_output_box_keeps_a_bounded_tail_for_expansion() {
 #[test]
 fn shell_output_can_be_expanded_and_collapsed() {
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     for index in 0..6 {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1368,7 +1609,7 @@ fn greeting_keeps_the_small_norte_mark() {
 #[test]
 fn expanded_output_retains_a_bounded_tail_and_counts_evictions() {
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     for index in 0..crate::transcript::MAX_ENTRY_LINES + 5 {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1401,7 +1642,7 @@ fn a_long_output_retains_all_rows_until_the_bound() {
     // The rows retained for expansion are kept in order; the initial view can
     // still choose the useful tail without discarding the head.
     let pinned = Pinned::new();
-    let mut renderer = visible_renderer(&pinned);
+    let mut renderer = tool_renderer(&pinned);
     for label in ["first", "second", "third", "fourth", "fifth"] {
         renderer.tool_event(&ServerEventKind::ToolOutput {
             turn: 1,
@@ -1788,6 +2029,148 @@ fn the_conversation_is_kept_as_it_arrives() {
         .position(|entry| entry.kind == Kind::Reasoning)
         .expect("and it is before it");
     assert!(thought < answer, "the thought leads: {entries:?}");
+}
+
+#[test]
+fn replayed_thinking_and_output_are_not_recorded_twice() {
+    use crate::transcript::Kind;
+
+    let pinned = Pinned::new();
+    let mut renderer = reasoning_renderer(&pinned);
+    let replay = |role: MessageRole, kind: ReplayedKind, text: &str| ServerEvent {
+        request_id: 1,
+        session: None,
+        kind: ServerEventKind::MessageReplayed {
+            index: 0,
+            role,
+            kind,
+            text: text.to_owned(),
+        },
+    };
+
+    renderer
+        .event(&replay(
+            MessageRole::Assistant,
+            ReplayedKind::Reasoning,
+            "thinking",
+        ))
+        .expect("reasoning replay");
+    renderer
+        .event(&replay(
+            MessageRole::Assistant,
+            ReplayedKind::Text,
+            "answer",
+        ))
+        .expect("answer replay");
+
+    let entries = renderer.transcript.entries();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.kind == Kind::Reasoning)
+            .count(),
+        1,
+        "replayed thinking has one gutter entry: {entries:?}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.kind == Kind::Answer)
+            .count(),
+        1,
+        "replayed output has one entry: {entries:?}"
+    );
+    let thinking = entries
+        .iter()
+        .find(|entry| entry.kind == Kind::Reasoning)
+        .expect("thinking entry");
+    let answer = entries
+        .iter()
+        .find(|entry| entry.kind == Kind::Answer)
+        .expect("answer entry");
+    assert_eq!(texts(thinking), ["thinking"]);
+    assert_eq!(texts(answer), ["answer"]);
+}
+
+#[test]
+fn replayed_thinking_is_hidden_at_medium_verbosity() {
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::MessageReplayed {
+                index: 1,
+                role: MessageRole::Assistant,
+                kind: ReplayedKind::Reasoning,
+                text: "identity hierarchy".to_owned(),
+            },
+        })
+        .expect("reasoning replay");
+    assert!(
+        renderer.transcript.entries().is_empty(),
+        "medium replay must not expose reasoning"
+    );
+}
+
+#[test]
+fn a_conflict_replaces_the_stale_transcript_with_replayed_history() {
+    use crate::transcript::Kind;
+
+    let pinned = Pinned::new();
+    let mut renderer = visible_renderer(&pinned);
+    renderer.said("stale message");
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::Error {
+                code: norte_code_protocol::ErrorCode::Conflict,
+                message: "session advanced".to_owned(),
+            },
+        })
+        .expect("conflict event");
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::MessageReplayed {
+                index: 1,
+                role: MessageRole::Assistant,
+                kind: ReplayedKind::Text,
+                text: "latest answer".to_owned(),
+            },
+        })
+        .expect("replay event");
+
+    let entries = renderer.transcript.entries();
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| { entry.kind == Kind::Said && texts(entry) == ["stale message"] }),
+        "the stale transcript is removed: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.kind == Kind::Answer && texts(entry) == ["latest answer"]),
+        "the latest committed history is visible: {entries:?}"
+    );
+}
+
+#[test]
+fn saying_a_message_returns_the_view_to_the_tail() {
+    let pinned = Arc::new(Pinned::new());
+    let mut renderer = visible_renderer(&pinned);
+    pinned.scroll_transcript(-12);
+    assert_ne!(pinned.transcript_scroll(), 0, "the view is scrolled back");
+    renderer.said("hello");
+    assert_eq!(
+        pinned.transcript_scroll(),
+        0,
+        "a fresh message must be visible, not hidden behind the scroll"
+    );
 }
 
 #[test]

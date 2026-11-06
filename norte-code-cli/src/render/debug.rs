@@ -13,18 +13,14 @@
 
 use std::path::PathBuf;
 
-use norte_code_protocol::catalog::{Catalog, Model};
 use norte_code_protocol::config::CompactionTrigger;
 
 use super::helpers::find_project_config;
-use super::names::{
-    cache_name, feature_set, modality_set, reasoning_capabilities, streaming_name, structured_set,
-    tool_kind_set,
-};
 use crate::modal::{Action, Row};
 
-use super::{Config, ModelSpec, Path, Reasoning, Service, Style};
-use super::{RuleScope, SessionKey};
+use super::SessionKey;
+use super::{Config, ModelSpec, Path, Reasoning, Style};
+use crate::remote_state::{ModelInfoExt, RemoteState};
 
 /// The facts only the host knows, set once at startup.
 ///
@@ -61,13 +57,16 @@ fn heading(style: Style, title: &str) -> String {
 
 /// The first line of every run: where it is, what it is on, where it writes.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn report_start(
     style: Style,
     spec: &ModelSpec,
     configuration: &Config,
     config_path: Option<&Path>,
     session: Option<&str>,
-    catalog: &Catalog,
+    provider_count: usize,
+    model_count: usize,
+    provider_known: bool,
     host: Option<&HostFacts>,
 ) -> Vec<String> {
     let workspace =
@@ -105,11 +104,8 @@ pub(crate) fn report_start(
         clippy::cast_sign_loss
     )]
     let compaction_tokens = spec
-        .capabilities
         .max_context
         .map(|context| (context as f64 * configuration.compaction.threshold).round() as u64);
-    let provider_count = catalog.providers().len();
-    let model_count = catalog.model_count();
     let max_iterations = configuration
         .max_iterations
         .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string());
@@ -123,14 +119,14 @@ pub(crate) fn report_start(
             format!(
                 "{}{}",
                 spec.provider,
-                if catalog.provider(&spec.provider).is_some() {
+                if provider_known {
                     String::new()
                 } else {
                     "  (not in the catalogue; from the config)".to_owned()
                 }
             ),
         ),
-        fact("wire", spec.schema.family()),
+        fact("wire", "configured on remote host"),
         fact("iterations", &max_iterations),
         fact(
             "compaction",
@@ -158,10 +154,7 @@ pub(crate) fn report_start(
         ),
         fact(
             "reasoning",
-            format!(
-                "{} effort(s) available",
-                spec.capabilities.reasoning.efforts.len()
-            ),
+            format!("{} effort(s) available", spec.reasoning.efforts.len()),
         ),
         String::new(),
         heading(style, "paths"),
@@ -197,24 +190,20 @@ pub(crate) fn report_start(
             format!("{provider_count} provider(s) · {model_count} model(s)"),
         ),
     ];
-    lines.extend(model_lines(
-        style,
-        spec,
-        catalog.find(&spec.provider, &spec.model),
-    ));
+    lines.extend(model_lines(style, spec, None));
     lines
 }
 
 /// What the model itself can do, from the catalogue entry when there is one.
-pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>) -> Vec<String> {
-    let capabilities = &spec.capabilities;
+pub(crate) fn model_lines(
+    style: Style,
+    spec: &ModelSpec,
+    model: Option<&norte_code_protocol::ModelInfo>,
+) -> Vec<String> {
     let mut lines = vec![String::new(), heading(style, "model")];
     if let Some(model) = model {
         if !model.name.is_empty() {
             lines.push(fact("name", &model.name));
-        }
-        if let Some(family) = &model.family {
-            lines.push(fact("family", family));
         }
         if let Some(description) = &model.description {
             lines.push(fact("about", description));
@@ -227,69 +216,20 @@ pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>)
     }
     lines.push(fact(
         "wire",
-        format!("{} · provider {}", spec.schema.family(), spec.provider),
+        format!("remote catalogue · provider {}", spec.provider),
     ));
-    lines.push(fact("context", token_limit_label(capabilities.max_context)));
-    lines.push(fact("output", token_limit_label(capabilities.max_output)));
-    lines.push(fact(
-        "modalities",
-        format!(
-            "input {} · output {}",
-            modality_set(capabilities.modalities.input.keys()),
-            modality_set(capabilities.modalities.output.iter())
-        ),
-    ));
-    lines.push(fact("tools", tool_kind_set(&capabilities.tool_kinds)));
+    lines.push(fact("context", token_limit_label(spec.max_context)));
+    lines.push(fact("output", token_limit_label(spec.max_output)));
+    lines.push(fact("modalities", "text"));
+    lines.push(fact("tools", if spec.tools { "tools" } else { "-" }));
     lines.push(fact(
         "reasoning",
-        reasoning_capabilities(&capabilities.reasoning),
+        if spec.reasoning.supported {
+            format!("{} effort(s) available", spec.reasoning.efforts.len())
+        } else {
+            "not supported".to_owned()
+        },
     ));
-    lines.push(fact(
-        "streaming",
-        capabilities
-            .streaming
-            .map_or_else(|| "-".to_owned(), |value| streaming_name(value).to_owned()),
-    ));
-    lines.push(fact("cache", cache_name(capabilities.cache)));
-    lines.push(fact("features", feature_set(&capabilities.features)));
-    lines.push(fact(
-        "structured",
-        structured_set(&capabilities.structured_output),
-    ));
-    if let Some(model) = model {
-        let mut metadata = Vec::new();
-        if let Some(status) = &model.status {
-            metadata.push(format!("status {status}"));
-        }
-        if let Some(knowledge) = &model.knowledge {
-            metadata.push(format!("knowledge {knowledge}"));
-        }
-        if let Some(released) = &model.release_date {
-            metadata.push(format!("released {released}"));
-        }
-        if let Some(updated) = &model.last_updated {
-            metadata.push(format!("updated {updated}"));
-        }
-        if model.open_weights {
-            metadata.push("open weights".to_owned());
-        }
-        // The parameters are a list and this is where it is worth showing: what
-        // a model accepts decides which controls are offered, and a name missing
-        // from here is a control that is not.
-        if !model.supported_params.is_empty() {
-            let mut params: Vec<&str> = model
-                .supported_params
-                .iter()
-                .copied()
-                .map(super::names::supported_param_name)
-                .collect();
-            params.sort_unstable();
-            metadata.push(format!("params {}", params.join(", ")));
-        }
-        if !metadata.is_empty() {
-            lines.push(fact("catalogue", metadata.join(" · ")));
-        }
-    }
     lines
 }
 
@@ -305,12 +245,19 @@ pub(crate) fn model_lines(style: Style, spec: &ModelSpec, model: Option<&Model>)
 ///
 /// It reads the same `tool_rules` the report does, so the row and the rule
 /// beside it cannot disagree.
-pub(crate) fn tools_panel(
+pub(crate) async fn tools_panel(
     style: Style,
-    service: &Service,
+    state: &RemoteState,
     session: Option<&SessionKey>,
 ) -> Vec<Row> {
-    let statuses = service.tool_rules(session);
+    let statuses = match state.tool_rules_remote(session.cloned()).await {
+        Ok(statuses) => statuses,
+        Err(error) => {
+            return vec![Row::text(
+                style.red(format!("could not read tools: {error}")),
+            )];
+        }
+    };
     if statuses.is_empty() {
         return vec![Row::text(style.yellow("no tools are registered"))];
     }
@@ -327,15 +274,15 @@ pub(crate) fn tools_panel(
         // to it runs again. Setting and clearing both, from the panel, is why
         // there are three: a rule a person set by hand is one they must be able
         // to take back.
-        let (word, action) = match status.scope {
-            RuleScope::Default => ("runs", Action::Allow(status.name.clone())),
+        let (word, action) = match status.scope.as_str() {
+            "default" => ("runs", Action::Allow(status.name.clone())),
             _ if status.allowed => ("allow", Action::Deny(status.name.clone())),
             _ => ("deny", Action::Forget(status.name.clone())),
         };
-        let scope = match status.scope {
-            RuleScope::Session => "this session",
-            RuleScope::Global => "every session",
-            RuleScope::Default => "by default",
+        let scope = match status.scope.as_str() {
+            "session" => "this session",
+            "global" => "every session",
+            _ => "by default",
         };
         rows.push(
             Row::actable(format!("{:<widest$}", status.name), action)
@@ -351,31 +298,26 @@ pub(crate) fn tools_panel(
 /// that was registered a moment ago is in the report and a tool that failed to
 /// register is not. The first line of a description is enough to say what the
 /// tool is; the whole text is the model's, and it is long.
-pub(crate) fn report_tools(
+pub(crate) async fn report_tools(
     style: Style,
-    service: &Service,
+    state: &RemoteState,
     session: Option<&norte_code_protocol::SessionKey>,
 ) -> Vec<String> {
     let mut lines = vec![heading(style, "tools")];
     // The session's list and not the configuration's: a session keeps the tools
     // it was made with, so this is what the model can actually reach in it.
-    match service.tools(session) {
-        Ok(registry) => {
-            let specs = registry.specs();
-            lines.push(fact("registered", specs.len()));
-            for spec in &specs {
-                let summary = spec
-                    .description
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                lines.push(format!(
-                    "  {} — {}",
-                    style.bold(spec.name.to_string()),
-                    style.dim(summary)
-                ));
+    match state.tool_rules_remote(session.cloned()).await {
+        Ok(tools) => {
+            lines.push(fact("registered", tools.len()));
+            for tool in tools {
+                let rule = if tool.scope == "default" {
+                    "default"
+                } else if tool.allowed {
+                    "allow"
+                } else {
+                    "deny"
+                };
+                lines.push(fact(&tool.name, format!("{rule} ({})", tool.scope)));
             }
         }
         Err(error) => lines.push(fact("error", error)),
@@ -393,9 +335,11 @@ pub(crate) fn report_tools(
 /// A server that failed to start is a row too, and not an actable one: there is
 /// nothing running to switch, and a key that did nothing would say the press was
 /// wrong rather than the server.
-pub(crate) fn mcp_panel(service: &Service) -> Vec<Row> {
-    let connected = service.mcp_status();
-    let failures = service.mcp_failures();
+pub(crate) async fn mcp_panel(state: &RemoteState) -> Vec<Row> {
+    let (connected, failures) = match state.mcp_status_remote().await {
+        Ok(status) => status,
+        Err(error) => return vec![Row::text(format!("could not read MCP status: {error}"))],
+    };
     if connected.is_empty() && failures.is_empty() {
         return Vec::new();
     }
@@ -423,16 +367,21 @@ pub(crate) fn mcp_panel(service: &Service) -> Vec<Row> {
             rows.push(Row::text(format!("    {warning}")));
         }
     }
-    for (name, reason) in &failures {
-        rows.push(Row::text(format!("{name} failed: {reason}")));
+    for failure in &failures {
+        rows.push(Row::text(format!(
+            "{} failed: {}",
+            failure.name, failure.reason
+        )));
     }
     rows
 }
 
 /// The MCP servers, connected or not, with their tools.
-pub(crate) fn report_mcp(style: Style, service: &Service) -> Vec<String> {
-    let connected = service.mcp_status();
-    let failures = service.mcp_failures();
+pub(crate) async fn report_mcp(style: Style, state: &RemoteState) -> Vec<String> {
+    let (connected, failures) = match state.mcp_status_remote().await {
+        Ok(status) => status,
+        Err(error) => return vec![fact("error", error)],
+    };
     if connected.is_empty() && failures.is_empty() {
         return Vec::new();
     }
@@ -454,36 +403,23 @@ pub(crate) fn report_mcp(style: Style, service: &Service) -> Vec<String> {
             lines.push(format!("    {}", style.yellow(warning.clone())));
         }
     }
-    for (name, reason) in &failures {
-        lines.push(fact(&style.red(name.clone()), format!("failed: {reason}")));
+    for failure in &failures {
+        lines.push(fact(
+            &style.red(failure.name.clone()),
+            format!("failed: {}", failure.reason),
+        ));
     }
     lines
 }
 
 /// The static prompt size in characters. Tokens are provider-reported, so no
 /// estimate is made here.
-pub(crate) fn report_prompt(style: Style, service: &Service, source: &str) -> Vec<String> {
-    let size = match service.prompt_size() {
-        Ok(size) => size,
-        Err(error) => {
-            return vec![fact(
-                "prompt",
-                style.yellow(format!("could not measure it: {error}")),
-            )];
-        }
-    };
-    let mut lines = vec![heading(style, "prompt material")];
-    lines.push(fact("source", source));
-    lines.push(fact("system", format!("{} chars", size.system_chars)));
-    if let Some(path) = &size.project_path {
-        lines.push(fact(
-            "project",
-            format!("{} chars ({})", size.project_chars, path.display()),
-        ));
-    }
-    lines.push(fact("tools", format!("{} chars", size.tool_chars)));
-    lines.push(fact("total", format!("{} chars", size.total_chars())));
-    lines
+pub(crate) fn report_prompt(style: Style, _state: &RemoteState, source: &str) -> Vec<String> {
+    vec![
+        heading(style, "prompt material"),
+        fact("source", source),
+        fact("prompt", "owned and evaluated by remote host"),
+    ]
 }
 
 /// The reasoning setting the session is actually using.

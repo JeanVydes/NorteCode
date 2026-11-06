@@ -245,6 +245,8 @@ pub(crate) struct CompletionNames {
     /// provider comes from the session, which is why the field is filled from
     /// the provider in play rather than from the whole catalogue.
     pub(crate) models: Vec<String>,
+    /// Tool names accepted by tool approval commands.
+    pub(crate) tools: Vec<String>,
 }
 
 /// The pinned text above the input line.
@@ -308,8 +310,8 @@ struct PinnedInner {
     ///
     /// They are here because the completion is answered on two other threads —
     /// the keyboard reads keys and the frame draws the menu — and neither holds
-    /// the service the catalogue lives in. The CLI pushes them whenever the
-    /// catalogue is read, which is startup and `/refresh`.
+    /// the service the catalogue lives in. The CLI pushes them at startup and
+    /// when the session changes model.
     names: CompletionNames,
     /// What the mouse has selected, in cells of the frame.
     ///
@@ -396,7 +398,6 @@ impl Pinned {
     }
 
     /// The pending steering messages, oldest first.
-    #[cfg(test)]
     pub(crate) fn pending_steers(&self) -> Vec<String> {
         self.lock().pending_steers.clone()
     }
@@ -426,6 +427,7 @@ impl Pinned {
     /// The name is what the footer shows while the build runs, so a person
     /// reading the screen knows that the wait is a build and not a client that
     /// stopped answering.
+    #[allow(dead_code)]
     pub(crate) fn set_installing(&self, name: String) {
         let mut inner = self.lock();
         if !inner.installing.iter().any(|step| step.name == name) {
@@ -445,6 +447,7 @@ impl Pinned {
     /// `building (2/4)` instead of a bare ellipsis. A step for a name nobody
     /// started is ignored: the start and the finish are the only moments a
     /// name is added or removed.
+    #[allow(dead_code)]
     pub(crate) fn set_install_step(&self, name: &str, step: usize, total: usize, label: &str) {
         let mut inner = self.lock();
         if let Some(current) = inner.installing.iter_mut().find(|entry| entry.name == name) {
@@ -460,6 +463,7 @@ impl Pinned {
     /// The report waits here for the loop to pick it up: the task that ran the
     /// build cannot reach the frame, and the frame is what says it in the
     /// conversation.
+    #[allow(dead_code)]
     pub(crate) fn finish_install(&self, report: InstallReport) {
         let mut inner = self.lock();
         inner.installing.retain(|step| step.name != report.name);
@@ -502,6 +506,7 @@ impl Pinned {
     /// must not reach the frame, the history or the transcript. The reader
     /// clears its buffer when the question opens, so nothing typed before it
     /// can become the key by accident.
+    #[cfg(test)]
     pub(crate) fn ask_masked(&self, prompt: String) {
         let mut inner = self.lock();
         inner.asked = Some(Asked {
@@ -1110,6 +1115,7 @@ mod unix {
 
         /// A handle over a channel a test fills, with no terminal behind it.
         #[cfg(test)]
+        #[allow(dead_code)]
         pub(crate) fn from_events(events: mpsc::UnboundedReceiver<EditorEvent>) -> Self {
             Self {
                 events,

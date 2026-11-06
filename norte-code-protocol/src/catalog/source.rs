@@ -8,20 +8,26 @@
 //! was never written, which is exactly how a catalogue looks empty when it is
 //! not.
 //!
-//! The files are written when they are missing: a first run has no catalogue,
-//! and an empty one says what to fill in without inventing a provider or a
-//! model the person did not choose.
+//! The files are written when they are missing from the built-in defaults,
+//! giving a first run a usable `OpenRouter` catalogue without overwriting a
+//! catalogue the person already owns.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::schema::CatalogError;
 
-/// What an empty `providers.json` holds.
-const EMPTY_PROVIDERS: &str = "{\n  \"providers\": {}\n}\n";
+/// The built-in provider catalogue.
+const DEFAULT_PROVIDERS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../default/providers.json"
+));
 
-/// What an empty `models.json` holds.
-const EMPTY_MODELS: &str = "{\n  \"models\": []\n}\n";
+/// The built-in model catalogue.
+const DEFAULT_MODELS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../default/models.json"
+));
 
 /// The directory the catalogue files live in.
 ///
@@ -85,9 +91,8 @@ impl CreatedCatalog {
 /// A file that is already there is never touched: what a person wrote is theirs,
 /// and a catalogue that is empty because they emptied it stays empty.
 ///
-/// What is written is an empty catalogue and nothing else — no provider, no
-/// model, no price. The first run of a new install has to be told what to use,
-/// and a snapshot shipped with the binary would be one that ages into a lie.
+/// What is written is the checked-in default catalogue. It can be edited after
+/// creation, and existing files are never replaced.
 ///
 /// # Errors
 ///
@@ -104,8 +109,8 @@ fn ensure_in(dir: &Path) -> Result<CreatedCatalog, CatalogError> {
         path: dir.to_path_buf(),
         source,
     })?;
-    let providers = write_missing(&dir.join("providers.json"), EMPTY_PROVIDERS)?;
-    let models = write_missing(&dir.join("models.json"), EMPTY_MODELS)?;
+    let providers = write_missing(&dir.join("providers.json"), DEFAULT_PROVIDERS)?;
+    let models = write_missing(&dir.join("models.json"), DEFAULT_MODELS)?;
     Ok(CreatedCatalog { providers, models })
 }
 
@@ -160,23 +165,6 @@ mod tests {
         assert_eq!(providers_path().expect("path"), dir.join("providers.json"));
         assert_eq!(models_path().expect("path"), dir.join("models.json"));
         assert!(dir.ends_with("norte-code"), "{}", dir.display());
-    }
-
-    #[test]
-    fn a_missing_catalogue_is_written_empty() {
-        // The first run of a new install has no catalogue. What is written says
-        // the shape and nothing else: a provider or a model invented here would
-        // be one the person did not choose.
-        let dir = temp_dir();
-        let created = ensure_in(&dir).expect("written");
-        assert!(created.providers && created.models, "{created:?}");
-        assert!(created.any());
-        let providers = std::fs::read_to_string(dir.join("providers.json")).expect("providers");
-        let models = std::fs::read_to_string(dir.join("models.json")).expect("models");
-        assert!(providers.contains("\"providers\""), "{providers}");
-        assert!(models.contains("\"models\""), "{models}");
-        assert!(!providers.contains("openai"), "{providers}");
-        assert!(!models.contains("openai"), "{models}");
     }
 
     #[test]

@@ -1,0 +1,25 @@
+[package]
+name = "norte-code-client"
+description = "Transport-neutral client contract for Norte Code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+norte-code-protocol = { path = "../norte-code-protocol" }
+raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio-stream = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -25,7 +25,6 @@ pub struct ServerEvent {
 | --- | --- |
 | `CreateSession { title }` | Create a logical session. |
 | `ListSessions` | List known sessions. |
-| `SwitchSession { session }` | Make a session current for the caller. |
 | `ForkSession { session, title }` | Copy a session's history. |
 | `RenameSession { session, title }` | Rename a session. |
 | `DeleteSession { session }` | Delete a session. |
@@ -61,7 +60,7 @@ request, `Committed`, then `TurnFinished`.
 
 | Event | Purpose |
 | --- | --- |
-| `SessionCreated`, `SessionList`, `SessionDeleted`, `SessionRenamed`, `SessionForked`, `SessionSwitched` | Session lifecycle. |
+| `SessionCreated`, `SessionList`, `SessionDeleted`, `SessionRenamed`, `SessionForked` | Session lifecycle. |
 | `TurnStarted`, `TurnFinished { phase, committed }` | Turn bounds. |
 | `Delta { turn, delta }` | `text`, `reasoning` or `refusal` chunk. Append in arrival order. |
 | `ToolStarted`, `ToolFinished`, `ToolOutput` | Tool activity, live output chunks, result, error, duration. |

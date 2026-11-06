@@ -3,11 +3,15 @@
 
 use super::{
     Arc, Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, EventStream, JobInfo,
-    Reasoning, ReasoningScope, Renderer, ServerEvent, ServerEventKind, Service, SessionKey,
-    StreamExt, Style, VecDeque, mpsc,
+    Reasoning, ReasoningScope, Renderer, ServerEvent, ServerEventKind, SessionKey, Style, VecDeque,
+    mpsc,
 };
 use crate::input::{Attachment, CompletionNames, EditorAction, EditorEvent, InteractiveInput};
 use crate::models::ModelChoice;
+use crate::remote_state::{ModelInfoExt, RemoteState, effective_reasoning};
+use futures_util::StreamExt;
+use norte_code_client::AgentClient;
+use norte_code_protocol::QueueMode;
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
@@ -465,9 +469,9 @@ pub(crate) fn completion_text(
 ///
 /// The registry answers for its own arguments — the efforts, the scopes, the
 /// actions. `/provider` and `/model` take a name only the catalogue holds, and
-/// the registry cannot carry it: it is built once at startup while the
-/// catalogue is read again by `/refresh`, and one does not know about the
-/// other. Those two are answered from the names the CLI pushed into
+/// the registry cannot carry it: the catalogue belongs to the service, and one
+/// does not know about the other. Those two are answered from the names the CLI
+/// pushed into
 /// [`crate::input::Pinned`], and everything else is the registry's answer.
 pub(crate) fn candidates(
     text: &str,
@@ -508,6 +512,7 @@ fn catalogue_candidates(
         "/provider" => single_arg(rest, &names.providers, "provider"),
         "/model" => single_arg(rest, &names.models, "model"),
         "/connection" => connection_arg(rest, &names.providers),
+        "/allow" | "/deny" => single_arg(rest, &names.tools, "tool"),
         _ => None,
     };
     let Some((values, partial, note)) = offered else {
@@ -573,16 +578,14 @@ fn connection_arg<'a>(
 /// The catalogue belongs to the service and the completion is answered on the
 /// threads that read keys and draw the frame, neither of which can reach it, so
 /// the names travel through the pinned handle. They are refreshed whenever the
-/// answer changes: at startup, after `/refresh` re-read the catalogue, and after
-/// a `/provider` or a `/model` moved the session.
+/// answer changes: at startup and after a `/provider` or a `/model` moved the
+/// session.
 pub(crate) fn refresh_completions(
-    service: &Arc<Service>,
+    service: &RemoteState,
     session: Option<&SessionKey>,
     renderer: &mut Renderer,
 ) {
-    let catalog = service.catalog();
-    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
-    providers.sort();
+    let providers = service.providers();
     // The provider the next `/model` would land on, which is the one a `/model`
     // line completes from: the held one when `/provider` just moved and the
     // model did not come with it, and the session's own otherwise.
@@ -597,14 +600,21 @@ pub(crate) fn refresh_completions(
     let mut models: Vec<String> = provider
         .as_deref()
         .map(|provider| {
-            catalog
+            service
                 .models_of(provider)
-                .map(|model| model.id.clone())
+                .into_iter()
+                .map(|model| model.model)
                 .collect()
         })
         .unwrap_or_default();
     models.sort();
-    renderer.set_completion_names(CompletionNames { providers, models });
+    let mut tools = Vec::new();
+    tools.sort();
+    renderer.set_completion_names(CompletionNames {
+        providers,
+        models,
+        tools,
+    });
 }
 
 /// The one dimmed row shown above the input, for the line as it stands.
@@ -650,7 +660,8 @@ pub(crate) fn command_suggestion(
 /// stops the session.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn interactive_loop(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     mut session: Option<SessionKey>,
     renderer: &mut Renderer,
     style: Style,
@@ -678,58 +689,68 @@ pub(crate) async fn interactive_loop(
         renderer.set_title(title);
     }
     loop {
-        let (text, attachments) =
-            match read_repl_line(service, session.as_ref(), input, renderer, style).await? {
-                ReplInput::End => break,
-                ReplInput::Session(key) => {
-                    // A panel chose a session: start its view afresh, then
-                    // replay its history so the screen shows the conversation
-                    // that was opened, not the one that was left.
-                    renderer.begin_session();
-                    renderer.session = Some(key.to_string());
-                    refresh_session_model(service, &key, renderer);
-                    if let Some(title) = service.session_title(&key) {
-                        renderer.set_title(title);
-                    }
-                    session = Some(key.clone());
-                    crate::plugins::attach(service, Some(key.clone()));
-                    refresh_effort(service, &key, renderer);
-                    refresh_completions(service, Some(&key), renderer);
-                    match service
-                        .submit(ClientRequest {
-                            request_id,
-                            kind: ClientRequestKind::Resume {
-                                session: key.clone(),
-                            },
-                        })
-                        .await
-                    {
-                        Ok(stream) => {
-                            request_id = request_id.saturating_add(1);
-                            renderer.mark_working();
-                            let outcome = drive_turns(
-                                service,
-                                stream,
-                                renderer,
-                                style,
-                                Some(key),
-                                Some(&mut *input),
-                            )
-                            .await?;
-                            renderer.ensure_newline();
-                            session = outcome.session.or(session);
-                            crate::plugins::attach(service, session.clone());
-                            refresh_completions(service, session.as_ref(), renderer);
-                        }
-                        Err(error) => {
-                            renderer.notice(format!("could not open the session: {error}"));
-                        }
-                    }
-                    renderer.draw()?;
-                    continue;
+        let (text, attachments) = match read_repl_line(
+            service,
+            client,
+            session.as_ref(),
+            input,
+            renderer,
+            style,
+        )
+        .await?
+        {
+            ReplInput::End => break,
+            ReplInput::Session(key) => {
+                // A panel chose a session: start its view afresh, then
+                // replay its history so the screen shows the conversation
+                // that was opened, not the one that was left.
+                renderer.begin_session();
+                renderer.session = Some(key.to_string());
+                refresh_session_model(service, &key, renderer);
+                if let Some(title) = service.session_title(&key) {
+                    renderer.set_title(title);
                 }
-                ReplInput::Line(text, attachments) => (text, attachments),
-            };
+                session = Some(key.clone());
+                crate::plugins::attach(Some(key.clone()));
+                refresh_effort(service, &key, renderer);
+                refresh_completions(service, Some(&key), renderer);
+                match client
+                    .submit(ClientRequest {
+                        request_id,
+                        kind: ClientRequestKind::Resume {
+                            session: key.clone(),
+                            replay: true,
+                        },
+                    })
+                    .await
+                {
+                    Ok(stream) => {
+                        request_id = request_id.saturating_add(1);
+                        renderer.mark_working();
+                        let outcome = drive_turns(
+                            service,
+                            client,
+                            stream,
+                            renderer,
+                            style,
+                            Some(key),
+                            Some(&mut *input),
+                        )
+                        .await?;
+                        renderer.ensure_newline();
+                        session = outcome.session.or(session);
+                        crate::plugins::attach(session.clone());
+                        refresh_completions(service, session.as_ref(), renderer);
+                    }
+                    Err(error) => {
+                        renderer.notice(format!("could not open the session: {error}"));
+                    }
+                }
+                renderer.draw()?;
+                continue;
+            }
+            ReplInput::Line(text, attachments) => (text, attachments),
+        };
         let command = match parse_chat_command(&text) {
             None => None,
             Some(Ok(command)) => Some(command),
@@ -745,10 +766,14 @@ pub(crate) async fn interactive_loop(
                 // The report is built now, not at startup: the tools, the model
                 // and the servers are all things that change while the process
                 // runs, so the useful moment to ask is after they have.
-                ChatCommand::Debug => report_debug(service, session.as_ref(), renderer, style),
-                ChatCommand::Tools => report_tools_now(service, session.as_ref(), renderer, style),
+                ChatCommand::Debug => {
+                    report_debug(service, session.as_ref(), renderer, style).await;
+                }
+                ChatCommand::Tools => {
+                    report_tools_now(service, session.as_ref(), renderer, style).await;
+                }
                 ChatCommand::Telemetry => {
-                    report_telemetry(session.as_ref(), renderer).await;
+                    report_telemetry(service, session.as_ref(), renderer).await;
                 }
                 ChatCommand::Plans => show_plans(session.as_ref(), renderer).await,
                 // A command from a plugin: the plugin answers with the lines
@@ -767,14 +792,7 @@ pub(crate) async fn interactive_loop(
                 }
 
                 ChatCommand::Sessions => {
-                    let database = match crate::commands::database_path() {
-                        Ok(p) => p,
-                        Err(e) => {
-                            renderer.notice(e);
-                            continue;
-                        }
-                    };
-                    let rows = crate::startup::session_rows(&database)
+                    let rows = crate::startup::session_rows(service.client().as_ref())
                         .await
                         .unwrap_or_default();
                     let modal_rows = session_modal_rows(&rows, renderer);
@@ -782,57 +800,63 @@ pub(crate) async fn interactive_loop(
                 }
 
                 ChatCommand::PluginsList => {
-                    let lines = plugins_panel_lines();
-                    if lines.is_empty() {
-                        renderer.notice("no plugins installed");
-                    } else {
-                        renderer.open_modal("installed plugins".to_owned(), lines);
-                    }
+                    remote_plugin_command(
+                        client,
+                        norte_code_protocol::ClientRequestKind::ListPlugins,
+                        renderer,
+                    )
+                    .await;
                 }
 
                 ChatCommand::PluginsAdd { url, package, all } => {
-                    // The clone and the build take minutes, so they run on
-                    // their own thread and the interface stays alive: a person
-                    // can keep working while a plugin is installed, and the
-                    // screen says what is being waited for.
-                    let name = package
-                        .clone()
-                        .unwrap_or_else(|| crate::installs::plugin_name(&url));
-                    renderer.notice(format!("installing {name}…"));
-                    renderer.mark_dirty();
-                    crate::installs::start(url, package, all, Arc::clone(&renderer.pinned));
+                    remote_plugin_command(
+                        client,
+                        norte_code_protocol::ClientRequestKind::InstallPlugin { url, package, all },
+                        renderer,
+                    )
+                    .await;
                 }
 
                 ChatCommand::PluginsUpdate { name } => {
-                    let label = name.clone().unwrap_or_else(|| "plugins".to_owned());
-                    renderer.notice(format!("updating {label}…"));
-                    renderer.mark_dirty();
-                    crate::installs::start_update(name, Arc::clone(&renderer.pinned));
+                    remote_plugin_command(
+                        client,
+                        norte_code_protocol::ClientRequestKind::UpdatePlugins { name },
+                        renderer,
+                    )
+                    .await;
                 }
 
                 ChatCommand::PluginsEnable { name } => {
-                    match crate::plugin_manager::set_plugin_enabled(&name, true) {
-                        Ok(()) => renderer.notice(format!(
-                            "plugin {name} enabled — restart norte-code to load it"
-                        )),
-                        Err(error) => renderer.failure(error),
-                    }
+                    remote_plugin_command(
+                        client,
+                        norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                            name,
+                            enabled: true,
+                        },
+                        renderer,
+                    )
+                    .await;
                 }
 
                 ChatCommand::PluginsDisable { name } => {
-                    match crate::plugin_manager::set_plugin_enabled(&name, false) {
-                        Ok(()) => renderer.notice(format!(
-                            "plugin {name} disabled — restart norte-code to apply it"
-                        )),
-                        Err(error) => renderer.failure(error),
-                    }
+                    remote_plugin_command(
+                        client,
+                        norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                            name,
+                            enabled: false,
+                        },
+                        renderer,
+                    )
+                    .await;
                 }
 
                 ChatCommand::PluginsRm { name } => {
-                    match crate::plugin_manager::remove_plugin(&name) {
-                        Ok(()) => renderer.notice(format!("plugin {name} removed")),
-                        Err(error) => renderer.failure(format!("could not remove plugin: {error}")),
-                    }
+                    remote_plugin_command(
+                        client,
+                        norte_code_protocol::ClientRequestKind::RemovePlugin { name },
+                        renderer,
+                    )
+                    .await;
                 }
 
                 ChatCommand::Compact => {
@@ -841,7 +865,7 @@ pub(crate) async fn interactive_loop(
                         continue;
                     };
                     renderer.mark_working();
-                    let stream = service
+                    let stream = client
                         .submit(ClientRequest {
                             request_id,
                             kind: ClientRequestKind::Compact { session: current },
@@ -851,6 +875,7 @@ pub(crate) async fn interactive_loop(
                     request_id = request_id.saturating_add(1);
                     let outcome = drive_turns(
                         service,
+                        client,
                         stream,
                         renderer,
                         style,
@@ -864,15 +889,17 @@ pub(crate) async fn interactive_loop(
                         break;
                     }
                 }
-                ChatCommand::Refresh => report_refresh(service, session.as_ref(), renderer).await,
+                ChatCommand::Refresh => {
+                    report_refresh(service, client, session.as_ref(), renderer);
+                }
                 ChatCommand::Rename { title } => match session.clone() {
                     Some(current) => {
-                        rename_session(service, current, title, renderer).await;
+                        rename_session(service, client, current, title, renderer).await;
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
                 ChatCommand::Mcp { action } => {
-                    report_mcp(service, action, renderer).await;
+                    report_mcp(service, &action, renderer).await;
                 }
                 ChatCommand::Approval {
                     allow,
@@ -899,7 +926,7 @@ pub(crate) async fn interactive_loop(
                 },
                 ChatCommand::Reasoning { scope, reasoning } => {
                     if let Some(current) = session.clone() {
-                        run_reasoning(service, current, scope, reasoning, renderer).await;
+                        run_reasoning(client, current, scope, reasoning, renderer).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -922,31 +949,23 @@ pub(crate) async fn interactive_loop(
                             renderer.notice("there is no session yet; send a message first");
                             continue;
                         };
-                        let catalog = service.catalog();
                         // The model list is a report: it is read and dismissed,
                         // and as lines of the conversation a catalogue of
                         // hundreds would bury the work.
                         let mut lines = vec![format!("Models for {provider}:")];
-                        if catalog.provider(&provider).is_some() {
-                            let mut models: Vec<String> = catalog
-                                .models_of(&provider)
-                                .map(|entry| entry.id.clone())
-                                .collect();
-                            models.sort();
+                        let models: Vec<String> = service
+                            .models_of(&provider)
+                            .into_iter()
+                            .map(|entry| entry.model)
+                            .collect();
+                        if models.is_empty() {
+                            lines.push(format!(
+                                "  (no models for `{provider}` in the server catalogue)"
+                            ));
+                        } else {
                             for m in &models {
                                 lines.push(format!("  {m}"));
                             }
-                            if models.is_empty() {
-                                // A provider with no models is one somebody added
-                                // to `providers.json` and not yet to
-                                // `models.json`, which is the state a plugin
-                                // building one leaves the other in for a moment.
-                                lines.push("  (no models; add one to models.json)".to_owned());
-                            }
-                        } else {
-                            lines.push(format!(
-                                "  (no provider named `{provider}`; see providers.json)"
-                            ));
                         }
                         renderer.open_modal(format!("models of {provider}"), lines);
                     } else if let Some(current) = session.clone() {
@@ -960,7 +979,7 @@ pub(crate) async fn interactive_loop(
                         let Some(choice) = choice else {
                             continue;
                         };
-                        run_model(service, current, choice, renderer, Some(input)).await;
+                        run_model(service, client, current, choice, renderer, Some(input)).await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
@@ -971,22 +990,12 @@ pub(crate) async fn interactive_loop(
                         // it serves and how many models it holds. There is no
                         // configured provider to merge in any more: the
                         // catalogue is the only place a provider comes from.
-                        let catalog = service.catalog();
                         let mut lines = vec!["Providers:".to_owned()];
-                        let mut providers: Vec<String> =
-                            catalog.providers().keys().cloned().collect();
-                        providers.sort();
+                        let providers = service.providers();
                         for id in &providers {
-                            let Some(entry) = catalog.provider(id) else {
-                                continue;
-                            };
-                            let wires = entry.offered();
-                            let models = catalog.models_of(id).count();
+                            let models = service.models_of(id).len();
                             let plural = if models == 1 { "model" } else { "models" };
-                            lines.push(format!(
-                                "  {id} ({} · {models} {plural})",
-                                crate::text::terminal(&wires)
-                            ));
+                            lines.push(format!("  {id} ({models} {plural})"));
                         }
                         renderer.open_modal("providers", lines);
                     } else if let Some(current) = session.clone() {
@@ -996,19 +1005,27 @@ pub(crate) async fn interactive_loop(
                         // pair no provider lists. Left separate once, which is why
                         // the held state never appeared at a turn boundary and
                         // neither half could be moved.
-                        switch_provider(service, &current, &provider, renderer, Some(input)).await;
+                        switch_provider(
+                            service,
+                            client,
+                            &current,
+                            &provider,
+                            renderer,
+                            Some(input),
+                        )
+                        .await;
                     } else {
                         renderer.notice("there is no session yet; send a message first");
                     }
                 }
                 ChatCommand::Jobs { action, id } => match session.clone() {
                     Some(current) => {
-                        report_jobs(service, current, action, id, renderer, style).await;
+                        report_jobs(client, current, action, id, renderer, style).await;
                     }
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
                 ChatCommand::Connection { action } => {
-                    handle_connection(service, action, renderer, Some(input), style).await;
+                    handle_connection(service, &action, renderer, Some(input), style);
                 }
                 // Going back to the menu is the startup screen reached from
                 // inside a session: it lists the providers and the models the
@@ -1030,7 +1047,7 @@ pub(crate) async fn interactive_loop(
                             )
                         };
                         let rows = models_panel(
-                            service.catalog().as_ref(),
+                            service.models().as_ref(),
                             current_provider.as_deref(),
                             current_model.as_deref(),
                             None,
@@ -1041,24 +1058,22 @@ pub(crate) async fn interactive_loop(
                     None => renderer.notice("there is no session yet; send a message first"),
                 },
                 ChatCommand::Menu => {
-                    let catalog = service.catalog();
                     let current = session
                         .as_ref()
                         .and_then(|current| provider_of(service, current));
                     let mut lines = vec!["Choose a provider and a model:".to_owned()];
-                    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
-                    providers.sort();
+                    let providers = service.providers();
                     for provider in &providers {
                         let marked = if current.as_deref() == Some(provider.as_str()) {
                             "*"
                         } else {
                             " "
                         };
-                        let mut models: Vec<String> = catalog
+                        let models: Vec<String> = service
                             .models_of(provider)
-                            .map(|entry| entry.id.clone())
+                            .into_iter()
+                            .map(|entry| entry.model)
                             .collect();
-                        models.sort();
                         if models.is_empty() {
                             lines.push(format!("{marked} {provider} (no models listed)"));
                             continue;
@@ -1094,7 +1109,7 @@ pub(crate) async fn interactive_loop(
                         renderer.notice("there is no session to delete yet; send a message first");
                         continue;
                     };
-                    match delete_current(service, &key).await {
+                    match delete_current(client, &key).await {
                         Ok(()) => {
                             // Cleared before the break, so the caller cannot
                             // write the session back: a session deleted here
@@ -1148,11 +1163,11 @@ pub(crate) async fn interactive_loop(
                 .trim_end()
                 .to_owned();
             if let Some(key) = session.as_ref() {
-                let _ = service.rename(key, &title).await;
+                let _ = client.rename_session(key.as_str(), &title).await;
                 renderer.set_title(title);
             }
         }
-        let stream = match service
+        let stream = match client
             .submit(ClientRequest {
                 request_id,
                 kind: ClientRequestKind::SendMessage {
@@ -1162,6 +1177,7 @@ pub(crate) async fn interactive_loop(
                         .iter()
                         .map(|attachment| ProtocolAttachment {
                             path: attachment.path.clone(),
+                            blob: None,
                             mime: attachment.mime.clone(),
                             name: attachment.name.clone(),
                         })
@@ -1188,6 +1204,7 @@ pub(crate) async fn interactive_loop(
         request_id = request_id.saturating_add(1);
         let outcome = drive_turns(
             service,
+            client,
             stream,
             renderer,
             style,
@@ -1200,7 +1217,7 @@ pub(crate) async fn interactive_loop(
         // The session may have moved — a compaction opens another one — and the
         // plugins ask the host about the session in play, so the handle is
         // pointed at the one that is now.
-        crate::plugins::attach(service, session.clone());
+        crate::plugins::attach(session.clone());
         if outcome.parked || renderer.budget_stopped {
             break;
         }
@@ -1209,7 +1226,7 @@ pub(crate) async fn interactive_loop(
 }
 
 async fn run_reasoning(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     scope: ReasoningScope,
     reasoning: Reasoning,
@@ -1220,7 +1237,7 @@ async fn run_reasoning(
         scope,
         reasoning: reasoning.clone(),
     };
-    match drain_request(service, kind).await {
+    match drain_request(client, kind).await {
         Ok(events) => {
             if let Some(message) = stream_error(&events) {
                 renderer.failure(format!("could not set reasoning: {message}"));
@@ -1253,14 +1270,14 @@ async fn run_reasoning(
 /// The provider is not read here and the label is not split to find it: the spec
 /// carries the two apart, and a model id may contain a slash of its own, which is
 /// why a model is never taken apart to find its provider.
-fn model_name_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
+fn model_name_of(service: &RemoteState, session: &SessionKey) -> Option<String> {
     service.session_spec(session).map(|spec| spec.model)
 }
 
 /// The provider a session is on.
 ///
 /// The other half of the same fact, read the same way: from the spec's own field.
-fn provider_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
+fn provider_of(service: &RemoteState, session: &SessionKey) -> Option<String> {
     service.session_spec(session).map(|spec| spec.provider)
 }
 
@@ -1271,7 +1288,7 @@ fn provider_of(service: &Arc<Service>, session: &SessionKey) -> Option<String> {
 /// models, each actable and carrying the pair to set. The current provider and
 /// model are marked so a person can see what a selection would change.
 fn models_panel(
-    catalog: &norte_code_protocol::catalog::Catalog,
+    models: &[norte_code_protocol::ModelInfo],
     current_provider: Option<&str>,
     current_model: Option<&str>,
     expanded: Option<&str>,
@@ -1281,21 +1298,21 @@ fn models_panel(
     let current_model = current_model.map(str::to_owned);
     let query = filter.trim().to_lowercase();
     let filtering = !query.is_empty();
-    let mut providers: Vec<String> = catalog.providers().keys().cloned().collect();
+    let mut providers: Vec<String> = models.iter().map(|model| model.provider.clone()).collect();
     providers.sort();
+    providers.dedup();
     let mut rows = Vec::new();
     for provider in &providers {
         let is_current = current_provider.as_deref() == Some(provider.as_str());
-        let provider_name = catalog
-            .provider(provider)
-            .map_or(provider.as_str(), |entry| entry.name.as_str());
+        let provider_name = provider.as_str();
         // The query reaches both halves: a provider id, the name a person gave
         // it, a model id and its name.
         let provider_matches = provider.to_lowercase().contains(&query)
             || provider_name.to_lowercase().contains(&query);
-        let mut models: Vec<(String, String)> = catalog
-            .models_of(provider)
-            .map(|entry| (entry.id.clone(), entry.name.clone()))
+        let mut models: Vec<(String, String)> = models
+            .iter()
+            .filter(|entry| entry.provider == *provider)
+            .map(|entry| (entry.model.clone(), entry.name.clone()))
             .collect();
         models.sort_by(|left, right| left.0.cmp(&right.0));
         let matching: Vec<&(String, String)> = models
@@ -1378,20 +1395,25 @@ fn models_panel_title(filter: &str) -> String {
 }
 
 /// Steers a message into the running turn and names it, so the client can
-/// tell it apart when the engine reports it applied.
+/// tell it apart when the engine reports it applied. The policy that
+/// decides what happens when the session is busy comes from the
+/// connection's `queue_mode`; `Steer` keeps its own `queue_mode` field for
+/// callers that already know what they want.
 async fn steer_text(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     text: String,
+    queue_mode: QueueMode,
     renderer: &mut Renderer,
 ) -> Option<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let outcome = drain_request(
-        service,
+        client,
         ClientRequestKind::Steer {
             session,
             text,
             id: id.clone(),
+            queue_mode,
         },
     )
     .await;
@@ -1554,6 +1576,7 @@ async fn plan_paths(
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn plan_file_status(contents: &str) -> Option<&str> {
     let plan = norte_code_protocol::plans::parse_plan("plan", contents).ok()?;
     Some(match plan.status {
@@ -1564,6 +1587,7 @@ fn plan_file_status(contents: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn plan_file_metadata(contents: &str, key: &str) -> Option<String> {
     let plan = norte_code_protocol::plans::parse_plan("plan", contents).ok()?;
     match key {
@@ -1581,7 +1605,8 @@ fn plan_file_metadata(contents: &str, key: &str) -> Option<String> {
 
 #[allow(clippy::too_many_lines)]
 async fn handle_live_command(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     command: ChatCommand,
     current: Option<&SessionKey>,
     renderer: &mut Renderer,
@@ -1597,10 +1622,10 @@ async fn handle_live_command(
         ChatCommand::Help => print_chat_help(renderer, style),
         // The report needs no turn boundary: it reads state that is already
         // settled, so it is the one command that works mid-turn.
-        ChatCommand::Debug => report_debug(service, current, renderer, style),
-        ChatCommand::Tools => report_tools_now(service, current, renderer, style),
+        ChatCommand::Debug => report_debug(service, current, renderer, style).await,
+        ChatCommand::Tools => report_tools_now(service, current, renderer, style).await,
         ChatCommand::Telemetry => {
-            report_telemetry(current, renderer).await;
+            report_telemetry(service, current, renderer).await;
         }
         ChatCommand::Plans => show_plans(current, renderer).await,
         // A command from a plugin: the plugin answers with the lines
@@ -1619,14 +1644,7 @@ async fn handle_live_command(
         }
 
         ChatCommand::Sessions => {
-            let database = match crate::commands::database_path() {
-                Ok(p) => p,
-                Err(e) => {
-                    renderer.notice(e);
-                    return;
-                }
-            };
-            let rows = crate::startup::session_rows(&database)
+            let rows = crate::startup::session_rows(service.client().as_ref())
                 .await
                 .unwrap_or_default();
             if rows.is_empty() {
@@ -1641,61 +1659,71 @@ async fn handle_live_command(
         }
 
         ChatCommand::PluginsList => {
-            let lines = plugins_panel_lines();
-            if lines.is_empty() {
-                renderer.notice("no plugins installed");
-            } else {
-                renderer.open_modal("installed plugins".to_owned(), lines);
-            }
+            remote_plugin_command(
+                client,
+                norte_code_protocol::ClientRequestKind::ListPlugins,
+                renderer,
+            )
+            .await;
         }
 
         ChatCommand::PluginsAdd { url, package, all } => {
-            // The same as at the prompt: the build runs on its own thread and
-            // the turn keeps going.
-            let name = package
-                .clone()
-                .unwrap_or_else(|| crate::installs::plugin_name(&url));
-            renderer.notice(format!("installing {name}…"));
-            renderer.mark_dirty();
-            crate::installs::start(url, package, all, Arc::clone(&renderer.pinned));
+            remote_plugin_command(
+                client,
+                norte_code_protocol::ClientRequestKind::InstallPlugin { url, package, all },
+                renderer,
+            )
+            .await;
         }
 
         ChatCommand::PluginsUpdate { name } => {
-            let label = name.clone().unwrap_or_else(|| "plugins".to_owned());
-            renderer.notice(format!("updating {label}…"));
-            renderer.mark_dirty();
-            crate::installs::start_update(name, Arc::clone(&renderer.pinned));
+            remote_plugin_command(
+                client,
+                norte_code_protocol::ClientRequestKind::UpdatePlugins { name },
+                renderer,
+            )
+            .await;
         }
 
         ChatCommand::PluginsEnable { name } => {
-            match crate::plugin_manager::set_plugin_enabled(&name, true) {
-                Ok(()) => renderer.notice(format!(
-                    "plugin {name} enabled — restart norte-code to load it"
-                )),
-                Err(error) => renderer.failure(error),
-            }
+            remote_plugin_command(
+                client,
+                norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                    name,
+                    enabled: true,
+                },
+                renderer,
+            )
+            .await;
         }
 
         ChatCommand::PluginsDisable { name } => {
-            match crate::plugin_manager::set_plugin_enabled(&name, false) {
-                Ok(()) => renderer.notice(format!(
-                    "plugin {name} disabled — restart norte-code to apply it"
-                )),
-                Err(error) => renderer.failure(error),
-            }
+            remote_plugin_command(
+                client,
+                norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                    name,
+                    enabled: false,
+                },
+                renderer,
+            )
+            .await;
         }
 
-        ChatCommand::PluginsRm { name } => match crate::plugin_manager::remove_plugin(&name) {
-            Ok(()) => renderer.notice(format!("plugin {name} removed")),
-            Err(error) => renderer.failure(format!("could not remove plugin: {error}")),
-        },
+        ChatCommand::PluginsRm { name } => {
+            remote_plugin_command(
+                client,
+                norte_code_protocol::ClientRequestKind::RemovePlugin { name },
+                renderer,
+            )
+            .await;
+        }
 
         ChatCommand::Compact => {
             renderer.notice("wait until the current turn finishes, then /compact");
         }
-        ChatCommand::Refresh => report_refresh(service, current, renderer).await,
+        ChatCommand::Refresh => report_refresh(service, client, current, renderer),
         ChatCommand::Mcp { action } => {
-            report_mcp(service, action, renderer).await;
+            report_mcp(service, &action, renderer).await;
         }
         ChatCommand::Approval {
             allow,
@@ -1718,7 +1746,7 @@ async fn handle_live_command(
         },
         ChatCommand::Reasoning { scope, reasoning } => {
             if let Some(session) = current {
-                run_reasoning(service, session.clone(), scope, reasoning, renderer).await;
+                run_reasoning(client, session.clone(), scope, reasoning, renderer).await;
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
@@ -1730,7 +1758,7 @@ async fn handle_live_command(
                     // Mid-turn there is no prompt surface that can replace the
                     // running turn, so a missing key is reported by `SetModel`
                     // and the switch is made from the prompt afterwards.
-                    run_model(service, session.clone(), choice, renderer, None).await;
+                    run_model(service, client, session.clone(), choice, renderer, None).await;
                 }
             } else {
                 renderer.notice("the session is not ready yet; try again");
@@ -1740,24 +1768,26 @@ async fn handle_live_command(
             if provider.is_empty() {
                 renderer.notice("wait until the current turn finishes, then /provider");
             } else if let Some(session) = current {
-                switch_provider(service, session, &provider, renderer, None).await;
+                switch_provider(service, client, session, &provider, renderer, None).await;
             } else {
                 renderer.notice("the session is not ready yet; try again");
             }
         }
         ChatCommand::Jobs { action, id } => match current {
             Some(session) => {
-                report_jobs(service, session.clone(), action, id, renderer, style).await;
+                report_jobs(client, session.clone(), action, id, renderer, style).await;
             }
             None => renderer.notice("no session yet; send a message first"),
         },
         ChatCommand::Connection { action } => {
-            handle_connection(service, action, renderer, None, style).await;
+            handle_connection(service, &action, renderer, None, style);
         }
         // A restart ends the session, so it cannot wait for the turn; the
         // turn loop does it, where the boundary is known.
         ChatCommand::Rename { title } => match current {
-            Some(current) => rename_session(service, current.clone(), title, renderer).await,
+            Some(current) => {
+                rename_session(service, client, current.clone(), title, renderer).await;
+            }
             None => renderer.notice("no session yet; send a message first"),
         },
         // A restart ends the session, so it cannot wait for the turn; the
@@ -1790,15 +1820,11 @@ async fn handle_live_command(
 /// the ledgers keyed by either id. The tables carry no foreign keys, so a delete
 /// that cleared one row alone is what left requests pointing at a session the
 /// list no longer had.
-async fn delete_current(service: &Arc<Service>, session: &SessionKey) -> Result<(), String> {
-    let request = ClientRequestKind::DeleteSession {
-        session: session.clone(),
-    };
-    let events = drain_request(service, request).await?;
-    if let Some(error) = stream_error(&events) {
-        return Err(error);
-    }
-    Ok(())
+async fn delete_current(client: &dyn AgentClient, session: &SessionKey) -> Result<(), String> {
+    client
+        .delete_session(session.as_str())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Names the session, from the text given or from the model.
@@ -1807,7 +1833,8 @@ async fn delete_current(service: &Arc<Service>, session: &SessionKey) -> Result<
 /// a person who has already decided what the session is called should not wait
 /// for a model to agree. A bare `/rename` asks the model, from the first message
 async fn rename_session(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     session: SessionKey,
     title: Option<String>,
     renderer: &mut Renderer,
@@ -1834,18 +1861,10 @@ async fn rename_session(
         renderer.notice("usage: /rename <title>  or  /rename");
         return;
     }
-    let request = ClientRequestKind::RenameSession {
-        session: session.clone(),
-        title: title.clone(),
-    };
-    match drain_request(service, request).await {
-        Ok(events) => {
-            if let Some(error) = stream_error(&events) {
-                renderer.failure(format!("could not rename: {error}"));
-            } else {
-                renderer.set_title(title.clone());
-                renderer.notice(format!("named `{title}`"));
-            }
+    match client.rename_session(session.as_str(), &title).await {
+        Ok(()) => {
+            renderer.set_title(title.clone());
+            renderer.notice(format!("named `{title}`"));
         }
         Err(error) => renderer.failure(format!("could not rename: {error}")),
     }
@@ -1862,8 +1881,8 @@ async fn rename_session(
 ///
 /// It goes to stderr with the other diagnostics, not into the answer: it is
 /// what the person asked the client, not what the model said.
-fn report_tools_now(
-    service: &Arc<Service>,
+async fn report_tools_now(
+    service: &RemoteState,
     session: Option<&SessionKey>,
     renderer: &mut Renderer,
     style: Style,
@@ -1874,7 +1893,7 @@ fn report_tools_now(
     // person reading the list is one key from changing what it says, instead of
     // typing `/allow shell global` from memory while looking at the list that
     // names the tool.
-    let rows = tools_panel(style, service, session);
+    let rows = tools_panel(style, service, session).await;
     renderer.open_editable("tools", rows);
 }
 
@@ -1885,31 +1904,83 @@ fn report_tools_now(
 /// file, and WAL lets the two share it. A store that cannot be opened is not a
 /// failure of the client — a machine that has never run a request has no
 /// database — so it opens an empty panel and says so.
-async fn report_telemetry(session: Option<&SessionKey>, renderer: &mut Renderer) {
-    let records = match read_telemetry().await {
-        Ok(records) => records,
-        Err(error) => {
-            renderer.failure(format!("could not read the request ledger: {error}"));
-            return;
+async fn remote_plugin_command(
+    client: &dyn AgentClient,
+    kind: norte_code_protocol::ClientRequestKind,
+    renderer: &mut Renderer,
+) {
+    let result = async {
+        let mut events = client
+            .submit(norte_code_protocol::ClientRequest {
+                request_id: 0,
+                kind,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        while let Some(event) = events.next().await {
+            match event.kind {
+                norte_code_protocol::ServerEventKind::PluginList { plugins } => {
+                    let lines = plugins
+                        .into_iter()
+                        .map(|plugin| {
+                            format!(
+                                "{}\t{}",
+                                plugin.name,
+                                if plugin.enabled {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if lines.is_empty() {
+                        renderer.notice("no plugins installed");
+                    } else {
+                        renderer.open_modal("installed plugins".to_owned(), lines);
+                    }
+                }
+                norte_code_protocol::ServerEventKind::PluginChanged { operation, name } => {
+                    renderer.notice(format!("plugin {name} {operation}"));
+                }
+                norte_code_protocol::ServerEventKind::Error { message, .. } => {
+                    return Err(message);
+                }
+                _ => {}
+            }
         }
-    };
-    let session_key = session.map(ToString::to_string);
-    renderer.open_telemetry(crate::telemetry_panel::Panel::new(records, session_key));
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(error) = result {
+        renderer.failure(error);
+    }
 }
 
-/// Every recorded request row, from the store the client already uses.
-async fn read_telemetry() -> Result<Vec<norte_code_protocol::sqlite::RequestRecord>, String> {
-    use norte_code_protocol::sqlite::SessionDirectory as _;
-    let path = crate::commands::database_path()?;
-    if !path.exists() {
-        return Ok(Vec::new());
+async fn report_telemetry(
+    service: &RemoteState,
+    session: Option<&SessionKey>,
+    renderer: &mut Renderer,
+) {
+    match service.telemetry(session.cloned()).await {
+        Ok(records) if records.is_empty() => renderer.notice("no telemetry recorded"),
+        Ok(records) => {
+            let lines = records
+                .into_iter()
+                .map(|record| {
+                    format!(
+                        "{} · {} · {} ms · ${:.6}",
+                        record.model,
+                        record.provider,
+                        record.duration_ms,
+                        record.cost_usd.unwrap_or(0.0)
+                    )
+                })
+                .collect();
+            renderer.open_modal("telemetry".to_owned(), lines);
+        }
+        Err(error) => renderer.failure(format!("could not read telemetry: {error}")),
     }
-    let store = norte_code_protocol::sqlite::SqliteStore::open(&path)
-        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
-    store
-        .requests(None)
-        .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))
 }
 
 /// Carries out what the tools panel decided.
@@ -1961,9 +2032,10 @@ fn session_modal_rows(
     modal_rows
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn apply_tool_action(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     session: Option<&SessionKey>,
     renderer: &mut Renderer,
     style: Style,
@@ -1987,7 +2059,8 @@ async fn apply_tool_action(
                 service,
                 renderer,
                 &crate::modal::Action::Toggle(name.clone()),
-            );
+            )
+            .await;
             return None;
         }
         crate::modal::Action::OpenSession(key) => {
@@ -1996,23 +2069,20 @@ async fn apply_tool_action(
         // A fresh session: the service creates an empty one and the loop
         // switches to it, so the next message lands in it.
         crate::modal::Action::NewSession => {
-            return match service.start_session(None).await {
-                Ok(key) => Some(key),
+            let summary = match client.create_session(None).await {
+                Ok(summary) => summary,
                 Err(error) => {
                     renderer.failure(format!("could not start a session: {error}"));
-                    None
+                    return None;
                 }
             };
+            return Some(norte_code_protocol::SessionKey::new(summary.session_id));
         }
         crate::modal::Action::ToggleSessionDay(day) => {
             if !renderer.session_days_expanded.remove(day) {
                 renderer.session_days_expanded.insert(day.clone());
             }
-            let Ok(database) = crate::commands::database_path() else {
-                renderer.notice("could not locate the sessions database");
-                return None;
-            };
-            let Ok(rows) = crate::startup::session_rows(&database).await else {
+            let Ok(rows) = crate::startup::session_rows(service.client().as_ref()).await else {
                 renderer.notice("could not read saved sessions");
                 return None;
             };
@@ -2033,7 +2103,7 @@ async fn apply_tool_action(
                     Some(provider.clone())
                 };
             let rows = models_panel(
-                service.catalog().as_ref(),
+                service.models().as_ref(),
                 provider_of(service, current).as_deref(),
                 model_name_of(service, current).as_deref(),
                 renderer.models_expanded.as_deref(),
@@ -2049,7 +2119,7 @@ async fn apply_tool_action(
                 return None;
             };
             let choice = ModelChoice::new(provider.clone(), model.clone());
-            if run_model(service, current.clone(), choice, renderer, input).await {
+            if run_model(service, client, current.clone(), choice, renderer, input).await {
                 renderer.close_modal();
             }
             return None;
@@ -2078,7 +2148,7 @@ async fn apply_tool_action(
             // The list is rebuilt from the rules, so the row says what the rule
             // now is: a panel that kept its old text after a change is a panel
             // that lies about what a key did.
-            let rows = tools_panel(style, service, session);
+            let rows = tools_panel(style, service, session).await;
             if rows.is_empty() {
                 renderer.close_modal();
             } else {
@@ -2092,14 +2162,13 @@ async fn apply_tool_action(
     None
 }
 
-fn report_debug(
-    service: &Arc<Service>,
+async fn report_debug(
+    service: &RemoteState,
     session: Option<&SessionKey>,
     renderer: &mut Renderer,
     style: Style,
 ) {
     let config = service.config();
-    let catalog = service.catalog();
     // The session's own spec once it has one: after a `/model` the model in play
     // is the session's, not the one the process started with. Before the first
     // message there is no session, so the default is what the next turn opens on.
@@ -2124,13 +2193,18 @@ fn report_debug(
         style,
         &spec,
         &config,
-        service.config_path().as_deref(),
+        service.config_path(),
         session.map(SessionKey::as_str),
-        &catalog,
+        service.providers().len(),
+        service.model_count(),
+        service
+            .providers()
+            .iter()
+            .any(|provider| provider == &spec.provider),
         host,
     );
-    lines.extend(report_tools(style, service, session));
-    lines.extend(render_mcp(style, service));
+    lines.extend(report_tools(style, service, session).await);
+    lines.extend(render_mcp(style, service).await);
     if let Some(host) = host {
         lines.extend(report_prompt(style, service, host.prompt_source));
     }
@@ -2153,7 +2227,7 @@ fn report_debug(
 /// A line that is not a limit is not thrown away: it is steered into the
 /// session, because the human may have been typing when the budget ran out.
 async fn prompt_budget_limit(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: &SessionKey,
     input: &mut InteractiveInput,
     interrupts: &mut mpsc::Receiver<()>,
@@ -2181,7 +2255,14 @@ async fn prompt_budget_limit(
                     Err(error) => {
                         renderer.notice(error);
                         renderer.notice("that is not a limit; it is steered into the session");
-                        steer_text(service, session.clone(), line.to_owned(), renderer).await;
+                        steer_text(
+                            client,
+                            session.clone(),
+                            line.to_owned(),
+                            renderer.queue_mode,
+                            renderer,
+                        )
+                        .await;
                     }
                 }
             }
@@ -2214,17 +2295,13 @@ fn parse_budget_limit(unit: BudgetUnit, value: &str) -> Result<f64, String> {
 /// the session is not on. The setting is resolved once, here, and the footer
 /// and `/debug` both read that: computing it twice is how they came to
 /// disagree.
-pub(crate) fn refresh_effort(
-    service: &Arc<Service>,
-    session: &SessionKey,
-    renderer: &mut Renderer,
-) {
+pub(crate) fn refresh_effort(service: &RemoteState, session: &SessionKey, renderer: &mut Renderer) {
     let label = service.session_spec(session).and_then(|spec| {
         let override_reasoning = service.session_reasoning(session);
-        norte_code_agent::effective_reasoning(
+        effective_reasoning(
             override_reasoning.as_ref(),
             &service.config().reasoning.default,
-            &spec.capabilities.reasoning,
+            &spec.reasoning,
         )
         .ok()
         .map(|effective| reasoning_setting_label(&effective))
@@ -2235,11 +2312,11 @@ pub(crate) fn refresh_effort(
 }
 
 /// Refreshes the model details shown for the session the client just opened.
-fn refresh_session_model(service: &Arc<Service>, session: &SessionKey, renderer: &mut Renderer) {
+fn refresh_session_model(service: &RemoteState, session: &SessionKey, renderer: &mut Renderer) {
     let spec = service.session_spec(session);
-    renderer.model_name = spec.as_ref().map(norte_code_agent::ModelSpec::label);
+    renderer.model_name = spec.as_ref().map(ModelInfoExt::label);
     renderer.model_unset = spec.is_none();
-    renderer.max_context = spec.and_then(|spec| spec.capabilities.max_context);
+    renderer.max_context = spec.and_then(|spec| spec.max_context);
 }
 
 /// The provider and the model a `/model` names, given the half the person did
@@ -2255,7 +2332,7 @@ fn refresh_session_model(service: &Arc<Service>, session: &SessionKey, renderer:
 /// provider yet, which is the one case a person has to answer with `/provider`
 /// first.
 fn pick_model(
-    service: &Arc<Service>,
+    service: &RemoteState,
     session: &SessionKey,
     model: &str,
     renderer: &mut Renderer,
@@ -2320,22 +2397,21 @@ fn plan_provider_switch(known: bool, model: Option<&str>, serves: bool) -> Provi
 /// session is not committed without a model, and closing here reopens on the
 /// model the session already had.
 async fn switch_provider(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     session: &SessionKey,
     provider: &str,
     renderer: &mut Renderer,
     input: Option<&mut InteractiveInput>,
 ) {
     let model_name = model_name_of(service, session);
-    let catalog = service.catalog();
-    let known = catalog.provider(provider).is_some();
+    let known = service.providers().iter().any(|entry| entry == provider);
     let serves = model_name
         .as_deref()
-        .is_some_and(|model| catalog.find(provider, model).is_some());
+        .is_some_and(|model| service.model(provider, model).is_some());
     match plan_provider_switch(known, model_name.as_deref(), serves) {
         ProviderSwitch::Unknown => {
-            let mut names: Vec<String> = catalog.providers().keys().cloned().collect();
-            names.sort();
+            let names = service.providers();
             renderer.failure(format!(
                 "unknown provider `{provider}`; pick one of: {}",
                 names.join(", ")
@@ -2357,7 +2433,7 @@ async fn switch_provider(
         ProviderSwitch::Move(model) => {
             let choice = ModelChoice::new(provider, model);
             renderer.pending_provider = None;
-            run_model(service, session.clone(), choice, renderer, input).await;
+            run_model(service, client, session.clone(), choice, renderer, input).await;
         }
     }
     // The completion follows the session: a `/model` line now offers the models
@@ -2372,93 +2448,30 @@ async fn switch_provider(
 /// run, then the 0600 file. Only a missing key prompts, and only
 /// when there is an interactive client to prompt on. Returns whether the switch
 /// may proceed; a cancelled prompt leaves the current model untouched.
-async fn ensure_provider_key(
-    service: &Arc<Service>,
-    provider: &str,
-    renderer: &mut Renderer,
-    input: Option<&mut InteractiveInput>,
+fn ensure_provider_key(
+    _service: &RemoteState,
+    _provider: &str,
+    _renderer: &mut Renderer,
+    _input: Option<&mut InteractiveInput>,
 ) -> bool {
-    let Some(store) = service.key_store() else {
-        // No host store: `SetModel` reports the missing key exactly as before.
-        return true;
-    };
-    let catalog = service.catalog();
-    let Some(entry) = catalog.provider(provider) else {
-        // An unknown provider is the switch's error to report.
-        return true;
-    };
-    match store.resolve(provider, &entry.environment_keys) {
-        Ok(_) => true,
-        Err(norte_code_protocol::config::ConfigError::Secret { message, .. }) => {
-            let Some(input) = input else {
-                renderer.failure(format!(
-                    "could not resolve the API key for {provider}: {message}"
-                ));
-                return false;
-            };
-            if !renderer.can_prompt() {
-                renderer.failure(format!(
-                    "could not resolve the API key for {provider}: {message}"
-                ));
-                return false;
-            }
-            // The models panel is still open behind the question; close it so
-            // the masked prompt is the only thing asking for a decision.
-            renderer.close_modal();
-            let prompt = format!("API key for {provider} (input is hidden): ");
-            let pinned = Arc::clone(&renderer.pinned);
-            let secret =
-                match crate::prompt::ask_secret(&prompt, &pinned, input, &mut || renderer.draw())
-                    .await
-                {
-                    Ok(secret) => secret,
-                    Err(error) => {
-                        renderer.failure(format!("could not read the key: {error}"));
-                        return false;
-                    }
-                };
-            let Some(secret) = secret.map(|secret| secret.trim().to_owned()) else {
-                renderer.notice("no key saved; the model was not switched");
-                return false;
-            };
-            if secret.is_empty() {
-                renderer.notice("no key saved; the model was not switched");
-                return false;
-            }
-            match store.save(provider, &secret) {
-                Ok(_) => {
-                    renderer.notice(format!(
-                        "saved the key for {provider} in secrets.json (0600)"
-                    ));
-                }
-                Err(error) => {
-                    renderer.failure(format!("could not save the key: {error}"));
-                    renderer.notice("the key is used for this session only");
-                }
-            }
-            true
-        }
-        Err(error) => {
-            renderer.failure(error.to_string());
-            false
-        }
-    }
+    true
 }
 
 async fn run_model(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     session: SessionKey,
     choice: ModelChoice,
     renderer: &mut Renderer,
     input: Option<&mut InteractiveInput>,
 ) -> bool {
-    if !ensure_provider_key(service, &choice.provider, renderer, input).await {
+    if !ensure_provider_key(service, &choice.provider, renderer, input) {
         return false;
     }
     // Cloned: the refresh below needs the key after the request consumed it.
     let key = session.clone();
     match drain_request(
-        service,
+        client,
         ClientRequestKind::SetModel {
             session,
             provider: choice.provider,
@@ -2512,16 +2525,24 @@ async fn run_model(
     true
 }
 
-/// Manages a saved provider key: lists them, prompts for one, or removes one.
-#[allow(clippy::too_many_lines)]
-async fn handle_connection(
-    service: &Arc<Service>,
-    action: ConnectionAction,
+/// Reports that key management belongs to the remote host.
+fn handle_connection(
+    _service: &RemoteState,
+    action: &ConnectionAction,
     renderer: &mut Renderer,
-    input: Option<&mut InteractiveInput>,
+    _input: Option<&mut InteractiveInput>,
     _style: Style,
 ) {
-    match action {
+    let action_name = match action {
+        ConnectionAction::List => "list",
+        ConnectionAction::Add { .. } => "add",
+        ConnectionAction::Remove { .. } => "remove",
+    };
+    renderer.failure(format!(
+        "connection keys are managed by the remote server; `/connection {action_name}` is not available in the stateless CLI"
+    ));
+}
+/*
         ConnectionAction::List => {
             let catalog = service.catalog();
             let store = service.key_store();
@@ -2628,10 +2649,7 @@ async fn handle_connection(
                     renderer.failure(format!("could not remove the key: {error}"));
                 }
             }
-        }
-    }
-    let _ = renderer.draw();
-}
+*/
 
 /// Reports the session's background jobs: a listing, one job, or a stop.
 ///
@@ -2639,7 +2657,7 @@ async fn handle_connection(
 /// rather than the registry read directly: the CLI has no registry, and a job
 /// may be running in a turn this client never started.
 async fn report_jobs(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     session: SessionKey,
     action: JobListAction,
     id: Option<String>,
@@ -2657,7 +2675,7 @@ async fn report_jobs(
                     id: id.clone(),
                 },
             };
-            match service.submit(request).await {
+            match client.submit(request).await {
                 Ok(mut stream) => {
                     let mut stopped = None;
                     while let Some(event) = stream.next().await {
@@ -2680,7 +2698,7 @@ async fn report_jobs(
             }
         }
         JobListAction::List | JobListAction::Check => {
-            let jobs = match fetch_jobs(service, session).await {
+            let jobs = match fetch_jobs(client, session).await {
                 Ok(jobs) => jobs,
                 Err(error) => {
                     renderer.failure(format!("could not list the jobs: {error}"));
@@ -2762,8 +2780,8 @@ fn job_state_label(state: JobState, style: Style) -> String {
 }
 
 /// Asks the service for the session's jobs.
-async fn fetch_jobs(service: &Arc<Service>, session: SessionKey) -> Result<Vec<JobInfo>, String> {
-    let events = drain_request(service, ClientRequestKind::ListJobs { session }).await?;
+async fn fetch_jobs(client: &dyn AgentClient, session: SessionKey) -> Result<Vec<JobInfo>, String> {
+    let events = drain_request(client, ClientRequestKind::ListJobs { session }).await?;
     for event in events {
         match event.kind {
             ServerEventKind::JobList { jobs } => return Ok(jobs),
@@ -2784,10 +2802,10 @@ async fn fetch_jobs(service: &Arc<Service>, session: SessionKey) -> Result<Vec<J
 /// channel, and why the reader selects over it.
 /// Sends one request and drains its acknowledgement.
 async fn drain_request(
-    service: &Arc<Service>,
+    client: &dyn AgentClient,
     kind: ClientRequestKind,
 ) -> Result<Vec<ServerEvent>, String> {
-    let stream = service
+    let stream = client
         .submit(ClientRequest {
             request_id: 0,
             kind,
@@ -2804,129 +2822,37 @@ fn stream_error(events: &[ServerEvent]) -> Option<String> {
     })
 }
 
-/// Re-reads everything that can be re-read while the process runs.
+/// Re-reads the client configuration while the process runs.
 ///
-/// The configuration, the skill roots and the MCP servers that failed to start
-/// are the three things that can change underneath a running agent, so one
-/// command covers them: what a person means by "refresh" is not one of the
-/// three, and asking them to remember which is which was the mistake.
-async fn report_refresh(
-    service: &Arc<Service>,
-    session: Option<&SessionKey>,
+/// The service owns agents, models, providers, skills and MCP servers. Those
+/// files are intentionally not reloaded from the client; use `service restart`
+/// after changing service-side configuration.
+fn report_refresh(
+    service: &RemoteState,
+    _client: &dyn AgentClient,
+    _session: Option<&SessionKey>,
     renderer: &mut Renderer,
 ) {
     report_reload(service, renderer);
-    let count = service.refresh_skills();
-    renderer.notice(format!("skills refreshed: {count}"));
-    // The connections are rebuilt, not merely retried: a server added, removed
-    // or disabled in the file takes effect here, and one that is still failing
-    // comes back in the failures list. A retry alone could only revive what was
-    // already configured when the process started, which is why a new server
-    // needed a restart.
-    let up = service.reload_mcp().await;
-    let failed = service.mcp_failures();
-    renderer.notice(format!("mcp servers connected: {up}"));
-    if !failed.is_empty() {
-        renderer.notice(format!("{} mcp server(s) unreachable", failed.len()));
-    }
-    // And so does the completion: `/refresh` is what re-reads the catalogue, so
-    // a model added to `models.json` is one the next `/model` offers.
-    refresh_completions(service, session, renderer);
-}
-
-/// Rebuilds the MCP connections and reports how many are up.
-///
-/// It is what every write to the MCP configuration ends with: a switch or an
-/// entry that is written but not connected is a change the person cannot see
-/// working, and the reload is what makes the file and the process agree.
-async fn reload_mcp(service: &Arc<Service>, renderer: &mut Renderer) {
-    let up = service.reload_mcp().await;
-    let failed = service.mcp_failures();
-    renderer.notice(format!("mcp servers connected: {up}"));
-    for (name, reason) in failed {
-        renderer.notice(format!("`{name}` did not start: {reason}"));
-    }
 }
 
 /// Lists, adds, removes or switches an MCP server.
 ///
-/// `enable`/`disable` write the flag into the config file and reload the
-/// connections, so the choice outlives the process: a server switched off here
-/// is off in the next run too. `add` and `remove` write the entry and reload, so
-/// what a person typed is what connects. `list` opens the panel, where the same
-/// switch is one key.
-async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Renderer) {
-    let path = service
-        .config_path()
-        .or_else(norte_code_protocol::config::user_config_path);
-    match &action {
-        McpAction::List => {}
-        McpAction::Add {
-            name,
-            command,
-            args,
-        } => {
-            let Some(path) = path else {
-                renderer.failure("no user config path; pass --config");
-                return;
-            };
-            match norte_code_protocol::config::add_user_mcp_server(&path, name, command, args) {
-                Ok(()) => {
-                    renderer.notice(format!("added mcp server `{name}`"));
-                    reload_mcp(service, renderer).await;
-                }
-                Err(error) => renderer.failure(format!("could not add `{name}`: {error}")),
-            }
-            return;
-        }
-        McpAction::Remove { name } => {
-            let Some(path) = path else {
-                renderer.failure("no user config path; pass --config");
-                return;
-            };
-            match norte_code_protocol::config::remove_user_mcp_server(&path, name) {
-                Ok(()) => {
-                    renderer.notice(format!("removed mcp server `{name}`"));
-                    reload_mcp(service, renderer).await;
-                }
-                Err(error) => renderer.failure(format!("could not remove `{name}`: {error}")),
-            }
-            return;
-        }
-        McpAction::Enable { name } | McpAction::Disable { name } => {
-            let enabled = matches!(action, McpAction::Enable { .. });
-            // The switch is written first: a file that cannot be written is what
-            // the person needs to know, and switching the process alone would
-            // say it worked when the next run would undo it.
-            if let Some(path) = path
-                && let Err(error) =
-                    norte_code_protocol::config::set_user_mcp_enabled(&path, name, enabled)
-            {
-                renderer.failure(format!("could not change `{name}`: {error}"));
-                return;
-            }
-            let word = if enabled { "enabled" } else { "disabled" };
-            renderer.notice(format!("mcp server `{name}` {word}"));
-            if !enabled {
-                renderer.notice("its tools leave the next turn; the process stays up");
-            }
-            // The file changed, so the configuration in memory is stale: a
-            // reload reads it back before the connections are rebuilt. Without
-            // this the status kept the old `enabled` flag and a server switched
-            // off here kept its row until a `/refresh`.
-            if let Err(error) = service.reload_config() {
-                renderer.notice(format!("warning: could not reload the config: {error}"));
-            }
-            reload_mcp(service, renderer).await;
-            return;
-        }
+/// `enable`/`disable` change the active server in the remote service. `add` and
+/// `remove` remain host configuration operations: edit `service.json` and
+/// restart the service. `list` opens the panel, where the same switch is one
+/// key.
+async fn report_mcp(service: &RemoteState, action: &McpAction, renderer: &mut Renderer) {
+    if !matches!(action, McpAction::List) {
+        renderer.failure("MCP changes require the remote service configuration; use service restart after editing it");
+        return;
     }
 
     // The listing is a panel and not a print, and it is one a person can act
     // on: reading the list that names a server is the moment they know which
     // one to switch off, and typing `/mcp disable <name>` from memory while
     // looking at it is a command line doing a panel's job.
-    let rows = mcp_panel(service);
+    let rows = mcp_panel(service).await;
     if rows.is_empty() {
         renderer.notice("no MCP server connected");
         return;
@@ -2940,81 +2866,40 @@ async fn report_mcp(service: &Arc<Service>, action: McpAction, renderer: &mut Re
 /// is rebuilt after every switch and opened again, so the row says what the
 /// server became: a list that kept the word it had is a list that lies about
 /// what a key did.
-fn apply_mcp_action(
-    service: &Arc<Service>,
+async fn apply_mcp_action(
+    service: &RemoteState,
     renderer: &mut Renderer,
     action: &crate::modal::Action,
 ) {
     let crate::modal::Action::Toggle(name) = action else {
         return;
     };
-    let active = service
-        .mcp_status()
-        .iter()
-        .find(|server| server.name == *name)
-        .is_some_and(|server| !server.active);
-    // The switch is written to the config file, not only the process: a server
-    // turned off in the panel is off in the next run too, which is what makes
-    // the key mean something beyond this session.
-    if let Some(path) = service
-        .config_path()
-        .or_else(norte_code_protocol::config::user_config_path)
-        && let Err(error) = norte_code_protocol::config::set_user_mcp_enabled(&path, name, active)
-    {
-        renderer.failure(format!("could not change `{name}`: {error}"));
+    let Ok((servers, _)) = service.mcp_status_remote().await else {
+        renderer.failure("could not read remote MCP status");
         return;
-    }
-    match service.set_mcp_active(name, active) {
-        Some(state) => {
-            let word = if state { "enabled" } else { "disabled" };
-            renderer.notice(format!("mcp server `{name}` {word}"));
-            if !state {
-                renderer.notice("its tools leave the next turn; the process stays up");
-            }
-            let rows = mcp_panel(service);
-            if rows.is_empty() {
-                renderer.close_modal();
-            } else {
-                renderer.open_editable("mcp servers", rows);
-            }
-        }
-        None => renderer.failure(format!("no mcp server named `{name}` connected")),
+    };
+    let Some(server) = servers.iter().find(|server| server.name == *name) else {
+        renderer.failure(format!("unknown MCP server `{name}`"));
+        return;
+    };
+    match service
+        .set_mcp_active_remote(name.clone(), !server.active)
+        .await
+    {
+        Ok(_) => renderer.notice(format!(
+            "MCP server `{name}` {}",
+            if server.active { "disabled" } else { "enabled" }
+        )),
+        Err(error) => renderer.failure(format!("could not change MCP server `{name}`: {error}")),
     }
 }
 
-/// Re-reads the configuration and reports what happened.
-///
-/// The per-session rules and the model a session already resolved are session
-/// state and are not rebuilt, so the notice names what needs a new session.
-fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
+/// Re-reads only the client configuration and reports what happened.
+fn report_reload(service: &RemoteState, renderer: &mut Renderer) {
     match service.reload_config() {
         Ok(reloaded) => {
-            // The dial in the status row is drawn from the threshold and the
-            // window, and both are read from the configuration. They were set
-            // once at startup, so a threshold written into the file and picked
-            // up by `/refresh` changed how the session compacts without
-            // changing the colour the bar warns in: the two disagreed, which is
-            // the one thing a warning must not do.
-            renderer.compaction_threshold = reloaded.config.compaction.threshold;
-            // The window comes from the spec, which a `/model` may have moved:
-            // a session switched to a model with a smaller window has a dial
-            // that fills faster, and reading it from the startup spec would
-            // leave the bar lying about how close the compaction is.
-            if let Some(spec) = service.default_spec() {
-                renderer.max_context = spec.capabilities.max_context;
-            }
-            // The dial's colour and the effort bar are the renderer's own state,
-            // and no pinned text carries them: without this the new threshold
-            // would redraw its colour only on the next keystroke, which is the
-            // one moment a person who just ran `/refresh` is not typing.
             renderer.mark_dirty();
-            // The catalogue was re-read from disk by reload_config: a person who
-            // added a model to models.json and typed /reload expects the next
-            // /model to find it, and the files are the only place a model comes
-            // from. Warnings from a malformed catalogue file are already in
-            // reloaded.warnings.
-            let catalog_note = format!(", {} models", service.catalog().model_count());
-            renderer.notice(format!("configuration reloaded{catalog_note}"));
+            renderer.notice("client configuration reloaded from cli.json");
             for warning in &reloaded.warnings {
                 renderer.notice(format!(
                     "warning: unknown config key `{}`",
@@ -3022,7 +2907,7 @@ fn report_reload(service: &Arc<Service>, renderer: &mut Renderer) {
                 ));
             }
             renderer.notice(
-                "the open session keeps its model and its rules; a new session uses the new default",
+                "service.json, providers.json, models.json, skills and MCP changes require `service restart`",
             );
         }
         Err(error) => {
@@ -3061,7 +2946,7 @@ pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
     lines.push(String::new());
     lines.push("text typed while a turn runs is steered into that turn".to_owned());
     lines.push("an approval scope defaults to session; global writes the user config".to_owned());
-    renderer.open_modal("help", lines);
+    renderer.open_markdown_modal("help", lines);
 }
 
 /// Prints the interactive prompt and waits for the next message.
@@ -3084,7 +2969,8 @@ pub(crate) enum ReplInput {
 }
 
 pub(crate) async fn read_repl_line(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     session: Option<&SessionKey>,
     input: &mut InteractiveInput,
     renderer: &mut Renderer,
@@ -3152,7 +3038,7 @@ pub(crate) async fn read_repl_line(
                 let provider = session.and_then(|current| provider_of(service, current));
                 let model = session.and_then(|current| model_name_of(service, current));
                 let rows = models_panel(
-                    service.catalog().as_ref(),
+                    service.models().as_ref(),
                     provider.as_deref(),
                     model.as_deref(),
                     renderer.models_expanded.as_deref(),
@@ -3177,6 +3063,7 @@ pub(crate) async fn read_repl_line(
                 if let Some((decision, scope)) = renderer.modal_key(press)
                     && let Some(chosen) = apply_tool_action(
                         service,
+                        client,
                         session,
                         renderer,
                         style,
@@ -3199,7 +3086,7 @@ pub(crate) async fn read_repl_line(
                     // prompt, which is to leave.
                     return Ok(ReplInput::End);
                 };
-                stop_jobs(service, session.clone(), renderer).await;
+                stop_jobs(service, client, session.clone(), renderer).await;
                 continue;
             }
             // Nothing is running at the prompt, so nothing to cancel or detach.
@@ -3235,6 +3122,7 @@ pub(crate) async fn read_repl_line(
 /// in — loaded, waiting for a restart, disabled, or why it did not load. The
 /// state is read from the host's own registry and from the library itself, so
 /// "not loaded" comes with the reason instead of leaving a person to guess.
+#[cfg(any())]
 fn plugins_panel_lines() -> Vec<String> {
     let entries = crate::plugin_manager::installed_entries();
     if entries.is_empty() {
@@ -3306,7 +3194,8 @@ fn copied(text: &str, renderer: &mut Renderer) {
 
 /// Stops every background job of the session, and reports what it reached.
 pub(crate) async fn stop_jobs(
-    service: &Arc<Service>,
+    _service: &RemoteState,
+    client: &dyn AgentClient,
     session: SessionKey,
     renderer: &mut Renderer,
 ) {
@@ -3314,7 +3203,7 @@ pub(crate) async fn stop_jobs(
         request_id: 0,
         kind: ClientRequestKind::StopJobs { session, id: None },
     };
-    match service.submit(request).await {
+    match client.submit(request).await {
         Ok(mut stream) => {
             let mut stopped = None;
             while let Some(event) = stream.next().await {
@@ -3376,7 +3265,8 @@ enum Wake {
 /// stream, which can park again, so the loop drains a queue of streams.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn drive_turns(
-    service: &Arc<Service>,
+    service: &RemoteState,
+    client: &dyn AgentClient,
     primary: EventStream,
     renderer: &mut Renderer,
     style: Style,
@@ -3399,10 +3289,11 @@ pub(crate) async fn drive_turns(
     let mut current = session;
     let mut parked = false;
     let mut cancel_requested = false;
-    // The steering messages the human sent while the turn was running, with
-    // their text. The service applies them to the request in flight and names
-    // them when it does; the ones still waiting need the next turn to start.
-    let mut steered: Vec<(String, String)> = Vec::new();
+    // Messages typed while a turn is running stay local until that turn ends.
+    // Sending each one as steering caused a new model request for every line
+    // and made the same answer appear to repeat. The queue is shown above the
+    // input and is submitted in order, one normal turn at a time.
+    let mut queued: VecDeque<(String, Vec<Attachment>)> = VecDeque::new();
     // Whether the last turn closed normally. A cancelled or budget-stopped
     // turn leaves the session in a state a resume cannot pick up.
     let mut committed = false;
@@ -3482,6 +3373,7 @@ pub(crate) async fn drive_turns(
                                 if let Some((decision, scope)) = renderer.modal_key(press) {
                                     let Some(new_session) = apply_tool_action(
                                         service,
+                                        client,
                                         current.as_ref(),
                                         renderer,
                                         style,
@@ -3501,16 +3393,23 @@ pub(crate) async fn drive_turns(
                             }
                             EditorAction::CancelTurn => {
                                 if let Some(session) = current.clone() {
+                                    if cancel_requested {
+                                        renderer.notice("cancellation already requested; waiting for the turn to stop");
+                                        continue;
+                                    }
+                                    cancel_requested = true;
                                     renderer.mark_cancelled();
                                     renderer.notice("cancelling the running turn…");
-                                    // Cancel directly: the service's cancel_turn signals the
-                                    // token without going through submit's request handler, which
-                                    // may be busy or blocked.
-                                    let found = service.cancel_turn(&session);
-                                    if !found {
-                                        renderer.notice(
-                                            "warning: no running turn to cancel".to_owned(),
-                                        );
+                                    if let Err(error) = client
+                                        .submit(ClientRequest {
+                                            request_id: 0,
+                                            kind: ClientRequestKind::CancelTurn { session },
+                                        })
+                                        .await
+                                    {
+                                        renderer.notice(format!(
+                                            "warning: could not cancel the turn: {error}"
+                                        ));
                                     }
                                 }
                                 continue;
@@ -3527,7 +3426,7 @@ pub(crate) async fn drive_turns(
                                     renderer.notice("no background job is running");
                                     continue;
                                 }
-                                stop_jobs(service, session, renderer).await;
+                                stop_jobs(service, client, session, renderer).await;
                                 continue;
                             }
                             EditorAction::Detach => {
@@ -3538,7 +3437,7 @@ pub(crate) async fn drive_turns(
                                     request_id: 0,
                                     kind: ClientRequestKind::DetachTurn { session },
                                 };
-                                if let Err(error) = service.submit(request).await {
+                                if let Err(error) = client.submit(request).await {
                                     renderer.notice(format!(
                                         "warning: could not detach the turn: {error}"
                                     ));
@@ -3552,6 +3451,7 @@ pub(crate) async fn drive_turns(
                             continue;
                         };
                         if cancel_requested {
+                            renderer.pinned.set_pending_steers(Vec::new());
                             return Err("interrupted".to_owned());
                         }
                         cancel_requested = true;
@@ -3560,10 +3460,14 @@ pub(crate) async fn drive_turns(
                         renderer.notice(
                             "the running tool is being stopped; press Ctrl-C again to force quit",
                         );
-                        // Cancel directly.
-                        let found = service.cancel_turn(&session);
-                        if !found {
-                            renderer.notice("warning: no running turn to cancel".to_owned());
+                        if let Err(error) = client
+                            .submit(ClientRequest {
+                                request_id: 0,
+                                kind: ClientRequestKind::CancelTurn { session },
+                            })
+                            .await
+                        {
+                            renderer.notice(format!("warning: could not cancel the turn: {error}"));
                         }
                         continue;
                     }
@@ -3586,6 +3490,7 @@ pub(crate) async fn drive_turns(
                             Some(Ok(command)) => {
                                 handle_live_command(
                                     service,
+                                    client,
                                     command,
                                     current.as_ref(),
                                     renderer,
@@ -3595,24 +3500,20 @@ pub(crate) async fn drive_turns(
                             }
                             Some(Err(message)) => renderer.notice(message),
                             None => {
-                                let Some(session) = current.clone() else {
+                                if current.is_none() {
                                     renderer.notice("the session is not ready yet; try again");
                                     continue;
-                                };
-                                // The message is not in the history until the
-                                // engine applies it, so it is not printed as if
-                                // it were: it waits above the input, where the
-                                // human can still see what they sent, and moves
-                                // into the transcript when the engine reports
-                                // that it landed.
-                                if let Some(id) =
-                                    steer_text(service, session, text.clone(), renderer).await
-                                {
-                                    steered.push((id, text));
-                                    let waiting: Vec<String> =
-                                        steered.iter().map(|(_, text)| text.clone()).collect();
-                                    renderer.pinned.set_pending_steers(waiting);
                                 }
+                                queued.push_back((text, attachments));
+                                let waiting: Vec<String> =
+                                    queued.iter().map(|(text, _)| text.clone()).collect();
+                                renderer.pinned.set_pending_steers(waiting);
+                                // The message stays queued until the turn's
+                                // TurnFinished/TurnStopped arrives; the
+                                // dispatch gate below requires `committed`,
+                                // which only those events set. Guessing the
+                                // turn is over from the spinner would race
+                                // the server's own commit.
                             }
                         }
                         continue;
@@ -3629,36 +3530,29 @@ pub(crate) async fn drive_turns(
                 }
                 match &event.kind {
                     ServerEventKind::TurnStarted { .. } => parked = false,
-                    ServerEventKind::TurnFinished {
-                        committed: done, ..
-                    } => {
+                    ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
                         parked = false;
-                        committed = *done;
+                        // A cancelled or budget-stopped turn still leaves the
+                        // session clean and ready for a new message; only a
+                        // turn that is genuinely in flight blocks new input.
+                        committed = true;
                     }
-                    ServerEventKind::SteerApplied { ids, messages } => {
+                    ServerEventKind::SteerApplied { messages, .. } => {
                         // Every applied message now belongs to the transcript.
                         // One the human typed is written where the conversation
                         // reached, which is where it belongs; one they did not
                         // (a finished job's report) is shown with the time it
                         // arrived, because there is nowhere else to see it.
-                        for (id, text) in ids.iter().zip(messages.iter()) {
-                            let typed = steered.iter().find(|(name, _)| name == id).is_some();
-                            if typed {
-                                renderer.arrived_message(text);
-                            } else {
-                                renderer.steer_arrived(text);
-                            }
+                        for text in messages {
+                            renderer.steer_arrived(text);
                         }
-                        steered.retain(|(id, _)| !ids.contains(id));
-                        let waiting: Vec<String> =
-                            steered.iter().map(|(_, text)| text.clone()).collect();
-                        renderer.pinned.set_pending_steers(waiting);
                     }
                     _ => {}
                 }
                 let pinned = Arc::clone(&renderer.pinned);
                 if answer_if_asked(
                     service,
+                    client,
                     &pinned,
                     &event,
                     input.as_deref_mut(),
@@ -3670,27 +3564,25 @@ pub(crate) async fn drive_turns(
                     renderer.mark_cancelled();
                     renderer
                         .notice("question left pending; the session is saved and can be resumed");
+                    renderer.pinned.set_pending_steers(Vec::new());
                     return Ok(DriveOutcome {
                         session: current,
                         parked: true,
                     });
                 }
                 renderer.event(&event)?;
-                // One frame per event, and never on a timer: the frame is a
-                // function of the state, and the state only moves when
-                // something arrives.
                 renderer.draw()?;
+                // The server keeps the SSE stream open for the session (broadcast),
+                // so reading it would block forever. Handle the budget prompt first
+                // (if any), then leave this stream.
                 if matches!(
                     &event.kind,
-                    ServerEventKind::TurnFinished {
-                        committed: false,
-                        ..
-                    }
+                    ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
                 ) && let Some(prompt) = renderer.take_budget_prompt()
                     && renderer.can_prompt()
                     && let (Some(receiver), Some(session)) = (input.as_deref_mut(), current.clone())
                     && let Some(limit) = prompt_budget_limit(
-                        service,
+                        client,
                         &session,
                         receiver,
                         &mut interrupt_rx,
@@ -3721,6 +3613,7 @@ pub(crate) async fn drive_turns(
                                     request_id: 0,
                                     kind: ClientRequestKind::Resume {
                                         session: session.clone(),
+                                        replay: true,
                                     },
                                 })
                                 .await
@@ -3740,14 +3633,19 @@ pub(crate) async fn drive_turns(
                         }
                     }
                 }
+                if matches!(
+                    &event.kind,
+                    ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
+                ) {
+                    break;
+                }
             }
         }
-        // The human steered text while the turn was running. The service
-        // applies it to the request in flight; what the turn never reached
-        // waits for the next turn boundary, so that boundary has to start.
-        // With nothing left to apply, the turn loop is done: returning here is
-        // what hands the terminal back to the input line.
-        if steered.is_empty() {
+        // Submit queued lines only after the current turn has finished. They
+        // are ordinary messages, not steering requests, so each is committed
+        // exactly once and the transcript receives it immediately before its
+        // own request starts.
+        if queued.is_empty() {
             break;
         }
         let Some(session) = current.clone() else {
@@ -3756,15 +3654,39 @@ pub(crate) async fn drive_turns(
         if parked || renderer.budget_stopped || !committed {
             break;
         }
-        // The waiting messages are not forgotten here: a resume is the turn
-        // that will reach them, and they must stay above the input until the
-        // engine says it did. Clearing the list would hide a message that is
-        // still on its way to the model.
+        let Some((text, attachments)) = queued.pop_front() else {
+            break;
+        };
+        renderer
+            .pinned
+            .set_pending_steers(queued.iter().map(|(text, _)| text.clone()).collect());
+        renderer.said(&text);
+        renderer.mark_working();
+        // Draw immediately so the queued indicator and the spinner update
+        // before the network call blocks. Without this the frame that shows
+        // "queued: …" clears and the spinner appears only once the SSE
+        // connection is established, which the user perceives as a freeze.
+        renderer.draw()?;
         let request = ClientRequest {
             request_id: 0,
-            kind: ClientRequestKind::Resume { session },
+            kind: ClientRequestKind::SendMessage {
+                session: Some(session),
+                text,
+                attachments: attachments
+                    .iter()
+                    .map(|attachment| ProtocolAttachment {
+                        path: attachment.path.clone(),
+                        blob: None,
+                        mime: attachment.mime.clone(),
+                        name: attachment.name.clone(),
+                    })
+                    .collect(),
+                budget: None,
+                reasoning: None,
+                replay: false,
+            },
         };
-        match service.submit(request).await {
+        match client.submit(request).await {
             Ok(next) => {
                 renderer.mark_working();
                 streams.push_back(next);
@@ -3778,9 +3700,7 @@ pub(crate) async fn drive_turns(
     // Nothing is waiting any more: the turn ended, whatever is left was never
     // applied, and leaving it above the input would promise a delivery that is
     // not coming.
-    if !steered.is_empty() {
-        renderer.pinned.set_pending_steers(Vec::new());
-    }
+    renderer.pinned.set_pending_steers(Vec::new());
     // A turn can move both lists: it can write a session rule, and a server
     // that dropped took its tools with it. The rows are rebuilt once
     // here rather than after every event that might have moved either.
@@ -3790,1202 +3710,36 @@ pub(crate) async fn drive_turns(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use super::{
-        BudgetUnit, ChatCommand, JobListAction, McpAction, ProviderSwitch, Reasoning,
-        ReasoningScope, SignalGuard, command_suggestion, interactive_loop, models_panel, mpsc,
-        parse_budget_limit, parse_chat_command, plan_file_metadata, plan_file_status,
-        plan_provider_switch, refresh_completions, refresh_session_model, switch_provider,
-    };
-    use crate::input::{CompletionNames, EditorEvent, InteractiveInput, Pinned};
-    use crate::render::{Format, Renderer, Verbosity};
-    use crate::style::Style;
-    use norte_code_protocol::ClientRequestKind;
-    use norte_code_protocol::catalog::WireSchema;
-
-    use super::drain_request;
-
-    #[test]
-    fn a_provider_switch_moves_only_when_the_model_survives_it() {
-        // The three cases the command has, as values: the model is served (move),
-        // it is not (hold the provider), and there is nothing to carry. Before
-        // this, `/provider` kept the model and sent the pair whatever the
-        // catalogue said, so a provider that does not serve another's model got
-        // a request it would refuse — and there was no way out of the state,
-        // because `/model` put the old provider back on.
-        assert_eq!(
-            plan_provider_switch(true, Some("shared-model"), true),
-            ProviderSwitch::Move("shared-model".to_owned())
+/// Sends newline-delimited messages without requiring a terminal or TUI.
+pub(crate) async fn headless_messages(
+    service: &RemoteState,
+    client: &dyn AgentClient,
+    session: SessionKey,
+    renderer: &mut Renderer,
+    style: Style,
+    messages: impl IntoIterator<Item = String>,
+) -> Result<(), String> {
+    for (index, text) in messages.into_iter().enumerate() {
+        renderer.diagnostic(
+            "input",
+            &serde_json::json!({
+                "index": index,
+                "message": text,
+            }),
         );
-        assert_eq!(
-            plan_provider_switch(true, Some("other-providers-model"), false),
-            ProviderSwitch::Hold
+        renderer.diagnostic(
+            "request_started",
+            &serde_json::json!({
+                "index": index,
+                "operation": "send_message",
+            }),
         );
-        assert_eq!(
-            plan_provider_switch(true, None, false),
-            ProviderSwitch::NoModel
-        );
-    }
-
-    #[test]
-    fn an_unknown_provider_is_decided_before_the_model_is_looked_at() {
-        // `serves` is a question about a provider that exists. Asking it about
-        // one the catalogue does not list would answer "no" and hold a switch to
-        // nowhere, which reads as the provider being real and the model wrong.
-        assert_eq!(
-            plan_provider_switch(false, Some("m"), false),
-            ProviderSwitch::Unknown
-        );
-        assert_eq!(
-            plan_provider_switch(false, None, false),
-            ProviderSwitch::Unknown
-        );
-    }
-
-    /// The names a test offers: none, so the registry alone answers.
-    ///
-    /// The catalogue's own names are what `the_catalogue_names_complete` adds:
-    /// every other test is asking about the registry.
-    fn no_names() -> CompletionNames {
-        CompletionNames::default()
-    }
-
-    /// The names a test offers, as the CLI would push them: one provider, two
-    /// models of it.
-    fn catalogue() -> CompletionNames {
-        CompletionNames {
-            providers: vec!["exa".to_owned(), "river".to_owned()],
-            models: vec![
-                "deepseek-ai/DeepSeek-V4.1-Flash".to_owned(),
-                "deepseek-v4.1-flash-uncensored".to_owned(),
-            ],
-        }
-    }
-
-    #[test]
-    fn the_catalogue_names_complete_for_the_two_commands_that_take_one() {
-        // `/provider` and `/model` take a name only the catalogue holds, and
-        // neither offered anything: the registry is built at startup and cannot
-        // read the catalogue, which `/refresh` re-reads. A person typed the id
-        // from memory or not at all.
-        let names = catalogue();
-        let providers = command_suggestion("/provider ri", "/provider ri".len(), &names)
-            .expect("the providers are offered");
-        assert_eq!(
-            providers.completion, "ver",
-            "Tab finishes `ri` into `river`"
-        );
-        assert!(providers.hint.contains("river"), "{providers:?}");
-
-        let models = command_suggestion("/model deep", "/model deep".len(), &names)
-            .expect("the models are offered");
-        assert!(
-            models.hint.contains("deepseek-ai/DeepSeek-V4.1-Flash"),
-            "a model id may carry slashes of its own: {models:?}"
-        );
-        // The completion appends only what was not typed, so a name with a
-        // slash in it is completed as it is rather than cut at the slash.
-        assert_eq!(models.completion, "seek-ai/DeepSeek-V4.1-Flash");
-    }
-
-    #[test]
-    fn the_connection_command_completes_the_provider_it_takes() {
-        // `/connection add` and `/connection remove` name a provider the key is
-        // being saved or removed for, and that name is a catalogue id the
-        // registry cannot hold: the completion offers it for the third word.
-        let names = catalogue();
-        let adding = command_suggestion("/connection add ri", "/connection add ri".len(), &names)
-            .expect("the providers are offered");
-        assert_eq!(adding.completion, "ver", "Tab finishes `ri` into `river`");
-        assert!(adding.hint.contains("river"), "{adding:?}");
-
-        let removing = command_suggestion(
-            "/connection remove ri",
-            "/connection remove ri".len(),
-            &names,
-        )
-        .expect("the providers are offered");
-        assert_eq!(removing.completion, "ver");
-        assert!(removing.hint.contains("river"), "{removing:?}");
-
-        // `list` takes no provider: a word after it is not a name to complete.
-        assert!(
-            command_suggestion("/connection list ri", "/connection list ri".len(), &names)
-                .is_none()
-        );
-        // And a provider already on the line is finished: a second one is a
-        // word the parser refuses.
-        assert!(
-            command_suggestion(
-                "/connection add river ",
-                "/connection add river ".len(),
-                &names
-            )
-            .is_none()
-        );
-        // Before any provider is typed, the action itself is what the registry
-        // completes, and the catalogue does not jump in with every provider.
-        assert!(command_suggestion("/connection add ", "/connection add ".len(), &names).is_some());
-    }
-
-    #[test]
-    fn a_catalogue_name_is_not_offered_where_the_registry_answers() {
-        // The catalogue is the fallback, not a second opinion: `/reasoning` and
-        // every other command complete from the registry, and a provider id
-        // typed after one is not a name it offers.
-        let names = catalogue();
-        let efforts = command_suggestion("/reasoning h", "/reasoning h".len(), &names)
-            .expect("the registry answers");
-        assert_eq!(efforts.completion, "igh");
-        // And with no names pushed — the state before the first catalogue read —
-        // the two commands offer nothing rather than an empty list.
-        assert!(command_suggestion("/provider r", "/provider r".len(), &no_names()).is_none());
-        assert!(command_suggestion("/model d", "/model d".len(), &no_names()).is_none());
-    }
-
-    #[test]
-    fn a_command_with_its_argument_already_given_offers_nothing_more() {
-        // There is one provider and one model on the line: offering a second
-        // would complete a word the parser then refuses.
-        let names = catalogue();
-        for line in ["/provider river ", "/model deepseek-v4.1-flash "] {
-            assert!(
-                command_suggestion(line, line.len(), &names).is_none(),
-                "`{line}` is finished"
-            );
-        }
-    }
-
-    /// The usage line the registry writes for a command.
-    fn usage_of(name: &str) -> Option<String> {
-        crate::commands_registry::shared()
-            .get(name)
-            .map(norte_code_protocol::commands::CommandSpec::usage)
-    }
-
-    /// Whether the completion offers a name.
-    ///
-    /// These tests were written against a `const` list of names, and the bug
-    /// they exist for was a command that was parsed and missing from it. Asking
-    /// the registry is the same question and cannot go stale.
-    fn offered(name: &str) -> bool {
-        crate::commands_registry::shared()
-            .commands()
-            .iter()
-            .any(|spec| spec.spellings().contains(&name))
-    }
-
-    #[test]
-    fn reasoning_commands_accept_only_known_settings_and_scopes() {
-        assert_eq!(
-            parse_chat_command("/reasoning high"),
-            Some(Ok(ChatCommand::Reasoning {
-                scope: ReasoningScope::Session,
-                reasoning: Reasoning::Effort {
-                    effort: "high".to_owned()
-                }
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/reasoning message low"),
-            Some(Ok(ChatCommand::Reasoning {
-                scope: ReasoningScope::Message,
-                reasoning: Reasoning::Effort {
-                    effort: "low".to_owned()
-                }
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/reasoning budget:4096"),
-            Some(Ok(ChatCommand::Reasoning {
-                scope: ReasoningScope::Session,
-                reasoning: Reasoning::Budget { tokens: 4096 }
-            }))
-        );
-        assert!(matches!(
-            parse_chat_command("/reasoning fast"),
-            Some(Err(_))
-        ));
-        assert!(matches!(
-            parse_chat_command("/reasoning high sometimes"),
-            Some(Err(_))
-        ));
-        assert!(matches!(
-            parse_chat_command("/reasoning budget:0"),
-            Some(Err(_))
-        ));
-    }
-
-    #[test]
-    fn rename_takes_the_whole_line_and_a_bare_one_asks_the_model() {
-        // A name is not a word: everything after the command is the title, so
-        // a name with spaces in it is the name and not a usage error.
-        assert_eq!(
-            parse_chat_command("/rename fix the footer overflow"),
-            Some(Ok(ChatCommand::Rename {
-                title: Some("fix the footer overflow".to_owned())
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/rename   spaced   out  "),
-            Some(Ok(ChatCommand::Rename {
-                title: Some("spaced   out".to_owned())
-            }))
-        );
-        // Bare, it is the model that picks, which is the path a session that
-        assert_eq!(
-            parse_chat_command("/rename"),
-            Some(Ok(ChatCommand::Rename { title: None }))
-        );
-        assert!(offered("/rename"));
-        assert_eq!(usage_of("/rename"), Some("/rename [title]".to_owned()));
-        // A word that merely starts with it is still a message.
-        assert_eq!(parse_chat_command("/renamed"), None);
-    }
-
-    #[test]
-    fn delete_is_a_command_and_takes_no_argument() {
-        // `/delete` removes the session the chat is on and leaves. It is spelled
-        // out because it is not undoable from here: everything else a person
-        // types beginning with a slash is refused rather than sent as a message,
-        // and a delete that reached the model as text would be a message about
-        // deleting rather than the deletion.
-        assert_eq!(parse_chat_command("/delete"), Some(Ok(ChatCommand::Delete)));
-        // An argument is refused by the registry, which names the word it did
-        // not expect and prints the usage: a delete is not something to guess
-        // at, and a silent ignore would run it on the wrong reading of what
-        // was typed.
-        assert!(
-            matches!(
-                parse_chat_command("/delete now"),
-                Some(Err(message)) if message.contains("no `now`") && message.contains("usage: /delete")
-            ),
-            "an argument is refused: {:?}",
-            parse_chat_command("/delete now")
-        );
-    }
-
-    #[test]
-    fn debug_is_a_command_and_takes_no_argument() {
-        assert_eq!(parse_chat_command("/debug"), Some(Ok(ChatCommand::Debug)));
-        // The command list and the completion both know it, so it is reachable
-        // by typing `/deb` and pressing Tab.
-        assert!(offered("/debug"));
-        assert_eq!(usage_of("/debug"), Some("/debug".to_owned()));
-        // A word after it is not an argument it takes, and it is refused
-        // rather than sent: a command with text the client does not understand
-        // is a mistake the person wants told about, not a message for the
-        // model that happens to start with a slash.
-        assert!(
-            parse_chat_command("/debug now")
-                .expect("a command")
-                .is_err()
-        );
-        // A name that is not the command at all is still a message.
-        assert_eq!(parse_chat_command("/debugs"), None);
-    }
-
-    #[test]
-    fn command_arguments_are_validated_instead_of_sent_as_messages() {
-        assert_eq!(
-            parse_chat_command("/model openrouter/deepseek"),
-            Some(Ok(ChatCommand::Model {
-                model: "openrouter/deepseek".to_owned()
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/model deepseek"),
-            Some(Ok(ChatCommand::Model {
-                model: "deepseek".to_owned()
-            }))
-        );
-        assert!(matches!(parse_chat_command("/steer hello"), Some(Err(_))));
-    }
-
-    #[test]
-    fn budget_limits_are_positive_and_respect_the_unit() {
-        assert_eq!(parse_budget_limit(BudgetUnit::Usd, "$1.25"), Ok(1.25));
-        assert_eq!(parse_budget_limit(BudgetUnit::Tokens, "1_000"), Ok(1000.0));
-        assert!(parse_budget_limit(BudgetUnit::Requests, "1.5").is_err());
-        assert!(parse_budget_limit(BudgetUnit::Usd, "0").is_err());
-        assert!(parse_budget_limit(BudgetUnit::Tokens, "many").is_err());
-    }
-
-    #[test]
-    fn mcp_lists_switches_and_refuses_a_bad_argument() {
-        // Bare `/mcp` lists.
-        assert_eq!(
-            parse_chat_command("/mcp"),
-            Some(Ok(ChatCommand::Mcp {
-                action: McpAction::List
-            }))
-        );
-        // Each action, with the server it acts on.
-        for (text, action) in [
-            (
-                "/mcp enable everything",
-                McpAction::Enable {
-                    name: "everything".to_owned(),
-                },
-            ),
-            (
-                "/mcp disable everything",
-                McpAction::Disable {
-                    name: "everything".to_owned(),
-                },
-            ),
-            (
-                "/mcp remove everything",
-                McpAction::Remove {
-                    name: "everything".to_owned(),
-                },
-            ),
-        ] {
-            assert_eq!(
-                parse_chat_command(text),
-                Some(Ok(ChatCommand::Mcp { action })),
-                "{text}"
-            );
-        }
-        // `add` takes a name, a command and its arguments.
-        assert_eq!(
-            parse_chat_command("/mcp add context7 npx -y @upstash/context7-mcp"),
-            Some(Ok(ChatCommand::Mcp {
-                action: McpAction::Add {
-                    name: "context7".to_owned(),
-                    command: "npx".to_owned(),
-                    args: vec!["-y".to_owned(), "@upstash/context7-mcp".to_owned()],
-                },
-            }))
-        );
-        // A switch without a server, an `add` without a command, and an unknown
-        // action are refused rather than sent to the model as a message.
-        assert!(matches!(parse_chat_command("/mcp enable"), Some(Err(_))));
-        assert!(matches!(
-            parse_chat_command("/mcp add onlyname"),
-            Some(Err(_))
-        ));
-        assert!(matches!(
-            parse_chat_command("/mcp frobnicate x"),
-            Some(Err(_))
-        ));
-        // Prose is still a message.
-        assert!(parse_chat_command("mcp enable everything").is_none());
-        assert!(offered("/mcp"), "the list offers it");
-    }
-
-    #[test]
-    fn refresh_and_reload_are_the_same_command() {
-        // A command a user types must never reach the model as text, and the
-        // two spellings do the same work: one re-reads what can be re-read.
-        assert!(matches!(
-            parse_chat_command("/refresh"),
-            Some(Ok(ChatCommand::Refresh))
-        ));
-        assert!(matches!(
-            parse_chat_command("/reload"),
-            Some(Ok(ChatCommand::Refresh))
-        ));
-        assert!(
-            parse_chat_command("refresh the config").is_none(),
-            "prose is a message, not the command"
-        );
-        assert!(usage_of("/refresh").is_some());
-        assert!(usage_of("/reload").is_some());
-        assert!(offered("/refresh"), "the list offers it");
-        assert!(offered("/reload"), "and its alias");
-    }
-
-    #[test]
-    fn typing_part_of_an_effort_completes_it() {
-        // The case the registry was built for: nobody should have to remember
-        // that it is `xhigh` and not `x-high`, and Tab has to finish the word
-        // rather than refuse it for being partial.
-        let typed = command_suggestion("/reasoning xh", "/reasoning xh".len(), &no_names())
-            .expect("the effort is offered");
-        assert_eq!(typed.completion, "igh", "Tab finishes `xh` into `xhigh`");
-        assert!(
-            typed.hint.contains("xhigh"),
-            "and the row says what it was: {typed:?}"
-        );
-
-        // A single command with nothing typed past the slash still lists them.
-        let listed = command_suggestion("/reasoning ", "/reasoning ".len(), &no_names())
-            .expect("the values are offered");
-        assert!(listed.hint.contains("budget:<tokens>"), "{listed:?}");
-    }
-
-    #[test]
-    fn slash_commands_and_arguments_have_dimmed_suggestions() {
-        let commands = command_suggestion("/", 1, &no_names()).expect("command list");
-        assert_eq!(commands.completion, "help");
-        assert!(commands.hint.contains("/reasoning"));
-
-        let prefix = command_suggestion("/rea", 4, &no_names()).expect("command prefix");
-        assert_eq!(prefix.completion, "soning");
-
-        let settings =
-            command_suggestion("/reasoning ", "/reasoning ".len(), &no_names()).expect("settings");
-        assert_eq!(settings.completion, "auto");
-        assert!(settings.hint.contains("high"));
-        assert!(settings.hint.contains("budget:<tokens>"));
-
-        let partial =
-            command_suggestion("/reasoning h", "/reasoning h".len(), &no_names()).expect("effort");
-        assert_eq!(partial.completion, "igh");
-
-        let scope = command_suggestion("/reasoning high ", "/reasoning high ".len(), &no_names())
-            .expect("scope");
-        assert_eq!(scope.completion, "session");
-
-        let tool_scope =
-            command_suggestion("/allow bash ", "/allow bash ".len(), &no_names()).expect("scope");
-        assert_eq!(tool_scope.completion, "session");
-
-        assert!(command_suggestion("/steer", "/steer".len(), &no_names()).is_none());
-    }
-
-    #[test]
-    fn jobs_takes_a_list_check_or_stop_and_validates_its_id() {
-        // A bare `/jobs` is the listing, which is what a user reaching for it
-        // without arguments means.
-        assert_eq!(
-            parse_chat_command("/jobs"),
-            Some(Ok(ChatCommand::Jobs {
-                action: JobListAction::List,
-                id: None
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/jobs list"),
-            Some(Ok(ChatCommand::Jobs {
-                action: JobListAction::List,
-                id: None
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/jobs check job-2"),
-            Some(Ok(ChatCommand::Jobs {
-                action: JobListAction::Check,
-                id: Some("job-2".to_owned())
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/jobs stop job-2"),
-            Some(Ok(ChatCommand::Jobs {
-                action: JobListAction::Stop,
-                id: Some("job-2".to_owned())
-            }))
-        );
-        // `check` with nothing to check is a usage error, not an empty listing.
-        assert!(matches!(parse_chat_command("/jobs check"), Some(Err(_))));
-        assert!(matches!(parse_chat_command("/jobs stop"), Some(Err(_))));
-        assert!(matches!(
-            parse_chat_command("/jobs list job-1"),
-            Some(Err(_))
-        ));
-        assert!(matches!(
-            parse_chat_command("/jobs show job-1"),
-            Some(Err(_))
-        ));
-        assert!(matches!(parse_chat_command("/jobs one two"), Some(Err(_))));
-    }
-
-    #[test]
-    fn restart_is_an_exact_command_and_offered_by_help() {
-        assert!(matches!(
-            parse_chat_command("/restart"),
-            Some(Ok(ChatCommand::Restart))
-        ));
-        assert!(
-            offered("/jobs") && offered("/restart"),
-            "the list must offer both"
-        );
-        assert_eq!(
-            usage_of("/jobs"),
-            Some("/jobs [list|check|stop] [job-id]".to_owned())
-        );
-        assert_eq!(usage_of("/restart"), Some("/restart".to_owned()));
-    }
-
-    #[test]
-    fn the_menu_is_reachable_under_the_name_and_the_alias() {
-        // The startup screen is a list, and the command is the second way to
-        // reach it. `/back` is the name a person reaches for after wandering
-        // into something; both must land on the same thing, or the help would
-        // offer one and the parser answer only the other.
-        assert!(matches!(
-            parse_chat_command("/menu"),
-            Some(Ok(ChatCommand::Menu))
-        ));
-        assert!(matches!(
-            parse_chat_command("/back"),
-            Some(Ok(ChatCommand::Menu))
-        ));
-        assert!(offered("/menu"), "the list must offer it");
-        assert_eq!(usage_of("/menu"), Some("/menu".to_owned()));
-        // It takes no argument, so one is the mistake it is elsewhere: a word
-        // after the command is a word the command does not use.
-        assert!(matches!(parse_chat_command("/menu now"), Some(Err(_))));
-    }
-
-    #[test]
-    fn the_models_and_sessions_panels_are_reachable() {
-        // Both open a panel; neither takes an argument, so a word after one is
-        // a word the command does not use.
-        assert!(matches!(
-            parse_chat_command("/models"),
-            Some(Ok(ChatCommand::Models))
-        ));
-        assert!(matches!(
-            parse_chat_command("/sessions"),
-            Some(Ok(ChatCommand::Sessions))
-        ));
-        assert!(offered("/models"), "the list must offer /models");
-        assert!(offered("/sessions"), "the list must offer /sessions");
-        assert_eq!(usage_of("/models"), Some("/models".to_owned()));
-        assert_eq!(usage_of("/sessions"), Some("/sessions".to_owned()));
-        assert!(matches!(parse_chat_command("/models now"), Some(Err(_))));
-    }
-
-    #[test]
-    fn plans_command_is_offered_and_takes_no_arguments() {
-        assert!(matches!(
-            parse_chat_command("/plans"),
-            Some(Ok(ChatCommand::Plans))
-        ));
-        assert!(offered("/plans"));
-        assert_eq!(usage_of("/plans"), Some("/plans".to_owned()));
-        assert!(matches!(parse_chat_command("/plans now"), Some(Err(_))));
-    }
-
-    #[test]
-    fn plan_status_reads_only_supported_front_matter_values() {
-        assert_eq!(
-            plan_file_status("---\nstatus: active\n---\n# Plan"),
-            Some("active")
-        );
-        assert_eq!(
-            plan_file_status("---\nstatus: pending\n---\n# Plan"),
-            Some("pending")
-        );
-        assert_eq!(
-            plan_file_status("---\nstatus: canceled\n---\n# Plan"),
-            Some("canceled")
-        );
-        assert_eq!(plan_file_status("---\nstatus: unknown\n---\n"), None);
-        assert_eq!(plan_file_status("# No metadata"), None);
-    }
-
-    #[test]
-    fn plan_metadata_reads_timestamps_and_json_quoted_provider_values() {
-        let contents = "---\nstatus: active\ncreated_at: 2026-01-02T03:04:05Z\nprovider: \"openai\"\nmodel: \"model/one\"\n---\n# Title";
-        assert_eq!(
-            plan_file_metadata(contents, "created_at").as_deref(),
-            Some("2026-01-02T03:04:05Z")
-        );
-        assert_eq!(
-            plan_file_metadata(contents, "provider").as_deref(),
-            Some("openai")
-        );
-        assert_eq!(
-            plan_file_metadata(contents, "model").as_deref(),
-            Some("model/one")
-        );
-    }
-
-    #[test]
-    fn the_plugins_update_command_takes_an_optional_name() {
-        // Bare updates every plugin; a name updates just that one.
-        assert!(matches!(
-            parse_chat_command("/plugins update"),
-            Some(Ok(ChatCommand::PluginsUpdate { name: None }))
-        ));
-        assert!(matches!(
-            parse_chat_command("/plugins update session-info"),
-            Some(Ok(ChatCommand::PluginsUpdate { name: Some(name) })) if name == "session-info"
-        ));
-        assert!(offered("/plugins update"));
-    }
-
-    #[test]
-    fn the_plugins_add_command_accepts_a_workspace_package() {
-        assert_eq!(
-            parse_chat_command("/plugins add https://example.invalid/repo plugin-two"),
-            Some(Ok(ChatCommand::PluginsAdd {
-                url: "https://example.invalid/repo".to_owned(),
-                package: Some("plugin-two".to_owned()),
-                all: false,
-            }))
-        );
-        assert_eq!(
-            parse_chat_command("/plugins add https://example.invalid/repo"),
-            Some(Ok(ChatCommand::PluginsAdd {
-                url: "https://example.invalid/repo".to_owned(),
-                package: None,
-                all: false,
-            }))
-        );
-    }
-
-    #[test]
-    fn the_plugins_enable_and_disable_commands_take_a_name() {
-        assert!(matches!(
-            parse_chat_command("/plugins enable session-info"),
-            Some(Ok(ChatCommand::PluginsEnable { name })) if name == "session-info"
-        ));
-        assert!(matches!(
-            parse_chat_command("/plugins disable session-info"),
-            Some(Ok(ChatCommand::PluginsDisable { name })) if name == "session-info"
-        ));
-        // The name is required: a bare toggle has nothing to act on.
-        assert!(matches!(
-            parse_chat_command("/plugins enable"),
-            Some(Err(_))
-        ));
-        assert!(matches!(
-            parse_chat_command("/plugins disable"),
-            Some(Err(_))
-        ));
-    }
-
-    #[test]
-    fn the_models_panel_expands_a_provider_into_its_models() {
-        use norte_code_protocol::catalog::{Catalog, Models, Providers};
-
-        let providers: Providers = serde_json::from_str(
-            r#"{"providers":{
-                "a":{"name":"A","environment_keys":["K"],
-                    "wires":[{"api":"https://example.invalid/a","schema":"openai"}]},
-                "b":{"name":"B","environment_keys":["K"],
-                    "wires":[{"api":"https://example.invalid/b","schema":"openai"}]}}}"#,
-        )
-        .expect("providers");
-        let models: Models = serde_json::from_str(
-            r#"{"models":[
-                {"id":"m1","provider_id":"a","name":"M1","supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}},
-                {"id":"m2","provider_id":"a","name":"M2","supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}}]}"#,
-        )
-        .expect("models");
-        let catalog = Catalog::new(providers, models).expect("catalogue");
-
-        // Collapsed: one actable row per provider, each expanding.
-        let rows = models_panel(&catalog, Some("a"), Some("m1"), None, "");
-        let actables: Vec<_> = rows.iter().filter_map(|row| row.action.clone()).collect();
-        assert_eq!(actables.len(), 2, "one row per provider");
-        assert!(
-            matches!(&actables[0], crate::modal::Action::ExpandProvider(p) if p == "a"),
-            "{actables:?}"
-        );
-
-        // Expanded: the provider is a heading and each model sets both halves.
-        let rows = models_panel(&catalog, Some("a"), Some("m1"), Some("a"), "");
-        assert!(rows.iter().any(|row| row.heading), "the provider heads it");
-        let set: Vec<_> = rows
-            .iter()
-            .filter_map(|row| match &row.action {
-                Some(action @ crate::modal::Action::SetModel { .. }) => Some(action.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(set.len(), 2, "two models are selectable");
-        assert!(
-            matches!(&set[0], crate::modal::Action::SetModel { provider, model }
-                if provider == "a" && model == "m1"),
-            "{set:?}"
-        );
-    }
-
-    #[test]
-    fn the_models_panel_filters_by_provider_and_by_model() {
-        use norte_code_protocol::catalog::{Catalog, Models, Providers};
-
-        let providers: Providers = serde_json::from_str(
-            r#"{"providers":{
-                "alpha":{"name":"Alpha Cloud","environment_keys":["K"],
-                    "wires":[{"api":"https://example.invalid/a","schema":"openai"}]},
-                "beta":{"name":"Beta","environment_keys":["K"],
-                    "wires":[{"api":"https://example.invalid/b","schema":"openai"}]}}}"#,
-        )
-        .expect("providers");
-        let models: Models = serde_json::from_str(
-            r#"{"models":[
-                {"id":"m1","provider_id":"alpha","name":"M1","supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}},
-                {"id":"m2","provider_id":"alpha","name":"M2","supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}}]}"#,
-        )
-        .expect("models");
-        let catalog = Catalog::new(providers, models).expect("catalogue");
-
-        // A model matches: only that model, under its provider.
-        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "m2");
-        assert_eq!(rows.len(), 2, "heading and the matching model: {rows:?}");
-        assert!(rows[0].heading, "the provider is a heading: {rows:?}");
-        assert_eq!(rows[1].text.trim(), "m2");
-        assert!(
-            !rows.iter().any(|row| row.text.contains("beta")),
-            "the provider with no match is gone: {rows:?}"
-        );
-
-        // The provider matches: all of its models stay.
-        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "beta");
-        assert!(rows[0].heading, "the matching provider heads it: {rows:?}");
-        assert_eq!(rows.len(), 2, "heading and its empty note: {rows:?}");
-        assert!(rows[1].dim, "no models listed: {rows:?}");
-
-        // A provider name matches even when the id does not; the query is
-        // case-insensitive, and the name is part of what it reads.
-        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "ALPHA CLOUD");
-        assert_eq!(rows.len(), 3, "provider and both models: {rows:?}");
-
-        // Nothing matches: one quiet row says so, and there is nothing to act
-        // on.
-        let rows = models_panel(&catalog, Some("alpha"), Some("m1"), None, "zzz");
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0].text.contains("zzz"), "{:?}", rows[0].text);
-        assert!(rows[0].action.is_none(), "no row to act on");
-    }
-
-    /// The routing that was missing. `/provider` and `/model` reach the
-    /// command through two handlers — one at a turn boundary and one mid-turn —
-    /// and the held-provider state was only wired into the second. At a turn
-    /// boundary (the idle case, which is nearly always) `/provider exa` kept the
-    /// old model, built `exa/river-model`, and sent it: the service refused a
-    /// pair no file lists, the switch never took, and `/model` put the old
-    /// provider back. Neither half could be moved.
-    ///
-    /// This drives the real loop — the same `interactive_loop` a person types
-    /// into — rather than the pure decision the unit test above already covers,
-    /// so it is the wiring, and not the policy, that fails if it regresses.
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn a_held_provider_switch_is_taken_by_the_turn_boundary_handler() {
-        use std::collections::BTreeMap;
-
-        use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
-        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
-        use norte_code_protocol::catalog::Catalog;
-        use norte_code_protocol::config::{ApiKey, Config};
-        use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
-        use norte_testing::ScriptedModel;
-
-        struct Factory(Arc<dyn Model>);
-        impl ModelFactory for Factory {
-            fn build(
-                &self,
-                _spec: &ModelSpec,
-                _capabilities: &Capabilities,
-            ) -> Result<Arc<dyn Model>, ServiceError> {
-                Ok(Arc::clone(&self.0))
-            }
-        }
-
-        let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
-            r#"{"providers":{
-                "first":{"name":"First","environment_keys":["PATH"],
-                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]},
-                "second":{"name":"Second","environment_keys":["PATH"],
-                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
-        )
-        .expect("providers");
-        // Only `first` lists `shared`. `second` lists a model of its own, so a
-        // switch to it cannot carry the model the session is on.
-        let models: norte_code_protocol::catalog::Models = serde_json::from_str(
-            r#"{"models":[
-                {"id":"shared","provider_id":"first","name":"Shared",
-                    "supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}},
-                {"id":"other","provider_id":"second","name":"Other",
-                    "supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}}]}"#,
-        )
-        .expect("models");
-        let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
-        let entry = catalog.find("first", "shared").expect("model");
-        let spec = ModelSpec {
-            provider: "first".to_owned(),
-            model: "shared".to_owned(),
-            endpoint: "https://example.invalid/v1".to_owned(),
-            api_key: ApiKey::new("test"),
-            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
-            auth: None,
-            capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
-            headers: BTreeMap::new(),
-        };
-        let reference = ModelRef::new(
-            ProviderId::new("first").expect("provider"),
-            ModelId::new("shared").expect("model"),
-        );
-        let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
-        let service = Arc::new(
-            Service::new(
-                Config::default(),
-                catalog,
-                Some(spec),
-                Arc::new(Factory(model)),
-                Arc::new(InMemoryStore::new()),
-                Arc::new(InMemoryBlobStore::new()),
-                "system",
-            )
-            .expect("service"),
-        );
-
-        let pinned = Pinned::new();
-        let mut renderer = Renderer::new(
-            Format::Text,
-            Verbosity::Low,
-            false,
-            Style::plain(),
-            Arc::clone(&pinned),
-        );
-
-        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
-            .await
-            .expect("create session");
-        let session = events
-            .iter()
-            .find_map(|event| event.session.clone())
-            .expect("session key");
-        let other_session =
-            drain_request(&service, ClientRequestKind::CreateSession { title: None })
-                .await
-                .expect("create another session")
-                .into_iter()
-                .find_map(|event| event.session)
-                .expect("second session key");
-
-        // Drive the loop the way a person does: `/provider`, then `/model`, then
-        // `/exit`. There is no terminal in a test, so the lines come from a
-        // channel instead of the keyboard — the same path the real handler
-        // takes, which is the thing that was wired wrong.
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut input = InteractiveInput::from_events(rx);
-        for line in ["/provider second", "/model other", "/exit"] {
-            tx.send(EditorEvent::Line(line.to_owned(), Vec::new()))
-                .expect("line");
-        }
-        drop(tx);
-
-        interactive_loop(
-            &service,
-            Some(session.clone()),
-            &mut renderer,
-            Style::plain(),
-            &mut input,
-            None,
-            None,
-        )
-        .await
-        .expect("loop");
-
-        assert_eq!(renderer.pending_provider, None, "the switch is settled");
-        assert_eq!(
-            service.session_spec(&session).map(|spec| spec.label()),
-            Some("second/other".to_owned()),
-            "both halves moved through the turn-boundary handler"
-        );
-        refresh_session_model(&service, &other_session, &mut renderer);
-        assert_eq!(
-            renderer.model_name.as_deref(),
-            Some("first/shared"),
-            "opening another session restores its own model in the footer"
-        );
-        assert_eq!(renderer.max_context, Some(1_000));
-        assert!(!renderer.model_unset);
-    }
-
-    /// The wiring the completion depends on, driven through the real loop.
-    ///
-    /// The names travel from the catalogue to the pinned handle, which is the
-    /// only channel the keyboard's thread and the frame share: a completion that
-    /// was answered from the catalogue but never pushed there would offer
-    /// nothing, and that is a bug no pure test of the candidate list can see.
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn the_catalogue_reaches_the_pinned_handle_the_frame_completes_from() {
-        use std::collections::BTreeMap;
-
-        use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId};
-        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
-        use norte_code_protocol::catalog::Catalog;
-        use norte_code_protocol::config::{ApiKey, Config};
-        use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
-        use norte_testing::ScriptedModel;
-
-        struct Factory(Arc<dyn Model>);
-        impl ModelFactory for Factory {
-            fn build(
-                &self,
-                _spec: &ModelSpec,
-                _capabilities: &Capabilities,
-            ) -> Result<Arc<dyn Model>, ServiceError> {
-                Ok(Arc::clone(&self.0))
-            }
-        }
-
-        let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
-            r#"{"providers":{
-                "exa":{"name":"Exa","environment_keys":["PATH"],
-                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]},
-                "river":{"name":"River","environment_keys":["PATH"],
-                    "wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
-        )
-        .expect("providers");
-        let models: norte_code_protocol::catalog::Models = serde_json::from_str(
-            r#"{"models":[
-                {"id":"deepseek-v4.1-flash-uncensored","provider_id":"exa","name":"U",
-                    "supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}},
-                {"id":"deepseek-ai/DeepSeek-V4.1-Flash","provider_id":"river","name":"F",
-                    "supported_params":["tools"],
-                    "modalities":{"input":["text"],"output":["text"]},
-                    "limit":{"context":1000,"output":100}}]}"#,
-        )
-        .expect("models");
-        let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
-        let entry = catalog
-            .find("exa", "deepseek-v4.1-flash-uncensored")
-            .expect("model");
-        let spec = ModelSpec {
-            provider: "exa".to_owned(),
-            model: "deepseek-v4.1-flash-uncensored".to_owned(),
-            endpoint: "https://example.invalid/v1".to_owned(),
-            api_key: ApiKey::new("test"),
-            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
-            auth: None,
-            capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
-            headers: BTreeMap::new(),
-        };
-        let reference = ModelRef::new(
-            ProviderId::new("exa").expect("provider"),
-            ModelId::new("deepseek-v4.1-flash-uncensored").expect("model"),
-        );
-        let model = Arc::new(ScriptedModel::new(reference).turn_text("ok"));
-        let service = Arc::new(
-            Service::new(
-                Config::default(),
-                catalog,
-                Some(spec),
-                Arc::new(Factory(model)),
-                Arc::new(InMemoryStore::new()),
-                Arc::new(InMemoryBlobStore::new()),
-                "system",
-            )
-            .expect("service"),
-        );
-
-        let pinned = Pinned::new();
-        let mut renderer = Renderer::new(
-            Format::Text,
-            Verbosity::Low,
-            false,
-            Style::plain(),
-            Arc::clone(&pinned),
-        );
-        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
-            .await
-            .expect("create session");
-        let session = events
-            .iter()
-            .find_map(|event| event.session.clone())
-            .expect("session key");
-
-        // A session on `exa`: the models offered are `exa`'s.
-        refresh_completions(&service, Some(&session), &mut renderer);
-        let names = pinned.completion_names();
-        assert_eq!(
-            names.providers,
-            ["exa", "river"],
-            "every provider is offered"
-        );
-        assert_eq!(
-            names.models,
-            ["deepseek-v4.1-flash-uncensored"],
-            "the session's own provider decides the models: {names:?}"
-        );
-
-        // `/provider river` holds the switch, because `river` does not serve the
-        // model the session is on, and the completion follows the held provider:
-        // the next `/model` line offers `river`'s models, which is the list the
-        // notice just told the person to pick from.
-        switch_provider(&service, &session, "river", &mut renderer, None).await;
-        assert_eq!(renderer.pending_provider.as_deref(), Some("river"));
-        let held = pinned.completion_names();
-        assert_eq!(
-            held.models,
-            ["deepseek-ai/DeepSeek-V4.1-Flash"],
-            "the held provider decides the models: {held:?}"
-        );
-        // And the frame, which is what draws the menu, offers it from the same
-        // names: the row reaches the frame and not only the test.
-        let suggestion = command_suggestion(
-            "/model deep",
-            "/model deep".len(),
-            &pinned.completion_names(),
-        )
-        .expect("the model is offered");
-        assert_eq!(suggestion.completion, "seek-ai/DeepSeek-V4.1-Flash");
-    }
-
-    #[tokio::test]
-    async fn dropping_the_guard_aborts_the_interrupt_listener() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&ran);
-        let guard = SignalGuard(tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            flag.store(true, Ordering::SeqCst);
-        }));
-        drop(guard);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(!ran.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn cancel_before_first_token_returns_cli() {
-        use crate::input::{EditorAction, EditorEvent, InteractiveInput};
-        use async_trait::async_trait;
-        use norte::{
-            Capabilities, Model, ModelId, ModelRef, ModelRequest, ModelStream, ProviderId,
-        };
-        use norte_code_agent::{ModelFactory, ModelSpec, Service, ServiceError};
-        use norte_code_protocol::ClientRequest;
-        use norte_code_protocol::catalog::Catalog;
-        use norte_code_protocol::config::Config;
-        use norte_code_protocol::{InMemoryBlobStore, InMemoryStore};
-        use norte_testing::ScriptedModel;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct Factory(Arc<dyn Model>);
-        impl ModelFactory for Factory {
-            fn build(
-                &self,
-                _: &ModelSpec,
-                _: &Capabilities,
-            ) -> Result<Arc<dyn Model>, ServiceError> {
-                Ok(Arc::clone(&self.0))
-            }
-        }
-
-        struct StallingModel {
-            inner: Arc<ScriptedModel>,
-            started: Arc<tokio::sync::Notify>,
-            dropped: Arc<AtomicBool>,
-        }
-        struct DropProbe(Arc<AtomicBool>);
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-        #[async_trait]
-        impl Model for StallingModel {
-            fn reference(&self) -> &ModelRef {
-                self.inner.reference()
-            }
-            fn capabilities(&self) -> &Capabilities {
-                self.inner.capabilities()
-            }
-            fn continuity(&self) -> &dyn norte::ContinuityAdapter {
-                self.inner.continuity()
-            }
-            async fn stream(&self, _request: ModelRequest) -> norte::Result<ModelStream> {
-                let _probe = DropProbe(Arc::clone(&self.dropped));
-                self.started.notify_one();
-                std::future::pending::<()>().await;
-                unreachable!()
-            }
-        }
-
-        let reference = ModelRef::new(
-            ProviderId::new("test").expect("provider"),
-            ModelId::new("scripted").expect("model"),
-        );
-        let started = Arc::new(tokio::sync::Notify::new());
-        let dropped = Arc::new(AtomicBool::new(false));
-        let model = Arc::new(StallingModel {
-            inner: Arc::new(ScriptedModel::new(reference)),
-            started: Arc::clone(&started),
-            dropped: Arc::clone(&dropped),
-        });
-
-        let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
-            r#"{"providers":{"test":{"name":"Test","environment_keys":["PATH"],"wires":[{"api":"https://example.invalid/v1","schema":"openai"}]}}}"#,
-        ).expect("providers");
-        let models: norte_code_protocol::catalog::Models = serde_json::from_str(
-            r#"{"models":[{"id":"scripted","provider_id":"test","name":"S","supported_params":["tools"],"modalities":{"input":["text"],"output":["text"]},"limit":{"context":1000,"output":100}}]}"#,
-        ).expect("models");
-        let catalog = Arc::new(Catalog::new(providers, models).expect("catalogue"));
-        let entry = catalog.find("test", "scripted").expect("model");
-        let spec = ModelSpec {
-            provider: "test".to_owned(),
-            model: "scripted".to_owned(),
-            endpoint: "https://example.invalid/v1".to_owned(),
-            api_key: norte_code_protocol::config::ApiKey::new("test"),
-            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
-            auth: None,
-            capabilities: norte_code_protocol::catalog::capabilities(
-                entry,
-                norte_code_protocol::catalog::WireSchema::OpenAI,
-            ),
-            headers: std::collections::BTreeMap::new(),
-        };
-        let service = Arc::new(
-            Service::new(
-                Config::default(),
-                catalog,
-                Some(spec),
-                Arc::new(Factory(model)),
-                Arc::new(InMemoryStore::new()),
-                Arc::new(InMemoryBlobStore::new()),
-                "system",
-            )
-            .expect("service"),
-        );
-
-        let pinned = Pinned::new();
-        let mut renderer = Renderer::new(
-            Format::Text,
-            Verbosity::Low,
-            false,
-            Style::plain(),
-            Arc::clone(&pinned),
-        );
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut input = InteractiveInput::from_events(rx);
-
-        // create session
-        let events = drain_request(&service, ClientRequestKind::CreateSession { title: None })
-            .await
-            .expect("create session");
-        let session = events
-            .iter()
-            .find_map(|e| e.session.clone())
-            .expect("session");
-
-        // send a message to start a turn
-        let stream = service
+        let stream = match client
             .submit(ClientRequest {
-                request_id: 1,
+                request_id: 0,
                 kind: ClientRequestKind::SendMessage {
                     session: Some(session.clone()),
-                    text: "go".to_owned(),
+                    text,
                     attachments: Vec::new(),
                     budget: None,
                     reasoning: None,
@@ -4993,32 +3747,64 @@ mod tests {
                 },
             })
             .await
-            .expect("turn");
-
-        // cancel immediately (before TurnStarted processed)
-        tx.send(EditorEvent::Action(EditorAction::CancelTurn))
-            .expect("send");
-
-        // wait for provider to start (may never if cancelled early)
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_millis(500), started.notified()).await;
-
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            super::drive_turns(
-                &service,
-                stream,
-                &mut renderer,
-                Style::plain(),
-                Some(session.clone()),
-                Some(&mut input),
-            ),
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                let message = error.to_string();
+                renderer.diagnostic(
+                    "request_failed",
+                    &serde_json::json!({
+                        "index": index,
+                        "operation": "send_message",
+                        "error": message,
+                    }),
+                );
+                return Err(message);
+            }
+        };
+        drive_turns(
+            service,
+            client,
+            stream,
+            renderer,
+            style,
+            Some(session.clone()),
+            None,
         )
         .await
-        .expect("drive_turns should return within timeout")
-        .expect("no error");
+        .map_err(|error| {
+            renderer.diagnostic(
+                "request_failed",
+                &serde_json::json!({
+                    "index": index,
+                    "operation": "send_message",
+                    "error": error,
+                }),
+            );
+            error
+        })?;
+        renderer.diagnostic(
+            "request_finished",
+            &serde_json::json!({
+                "index": index,
+                "operation": "send_message",
+            }),
+        );
+    }
+    Ok(())
+}
 
-        assert!(dropped.load(Ordering::SeqCst), "provider future dropped");
-        let _ = outcome;
+#[cfg(test)]
+mod tests {
+    use super::{parse_budget_limit, parse_chat_command};
+
+    #[test]
+    fn budget_limit_rejects_non_positive_values() {
+        assert!(parse_budget_limit(super::BudgetUnit::Tokens, "0").is_err());
+    }
+
+    #[test]
+    fn unknown_chat_text_remains_a_message() {
+        assert!(parse_chat_command("hello").is_none());
     }
 }

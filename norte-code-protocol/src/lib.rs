@@ -1,8 +1,11 @@
 //! The Norte Code client protocol.
 //!
-//! Versioned serde types only. Nothing here depends on Norte: the service maps
-//! between these types and the engine, so a client does not compile the engine
-//! and the wire can move on its own schedule.
+//! Versioned serde types for the Norte Code client wire. The service maps
+//! between these types and the engine, so a client does not compile the
+//! engine and the wire can move on its own schedule. This crate still
+//! depends on Norte for catalog capability mapping and adjacent adapters;
+//! those engine types are kept out of the wire structs and mapped in one
+//! place, so the crate is not engine-free until that dependency is removed.
 //!
 //! The two halves of the wire are [`ClientRequest`] and [`ServerEvent`]. Every
 //! server event carries the request it answers and, when it is about one, the
@@ -10,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_commands;
 pub mod catalog;
 pub mod commands;
 pub mod config;
@@ -24,6 +28,7 @@ pub mod tools;
 pub mod types;
 pub mod wire;
 
+pub use agent_commands::{AgentCommand, QueueMode};
 pub use store::*;
 pub use types::*;
 pub use wire::*;

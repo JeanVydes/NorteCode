@@ -1,0 +1,16 @@
+[package]
+name = "norte-code-plugin-host"
+description = "Unsafe dynamic-library boundary for Norte Code plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+libloading = "0.8"
+norte-code-protocol = { path = "../norte-code-protocol" }
+
+[lints]
+workspace = true
