@@ -3474,6 +3474,7 @@ pub(crate) async fn drive_turns(
                             continue;
                         };
                         if cancel_requested {
+                            renderer.pinned.set_pending_steers(Vec::new());
                             return Err("interrupted".to_owned());
                         }
                         cancel_requested = true;
@@ -3546,7 +3547,7 @@ pub(crate) async fn drive_turns(
                 }
                 match &event.kind {
                     ServerEventKind::TurnStarted { .. } => parked = false,
-                    ServerEventKind::TurnFinished { .. } => {
+                    ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
                         parked = false;
                         // A cancelled or budget-stopped turn still leaves the
                         // session clean and ready for a new message; only a
@@ -3580,6 +3581,7 @@ pub(crate) async fn drive_turns(
                     renderer.mark_cancelled();
                     renderer
                         .notice("question left pending; the session is saved and can be resumed");
+                    renderer.pinned.set_pending_steers(Vec::new());
                     return Ok(DriveOutcome {
                         session: current,
                         parked: true,
@@ -3587,20 +3589,12 @@ pub(crate) async fn drive_turns(
                 }
                 renderer.event(&event)?;
                 renderer.draw()?;
-                // Una vez que el turno terminó (TurnFinished) el stream SSE
-                // del servidor se mantiene abierto para la sesión, así que
-                // seguir leyéndolo bloquearía para siempre. Salimos de este
-                // bucle para poder enviar los mensajes encolados y aceptar
-                // nueva entrada en lugar de esperar eventos que nunca llegan.
-                if matches!(&event.kind, ServerEventKind::TurnFinished { .. }) {
-                    break;
-                }
+                // The server keeps the SSE stream open for the session (broadcast),
+                // so reading it would block forever. Handle the budget prompt first
+                // (if any), then leave this stream.
                 if matches!(
                     &event.kind,
-                    ServerEventKind::TurnFinished {
-                        committed: false,
-                        ..
-                    }
+                    ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
                 ) && let Some(prompt) = renderer.take_budget_prompt()
                     && renderer.can_prompt()
                     && let (Some(receiver), Some(session)) = (input.as_deref_mut(), current.clone())
@@ -3656,6 +3650,12 @@ pub(crate) async fn drive_turns(
                         }
                     }
                 }
+                if matches!(
+                    &event.kind,
+                    ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
+                ) {
+                    break;
+                }
             }
         }
         // Submit queued lines only after the current turn has finished. They
@@ -3679,6 +3679,11 @@ pub(crate) async fn drive_turns(
             .set_pending_steers(queued.iter().map(|(text, _)| text.clone()).collect());
         renderer.said(&text);
         renderer.mark_working();
+        // Draw immediately so the queued indicator and the spinner update
+        // before the network call blocks. Without this the frame that shows
+        // "queued: …" clears and the spinner appears only once the SSE
+        // connection is established, which the user perceives as a freeze.
+        renderer.draw()?;
         let request = ClientRequest {
             request_id: 0,
             kind: ClientRequestKind::SendMessage {
@@ -3712,9 +3717,7 @@ pub(crate) async fn drive_turns(
     // Nothing is waiting any more: the turn ended, whatever is left was never
     // applied, and leaving it above the input would promise a delivery that is
     // not coming.
-    if !queued.is_empty() {
-        renderer.pinned.set_pending_steers(Vec::new());
-    }
+    renderer.pinned.set_pending_steers(Vec::new());
     // A turn can move both lists: it can write a session rule, and a server
     // that dropped took its tools with it. The rows are rebuilt once
     // here rather than after every event that might have moved either.
