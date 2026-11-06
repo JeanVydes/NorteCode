@@ -16,14 +16,84 @@ use axum::{
 };
 use futures_util::StreamExt;
 use raep_types::{Envelope, FrameType, SessionAttach, StandardFrameType};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::{convert::Infallible, sync::Arc};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tower_http::{
     limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer, trace::TraceLayer,
 };
 
+use crate::payloads::payload;
 use crate::{HostError, NorteCodeRaepHost};
+
+/// A health/live payload.
+#[derive(Debug, serde::Serialize)]
+struct LivePayload {
+    status: &'static str,
+}
+
+/// An error body shared by every rejected HTTP response.
+#[derive(Debug, serde::Serialize)]
+struct ErrorBody {
+    code: &'static str,
+    message: String,
+}
+
+/// A rejected-response payload.
+#[derive(Debug, serde::Serialize)]
+struct RejectedPayload {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accepted: Option<bool>,
+    error: ErrorBody,
+}
+
+/// A telemetry failure payload.
+#[derive(Debug, serde::Serialize)]
+struct TelemetryFailedPayload {
+    status: &'static str,
+    error: ErrorBody,
+}
+
+/// An agent list payload.
+#[derive(Debug, serde::Serialize)]
+struct AgentListPayload {
+    agents: Vec<Value>,
+    next_cursor: Value,
+}
+
+/// A session list payload.
+#[derive(Debug, serde::Serialize)]
+struct SessionListPayload {
+    sessions: Vec<Value>,
+    next_cursor: Value,
+}
+
+/// An artifact reference payload.
+#[derive(Debug, serde::Serialize)]
+struct ArtifactRefPayload<'a> {
+    id: &'a str,
+    mime_type: &'a str,
+    bytes: u64,
+}
+
+/// A command response payload.
+#[derive(Debug, serde::Serialize)]
+struct CommandResponsePayload {
+    accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events: Option<Vec<Envelope<Value>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorBody>,
+}
+
+/// How many frames a lagged subscriber lost.
+#[derive(Debug, serde::Serialize)]
+struct ReplayLostPayload {
+    lost: u64,
+}
 
 /// Builds the RAEP HTTP, WebSocket and SSE routes for a host.
 pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
@@ -83,7 +153,7 @@ async fn info(State(host): State<Arc<NorteCodeRaepHost>>, headers: HeaderMap) ->
 }
 
 async fn health_live() -> Json<Value> {
-    Json(json!({"status": "live"}))
+    Json(payload(LivePayload { status: "live" }))
 }
 
 async fn health_ready(State(host): State<Arc<NorteCodeRaepHost>>) -> Json<Value> {
@@ -111,9 +181,12 @@ async fn telemetry(
         Ok(report) => Json(report).into_response(),
         Err(error) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "status": "error",
-                "error": {"code": "TELEMETRY_FAILED", "message": error.to_string()}
+            Json(payload(TelemetryFailedPayload {
+                status: "error",
+                error: ErrorBody {
+                    code: "TELEMETRY_FAILED",
+                    message: error.to_string(),
+                },
             })),
         )
             .into_response(),
@@ -123,9 +196,13 @@ async fn telemetry(
 fn not_found_message(message: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
-        Json(json!({
-            "accepted": false,
-            "error": {"code": "NOT_FOUND", "message": message}
+        Json(payload(RejectedPayload {
+            status: "error",
+            accepted: Some(false),
+            error: ErrorBody {
+                code: "NOT_FOUND",
+                message: message.to_owned(),
+            },
         })),
     )
         .into_response()
@@ -138,9 +215,13 @@ fn not_found() -> Response {
 fn invalid(message: &str) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({
-            "accepted": false,
-            "error": {"code": "INVALID_FRAME", "message": message}
+        Json(payload(RejectedPayload {
+            status: "error",
+            accepted: Some(false),
+            error: ErrorBody {
+                code: "INVALID_FRAME",
+                message: message.to_owned(),
+            },
         })),
     )
         .into_response()
@@ -150,9 +231,9 @@ async fn list_agents(State(host): State<Arc<NorteCodeRaepHost>>, headers: Header
     if let Err(response) = principal(&host, &headers) {
         return response;
     }
-    Json(json!({
-        "agents": host.agents(),
-        "next_cursor": Value::Null,
+    Json(payload(AgentListPayload {
+        agents: host.agents(),
+        next_cursor: Value::Null,
     }))
     .into_response()
 }
@@ -190,9 +271,9 @@ async fn list_sessions(State(host): State<Arc<NorteCodeRaepHost>>, headers: Head
         Ok(principal) => principal,
         Err(response) => return response,
     };
-    Json(json!({
-        "sessions": host.session_summaries(&principal).await,
-        "next_cursor": Value::Null,
+    Json(payload(SessionListPayload {
+        sessions: host.session_summaries(&principal).await,
+        next_cursor: Value::Null,
     }))
     .into_response()
 }
@@ -336,17 +417,21 @@ async fn upload_artifact(
         .put_artifact_as(mime_type, &body, Some(&principal))
         .await
     {
-        Ok(reference) => Json(json!({
-            "id": reference.id,
-            "mime_type": reference.mime_type,
-            "bytes": reference.bytes
+        Ok(reference) => Json(payload(ArtifactRefPayload {
+            id: &reference.id,
+            mime_type: &reference.mime_type,
+            bytes: reference.bytes,
         }))
         .into_response(),
         Err(error) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "accepted": false,
-                "error": {"code": "ARTIFACT_FAILED", "message": error.to_string()}
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "ARTIFACT_FAILED",
+                    message: error.to_string(),
+                },
             })),
         )
             .into_response(),
@@ -370,9 +455,13 @@ async fn download_artifact(
             .into_response(),
         Err(error) => (
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "accepted": false,
-                "error": {"code": "ARTIFACT_NOT_FOUND", "message": error.to_string()}
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "ARTIFACT_NOT_FOUND",
+                    message: error.to_string(),
+                },
             })),
         )
             .into_response(),
@@ -547,7 +636,7 @@ async fn events(
         .or(query.resume_from_seq);
     let attach = Envelope {
         kind: FrameType::Standard(StandardFrameType::SessionAttach),
-        payload: serde_json::to_value(SessionAttach {
+        payload: payload(SessionAttach {
             agent_id: host.agent_id().to_owned(),
             agent_override: None,
             create_if_missing: Some(false),
@@ -557,12 +646,11 @@ async fn events(
             capabilities: None,
             client_info: None,
             options: None,
-        })
-        .unwrap_or_else(|_| json!({})),
+        }),
         session_id: session_id.clone(),
         ..Envelope::new(
             FrameType::Standard(StandardFrameType::SessionAttach),
-            json!({}),
+            Value::Object(serde_json::Map::new()),
             0,
         )
     };
@@ -600,13 +688,13 @@ async fn events(
                 Err(BroadcastStreamRecvError::Lagged(lost)) => {
                     let mut frame = Envelope::new(
                         FrameType::Standard(StandardFrameType::Error),
-                        json!({
-                            "code": "REPLAY_TRUNCATED",
-                            "message": format!(
+                        payload(raep_types::ErrorPayload {
+                            code: "REPLAY_TRUNCATED".to_owned(),
+                            message: format!(
                                 "the event stream fell behind and dropped {lost} frames; reconnect from the last sequence number"
                             ),
-                            "retryable": true,
-                            "details": {"lost": lost}
+                            retryable: Some(true),
+                            details: Some(payload(ReplayLostPayload { lost })),
                         }),
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -647,9 +735,13 @@ async fn commands(
     } else if frame.session_id != session_id {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "accepted": false,
-                "error": {"code": "INVALID_FRAME", "message": "session_id does not match path"}
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "INVALID_FRAME",
+                    message: "session_id does not match path".to_owned(),
+                },
             })),
         )
             .into_response();
@@ -674,7 +766,11 @@ async fn commands(
         });
         return (
             StatusCode::ACCEPTED,
-            Json(json!({"accepted": true, "events": []})),
+            Json(payload(CommandResponsePayload {
+                accepted: true,
+                events: Some(Vec::new()),
+                error: None,
+            })),
         )
             .into_response();
     }
@@ -686,22 +782,34 @@ async fn commands(
     {
         Ok(Ok(events)) => (
             StatusCode::ACCEPTED,
-            Json(json!({"accepted": true, "events": events})),
+            Json(payload(CommandResponsePayload {
+                accepted: true,
+                events: Some(events),
+                error: None,
+            })),
         )
             .into_response(),
         Err(_) => (
             StatusCode::REQUEST_TIMEOUT,
-            Json(json!({
-                "accepted": false,
-                "error": {"code": "TIMEOUT", "message": "command timed out"}
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "TIMEOUT",
+                    message: "command timed out".to_owned(),
+                },
             })),
         )
             .into_response(),
         Ok(Err(error)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({
-                "accepted": false,
-                "error": {"code": "INVALID_FRAME", "message": error.to_string()}
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "INVALID_FRAME",
+                    message: error.to_string(),
+                },
             })),
         )
             .into_response(),
@@ -726,10 +834,11 @@ fn sse_event(frame: Envelope<Value>) -> Event {
 fn error_frame(error: &HostError) -> Envelope<Value> {
     Envelope::new(
         FrameType::Standard(StandardFrameType::Error),
-        json!({
-            "code": "INVALID_FRAME",
-            "message": error.to_string(),
-            "retryable": false
+        payload(raep_types::ErrorPayload {
+            code: "INVALID_FRAME".to_owned(),
+            message: error.to_string(),
+            retryable: Some(false),
+            details: None,
         }),
         0,
     )
@@ -742,9 +851,13 @@ fn origin_guard(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Result<(), Res
     {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(json!({
-                "accepted": false,
-                "error": {"code": "ORIGIN_NOT_ALLOWED", "message": "origin is not allowed"}
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "ORIGIN_NOT_ALLOWED",
+                    message: "origin is not allowed".to_owned(),
+                },
             })),
         )
             .into_response());
@@ -767,9 +880,13 @@ fn principal(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Result<String, Re
         .ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "accepted": false,
-                    "error": {"code": "UNAUTHENTICATED", "message": "valid bearer token required"}
+                Json(payload(RejectedPayload {
+                    status: "error",
+                    accepted: Some(false),
+                    error: ErrorBody {
+                        code: "UNAUTHENTICATED",
+                        message: "valid bearer token required".to_owned(),
+                    },
                 })),
             )
                 .into_response()

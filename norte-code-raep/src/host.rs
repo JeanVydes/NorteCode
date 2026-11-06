@@ -19,7 +19,190 @@ use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::NorteCodeExtension;
 use crate::commands::AgentCommand;
-use crate::payloads::{canonical_event_payload, standard_event_payload};
+use crate::payloads::{canonical_event_payload, payload, standard_event_payload};
+
+/// The agent block inside a session or agent summary.
+#[derive(Debug, serde::Serialize)]
+struct AgentRef<'a> {
+    id: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    version: &'a str,
+}
+
+/// A session summary as the management API returns it.
+#[derive(Debug, serde::Serialize)]
+struct SessionSummary<'a> {
+    session_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    title_source: &'static str,
+    labels: Value,
+    pinned: bool,
+    archived: bool,
+    status: &'static str,
+    agent: AgentRef<'a>,
+    created_at: i64,
+    updated_at: i64,
+    last_activity_at: i64,
+    turn_count: u32,
+    has_pending: bool,
+}
+
+/// An agent summary as the management API returns it.
+#[derive(Debug, serde::Serialize)]
+struct AgentSummary<'a> {
+    id: &'a str,
+    version: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<AgentRef<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<AgentRef<'a>>,
+}
+
+/// One agent version entry.
+#[derive(Debug, serde::Serialize)]
+struct AgentVersion<'a> {
+    version: &'a str,
+    created_at: i64,
+    deprecated: bool,
+}
+
+/// An agent with its latest version.
+#[derive(Debug, serde::Serialize)]
+struct AgentDetail<'a> {
+    agent: AgentSummary<'a>,
+    latest_version: AgentVersion<'a>,
+}
+
+/// An agent's version list.
+#[derive(Debug, serde::Serialize)]
+struct AgentVersions<'a> {
+    versions: Vec<AgentVersion<'a>>,
+}
+
+/// The protocol block in hello/info payloads.
+#[derive(Debug, serde::Serialize)]
+struct ProtocolRef {
+    name: &'static str,
+    version: &'static str,
+}
+
+/// A provider/model reference.
+#[derive(Debug, serde::Serialize)]
+struct ModelRef<'a> {
+    provider: &'a str,
+    model: &'a str,
+}
+
+/// The limits block in hello/info payloads.
+#[derive(Debug, serde::Serialize)]
+struct LimitsRef {
+    max_frame_bytes: u64,
+    replay_buffer_events: usize,
+    max_artifact_bytes: usize,
+}
+
+/// The hello handshake payload.
+#[derive(Debug, serde::Serialize)]
+struct HelloPayload<'a> {
+    protocol: ProtocolRef,
+    server_version: &'a str,
+    wire_versions: Vec<&'static str>,
+    capabilities: Vec<&'static str>,
+    extensions: Vec<&'a str>,
+    limits: LimitsRef,
+    heartbeat_s: u64,
+    draining: bool,
+    deprecations: Vec<Value>,
+}
+
+/// The HTTP discovery payload.
+#[derive(Debug, serde::Serialize)]
+struct InfoPayload<'a> {
+    protocol: ProtocolRef,
+    server_version: &'a str,
+    wire_versions: Vec<&'static str>,
+    capabilities: Vec<&'static str>,
+    extensions: Vec<&'a str>,
+    limits: LimitsRef,
+    agents: Vec<String>,
+    default_agent: &'a str,
+    default_model: Value,
+}
+
+/// The readiness payload.
+#[derive(Debug, serde::Serialize)]
+struct ReadinessPayload<'a> {
+    status: &'static str,
+    agent_id: &'a str,
+    agents: usize,
+    replay: bool,
+    artifacts: bool,
+    limits: ReadinessLimits,
+}
+
+/// The limits block in the readiness payload.
+#[derive(Debug, serde::Serialize)]
+struct ReadinessLimits {
+    max_connections: usize,
+    command_timeout_ms: u64,
+}
+
+/// The telemetry report payload.
+#[derive(Debug, serde::Serialize)]
+struct TelemetryReport {
+    session: Option<String>,
+    records: Value,
+    summary: TelemetrySummary,
+}
+
+/// The counters inside a telemetry report.
+#[derive(Debug, serde::Serialize)]
+struct TelemetrySummary {
+    requests: usize,
+    errors: u64,
+    cancelled: u64,
+    duration_ms: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+}
+
+/// A replay descriptor in an attach payload.
+#[derive(Debug, serde::Serialize)]
+struct ReplayMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to_seq: Option<u64>,
+    truncated: bool,
+}
+
+/// The session-attached payload.
+#[derive(Debug, serde::Serialize)]
+struct SessionAttachedPayload {
+    created: bool,
+    mode: AttachMode,
+    last_seq: u64,
+    replay: ReplayMeta,
+    negotiated_capabilities: Vec<&'static str>,
+}
+
+/// The session-state payload.
+#[derive(Debug, serde::Serialize)]
+struct SessionStatePayload<'a> {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+    history_summary: Vec<Value>,
+}
+
+/// An accepted acknowledgement payload.
+#[derive(Debug, serde::Serialize)]
+struct AcceptedPayload {
+    accepted: bool,
+}
 
 /// Host configuration independent of the HTTP listener.
 #[derive(Clone, Debug)]
@@ -692,29 +875,24 @@ impl NorteCodeRaepHost {
             .as_deref()
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .map_or(now, |value| value.timestamp_millis());
-        let mut summary = json!({
-            "session_id": info.session.as_str(),
-            "title_source": "user",
-            "labels": {},
-            "pinned": false,
-            "archived": false,
-            "status": "ACTIVE",
-            "agent": {
-                "id": self.config.agent_id,
-                "version": self.config.server_version,
+        payload(SessionSummary {
+            session_id: info.session.as_str(),
+            title: info.title.as_deref(),
+            title_source: "user",
+            labels: json!({}),
+            pinned: false,
+            archived: false,
+            status: "ACTIVE",
+            agent: AgentRef {
+                id: &self.config.agent_id,
+                version: &self.config.server_version,
             },
-            "created_at": created_at,
-            "updated_at": now,
-            "last_activity_at": now,
-            "turn_count": 0,
-            "has_pending": false,
-        });
-        if let Some(title) = &info.title
-            && let Some(object) = summary.as_object_mut()
-        {
-            object.insert("title".to_owned(), Value::String(title.clone()));
-        }
-        summary
+            created_at,
+            updated_at: now,
+            last_activity_at: now,
+            turn_count: 0,
+            has_pending: false,
+        })
     }
 
     /// Creates a session through the management API and records its owner.
@@ -822,15 +1000,22 @@ impl NorteCodeRaepHost {
         ids.sort();
         ids.into_iter()
             .map(|id| {
-                let mut summary = json!({"id": id, "version": self.config.server_version});
-                if let Some(service) = self.services.get(&id)
-                    && let Some(spec) = service.default_spec()
-                    && let Some(object) = summary.as_object_mut()
-                {
-                    object.insert("provider".to_owned(), json!({"id": spec.provider}));
-                    object.insert("model".to_owned(), json!({"id": spec.model}));
-                }
-                summary
+                let spec = self
+                    .services
+                    .get(&id)
+                    .and_then(|service| service.default_spec());
+                payload(AgentSummary {
+                    id: &id,
+                    version: &self.config.server_version,
+                    provider: spec.as_ref().map(|spec| AgentRef {
+                        id: &spec.provider,
+                        version: "",
+                    }),
+                    model: spec.as_ref().map(|spec| AgentRef {
+                        id: &spec.model,
+                        version: "",
+                    }),
+                })
             })
             .collect()
     }
@@ -839,16 +1024,25 @@ impl NorteCodeRaepHost {
     /// agent is unknown.
     #[must_use]
     pub fn agent(&self, agent_id: &str) -> Option<Value> {
-        let summary = self
-            .agents()
-            .into_iter()
-            .find(|summary| summary["id"].as_str() == Some(agent_id))?;
-        Some(json!({
-            "agent": summary,
-            "latest_version": {
-                "version": self.config.server_version,
-                "created_at": 0,
-                "deprecated": false,
+        let service = self.services.get(agent_id)?;
+        let spec = service.default_spec();
+        Some(payload(AgentDetail {
+            agent: AgentSummary {
+                id: agent_id,
+                version: &self.config.server_version,
+                provider: spec.as_ref().map(|spec| AgentRef {
+                    id: &spec.provider,
+                    version: "",
+                }),
+                model: spec.as_ref().map(|spec| AgentRef {
+                    id: &spec.model,
+                    version: "",
+                }),
+            },
+            latest_version: AgentVersion {
+                version: &self.config.server_version,
+                created_at: 0,
+                deprecated: false,
             },
         }))
     }
@@ -857,11 +1051,11 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn agent_versions(&self, agent_id: &str) -> Option<Value> {
         self.services.get(agent_id)?;
-        Some(json!({
-            "versions": [{
-                "version": self.config.server_version,
-                "created_at": 0,
-                "deprecated": false,
+        Some(payload(AgentVersions {
+            versions: vec![AgentVersion {
+                version: &self.config.server_version,
+                created_at: 0,
+                deprecated: false,
             }],
         }))
     }
@@ -949,18 +1143,18 @@ impl NorteCodeRaepHost {
     }
 
     /// Returns the RAEP handshake frame.
-    ///
-    /// The handshake payload uses only JSON values constructed from validated
-    /// host configuration, so serialization cannot fail.
     #[must_use]
     pub fn hello(&self) -> Envelope<Value> {
         Envelope::new(
             standard(StandardFrameType::Hello),
-            json!({
-                "protocol": {"name": "RAEP", "version": WIRE_VERSION},
-                "server_version": self.config.server_version,
-                "wire_versions": [WIRE_VERSION],
-                "capabilities": [
+            payload(HelloPayload {
+                protocol: ProtocolRef {
+                    name: "RAEP",
+                    version: WIRE_VERSION,
+                },
+                server_version: &self.config.server_version,
+                wire_versions: vec![WIRE_VERSION],
+                capabilities: vec![
                     "transport.ws",
                     "transport.sse",
                     "resume",
@@ -970,17 +1164,17 @@ impl NorteCodeRaepHost {
                     "events.replay",
                     "events.canonical",
                     "auth.principals",
-                    "replay.sqlite"
+                    "replay.sqlite",
                 ],
-                "extensions": [NorteCodeExtension::Command.as_str()],
-                "limits": {
-                    "max_frame_bytes": self.config.max_frame_bytes,
-                    "replay_buffer_events": self.config.replay_capacity,
-                    "max_artifact_bytes": self.config.max_artifact_bytes,
+                extensions: vec![NorteCodeExtension::Command.as_str()],
+                limits: LimitsRef {
+                    max_frame_bytes: self.config.max_frame_bytes,
+                    replay_buffer_events: self.config.replay_capacity,
+                    max_artifact_bytes: self.config.max_artifact_bytes,
                 },
-                "heartbeat_s": 20,
-                "draining": false,
-                "deprecations": []
+                heartbeat_s: 20,
+                draining: false,
+                deprecations: Vec::new(),
             }),
             now_millis(),
         )
@@ -989,16 +1183,25 @@ impl NorteCodeRaepHost {
     /// Returns discovery information for an HTTP info route.
     #[must_use]
     pub fn info(&self) -> Value {
-        let default_model = self
+        let default_model = match self
             .services
             .get(&self.config.agent_id)
             .and_then(|service| service.default_spec())
-            .map(|spec| json!({"provider": spec.provider, "model": spec.model}));
-        json!({
-            "protocol": {"name": "RAEP", "version": WIRE_VERSION},
-            "server_version": self.config.server_version,
-            "wire_versions": [WIRE_VERSION],
-            "capabilities": [
+        {
+            Some(spec) => payload(ModelRef {
+                provider: &spec.provider,
+                model: &spec.model,
+            }),
+            None => Value::Null,
+        };
+        payload(InfoPayload {
+            protocol: ProtocolRef {
+                name: "RAEP",
+                version: WIRE_VERSION,
+            },
+            server_version: &self.config.server_version,
+            wire_versions: vec![WIRE_VERSION],
+            capabilities: vec![
                 "transport.ws",
                 "transport.sse",
                 "resume",
@@ -1008,33 +1211,33 @@ impl NorteCodeRaepHost {
                 "events.replay",
                 "events.canonical",
                 "auth.principals",
-                "replay.sqlite"
+                "replay.sqlite",
             ],
-            "extensions": [NorteCodeExtension::Command.as_str()],
-            "limits": {
-                "max_frame_bytes": self.config.max_frame_bytes,
-                "replay_buffer_events": self.config.replay_capacity,
-                "max_artifact_bytes": self.config.max_artifact_bytes
+            extensions: vec![NorteCodeExtension::Command.as_str()],
+            limits: LimitsRef {
+                max_frame_bytes: self.config.max_frame_bytes,
+                replay_buffer_events: self.config.replay_capacity,
+                max_artifact_bytes: self.config.max_artifact_bytes,
             },
-            "agents": self.services.keys().collect::<Vec<_>>(),
-            "default_agent": self.config.agent_id,
-            "default_model": default_model
+            agents: self.services.keys().cloned().collect::<Vec<_>>(),
+            default_agent: &self.config.agent_id,
+            default_model,
         })
     }
 
     /// Returns readiness and basic operational counters for health probes.
     #[must_use]
     pub fn readiness(&self) -> Value {
-        json!({
-            "status": "ready",
-            "agent_id": self.config.agent_id,
-            "agents": self.services.len(),
-            "replay": self.replay_store.is_some(),
-            "artifacts": self.artifact_store.is_some(),
-            "limits": {
-                "max_connections": self.config.max_connections,
-                "command_timeout_ms": self.config.command_timeout_ms
-            }
+        payload(ReadinessPayload {
+            status: "ready",
+            agent_id: &self.config.agent_id,
+            agents: self.services.len(),
+            replay: self.replay_store.is_some(),
+            artifacts: self.artifact_store.is_some(),
+            limits: ReadinessLimits {
+                max_connections: self.config.max_connections,
+                command_timeout_ms: self.config.command_timeout_ms,
+            },
         })
     }
 
@@ -1107,19 +1310,19 @@ impl NorteCodeRaepHost {
                 _ => {}
             }
         }
-        Ok(json!({
-            "session": session,
-            "records": records,
-            "summary": {
-                "requests": rows.len(),
-                "errors": errors,
-                "cancelled": cancelled,
-                "duration_ms": duration_ms,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read_tokens,
-                "cache_write_tokens": cache_write_tokens
-            }
+        Ok(payload(TelemetryReport {
+            session: session.map(str::to_owned),
+            records,
+            summary: TelemetrySummary {
+                requests: rows.len(),
+                errors,
+                cancelled,
+                duration_ms,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            },
         }))
     }
 
@@ -1279,6 +1482,7 @@ impl NorteCodeRaepHost {
             .collect())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn attach(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
         let attach: SessionAttach = serde_json::from_value(frame.payload)?;
         let agent_id = if attach.agent_id.is_empty() {
@@ -1338,16 +1542,31 @@ impl NorteCodeRaepHost {
                         .unwrap_or(after);
                     (
                         frames,
-                        json!({"from_seq": after.saturating_add(1), "to_seq": to_seq, "truncated": false}),
+                        ReplayMeta {
+                            from_seq: Some(after.saturating_add(1)),
+                            to_seq: Some(to_seq),
+                            truncated: false,
+                        },
                     )
                 }
                 Err(HostError::Replay(_)) => (
                     Vec::new(),
-                    json!({"from_seq": after.saturating_add(1), "to_seq": after, "truncated": true}),
+                    ReplayMeta {
+                        from_seq: Some(after.saturating_add(1)),
+                        to_seq: Some(after),
+                        truncated: true,
+                    },
                 ),
                 Err(error) => return Err(error),
             },
-            None => (Vec::new(), json!({"truncated": false})),
+            None => (
+                Vec::new(),
+                ReplayMeta {
+                    from_seq: None,
+                    to_seq: None,
+                    truncated: false,
+                },
+            ),
         };
         let last_seq = self.current_seq(&session_id).await;
         let mode = attach.mode.unwrap_or(AttachMode::Controller);
@@ -1355,24 +1574,26 @@ impl NorteCodeRaepHost {
             .emit(
                 &session_id,
                 StandardFrameType::SessionAttached,
-                json!({
-                    "created": created,
-                    "mode": mode,
-                    "last_seq": last_seq,
-                    "replay": replay_meta,
-                    "negotiated_capabilities": [
-                        "agent.norte_code",
-                        "events.replay"
-                    ]
+                payload(SessionAttachedPayload {
+                    created,
+                    mode,
+                    last_seq,
+                    replay: replay_meta,
+                    negotiated_capabilities: vec!["agent.norte_code", "events.replay"],
                 }),
             )
             .await?;
-        let mut state_payload = json!({"status": "ACTIVE", "history_summary": []});
-        if let Some(title) = service.session_title(&SessionKey::new(session_id.clone())) {
-            state_payload["title"] = json!(title);
-        }
+        let title = service.session_title(&SessionKey::new(session_id.clone()));
         let state = self
-            .emit(&session_id, StandardFrameType::SessionState, state_payload)
+            .emit(
+                &session_id,
+                StandardFrameType::SessionState,
+                payload(SessionStatePayload {
+                    status: "ACTIVE",
+                    title: title.as_deref(),
+                    history_summary: Vec::new(),
+                }),
+            )
             .await?;
         let mut output = vec![attached, state];
         output.extend(replayed);
@@ -1491,7 +1712,7 @@ impl NorteCodeRaepHost {
                 self.emit(
                     &frame.session_id,
                     StandardFrameType::UserInputAccepted,
-                    json!({"accepted": true}),
+                    payload(AcceptedPayload { accepted: true }),
                 )
                 .await?,
             );
