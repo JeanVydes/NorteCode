@@ -1804,9 +1804,15 @@ impl Renderer {
     /// The fence is part of the row: a block of JSON the model was asked with
     /// is text a person reads, and it is drawn where it happened.
     pub(crate) fn code_block(&mut self, language: &str, text: &str) {
+        self.code_block_titled(language, "tool output", text);
+    }
+
+    /// A fenced block with its own title, so a block that belongs to one
+    /// tool call does not read as anonymous output.
+    fn code_block_titled(&mut self, language: &str, title: &str, text: &str) {
         let text = crate::text::terminal(text);
         let mut entry =
-            crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, "tool output");
+            crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, title);
         entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
         entry.push_line(format!("```{language}"));
         if text.is_empty() {
@@ -1816,6 +1822,26 @@ impl Renderer {
         }
         entry.push_line("```");
         self.transcript.push(entry);
+    }
+
+    /// Prints a tool's arguments as a structured block at `high` verbosity.
+    ///
+    /// The block is titled with the tool and the shell's command is named
+    /// in it, so the JSON does not land as an anonymous blob: a reader
+    /// scanning the transcript sees which call the arguments belong to
+    /// before the first key.
+    fn print_arguments(&mut self, tool: &str, arguments: &serde_json::Value) {
+        let title = match Self::command_summary(Some(arguments)) {
+            Some(command) if tool == "shell" => format!("shell $ {command}"),
+            _ => format!("{tool} arguments"),
+        };
+        let text = serde_json::to_string_pretty(arguments)
+            .unwrap_or_else(|_| compact_json(arguments, 4_000));
+        let (text, truncated) = clip_text(&text, 4_000);
+        self.code_block_titled("json", &title, &text);
+        if truncated {
+            self.notice("arguments shortened for display");
+        }
     }
 
     /// Renders tool activity: what started, and how it ended.
@@ -1869,13 +1895,7 @@ impl Renderer {
                         && tool.as_str() != "edit"
                         && let Some(arguments) = arguments
                     {
-                        let text = serde_json::to_string_pretty(arguments)
-                            .unwrap_or_else(|_| compact_json(arguments, 4_000));
-                        let (text, truncated) = clip_text(&text, 4_000);
-                        self.code_block("json", &text);
-                        if truncated {
-                            self.notice("arguments shortened for display");
-                        }
+                        self.print_arguments(tool, arguments);
                     }
                 }
             }
@@ -2021,11 +2041,12 @@ impl Renderer {
                 last,
                 ..
             } => {
-                // Medium shows the call and its final status, but not the
-                // command's payload. Keeping the stream out of the transcript
-                // here is important: otherwise a later verbosity decision
-                // cannot hide rows that were already appended.
-                if !self.verbosity.at_least(Verbosity::High) {
+                // At `low` nothing of the payload is shown. At `medium` the
+                // live tail is: the last few rows of a running call, in a
+                // framed, collapsible box, that say it is alive and what it
+                // is doing. The finished result still shows only at `high`,
+                // so medium never prints a call's output twice.
+                if self.verbosity.is_quiet() {
                     return;
                 }
                 // The closing chunk carries no bytes, so it is handled before
@@ -2437,11 +2458,41 @@ impl Renderer {
                 Self::command_summary(arguments).unwrap_or_else(|| {
                     arguments.map_or_else(
                         || "(command unavailable)".to_owned(),
-                        |value| clip_command(&value.to_string(), 160),
+                        |_| "(command unavailable)".to_owned(),
                     )
                 })
             ),
+            "todo" => Self::todo_summary(arguments),
             _ => tool.to_owned(),
+        }
+    }
+
+    /// A one-line summary of a `todo` call, for the row that announces it.
+    ///
+    /// The full list already lives in the footer's task widget, so the row
+    /// names the call and the shape of what it carried instead of dumping
+    /// the JSON the model sent: N tasks, with the in-progress one named.
+    fn todo_summary(arguments: Option<&serde_json::Value>) -> String {
+        let Some(items) = todo_items(arguments) else {
+            return "todo".to_owned();
+        };
+        let total = items.len();
+        let done = items
+            .iter()
+            .filter(|item| item.status == crate::input::TodoStatus::Completed)
+            .count();
+        if let Some(active) = items
+            .iter()
+            .find(|item| item.status == crate::input::TodoStatus::InProgress)
+        {
+            format!(
+                "todo {} tasks · {} done · now: {}",
+                total,
+                done,
+                clip_command(&active.content, 80)
+            )
+        } else {
+            format!("todo {total} tasks · {done} done")
         }
     }
 

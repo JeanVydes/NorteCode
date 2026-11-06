@@ -183,6 +183,9 @@ fn the_command_that_ran_is_shown_under_the_call() {
 
 #[test]
 fn medium_shows_tool_status_without_payload() {
+    // Medium keeps the live tail of a running call — the last rows that
+    // say it is alive — but the finished result is not repeated: the
+    // closing row is the status, and the payload stays at high.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     let started = shell_started("call-1", serde_json::json!({ "script": "printf payload" }));
@@ -233,7 +236,10 @@ fn medium_shows_tool_status_without_payload() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(transcript_text.contains("✓ shell in 10 ms"));
-    assert!(!transcript_text.contains("output-payload"));
+    // The streamed chunk was the live tail, shown once; the finished
+    // result is not printed a second time at medium.
+    let hits = transcript_text.matches("output-payload").count();
+    assert_eq!(hits, 1, "{transcript_text}");
 }
 
 #[test]
@@ -647,6 +653,9 @@ fn a_streamed_chunk_is_recorded_once() {
 
 #[test]
 fn streamed_tool_output_is_hidden_at_medium_verbosity() {
+    // Medium keeps a live, bounded tail while the call runs — the last
+    // few rows that say it is alive — but the finished result still shows
+    // only at high. The tail is the box, and the box is collapsible.
     let pinned = Pinned::new();
     let mut renderer = visible_renderer(&pinned);
     renderer
@@ -658,8 +667,34 @@ fn streamed_tool_output_is_hidden_at_medium_verbosity() {
                 call_id: "call-1".to_owned(),
                 tool: "shell".to_owned(),
                 stream: OutputStream::Stdout,
-                text: "hidden payload\n".to_owned(),
+                text: "live tail row\n".to_owned(),
                 last: false,
+            },
+        })
+        .expect("event");
+    assert!(
+        renderer
+            .transcript
+            .entries()
+            .iter()
+            .flat_map(|entry| entry.lines.iter())
+            .any(|line| line.text().contains("live tail row")),
+        "medium shows a live tail while the call runs"
+    );
+    renderer
+        .event(&ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::ToolFinished {
+                turn: 1,
+                call_id: "call-1".to_owned(),
+                tool: "shell".to_owned(),
+                is_error: false,
+                error: None,
+                output: Some("finished payload\n".to_owned()),
+                truncated: false,
+                detached: false,
+                duration_ms: 3,
             },
         })
         .expect("event");
@@ -669,8 +704,8 @@ fn streamed_tool_output_is_hidden_at_medium_verbosity() {
             .entries()
             .iter()
             .flat_map(|entry| entry.lines.iter())
-            .any(|line| line.text().contains("hidden payload")),
-        "medium shows status, not tool payload"
+            .any(|line| line.text().contains("finished payload")),
+        "medium does not repeat the finished result"
     );
 }
 
