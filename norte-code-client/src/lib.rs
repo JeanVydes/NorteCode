@@ -787,10 +787,52 @@ impl ClientError {
 /// Implementations may submit requests in-process, over RAEP WebSocket, or
 /// through another transport. The stream remains the same protocol-level
 /// event stream in every case.
+///
+/// Session management goes through the RAEP standard resource
+/// (`/raep/v1/sessions`), not through `submit`: creating, listing, renaming
+/// and deleting sessions are management operations the spec owns, so they
+/// are typed methods here, not extension requests.
 #[async_trait]
 pub trait AgentClient: Send + Sync {
     /// Submits one request and returns its event stream.
     async fn submit(&self, request: ClientRequest) -> Result<EventStream, ClientError>;
+
+    /// Lists the sessions the server holds, newest content first.
+    async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ClientError>;
+
+    /// Creates a session and returns its summary.
+    async fn create_session(&self, title: Option<&str>) -> Result<SessionSummary, ClientError>;
+
+    /// Renames a session.
+    async fn rename_session(&self, session: &str, title: &str) -> Result<(), ClientError>;
+
+    /// Deletes a session and everything keyed by it.
+    async fn delete_session(&self, session: &str) -> Result<(), ClientError>;
+}
+
+/// A session summary as the RAEP management resource returns it.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct SessionSummary {
+    /// The session identifier.
+    pub session_id: String,
+    /// Its label, when it has one.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl SessionSummary {
+    /// Converts the summary into the protocol's session info shape.
+    #[must_use]
+    pub fn into_session_info(self) -> norte_code_protocol::SessionInfo {
+        norte_code_protocol::SessionInfo {
+            session: norte_code_protocol::SessionKey::new(self.session_id),
+            title: self.title,
+            provider: None,
+            model: None,
+            created_at: None,
+            phase: norte_code_protocol::Phase::Idle,
+        }
+    }
 }
 
 /// HTTP client for the `NorteCode` RAEP command endpoint.
@@ -1462,6 +1504,121 @@ impl AgentClient for RemoteClient {
     async fn submit(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
         self.submit_http(request).await
     }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ClientError> {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let response = self
+            .http
+            .get(format!("{}/raep/v1/sessions", self.base_url))
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP list sessions failed: {error}")))?;
+        let body: SessionListBody = response
+            .json()
+            .await
+            .map_err(|error| ClientError::new(format!("invalid RAEP session list: {error}")))?;
+        Ok(body.sessions)
+    }
+
+    async fn create_session(&self, title: Option<&str>) -> Result<SessionSummary, ClientError> {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let response = self
+            .http
+            .post(format!("{}/raep/v1/sessions", self.base_url))
+            .headers(headers)
+            .json(&CreateSessionBody {
+                agent_id: self.agent_id.clone(),
+                title: title.map(str::to_owned),
+            })
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP create session failed: {error}")))?;
+        let status = response.status();
+        let body: SessionSummary = response.json().await.map_err(|error| {
+            ClientError::new(format!("invalid RAEP create session response: {error}"))
+        })?;
+        if !status.is_success() {
+            return Err(ClientError::new("RAEP create session was rejected"));
+        }
+        Ok(body)
+    }
+
+    async fn rename_session(&self, session: &str, title: &str) -> Result<(), ClientError> {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let response = self
+            .http
+            .patch(format!(
+                "{}/raep/v1/sessions/{}",
+                self.base_url,
+                percent_encode(session)
+            ))
+            .headers(headers)
+            .json(&RenameSessionBody {
+                title: title.to_owned(),
+            })
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP rename session failed: {error}")))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ClientError::new("RAEP rename session was rejected"))
+        }
+    }
+
+    async fn delete_session(&self, session: &str) -> Result<(), ClientError> {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let response = self
+            .http
+            .delete(format!(
+                "{}/raep/v1/sessions/{}",
+                self.base_url,
+                percent_encode(session)
+            ))
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP delete session failed: {error}")))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ClientError::new("RAEP delete session was rejected"))
+        }
+    }
+}
+
+/// A session list body from the RAEP management resource.
+#[derive(Debug, serde::Deserialize)]
+struct SessionListBody {
+    #[serde(default)]
+    sessions: Vec<SessionSummary>,
+}
+
+/// A create-session request body.
+#[derive(Debug, serde::Serialize)]
+struct CreateSessionBody {
+    agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+/// A rename-session request body.
+#[derive(Debug, serde::Serialize)]
+struct RenameSessionBody {
+    title: String,
 }
 
 /// Whether an arriving sequence can be applied, is a duplicate, or skipped a

@@ -677,21 +677,13 @@ pub(crate) fn remote_client(config: &Config) -> Result<RemoteClient, String> {
 }
 
 async fn remote_session(client: &dyn AgentClient, key: &str) -> Result<SessionInfo, String> {
-    let mut stream = client
-        .submit(ClientRequest {
-            request_id: 0,
-            kind: ClientRequestKind::ListSessions,
-        })
+    let sessions = client
+        .list_sessions()
         .await
-        .map_err(|error| error.to_string())?;
-    let mut sessions = Vec::new();
-    while let Some(event) = stream.next().await {
-        match event.kind {
-            ServerEventKind::SessionList { sessions: listed } => sessions.extend(listed),
-            ServerEventKind::Error { message, .. } => return Err(message),
-            _ => {}
-        }
-    }
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(norte_code_client::SessionSummary::into_session_info)
+        .collect::<Vec<_>>();
     if let Some(session) = sessions
         .iter()
         .find(|session| session.session.as_str() == key)
@@ -723,25 +715,11 @@ fn matching_stored_session(sessions: Vec<StoredSession>, key: &str) -> Option<St
 }
 
 async fn create_session(client: &dyn AgentClient) -> Result<SessionKey, String> {
-    let mut stream = client
-        .submit(ClientRequest {
-            request_id: 0,
-            kind: ClientRequestKind::CreateSession { title: None },
-        })
+    let summary = client
+        .create_session(None)
         .await
         .map_err(|error| error.to_string())?;
-    while let Some(event) = stream.next().await {
-        match event.kind {
-            ServerEventKind::SessionCreated { .. } => {
-                return event
-                    .session
-                    .ok_or_else(|| "the service did not return the new session".to_owned());
-            }
-            ServerEventKind::Error { message, .. } => return Err(message),
-            _ => {}
-        }
-    }
-    Err("the service did not return the new session".to_owned())
+    Ok(SessionKey::new(summary.session_id))
 }
 
 /// Starts a new session and reads it from the terminal.

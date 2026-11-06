@@ -1162,14 +1162,7 @@ pub(crate) async fn interactive_loop(
                 .trim_end()
                 .to_owned();
             if let Some(key) = session.as_ref() {
-                let _ = drain_request(
-                    client,
-                    ClientRequestKind::RenameSession {
-                        session: key.clone(),
-                        title: title.clone(),
-                    },
-                )
-                .await;
+                let _ = client.rename_session(key.as_str(), &title).await;
                 renderer.set_title(title);
             }
         }
@@ -1822,14 +1815,10 @@ async fn handle_live_command(
 /// that cleared one row alone is what left requests pointing at a session the
 /// list no longer had.
 async fn delete_current(client: &dyn AgentClient, session: &SessionKey) -> Result<(), String> {
-    let request = ClientRequestKind::DeleteSession {
-        session: session.clone(),
-    };
-    let events = drain_request(client, request).await?;
-    if let Some(error) = stream_error(&events) {
-        return Err(error);
-    }
-    Ok(())
+    client
+        .delete_session(session.as_str())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Names the session, from the text given or from the model.
@@ -1866,18 +1855,10 @@ async fn rename_session(
         renderer.notice("usage: /rename <title>  or  /rename");
         return;
     }
-    let request = ClientRequestKind::RenameSession {
-        session: session.clone(),
-        title: title.clone(),
-    };
-    match drain_request(client, request).await {
-        Ok(events) => {
-            if let Some(error) = stream_error(&events) {
-                renderer.failure(format!("could not rename: {error}"));
-            } else {
-                renderer.set_title(title.clone());
-                renderer.notice(format!("named `{title}`"));
-            }
+    match client.rename_session(session.as_str(), &title).await {
+        Ok(()) => {
+            renderer.set_title(title.clone());
+            renderer.notice(format!("named `{title}`"));
         }
         Err(error) => renderer.failure(format!("could not rename: {error}")),
     }
@@ -2082,31 +2063,14 @@ async fn apply_tool_action(
         // A fresh session: the service creates an empty one and the loop
         // switches to it, so the next message lands in it.
         crate::modal::Action::NewSession => {
-            let events =
-                match drain_request(client, ClientRequestKind::CreateSession { title: None }).await
-                {
-                    Ok(events) => events,
-                    Err(error) => {
-                        renderer.failure(format!("could not start a session: {error}"));
-                        return None;
-                    }
-                };
-            for event in events {
-                match event.kind {
-                    ServerEventKind::SessionCreated { .. } => {
-                        if let Some(key) = event.session {
-                            return Some(key);
-                        }
-                    }
-                    ServerEventKind::Error { message, .. } => {
-                        renderer.failure(format!("could not start a session: {message}"));
-                        return None;
-                    }
-                    _ => {}
+            let summary = match client.create_session(None).await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    renderer.failure(format!("could not start a session: {error}"));
+                    return None;
                 }
-            }
-            renderer.failure("the service did not return the new session".to_owned());
-            return None;
+            };
+            return Some(norte_code_protocol::SessionKey::new(summary.session_id));
         }
         crate::modal::Action::ToggleSessionDay(day) => {
             if !renderer.session_days_expanded.remove(day) {

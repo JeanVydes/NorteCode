@@ -21,7 +21,6 @@
 //! in raw mode for the length of the question and restores it after, which is
 //! what makes an arrow key arrive as an arrow key instead of as three bytes.
 
-use futures_util::StreamExt;
 use norte_code_client::AgentClient;
 use norte_code_protocol::config::Config;
 #[cfg(test)]
@@ -150,23 +149,14 @@ impl SessionRow {
 /// session a hard kill left `streaming` is not streaming now, and a list that
 /// says otherwise offers to continue a turn that is already over.
 pub(crate) async fn session_rows(client: &dyn AgentClient) -> Result<Vec<SessionRow>, String> {
-    let request = norte_code_protocol::ClientRequest {
-        request_id: 0,
-        kind: norte_code_protocol::ClientRequestKind::ListSessions,
-    };
-    let events = client
-        .submit(request)
+    let sessions = client
+        .list_sessions()
         .await
-        .map_err(|error| error.to_string())?;
-    let mut rows = Vec::new();
-    futures_util::pin_mut!(events);
-    while let Some(event) = events.next().await {
-        if let norte_code_protocol::ServerEventKind::SessionList { sessions } = event.kind {
-            rows.extend(sessions.into_iter().map(row_of_info));
-        } else if let norte_code_protocol::ServerEventKind::Error { message, .. } = event.kind {
-            return Err(message);
-        }
-    }
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(norte_code_client::SessionSummary::into_session_info)
+        .collect::<Vec<_>>();
+    let mut rows = sessions.into_iter().map(row_of_info).collect::<Vec<_>>();
     rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
     Ok(rows)
 }
