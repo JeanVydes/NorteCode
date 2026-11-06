@@ -21,6 +21,61 @@ use crate::NorteCodeExtension;
 use crate::commands::AgentCommand;
 use crate::payloads::{canonical_event_payload, payload, standard_event_payload};
 
+/// A server capability advertised in a handshake or attach payload.
+///
+/// The set is closed: the host advertises exactly these, and a client
+/// reads them as variants, not strings. Each serializes to the wire name
+/// the RAEP registry uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+enum Capability {
+    /// WebSocket transport.
+    #[serde(rename = "transport.ws")]
+    TransportWs,
+    /// Server-sent events transport.
+    #[serde(rename = "transport.sse")]
+    TransportSse,
+    /// Session resume from a sequence cursor.
+    #[serde(rename = "resume")]
+    Resume,
+    /// Session management resource.
+    #[serde(rename = "manage")]
+    Manage,
+    /// The `NorteCode` agent surface.
+    #[serde(rename = "agent.norte_code")]
+    AgentNorteCode,
+    /// The full command surface.
+    #[serde(rename = "agent.commands")]
+    AgentCommands,
+    /// Event replay after a reconnect.
+    #[serde(rename = "events.replay")]
+    EventsReplay,
+    /// Canonical event payloads.
+    #[serde(rename = "events.canonical")]
+    EventsCanonical,
+    /// Principal-based authentication.
+    #[serde(rename = "auth.principals")]
+    AuthPrincipals,
+    /// SQLite-backed replay journal.
+    #[serde(rename = "replay.sqlite")]
+    ReplaySqlite,
+}
+
+/// Every capability this host advertises, in wire order.
+fn advertised_capabilities() -> Vec<Capability> {
+    vec![
+        Capability::TransportWs,
+        Capability::TransportSse,
+        Capability::Resume,
+        Capability::Manage,
+        Capability::AgentNorteCode,
+        Capability::AgentCommands,
+        Capability::EventsReplay,
+        Capability::EventsCanonical,
+        Capability::AuthPrincipals,
+        Capability::ReplaySqlite,
+    ]
+}
+
 /// The agent block inside a session or agent summary.
 #[derive(Debug, serde::Serialize)]
 struct AgentRef<'a> {
@@ -108,7 +163,7 @@ struct HelloPayload<'a> {
     protocol: ProtocolRef,
     server_version: &'a str,
     wire_versions: Vec<&'static str>,
-    capabilities: Vec<&'static str>,
+    capabilities: Vec<Capability>,
     extensions: Vec<&'a str>,
     limits: LimitsRef,
     heartbeat_s: u64,
@@ -122,7 +177,7 @@ struct InfoPayload<'a> {
     protocol: ProtocolRef,
     server_version: &'a str,
     wire_versions: Vec<&'static str>,
-    capabilities: Vec<&'static str>,
+    capabilities: Vec<Capability>,
     extensions: Vec<&'a str>,
     limits: LimitsRef,
     agents: Vec<String>,
@@ -186,7 +241,7 @@ struct SessionAttachedPayload {
     mode: AttachMode,
     last_seq: u64,
     replay: ReplayMeta,
-    negotiated_capabilities: Vec<&'static str>,
+    negotiated_capabilities: Vec<Capability>,
 }
 
 /// The session-state payload.
@@ -1154,18 +1209,7 @@ impl NorteCodeRaepHost {
                 },
                 server_version: &self.config.server_version,
                 wire_versions: vec![WIRE_VERSION],
-                capabilities: vec![
-                    "transport.ws",
-                    "transport.sse",
-                    "resume",
-                    "manage",
-                    "agent.norte_code",
-                    "agent.commands",
-                    "events.replay",
-                    "events.canonical",
-                    "auth.principals",
-                    "replay.sqlite",
-                ],
+                capabilities: advertised_capabilities(),
                 extensions: vec![NorteCodeExtension::Command.as_str()],
                 limits: LimitsRef {
                     max_frame_bytes: self.config.max_frame_bytes,
@@ -1201,18 +1245,7 @@ impl NorteCodeRaepHost {
             },
             server_version: &self.config.server_version,
             wire_versions: vec![WIRE_VERSION],
-            capabilities: vec![
-                "transport.ws",
-                "transport.sse",
-                "resume",
-                "manage",
-                "agent.norte_code",
-                "agent.commands",
-                "events.replay",
-                "events.canonical",
-                "auth.principals",
-                "replay.sqlite",
-            ],
+            capabilities: advertised_capabilities(),
             extensions: vec![NorteCodeExtension::Command.as_str()],
             limits: LimitsRef {
                 max_frame_bytes: self.config.max_frame_bytes,
@@ -1579,7 +1612,10 @@ impl NorteCodeRaepHost {
                     mode,
                     last_seq,
                     replay: replay_meta,
-                    negotiated_capabilities: vec!["agent.norte_code", "events.replay"],
+                    negotiated_capabilities: vec![
+                        Capability::AgentNorteCode,
+                        Capability::EventsReplay,
+                    ],
                 }),
             )
             .await?;
