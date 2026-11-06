@@ -3,10 +3,16 @@
 use norte_code_protocol::{Delta, ServerEventKind};
 use raep_types::{ErrorPayload, HistoryItem, HistoryPage, StopReason, TurnState, TurnStateChanged};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 /// Serializes a typed RAEP payload. The payloads are closed structs, so this
 /// cannot fail; the helper exists so call sites never build wire JSON by hand.
+///
+/// The return is `Value` only because the envelope's payload slot is the
+/// spec's generic `P` — every caller passes a closed struct, and the client
+/// decodes it back into the matching struct. No payload is built as `Value`.
 pub(crate) fn payload<T: Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("typed RAEP payload is serializable")
 }
@@ -66,6 +72,95 @@ struct JobEntryPayload {
 #[derive(Debug, Serialize)]
 struct JobListPayload {
     jobs: Vec<JobEntryPayload>,
+}
+
+/// How a turn ended, in the canonical payload's spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CanonicalTurnState {
+    Finished,
+    Stopped,
+}
+
+/// The canonical `turn_state_changed` state block.
+#[derive(Debug, Serialize)]
+struct TurnStateChangedPayload {
+    state: CanonicalTurnState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<norte_code_protocol::Phase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    committed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// What kind of agent change a canonical payload describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentChange {
+    ModelChanged,
+    ModelQueued,
+    ReasoningDowngraded,
+    CatalogUpdated,
+    SkillsUpdated,
+}
+
+/// The `details` of a `reasoning_downgraded` change.
+#[derive(Debug, Serialize)]
+struct ReasoningDowngradedDetails {
+    from: String,
+    to: String,
+    reason: String,
+}
+
+/// The `details` of a `catalog_updated` change.
+#[derive(Debug, Serialize)]
+struct CatalogUpdatedDetails {
+    models: usize,
+}
+
+/// The `details` of a `skills_updated` change.
+#[derive(Debug, Serialize)]
+struct SkillsUpdatedDetails {
+    skills: usize,
+}
+
+/// What kind of catalogue a canonical payload carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CatalogKind {
+    Models,
+    Skills,
+}
+
+/// The `entries` of a `skills` catalogue.
+#[derive(Debug, Serialize)]
+struct SkillCatalogEntries {
+    skills: Vec<norte_code_protocol::SkillInfo>,
+    warnings: Vec<String>,
+}
+
+/// What kind of service data a canonical payload carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ServiceDataKind {
+    Telemetry,
+    ToolList,
+    McpList,
+}
+
+/// The `data` of an `mcp_list` service payload.
+#[derive(Debug, Serialize)]
+struct McpListData {
+    servers: Vec<norte_code_protocol::McpInfo>,
+    failures: Vec<norte_code_protocol::McpFailure>,
+}
+
+/// The `content` of a replayed history item.
+#[derive(Debug, Serialize)]
+struct HistoryContent<'a> {
+    role: &'a str,
+    content: &'a str,
 }
 
 /// Converts a `NorteCode` event into the stable payload understood by RAEP
@@ -169,11 +264,21 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             committed,
         } => CanonicalEvent::TurnStateChanged {
             turn: Some(*turn),
-            state: json!({"state": "finished", "phase": phase, "committed": committed}),
+            state: TurnStateChangedPayload {
+                state: CanonicalTurnState::Finished,
+                phase: Some(*phase),
+                committed: Some(*committed),
+                reason: None,
+            },
         },
         ServerEventKind::TurnStopped { reason } => CanonicalEvent::TurnStateChanged {
             turn: None,
-            state: json!({"state": "cancelled", "reason": reason}),
+            state: TurnStateChangedPayload {
+                state: CanonicalTurnState::Stopped,
+                phase: None,
+                committed: None,
+                reason: Some(reason.clone()),
+            },
         },
         ServerEventKind::RequestReconstructed {
             turn,
@@ -305,42 +410,49 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             CanonicalEvent::UserInputAccepted { ids, messages }
         }
         ServerEventKind::ModelChanged { provider, model } => CanonicalEvent::AgentChanged {
-            change: "model_changed",
+            change: AgentChange::ModelChanged,
             provider: Some(provider),
             model: Some(model),
             details: None,
         },
         ServerEventKind::ModelQueued { provider, model } => CanonicalEvent::AgentChanged {
-            change: "model_queued",
+            change: AgentChange::ModelQueued,
             provider: Some(provider),
             model: Some(model),
             details: None,
         },
         ServerEventKind::ReasoningDowngraded { from, to, reason } => CanonicalEvent::AgentChanged {
-            change: "reasoning_downgraded",
+            change: AgentChange::ReasoningDowngraded,
             provider: None,
             model: None,
-            details: Some(json!({"from": from, "to": to, "reason": reason})),
+            details: Some(payload(ReasoningDowngradedDetails {
+                from: from.clone(),
+                to: to.clone(),
+                reason: reason.clone(),
+            })),
         },
         ServerEventKind::CatalogUpdated { models } => CanonicalEvent::AgentChanged {
-            change: "catalog_updated",
+            change: AgentChange::CatalogUpdated,
             provider: None,
             model: None,
-            details: Some(json!({"models": models})),
+            details: Some(payload(CatalogUpdatedDetails { models: *models })),
         },
         ServerEventKind::ModelList { models } => CanonicalEvent::AgentCatalog {
-            kind: "models",
+            kind: CatalogKind::Models,
             entries: serde_json::to_value(models).expect("model list is serializable"),
         },
         ServerEventKind::SkillList { skills, warnings } => CanonicalEvent::AgentCatalog {
-            kind: "skills",
-            entries: json!({"skills": skills, "warnings": warnings}),
+            kind: CatalogKind::Skills,
+            entries: payload(SkillCatalogEntries {
+                skills: skills.clone(),
+                warnings: warnings.clone(),
+            }),
         },
         ServerEventKind::SkillsUpdated { skills } => CanonicalEvent::AgentChanged {
-            change: "skills_updated",
+            change: AgentChange::SkillsUpdated,
             provider: None,
             model: None,
-            details: Some(json!({"skills": skills})),
+            details: Some(payload(SkillsUpdatedDetails { skills: *skills })),
         },
         ServerEventKind::RetryScheduled {
             turn,
@@ -366,16 +478,19 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             message,
         },
         ServerEventKind::Telemetry { records } => CanonicalEvent::ServiceData {
-            kind: "telemetry",
+            kind: ServiceDataKind::Telemetry,
             data: serde_json::to_value(records).expect("telemetry is serializable"),
         },
         ServerEventKind::ToolList { tools } => CanonicalEvent::ServiceData {
-            kind: "tool_list",
+            kind: ServiceDataKind::ToolList,
             data: serde_json::to_value(tools).expect("tool list is serializable"),
         },
         ServerEventKind::McpList { servers, failures } => CanonicalEvent::ServiceData {
-            kind: "mcp_list",
-            data: json!({"servers": servers, "failures": failures}),
+            kind: ServiceDataKind::McpList,
+            data: payload(McpListData {
+                servers: servers.clone(),
+                failures: failures.clone(),
+            }),
         },
     };
     serde_json::to_value(payload).expect("canonical event is serializable")
@@ -421,11 +536,11 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 .as_ref()
                 .and_then(|arguments| arguments.as_object())
                 .cloned()
-                .map_or_else(|| json!({}), Value::Object);
+                .unwrap_or_default();
             Some(payload(ToolCallStartedPayload {
                 tool_call_id: call_id,
                 tool_name: tool,
-                arguments,
+                arguments: Value::Object(arguments),
                 source: source.as_deref(),
                 requires_approval: false,
                 executor: "server",
@@ -530,7 +645,10 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 items: vec![HistoryItem {
                     id: String::new(),
                     kind: role.to_owned(),
-                    content: json!({"role": role, "content": text}),
+                    content: payload(HistoryContent {
+                        role,
+                        content: text,
+                    }),
                     created_at: 0,
                 }],
                 next: None,
@@ -555,7 +673,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
 #[serde(tag = "event", rename_all = "snake_case")]
 enum CanonicalEvent<'a> {
     /// Norte Code service-specific data exposed through the RAEP adapter.
-    ServiceData { kind: &'static str, data: Value },
+    ServiceData { kind: ServiceDataKind, data: Value },
     /// The plugins installed on the remote host.
     PluginList { plugins: Value },
     /// A plugin lifecycle operation completed.
@@ -641,7 +759,7 @@ enum CanonicalEvent<'a> {
     TurnStateChanged {
         #[serde(skip_serializing_if = "Option::is_none")]
         turn: Option<u64>,
-        state: Value,
+        state: TurnStateChangedPayload,
     },
     /// Provider usage and cost for one output part.
     OutputPartFinished {
@@ -713,7 +831,7 @@ enum CanonicalEvent<'a> {
     },
     /// Agent configuration changed.
     AgentChanged {
-        change: &'static str,
+        change: AgentChange,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -722,7 +840,7 @@ enum CanonicalEvent<'a> {
         details: Option<Value>,
     },
     /// An agent catalogue was returned.
-    AgentCatalog { kind: &'static str, entries: Value },
+    AgentCatalog { kind: CatalogKind, entries: Value },
     /// A provider retry changed state.
     ProviderRetry {
         turn: u64,
