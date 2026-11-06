@@ -3586,10 +3586,15 @@ pub(crate) async fn drive_turns(
                     });
                 }
                 renderer.event(&event)?;
-                // One frame per event, and never on a timer: the frame is a
-                // function of the state, and the state only moves when
-                // something arrives.
                 renderer.draw()?;
+                // Una vez que el turno terminó (TurnFinished) el stream SSE
+                // del servidor se mantiene abierto para la sesión, así que
+                // seguir leyéndolo bloquearía para siempre. Salimos de este
+                // bucle para poder enviar los mensajes encolados y aceptar
+                // nueva entrada en lugar de esperar eventos que nunca llegan.
+                if matches!(&event.kind, ServerEventKind::TurnFinished { .. }) {
+                    break;
+                }
                 if matches!(
                     &event.kind,
                     ServerEventKind::TurnFinished {
