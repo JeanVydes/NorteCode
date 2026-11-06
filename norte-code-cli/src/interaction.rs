@@ -3546,11 +3546,12 @@ pub(crate) async fn drive_turns(
                 }
                 match &event.kind {
                     ServerEventKind::TurnStarted { .. } => parked = false,
-                    ServerEventKind::TurnFinished {
-                        committed: done, ..
-                    } => {
+                    ServerEventKind::TurnFinished { .. } => {
                         parked = false;
-                        committed = *done;
+                        // A cancelled or budget-stopped turn still leaves the
+                        // session clean and ready for a new message; only a
+                        // turn that is genuinely in flight blocks new input.
+                        committed = true;
                     }
                     ServerEventKind::SteerApplied { messages, .. } => {
                         // Every applied message now belongs to the transcript.
