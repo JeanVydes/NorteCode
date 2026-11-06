@@ -1293,7 +1293,11 @@ fn edit_preview_without_a_source_has_no_row_numbers() {
         None,
     );
     let edit = &preview.boxes[0];
-    assert!(edit.old_range.is_none());
+    // Without the source there are no line numbers, but the block still
+    // covers lines on each side: the header names that count instead of
+    // disclaiming the location.
+    assert_eq!(edit.old_range, Some((1, 2)));
+    assert_eq!(edit.new_range, Some((1, 1)));
     assert_eq!(edit.rows[0].left.as_ref().expect("old").number, None);
     assert_eq!(edit.rows[0].left.as_ref().expect("old").text, "one");
     assert_eq!(edit.rows[1].left.as_ref().expect("old").text, "two");
