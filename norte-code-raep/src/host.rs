@@ -2106,6 +2106,7 @@ fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
         ServerEventKind::JobList { .. } => standard(StandardFrameType::JobListResult),
         ServerEventKind::MessageReplayed { .. } => standard(StandardFrameType::HistoryPage),
         ServerEventKind::Error { .. } => standard(StandardFrameType::Error),
+        ServerEventKind::SteerApplied { .. } => standard(StandardFrameType::UserInputAccepted),
         other => FrameType::Extension(extension_name_for_event(other)),
     }
 }

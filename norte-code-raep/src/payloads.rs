@@ -163,6 +163,44 @@ struct HistoryContent<'a> {
     content: &'a str,
 }
 
+/// Who originated an accepted input, in the standard payload's spelling.
+///
+/// RAEP says `kind` is required and the rest is only meaningful for the
+/// kind that names it; `delegator` and `system` can reach the CLI from a
+/// server (a steering message from a parent agent, a server-generated
+/// turn), so the struct has to spell them even though Norte Code never
+/// sends them.
+#[derive(Debug, Serialize)]
+struct OriginPayload<'a> {
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<&'a str>,
+}
+
+/// One part of the accepted content.
+#[derive(Debug, Serialize)]
+struct AcceptedPart<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+/// A standard `USER_INPUT_ACCEPTED` payload (RFC 12.4): `turn_id`, `origin`,
+/// `content`, plus `position` when the input waits in the queue and
+/// `replaces_turn_id` when it re-runs a turn.
+#[derive(Debug, Serialize)]
+struct UserInputAcceptedPayload<'a> {
+    turn_id: &'a str,
+    origin: OriginPayload<'a>,
+    content: Vec<AcceptedPart<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaces_turn_id: Option<&'a str>,
+}
+
 /// Converts a `NorteCode` event into the stable payload understood by RAEP
 /// clients.
 ///
@@ -664,6 +702,23 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             retryable: Some(false),
             details: None,
         })),
+        ServerEventKind::SteerApplied { ids, messages } => {
+            let mut content = Vec::with_capacity(messages.len());
+            for text in messages {
+                content.push(AcceptedPart { kind: "text", text });
+            }
+            Some(payload(UserInputAcceptedPayload {
+                turn_id: ids.first().map_or("", String::as_str),
+                origin: OriginPayload {
+                    kind: "user",
+                    user_id: None,
+                    display_name: None,
+                },
+                content,
+                position: None,
+                replaces_turn_id: None,
+            }))
+        }
         _ => None,
     }
 }
