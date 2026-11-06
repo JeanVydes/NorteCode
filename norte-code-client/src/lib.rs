@@ -22,6 +22,198 @@ use tokio_stream::iter;
 /// A stream of events answering one client request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 
+/// The frame kinds this client maps onto protocol events. The wire spells
+/// them in screaming snake case; the enum is the closed set, so a new frame
+/// type is a compile error here, not a silent fall-through.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameKind {
+    TokenDelta,
+    TurnStateChanged,
+    ToolCallStarted,
+    ToolOutputDelta,
+    ToolCallFinished,
+    JobListResult,
+    Error,
+    Other,
+}
+
+impl FrameKind {
+    fn from_wire(name: &str) -> Self {
+        match name {
+            "TOKEN_DELTA" => Self::TokenDelta,
+            "TURN_STATE_CHANGED" => Self::TurnStateChanged,
+            "TOOL_CALL_STARTED" => Self::ToolCallStarted,
+            "TOOL_OUTPUT_DELTA" => Self::ToolOutputDelta,
+            "TOOL_CALL_FINISHED" => Self::ToolCallFinished,
+            "JOB_LIST_RESULT" => Self::JobListResult,
+            "ERROR" => Self::Error,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// A tool call's terminal status, as the wire spells it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum ToolStatus {
+    Ok,
+    Error,
+    Cancelled,
+}
+
+/// A job's status, as the wire spells it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum JobStatus {
+    #[default]
+    Running,
+    Completed,
+    Failed,
+    Killed,
+    #[serde(rename = "TIMED_OUT")]
+    TimedOut,
+}
+
+/// A token delta payload.
+#[derive(Debug, serde::Deserialize)]
+struct TokenDeltaPayload {
+    delta: String,
+    index: u32,
+    #[serde(default)]
+    channel: String,
+}
+
+/// A tool call start payload.
+#[derive(Debug, serde::Deserialize)]
+struct ToolCallStartedPayload {
+    tool_call_id: String,
+    tool_name: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+}
+
+/// A tool output delta payload.
+#[derive(Debug, serde::Deserialize)]
+struct ToolOutputDeltaPayload {
+    tool_call_id: String,
+    tool_name: String,
+    #[serde(default = "default_output_stream")]
+    stream: norte_code_protocol::types::OutputStream,
+    delta: String,
+}
+
+fn default_output_stream() -> norte_code_protocol::types::OutputStream {
+    norte_code_protocol::types::OutputStream::Stdout
+}
+
+/// A tool call finish payload.
+#[derive(Debug, serde::Deserialize)]
+struct ToolCallFinishedPayload {
+    tool_call_id: String,
+    #[serde(default)]
+    tool_name: Option<String>,
+    status: ToolStatus,
+    #[serde(default)]
+    result_summary: Option<String>,
+    #[serde(default)]
+    result_truncated: bool,
+    #[serde(default)]
+    duration_ms: u64,
+}
+
+/// One job entry in a job list payload.
+#[derive(Debug, serde::Deserialize)]
+struct JobEntryPayload {
+    job_id: String,
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    status: JobStatus,
+    #[serde(default)]
+    exit_code: Option<i32>,
+}
+
+/// A job list payload.
+#[derive(Debug, serde::Deserialize)]
+struct JobListPayload {
+    #[serde(default)]
+    jobs: Vec<JobEntryPayload>,
+}
+
+/// An error payload.
+#[derive(Debug, serde::Deserialize)]
+struct ErrorPayload {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+/// The extension's `TurnFinished` fields, which the canonical turn payload
+/// does not carry.
+#[derive(Debug, serde::Deserialize)]
+struct ExtensionTurnFinished {
+    #[serde(default)]
+    phase: Option<norte_code_protocol::Phase>,
+    #[serde(default)]
+    committed: Option<bool>,
+}
+
+/// A typed view of one raw frame: the envelope fields the decoder needs,
+/// read once, instead of string lookups scattered through the match.
+struct FrameView {
+    frame_type: Option<FrameKind>,
+    payload: Option<Value>,
+    session: Option<norte_code_protocol::SessionKey>,
+    turn: u64,
+    extension: Option<Value>,
+}
+
+impl FrameView {
+    fn from_value(frame: &Value) -> Self {
+        let frame_type = frame
+            .get("type")
+            .and_then(Value::as_str)
+            .map(FrameKind::from_wire);
+        let payload = frame.get("payload").cloned();
+        let session = frame
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(norte_code_protocol::SessionKey::new);
+        let turn = frame
+            .get("turn_id")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let extension = frame.get("ext").cloned();
+        Self {
+            frame_type,
+            payload,
+            session,
+            turn,
+            extension,
+        }
+    }
+
+    fn extension_turn_finished(&self) -> Option<ExtensionTurnFinished> {
+        let event = self
+            .extension
+            .as_ref()
+            .and_then(|ext| ext.get("norte_code"))?;
+        let kind = event.get("kind")?;
+        let finished = kind.get("TurnFinished")?;
+        serde_json::from_value(finished.clone()).ok()
+    }
+}
+
+/// Deserializes one payload into its typed struct, naming the frame in the
+/// error so a wire change points at the frame that broke.
+fn from_payload<T: serde::de::DeserializeOwned>(payload: Value) -> Result<T, ClientError> {
+    serde_json::from_value(payload)
+        .map_err(|error| ClientError::new(format!("invalid RAEP payload: {error}")))
+}
+
 /// An error raised before a request can produce an event stream.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 #[error("{message}")]
@@ -790,210 +982,173 @@ fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(Option<ServerEvent>, bool, Opt
 ///
 /// Returns `Ok(None)` for a frame this adapter has no faithful standard
 /// mapping for, so the caller can fall back to the `NorteCode` extension.
+///
+/// Every payload is decoded through a typed struct — either one from
+/// `raep_types` or one defined here for the shapes the spec leaves opaque.
+/// There are no string-key field lookups: a missing or mistyped field is a
+/// serde error, which is a wire error, not a silent default.
 #[allow(clippy::too_many_lines)]
 fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, ClientError> {
-    let Some(frame_type) = frame.get("type").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    let Some(payload) = frame.get("payload") else {
-        return Ok(None);
-    };
-    let session = frame
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(norte_code_protocol::SessionKey::new);
-    let turn = frame
-        .get("turn_id")
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
+    let frame = FrameView::from_value(frame);
+    let frame_type = frame.frame_type;
+    let turn = frame.turn;
+    let extension_finished = frame.extension_turn_finished();
+    let payload = frame.payload;
+    let session = frame.session;
     let event = |kind| ServerEvent {
         request_id: 0,
         session: session.clone(),
         kind,
     };
     let kind = match frame_type {
-        "TOKEN_DELTA" => {
-            let index = u32::try_from(number(payload, "index")?).unwrap_or(u32::MAX);
-            let text = required_string(payload, "delta")?;
-            let delta = if payload.get("channel").and_then(Value::as_str) == Some("reasoning") {
-                norte_code_protocol::Delta::Reasoning { index, text }
-            } else {
-                norte_code_protocol::Delta::Text { index, text }
+        None => return Ok(None),
+        Some(FrameKind::Other | FrameKind::Error) if payload.is_none() => return Ok(None),
+        Some(frame_kind) => {
+            let Some(payload) = payload else {
+                return Ok(None);
             };
-            event(norte_code_protocol::ServerEventKind::Delta { turn, delta })
-        }
-        "TURN_STATE_CHANGED" => {
-            // The payload is the spec's own `TurnStateChanged` struct: decode
-            // it whole, so an unknown state or a missing field is an error
-            // from serde, not a silent drop or a hand-rolled lookup.
-            let changed: raep_types::TurnStateChanged = serde_json::from_value(payload.clone())
-                .map_err(|error| {
-                    ClientError::new(format!("invalid TURN_STATE_CHANGED payload: {error}"))
-                })?;
-            match changed.state {
-                raep_types::TurnState::Queued => {
-                    event(norte_code_protocol::ServerEventKind::TurnStarted { turn })
+            match frame_kind {
+                FrameKind::TokenDelta => {
+                    let decoded: TokenDeltaPayload = from_payload(payload)?;
+                    let delta = match decoded.channel.as_str() {
+                        "reasoning" => norte_code_protocol::Delta::Reasoning {
+                            index: decoded.index,
+                            text: decoded.delta,
+                        },
+                        _ => norte_code_protocol::Delta::Text {
+                            index: decoded.index,
+                            text: decoded.delta,
+                        },
+                    };
+                    event(norte_code_protocol::ServerEventKind::Delta { turn, delta })
                 }
-                raep_types::TurnState::Completed => {
-                    // `phase`/`committed` are NorteCode's own fields: the RAEP
-                    // spec has no equivalent, so they travel inside the
-                    // compatibility extension the server writes, not in the
-                    // canonical payload. Read them from there, defaulting to
-                    // the only honest values (idle, committed) when absent.
-                    let extension = frame
-                        .get("ext")
-                        .and_then(|ext| ext.get("norte_code"))
-                        .and_then(|event| event.get("kind"))
-                        .and_then(|kind| kind.get("TurnFinished"));
-                    let phase = extension
-                        .and_then(|finished| finished.get("phase"))
-                        .and_then(|phase| serde_json::from_value(phase.clone()).ok())
-                        .unwrap_or(norte_code_protocol::Phase::Idle);
-                    let committed = extension
-                        .and_then(|finished| finished.get("committed"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true);
-                    event(norte_code_protocol::ServerEventKind::TurnFinished {
+                FrameKind::TurnStateChanged => {
+                    // The payload is the spec's own `TurnStateChanged` struct: decode
+                    // it whole, so an unknown state or a missing field is an error
+                    // from serde, not a silent drop or a hand-rolled lookup.
+                    let changed: raep_types::TurnStateChanged = from_payload(payload)?;
+                    match changed.state {
+                        raep_types::TurnState::Queued => {
+                            event(norte_code_protocol::ServerEventKind::TurnStarted { turn })
+                        }
+                        raep_types::TurnState::Completed => {
+                            // `phase`/`committed` are NorteCode's own fields: the RAEP
+                            // spec has no equivalent, so they travel inside the
+                            // compatibility extension the server writes, not in the
+                            // canonical payload. Read them from there, defaulting to
+                            // the only honest values (idle, committed) when absent.
+                            let phase = extension_finished
+                                .as_ref()
+                                .and_then(|finished| finished.phase)
+                                .unwrap_or(norte_code_protocol::Phase::Idle);
+                            let committed = extension_finished
+                                .as_ref()
+                                .and_then(|finished| finished.committed)
+                                .unwrap_or(true);
+                            event(norte_code_protocol::ServerEventKind::TurnFinished {
+                                turn,
+                                phase,
+                                committed,
+                            })
+                        }
+                        raep_types::TurnState::Cancelled | raep_types::TurnState::Failed => {
+                            let reason = match changed.stop_reason {
+                                Some(raep_types::StopReason::EndTurn) => "end_turn",
+                                Some(raep_types::StopReason::MaxTokens) => "max_tokens",
+                                Some(raep_types::StopReason::Error) => "error",
+                                Some(raep_types::StopReason::ToolLimit) => "tool_limit",
+                                Some(raep_types::StopReason::BudgetExceeded) => "budget_exceeded",
+                                Some(raep_types::StopReason::Cancelled) | None => "cancelled",
+                            }
+                            .to_owned();
+                            event(norte_code_protocol::ServerEventKind::TurnStopped { reason })
+                        }
+                        // Intermediate states carry no turn-boundary meaning for the
+                        // client; the next terminal state will arrive on its own.
+                        raep_types::TurnState::CallingProvider
+                        | raep_types::TurnState::ExecutingTool
+                        | raep_types::TurnState::AwaitingApproval => return Ok(None),
+                    }
+                }
+                FrameKind::ToolCallStarted => {
+                    let decoded: ToolCallStartedPayload = from_payload(payload)?;
+                    event(norte_code_protocol::ServerEventKind::ToolStarted {
                         turn,
-                        phase,
-                        committed,
+                        call_id: decoded.tool_call_id,
+                        tool: decoded.tool_name,
+                        arguments: decoded.arguments,
+                        source: None,
                     })
                 }
-                raep_types::TurnState::Cancelled | raep_types::TurnState::Failed => {
-                    let reason = match changed.stop_reason {
-                        Some(raep_types::StopReason::EndTurn) => "end_turn",
-                        Some(raep_types::StopReason::MaxTokens) => "max_tokens",
-                        Some(raep_types::StopReason::Error) => "error",
-                        Some(raep_types::StopReason::ToolLimit) => "tool_limit",
-                        Some(raep_types::StopReason::BudgetExceeded) => "budget_exceeded",
-                        Some(raep_types::StopReason::Cancelled) | None => "cancelled",
-                    }
-                    .to_owned();
-                    event(norte_code_protocol::ServerEventKind::TurnStopped { reason })
+                FrameKind::ToolOutputDelta => {
+                    let decoded: ToolOutputDeltaPayload = from_payload(payload)?;
+                    event(norte_code_protocol::ServerEventKind::ToolOutput {
+                        turn,
+                        call_id: decoded.tool_call_id,
+                        tool: decoded.tool_name,
+                        stream: decoded.stream,
+                        text: decoded.delta,
+                        last: false,
+                    })
                 }
-                // Intermediate states carry no turn-boundary meaning for the
-                // client; the next terminal state will arrive on its own.
-                raep_types::TurnState::CallingProvider
-                | raep_types::TurnState::ExecutingTool
-                | raep_types::TurnState::AwaitingApproval => return Ok(None),
+                FrameKind::ToolCallFinished => {
+                    let decoded: ToolCallFinishedPayload = from_payload(payload)?;
+                    event(norte_code_protocol::ServerEventKind::ToolFinished {
+                        turn,
+                        call_id: decoded.tool_call_id,
+                        // The finish frame carries the name the start announced, so
+                        // the ending row can say which call ended. Older servers
+                        // omitted it; fall back to empty rather than failing.
+                        tool: decoded.tool_name.unwrap_or_default(),
+                        is_error: decoded.status == ToolStatus::Error,
+                        error: None,
+                        output: decoded.result_summary,
+                        truncated: decoded.result_truncated,
+                        detached: decoded.status == ToolStatus::Cancelled,
+                        duration_ms: decoded.duration_ms,
+                    })
+                }
+                FrameKind::JobListResult => {
+                    let decoded: JobListPayload = from_payload(payload)?;
+                    let jobs = decoded
+                        .jobs
+                        .into_iter()
+                        .map(|job| {
+                            let state = match job.status {
+                                JobStatus::Completed => norte_code_protocol::JobState::Finished,
+                                JobStatus::Failed | JobStatus::Killed | JobStatus::TimedOut => {
+                                    norte_code_protocol::JobState::Cancelled
+                                }
+                                JobStatus::Running => norte_code_protocol::JobState::Running,
+                            };
+                            norte_code_protocol::JobInfo {
+                                id: job.job_id,
+                                label: job.command,
+                                script: String::new(),
+                                state,
+                                exit_code: job.exit_code,
+                                timed_out: job.status == JobStatus::TimedOut,
+                                elapsed_ms: 0,
+                                output: String::new(),
+                                dropped: false,
+                            }
+                        })
+                        .collect();
+                    event(norte_code_protocol::ServerEventKind::JobList { jobs })
+                }
+                FrameKind::Error => {
+                    let decoded: ErrorPayload = from_payload(payload)?;
+                    let code = decoded.code.to_ascii_lowercase();
+                    let code = serde_json::from_value(serde_json::Value::String(code))
+                        .unwrap_or(norte_code_protocol::ErrorCode::Internal);
+                    event(norte_code_protocol::ServerEventKind::Error {
+                        code,
+                        message: decoded.message,
+                    })
+                }
+                FrameKind::Other => return Ok(None),
             }
         }
-        "TOOL_CALL_STARTED" => event(norte_code_protocol::ServerEventKind::ToolStarted {
-            turn,
-            call_id: required_string(payload, "tool_call_id")?,
-            tool: required_string(payload, "tool_name")?,
-            arguments: payload.get("arguments").cloned(),
-            source: None,
-        }),
-        "TOOL_OUTPUT_DELTA" => event(norte_code_protocol::ServerEventKind::ToolOutput {
-            turn,
-            call_id: required_string(payload, "tool_call_id")?,
-            tool: required_string(payload, "tool_name")?,
-            stream: serde_json::from_value(
-                payload
-                    .get("stream")
-                    .cloned()
-                    .unwrap_or(Value::String("stdout".to_owned())),
-            )
-            .unwrap_or(norte_code_protocol::types::OutputStream::Stdout),
-            text: required_string(payload, "delta")?,
-            last: false,
-        }),
-        "TOOL_CALL_FINISHED" => {
-            let status = required_string(payload, "status")?;
-            event(norte_code_protocol::ServerEventKind::ToolFinished {
-                turn,
-                call_id: required_string(payload, "tool_call_id")?,
-                // The finish frame carries the name the start announced, so
-                // the ending row can say which call ended. Older servers
-                // omitted it; fall back to empty rather than failing.
-                tool: payload
-                    .get("tool_name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                is_error: status == "ERROR",
-                error: None,
-                output: payload
-                    .get("result_summary")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                truncated: payload
-                    .get("result_truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                detached: status == "CANCELLED",
-                duration_ms: payload
-                    .get("duration_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            })
-        }
-        "JOB_LIST_RESULT" => {
-            let jobs = payload
-                .get("jobs")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|job| {
-                    let status = job
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("RUNNING");
-                    let state = match status {
-                        "COMPLETED" => norte_code_protocol::JobState::Finished,
-                        "FAILED" | "KILLED" | "TIMED_OUT" => {
-                            norte_code_protocol::JobState::Cancelled
-                        }
-                        _ => norte_code_protocol::JobState::Running,
-                    };
-                    norte_code_protocol::JobInfo {
-                        id: job
-                            .get("job_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                        label: job
-                            .get("command")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                        script: String::new(),
-                        state,
-                        exit_code: job
-                            .get("exit_code")
-                            .and_then(Value::as_i64)
-                            .and_then(|code| i32::try_from(code).ok()),
-                        timed_out: status == "TIMED_OUT",
-                        elapsed_ms: 0,
-                        output: String::new(),
-                        dropped: false,
-                    }
-                })
-                .collect();
-            event(norte_code_protocol::ServerEventKind::JobList { jobs })
-        }
-        "ERROR" => {
-            let code = payload
-                .get("code")
-                .and_then(Value::as_str)
-                .unwrap_or("internal")
-                .to_ascii_lowercase();
-            let code = serde_json::from_value(code.into())
-                .unwrap_or(norte_code_protocol::ErrorCode::Internal);
-            event(norte_code_protocol::ServerEventKind::Error {
-                code,
-                message: payload
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
-        }
-        _ => return Ok(None),
     };
     Ok(Some(kind))
 }
