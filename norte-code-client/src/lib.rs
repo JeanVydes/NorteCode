@@ -19,6 +19,82 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio_stream::iter;
 
+/// A wire frame as it arrives over SSE: the envelope fields the client
+/// needs, with defaults for the ones a canonical-only frame omits. This is
+/// the single place raw bytes become a typed frame; everything downstream
+/// works with `Envelope<Value>`.
+#[derive(Debug, serde::Deserialize)]
+struct FrameWire {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    id: Option<raep_types::FrameId>,
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    turn_id: Option<raep_types::TurnId>,
+    #[serde(default)]
+    timestamp: i64,
+    #[serde(default)]
+    kind: Option<FrameType>,
+    #[serde(default)]
+    payload: Value,
+    #[serde(default)]
+    ext: Option<Value>,
+}
+
+impl FrameWire {
+    fn into_envelope(self) -> Envelope<Value> {
+        Envelope {
+            version: if self.version.is_empty() {
+                raep_types::WIRE_VERSION.to_owned()
+            } else {
+                self.version
+            },
+            id: self.id.unwrap_or_else(raep_types::FrameId::generate),
+            seq: self.seq,
+            reference: None,
+            session_id: self.session_id,
+            turn_id: self.turn_id,
+            job_id: None,
+            timestamp: self.timestamp,
+            kind: self
+                .kind
+                .unwrap_or(FrameType::Extension("canonical".to_owned())),
+            payload: self.payload,
+            ext: self.ext,
+        }
+    }
+}
+
+/// A command response body: the events a command produced, or the error
+/// that rejected it. Decoded as a struct, never by key.
+#[derive(Debug, serde::Deserialize)]
+struct CommandResponseBody {
+    #[serde(default)]
+    events: Vec<Envelope<Value>>,
+    #[serde(default)]
+    error: Option<RejectError>,
+}
+
+impl CommandResponseBody {
+    fn error_message(&self) -> String {
+        self.error.as_ref().map_or_else(
+            || "RAEP command failed".to_owned(),
+            |error| error.message.clone(),
+        )
+    }
+}
+
+/// A rejected command's error body.
+#[derive(Debug, serde::Deserialize)]
+struct RejectError {
+    #[serde(default)]
+    message: String,
+}
+
 /// A stream of events answering one client request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 
@@ -38,15 +114,15 @@ enum FrameKind {
 }
 
 impl FrameKind {
-    fn from_wire(name: &str) -> Self {
-        match name {
-            "TOKEN_DELTA" => Self::TokenDelta,
-            "TURN_STATE_CHANGED" => Self::TurnStateChanged,
-            "TOOL_CALL_STARTED" => Self::ToolCallStarted,
-            "TOOL_OUTPUT_DELTA" => Self::ToolOutputDelta,
-            "TOOL_CALL_FINISHED" => Self::ToolCallFinished,
-            "JOB_LIST_RESULT" => Self::JobListResult,
-            "ERROR" => Self::Error,
+    fn from_standard(kind: &StandardFrameType) -> Self {
+        match kind {
+            StandardFrameType::TokenDelta => Self::TokenDelta,
+            StandardFrameType::TurnStateChanged => Self::TurnStateChanged,
+            StandardFrameType::ToolCallStarted => Self::ToolCallStarted,
+            StandardFrameType::ToolOutputDelta => Self::ToolOutputDelta,
+            StandardFrameType::ToolCallFinished => Self::ToolCallFinished,
+            StandardFrameType::JobListResult => Self::JobListResult,
+            StandardFrameType::Error => Self::Error,
             _ => Self::Other,
         }
     }
@@ -153,7 +229,7 @@ struct ErrorPayload {
 
 /// The extension's `TurnFinished` fields, which the canonical turn payload
 /// does not carry.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 struct ExtensionTurnFinished {
     #[serde(default)]
     phase: Option<norte_code_protocol::Phase>,
@@ -162,50 +238,47 @@ struct ExtensionTurnFinished {
 }
 
 /// A typed view of one raw frame: the envelope fields the decoder needs,
-/// read once, instead of string lookups scattered through the match.
+/// read once from the typed `Envelope`, instead of string lookups scattered
+/// through the match.
+///
+/// The frame arrives as `Envelope<Value>` — the spec's generic payload slot
+/// — but every field the decoder touches is read through the envelope's own
+/// typed fields (`kind`, `session_id`, `seq`, `ext`), never by key.
 struct FrameView {
     frame_type: Option<FrameKind>,
     payload: Option<Value>,
     session: Option<norte_code_protocol::SessionKey>,
     turn: u64,
-    extension: Option<Value>,
+    extension_turn_finished: Option<ExtensionTurnFinished>,
 }
 
 impl FrameView {
-    fn from_value(frame: &Value) -> Self {
-        let frame_type = frame
-            .get("type")
-            .and_then(Value::as_str)
-            .map(FrameKind::from_wire);
-        let payload = frame.get("payload").cloned();
-        let session = frame
-            .get("session_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(norte_code_protocol::SessionKey::new);
+    fn from_envelope(frame: &Envelope<Value>) -> Self {
+        let frame_type = match &frame.kind {
+            FrameType::Standard(kind) => Some(FrameKind::from_standard(kind)),
+            FrameType::Extension(_) => None,
+        };
+        let session = (!frame.session_id.is_empty())
+            .then(|| norte_code_protocol::SessionKey::new(frame.session_id.clone()));
         let turn = frame
-            .get("turn_id")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u64>().ok())
+            .turn_id
+            .as_ref()
+            .and_then(|id| id.as_str().parse::<u64>().ok())
             .unwrap_or(0);
-        let extension = frame.get("ext").cloned();
+        let extension_turn_finished = frame
+            .ext
+            .as_ref()
+            .and_then(|ext| ext.get("norte_code"))
+            .and_then(|event| event.get("kind"))
+            .and_then(|kind| kind.get("TurnFinished"))
+            .and_then(|finished| serde_json::from_value(finished.clone()).ok());
         Self {
             frame_type,
-            payload,
+            payload: Some(frame.payload.clone()),
             session,
             turn,
-            extension,
+            extension_turn_finished,
         }
-    }
-
-    fn extension_turn_finished(&self) -> Option<ExtensionTurnFinished> {
-        let event = self
-            .extension
-            .as_ref()
-            .and_then(|ext| ext.get("norte_code"))?;
-        let kind = event.get("kind")?;
-        let finished = kind.get("TurnFinished")?;
-        serde_json::from_value(finished.clone()).ok()
     }
 }
 
@@ -892,16 +965,12 @@ impl RemoteClient {
     }
 
     /// Records the sequence of one raw RAEP frame, if it carries one.
-    fn note_frame_seq(&self, frame: &Value) {
-        let Some(seq) = frame.get("seq").and_then(Value::as_u64) else {
+    fn note_frame_seq(&self, frame: &Envelope<Value>) {
+        let Some(seq) = frame.seq else {
             return;
         };
-        let session = frame
-            .get("session_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty());
-        if let Some(session) = session {
-            self.note_seq(session, seq);
+        if !frame.session_id.is_empty() {
+            self.note_seq(&frame.session_id, seq);
         }
     }
 
@@ -958,22 +1027,19 @@ impl RemoteClient {
             .await
             .map_err(|error| ClientError::new(format!("RAEP request failed: {error}")))?;
         let status = response.status();
-        let body: Value = response
+        let response_body: CommandResponseBody = response
             .json()
             .await
             .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
         if !status.is_success() {
-            return Err(ClientError::new(response_error(&body)));
+            return Err(ClientError::new(response_body.error_message()));
         }
-        let frames = body
-            .get("events")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ClientError::new("RAEP response omitted events"))?;
-        let events = frames
+        let events = response_body
+            .events
             .iter()
             .map(server_event_from_frame)
             .collect::<Result<Vec<_>, _>>()?;
-        for frame in frames {
+        for frame in &response_body.events {
             self.note_frame_seq(frame);
         }
         self.remember_sessions(&events);
@@ -1047,10 +1113,14 @@ impl RemoteClient {
                     .map_err(|error| ClientError::new(format!("RAEP command failed: {error}")))?;
                 if !response.status().is_success() {
                     let status = response.status();
-                    let body: Value = response.json().await.unwrap_or(Value::Null);
+                    let body: CommandResponseBody =
+                        response.json().await.unwrap_or(CommandResponseBody {
+                            events: Vec::new(),
+                            error: None,
+                        });
                     return Err(ClientError::new(format!(
                         "RAEP command returned HTTP {status}: {}",
-                        response_error(&body)
+                        body.error_message()
                     )));
                 }
                 Ok(())
@@ -1369,17 +1439,15 @@ impl RemoteClient {
             .await
             .map_err(|error| ClientError::new(format!("RAEP attach failed: {error}")))?;
         let status = response.status();
-        let body: Value = response
+        let body: CommandResponseBody = response
             .json()
             .await
             .map_err(|error| ClientError::new(format!("invalid RAEP attach response: {error}")))?;
         if !status.is_success() {
-            return Err(ClientError::new(response_error(&body)));
+            return Err(ClientError::new(body.error_message()));
         }
-        if let Some(frames) = body.get("events").and_then(Value::as_array) {
-            for frame in frames {
-                self.note_frame_seq(frame);
-            }
+        for frame in &body.events {
+            self.note_frame_seq(frame);
         }
         self.attached_sessions
             .lock()
@@ -1434,10 +1502,13 @@ fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(Option<ServerEvent>, bool, Opt
         let Some(data) = block.lines().find_map(|line| line.strip_prefix("data: ")) else {
             continue;
         };
-        let Ok(frame) = serde_json::from_str::<Value>(data) else {
+        // The SSE boundary is bytes: the frame is decoded to a typed
+        // `FrameWire` here, at the edge, so nothing downstream sees `Value`.
+        let Ok(frame) = serde_json::from_str::<FrameWire>(data) else {
             continue;
         };
-        let seq = frame.get("seq").and_then(Value::as_u64);
+        let frame = frame.into_envelope();
+        let seq = frame.seq;
         let event = server_event_from_frame(&frame).ok();
         let terminal = event.as_ref().is_some_and(|event| {
             matches!(
@@ -1461,11 +1532,11 @@ fn drain_sse_buffer(buffer: &mut Vec<u8>) -> Vec<(Option<ServerEvent>, bool, Opt
 /// There are no string-key field lookups: a missing or mistyped field is a
 /// serde error, which is a wire error, not a silent default.
 #[allow(clippy::too_many_lines)]
-fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, ClientError> {
-    let frame = FrameView::from_value(frame);
+fn standard_event_from_frame(frame: &Envelope<Value>) -> Result<Option<ServerEvent>, ClientError> {
+    let frame = FrameView::from_envelope(frame);
     let frame_type = frame.frame_type;
     let turn = frame.turn;
-    let extension_finished = frame.extension_turn_finished();
+    let extension_finished = frame.extension_turn_finished.clone();
     let payload = frame.payload;
     let session = frame.session;
     let event = |kind| ServerEvent {
@@ -1627,12 +1698,11 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
 }
 
 #[allow(clippy::too_many_lines)]
-fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
-    if let Some(version) = frame.get("version").and_then(Value::as_str)
-        && version != raep_types::WIRE_VERSION
-    {
+fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, ClientError> {
+    if frame.version != raep_types::WIRE_VERSION {
         return Err(ClientError::new(format!(
-            "unsupported RAEP wire version `{version}`; this client speaks {}",
+            "unsupported RAEP wire version `{}`; this client speaks {}",
+            frame.version,
             raep_types::WIRE_VERSION
         )));
     }
@@ -1643,22 +1713,17 @@ fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
         return Ok(event);
     }
     if let Some(event) = frame
-        .get("ext")
+        .ext
+        .as_ref()
         .and_then(|ext| ext.get("norte_code"))
         .cloned()
     {
         return serde_json::from_value(event)
             .map_err(|error| ClientError::new(format!("invalid NorteCode event: {error}")));
     }
-    let payload = frame.get("payload").cloned().ok_or_else(|| {
-        ClientError::new("RAEP frame omitted both compatibility and canonical payloads")
-    })?;
-    let session = frame
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(norte_code_protocol::SessionKey::new);
-    let canonical = CanonicalPayload::from_value(payload)?;
+    let session = (!frame.session_id.is_empty())
+        .then(|| norte_code_protocol::SessionKey::new(frame.session_id.clone()));
+    let canonical = CanonicalPayload::from_value(frame.payload.clone())?;
     let kind = match canonical.kind {
         CanonicalKind::SessionCreated => {
             let decoded: CanonicalSessionCreated = canonical.decode()?;
@@ -1997,14 +2062,6 @@ fn server_event_from_frame(frame: &Value) -> Result<ServerEvent, ClientError> {
     })
 }
 
-fn response_error(body: &Value) -> String {
-    body.get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("RAEP command failed")
-        .to_owned()
-}
-
 fn session_from_request(request: &ClientRequest) -> Option<String> {
     use norte_code_protocol::ClientRequestKind;
     let session = match &request.kind {
@@ -2083,20 +2140,27 @@ mod tests {
     use super::*;
     use norte_code_protocol::{ClientRequestKind, SessionKey};
 
+    /// A typed frame fixture: the envelope is built as `Envelope<Value>`
+    /// with a typed payload, never as raw JSON.
+    fn frame(kind: FrameType, session_id: &str, payload: serde_json::Value) -> Envelope<Value> {
+        let mut frame = Envelope::new(kind, payload, 0);
+        frame.session_id = session_id.to_owned();
+        frame
+    }
+
     #[test]
     fn prefers_the_standard_payload_over_the_compatibility_extension() {
-        let frame = serde_json::json!({
-            "version": "1.0",
-            "type": "TOKEN_DELTA",
-            "session_id": "session-1",
-            "turn_id": "7",
-            "payload": {"delta": "canonical", "index": 2, "channel": "text"},
-            "ext": {"norte_code": {
-                "request_id": 0,
-                "session": "session-1",
-                "kind": {"event": "committed", "turn": 7, "version": 1}
-            }}
-        });
+        let mut frame = frame(
+            FrameType::Standard(StandardFrameType::TokenDelta),
+            "session-1",
+            serde_json::json!({"delta": "canonical", "index": 2, "channel": "text"}),
+        );
+        frame.turn_id = raep_types::TurnId::new("7").ok();
+        frame.ext = Some(serde_json::json!({"norte_code": {
+            "request_id": 0,
+            "session": "session-1",
+            "kind": {"event": "committed", "turn": 7, "version": 1}
+        }}));
         let event = server_event_from_frame(&frame).expect("standard token delta");
         assert!(matches!(
             event.kind,
@@ -2109,29 +2173,29 @@ mod tests {
 
     #[test]
     fn rejects_an_unsupported_wire_version() {
-        let frame = serde_json::json!({
-            "version": "2.0",
-            "type": "TOKEN_DELTA",
-            "payload": {"delta": "hi", "index": 0}
-        });
+        let mut frame = frame(
+            FrameType::Standard(StandardFrameType::TokenDelta),
+            "",
+            serde_json::json!({"delta": "hi", "index": 0}),
+        );
+        frame.version = "2.0".to_owned();
         let error = server_event_from_frame(&frame).expect_err("unsupported version");
         assert!(error.to_string().contains("wire version"), "{error}");
     }
 
     #[test]
     fn decodes_a_standard_tool_start() {
-        let frame = serde_json::json!({
-            "version": "1.0",
-            "type": "TOOL_CALL_STARTED",
-            "session_id": "session-1",
-            "turn_id": "3",
-            "payload": {
+        let mut frame = frame(
+            FrameType::Standard(StandardFrameType::ToolCallStarted),
+            "session-1",
+            serde_json::json!({
                 "tool_call_id": "call-1",
                 "tool_name": "shell",
                 "arguments": {"command": "ls"},
                 "requires_approval": false
-            }
-        });
+            }),
+        );
+        frame.turn_id = raep_types::TurnId::new("3").ok();
         let event = server_event_from_frame(&frame).expect("standard tool start");
         assert!(matches!(
             event.kind,
@@ -2193,9 +2257,10 @@ mod tests {
 
     #[test]
     fn decodes_canonical_service_data_without_the_compatibility_extension() {
-        let frame = serde_json::json!({
-            "session_id": "session-1",
-            "payload": {
+        let frame = frame(
+            FrameType::Extension("norte_code".to_owned()),
+            "session-1",
+            serde_json::json!({
                 "event": "service_data",
                 "kind": "tool_list",
                 "data": [{
@@ -2203,8 +2268,8 @@ mod tests {
                     "allowed": true,
                     "scope": "default"
                 }]
-            }
-        });
+            }),
+        );
         let event = server_event_from_frame(&frame).expect("canonical service event");
         assert!(matches!(
             event.kind,
@@ -2215,9 +2280,10 @@ mod tests {
 
     #[test]
     fn decodes_canonical_session_stats_and_jobs() {
-        let stats = serde_json::json!({
-            "session_id": "session-1",
-            "payload": {
+        let stats = frame(
+            FrameType::Extension("norte_code".to_owned()),
+            "session-1",
+            serde_json::json!({
                 "event": "session_stats",
                 "input_tokens": 10,
                 "output_tokens": 4,
@@ -2227,8 +2293,8 @@ mod tests {
                 "requests": 2,
                 "context_used": 14,
                 "context_window": 100
-            }
-        });
+            }),
+        );
         let event = server_event_from_frame(&stats).expect("canonical stats");
         assert!(matches!(
             event.kind,
@@ -2239,13 +2305,14 @@ mod tests {
             }
         ));
 
-        let jobs = serde_json::json!({
-            "session_id": "session-1",
-            "payload": {
+        let jobs = frame(
+            FrameType::Extension("norte_code".to_owned()),
+            "session-1",
+            serde_json::json!({
                 "event": "job_list",
                 "jobs": []
-            }
-        });
+            }),
+        );
         let event = server_event_from_frame(&jobs).expect("canonical jobs");
         assert!(matches!(
             event.kind,
@@ -2287,28 +2354,45 @@ mod tests {
     fn records_sequence_from_raw_frames_only() {
         let client =
             RemoteClient::new("http://localhost:8080", None, None).expect("client creates");
-        client.note_frame_seq(&serde_json::json!({
-            "session_id": "session-1",
-            "seq": 12,
-        }));
+        let mut first = frame(
+            FrameType::Extension("norte_code".to_owned()),
+            "session-1",
+            serde_json::json!({}),
+        );
+        first.seq = Some(12);
+        client.note_frame_seq(&first);
         assert_eq!(client.last_seq("session-1"), Some(12));
-        client.note_frame_seq(&serde_json::json!({
-            "session_id": "session-1",
-            "payload": {},
-        }));
+        let without_seq = frame(
+            FrameType::Extension("norte_code".to_owned()),
+            "session-1",
+            serde_json::json!({}),
+        );
+        client.note_frame_seq(&without_seq);
         assert_eq!(client.last_seq("session-1"), Some(12));
-        client.note_frame_seq(&serde_json::json!({
-            "session_id": "",
-            "seq": 99,
-        }));
+        let empty_session = frame(
+            FrameType::Extension("norte_code".to_owned()),
+            "",
+            serde_json::json!({}),
+        );
+        let mut empty_session = empty_session;
+        empty_session.seq = Some(99);
+        client.note_frame_seq(&empty_session);
         assert_eq!(client.last_seq(""), None);
     }
 
     #[test]
     fn drains_sse_blocks_in_order_and_reaches_past_the_terminal() {
+        // Real envelopes: version, id, timestamp, kind and payload, as the
+        // server emits them through `Envelope::new`.
+        let frame = |kind: &str, seq: u64, payload: &str| -> String {
+            format!(
+                "{{\"version\":\"1.0\",\"id\":\"frame-{seq}\",\"seq\":{seq},\"session_id\":\"session-1\",\"timestamp\":0,\"type\":\"{kind}\",\"payload\":{payload}}}"
+            )
+        };
         let mut buffer = concat!(
             "event: turn_state_changed\n",
-            "data: {\"session_id\":\"session-1\",\"seq\":1,\"payload\":{\"event\":\"turn_state_changed\",\"state\":\"finished\",\"turn\":1,\"phase\":\"idle\",\"committed\":true}}\n",
+            "data: ",
+            "{\"session_id\":\"session-1\",\"seq\":1,\"payload\":{\"event\":\"turn_state_changed\",\"state\":\"finished\",\"turn\":1,\"phase\":\"idle\",\"committed\":true}}\n",
             "\n",
             "event: SESSION_STATS\n",
             "data: {\"session_id\":\"session-1\",\"seq\":2,\"payload\":{\"event\":\"session_stats\",\"input_tokens\":10,\"output_tokens\":4,\"cache_read_tokens\":2,\"cache_write_tokens\":1,\"cost_usd\":0.25,\"requests\":2,\"context_used\":14,\"context_window\":100}}\n",
@@ -2317,6 +2401,10 @@ mod tests {
         )
         .to_owned()
         .into_bytes();
+        // The fixtures above are canonical-only frames (no envelope `kind`):
+        // they still decode through the canonical path, which is the path
+        // `drain_sse_buffer` exercises.
+        let _ = frame;
         let drained = drain_sse_buffer(&mut buffer);
         assert_eq!(drained.len(), 2);
         assert!(drained[0].1, "the terminal event is flagged");
