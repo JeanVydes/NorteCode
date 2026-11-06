@@ -396,11 +396,15 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             "delta": text,
             "index": 0
         })),
+        // RAEP `TurnStateChanged` carries only `state` and `stop_reason`;
+        // `phase`/`committed` are NorteCode's own and travel in the
+        // compatibility extension (see `canonical_event_payload`), never
+        // smuggled into the canonical payload.
         ServerEventKind::TurnFinished { .. } => {
             Some(json!({"state": "COMPLETED", "stop_reason": "end_turn"}))
         }
-        ServerEventKind::TurnStopped { .. } => {
-            Some(json!({"state": "CANCELLED", "stop_reason": "cancelled"}))
+        ServerEventKind::TurnStopped { reason } => {
+            Some(json!({"state": "CANCELLED", "stop_reason": reason}))
         }
         ServerEventKind::JobList { jobs } => {
             let jobs = jobs
