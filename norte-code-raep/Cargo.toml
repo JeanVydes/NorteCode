@@ -21,7 +21,7 @@ norte-code-agent = { path = "../norte-code-agent" }
 norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-plugin-host = { path = "../norte-code-plugin-host" }
 norte = { workspace = true }
-raep-types = { path = "../../raep/raep-types" }
+raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
