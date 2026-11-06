@@ -897,7 +897,14 @@ fn standard_event_from_frame(frame: &Value) -> Result<Option<ServerEvent>, Clien
             event(norte_code_protocol::ServerEventKind::ToolFinished {
                 turn,
                 call_id: required_string(payload, "tool_call_id")?,
-                tool: String::new(),
+                // The finish frame carries the name the start announced, so
+                // the ending row can say which call ended. Older servers
+                // omitted it; fall back to empty rather than failing.
+                tool: payload
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
                 is_error: status == "ERROR",
                 error: None,
                 output: payload
