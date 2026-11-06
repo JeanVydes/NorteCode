@@ -1824,24 +1824,60 @@ impl Renderer {
         self.transcript.push(entry);
     }
 
-    /// Prints a tool's arguments as a structured block at `high` verbosity.
+    /// Prints a tool's arguments as a human-readable block at `high` verbosity.
     ///
-    /// The block is titled with the tool and the shell's command is named
-    /// in it, so the JSON does not land as an anonymous blob: a reader
-    /// scanning the transcript sees which call the arguments belong to
-    /// before the first key.
+    /// One line per argument, in the order the tool declared them, with the
+    /// key as a dim label and the value as prose — not a JSON blob. Nested
+    /// objects print as a short inline form, and long values are clipped
+    /// with a count, so the block reads like a summary a person wrote.
+    /// The block is titled with the tool (and the shell command), so it
+    /// never reads as anonymous output.
     fn print_arguments(&mut self, tool: &str, arguments: &serde_json::Value) {
         let title = match Self::command_summary(Some(arguments)) {
             Some(command) if tool == "shell" => format!("shell $ {command}"),
             _ => format!("{tool} arguments"),
         };
-        let text = serde_json::to_string_pretty(arguments)
-            .unwrap_or_else(|_| compact_json(arguments, 4_000));
-        let (text, truncated) = clip_text(&text, 4_000);
-        self.code_block_titled("json", &title, &text);
-        if truncated {
-            self.notice("arguments shortened for display");
+        let mut entry =
+            crate::transcript::Entry::bordered(crate::transcript::Kind::ToolOutput, title);
+        entry.collapsed_lines = Some(COLLAPSED_OUTPUT_ROWS);
+        let Some(object) = arguments.as_object() else {
+            let (text, _) = clip_text(&arguments.to_string(), 200);
+            entry.push_inked(crate::transcript::Ink::Alternate, text);
+            self.transcript.push(entry);
+            return;
+        };
+        for (shown, (key, value)) in object.iter().enumerate() {
+            if shown >= 12 {
+                entry.push_inked(
+                    crate::transcript::Ink::Yellow,
+                    format!("… {} more argument(s)", object.len() - shown),
+                );
+                break;
+            }
+            let rendered = match value {
+                serde_json::Value::String(text) => {
+                    let (text, _) = clip_text(text, 120);
+                    text
+                }
+                serde_json::Value::Bool(flag) => flag.to_string(),
+                serde_json::Value::Number(number) => number.to_string(),
+                serde_json::Value::Null => "∅".to_owned(),
+                serde_json::Value::Array(items) => {
+                    format!("{} item(s)", items.len())
+                }
+                serde_json::Value::Object(_) => {
+                    let (text, _) = clip_text(&compact_json(value, 120), 120);
+                    text
+                }
+            };
+            entry.push_inked(crate::transcript::Ink::Dim, key.clone());
+            let (value_text, truncated) = clip_text(&format!("  {rendered}"), 200);
+            entry.push_line(value_text);
+            if truncated {
+                entry.push_inked(crate::transcript::Ink::Yellow, "  … value shortened");
+            }
         }
+        self.transcript.push(entry);
     }
 
     /// Renders tool activity: what started, and how it ended.
