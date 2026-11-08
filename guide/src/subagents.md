@@ -27,6 +27,11 @@ a new turn when messaged. `wait_agent` waits for idle or terminal state;
 `stop_agent` allows a grace period or cancels immediately. `list_agents` and
 `inspect_agent` expose the child state and available session details.
 
+The RAEP host advertises `X_NORTECODE_DELEGATION_BASIC` for the HTTP child
+session list. `GET /raep/v1/sessions/{session_id}/children` returns the
+parent's children and their typed runner state; the route enforces the same
+principal boundary as the parent session.
+
 `lifetime` accepts `turn` or `session`, but automatic turn-bound cleanup,
 idle expiry and parent-close descendant cleanup are not implemented yet.
 Inspection of child events, approval routing, client-tool access, and

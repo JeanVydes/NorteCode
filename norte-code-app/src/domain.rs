@@ -48,6 +48,8 @@ pub enum Capability {
     ForkText,
     #[serde(rename = "X_NORTECODE_COMPACTION_BASIC")]
     CompactionBasic,
+    #[serde(rename = "X_NORTECODE_DELEGATION_BASIC")]
+    DelegationBasic,
     Delegation,
     #[default]
     #[serde(other)]
@@ -66,6 +68,7 @@ impl Capability {
             Self::JobsBasic => "Basic jobs",
             Self::ForkText => "Text session forks",
             Self::CompactionBasic => "Basic compaction",
+            Self::DelegationBasic => "Basic child-session inspection",
             Self::Delegation => "Delegation",
             Self::Other => "Other advertised capability",
         }

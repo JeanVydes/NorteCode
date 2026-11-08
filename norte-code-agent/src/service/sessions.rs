@@ -1534,17 +1534,30 @@ impl Service {
     /// The children of `parent`: sessions whose `parent_client` is `parent`,
     /// oldest first. Used by `list_agents` and the delegator tools, which
     /// address a child by the id `spawn_agent` returned.
-    pub fn children_of(
-        &self,
-        parent: &SessionKey,
-    ) -> Vec<(SessionKey, norte::SessionId, ProtocolPhase, Option<String>)> {
+    pub fn children_of(&self, parent: &SessionKey) -> Vec<super::ChildSessionSummary> {
         let sessions = self.lock_sessions();
         let mut children: Vec<_> = sessions
             .iter()
             .filter(|(_, record)| record.parent_client.as_ref() == Some(parent))
-            .map(|(key, record)| (key.clone(), record.id, record.phase, record.title.clone()))
+            .map(|(key, record)| super::ChildSessionSummary {
+                session: key.clone(),
+                title: record.title.clone(),
+                state: match record.child_terminal {
+                    Some(super::sessions::ChildTerminalState::Failed) => {
+                        super::ChildSessionState::Failed
+                    }
+                    Some(super::sessions::ChildTerminalState::Stopped) => {
+                        super::ChildSessionState::Stopped
+                    }
+                    None => match record.phase {
+                        ProtocolPhase::Idle => super::ChildSessionState::Idle,
+                        ProtocolPhase::Streaming => super::ChildSessionState::Streaming,
+                        ProtocolPhase::AwaitingTool => super::ChildSessionState::AwaitingTool,
+                    },
+                },
+            })
             .collect();
-        children.sort_by_key(|(key, _, _, _)| key.as_str().to_owned());
+        children.sort_by_key(|child| child.session.as_str().to_owned());
         children
     }
 
