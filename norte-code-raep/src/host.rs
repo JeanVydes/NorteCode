@@ -1701,7 +1701,10 @@ impl Default for HostConfig {
             max_frame_bytes: 1024 * 1024,
             auth_token: None,
             auth_principals: HashMap::new(),
-            allowed_origins: Vec::new(),
+            allowed_origins: vec![
+                "http://localhost:8080".to_owned(),
+                "http://127.0.0.1:8080".to_owned(),
+            ],
             max_artifact_bytes: 16 * 1024 * 1024,
             max_export_bytes: 64 * 1024 * 1024,
             export_ttl_s: 3600,

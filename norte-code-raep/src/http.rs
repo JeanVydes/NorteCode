@@ -22,7 +22,10 @@ use serde_json::Value;
 use serde_json::json;
 use std::{convert::Infallible, sync::Arc};
 use tower_http::{
-    limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer, trace::TraceLayer,
+    cors::{AllowOrigin, Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
+    timeout::RequestBodyTimeoutLayer,
+    trace::TraceLayer,
 };
 
 use crate::payloads::payload;
@@ -111,6 +114,7 @@ struct ReplayLostPayload {
 /// Builds the RAEP HTTP, WebSocket and SSE routes for a host.
 pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
     let limits = HostConfigLimits::from_host(&host);
+    let cors_host = Arc::clone(&host);
     Router::new()
         .route("/raep/v1/ws", get(websocket))
         .route("/raep/v1/info", get(info))
@@ -172,6 +176,16 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
         .route("/raep/v1/quota", get(quota))
         .layer(RequestBodyTimeoutLayer::new(limits.command_timeout))
         .layer(TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::predicate(move |origin, _| {
+                    origin
+                        .to_str()
+                        .is_ok_and(|origin| cors_host.origin_allowed(origin))
+                }))
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(host)
 }
 
@@ -2033,6 +2047,29 @@ mod tests {
             .expect("host"),
         );
         let app = router(host);
+        let preflight = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/raep/v1/sessions")
+                    .header("origin", "https://app.example")
+                    .header("access-control-request-method", "POST")
+                    .header(
+                        "access-control-request-headers",
+                        "authorization,content-type",
+                    )
+                    .body(Body::empty())
+                    .expect("preflight request"),
+            )
+            .await
+            .expect("preflight response");
+        assert_eq!(preflight.status(), StatusCode::OK);
+        assert_eq!(
+            preflight.headers().get("access-control-allow-origin"),
+            Some(&HeaderValue::from_static("https://app.example"))
+        );
+
         let denied = app
             .clone()
             .oneshot(
@@ -2059,6 +2096,10 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(allowed.status(), StatusCode::OK);
+        assert_eq!(
+            allowed.headers().get("access-control-allow-origin"),
+            Some(&HeaderValue::from_static("https://app.example"))
+        );
     }
 
     #[tokio::test]
@@ -2565,42 +2606,6 @@ mod tests {
             .expect("response");
         assert_eq!(stolen.status(), StatusCode::NOT_FOUND);
 
-        let children = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/raep/v1/sessions/{session}/children"))
-                    .header("authorization", "Bearer token-a")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(children.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(children.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let children: Value = serde_json::from_slice(&body).expect("json");
-        assert!(
-            children["children"]
-                .as_array()
-                .expect("children")
-                .is_empty()
-        );
-
-        let hidden_children = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/raep/v1/sessions/{session}/children"))
-                    .header("authorization", "Bearer token-b")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(hidden_children.status(), StatusCode::NOT_FOUND);
-
         let list = app
             .oneshot(
                 Request::builder()
@@ -2620,6 +2625,76 @@ mod tests {
             list["sessions"].as_array().expect("sessions").is_empty(),
             "a principal must not see another principal's sessions"
         );
+    }
+
+    #[tokio::test]
+    async fn child_session_list_is_scoped_to_parent_owner() {
+        let host = Arc::new(
+            NorteCodeRaepHost::new(
+                test_service(),
+                HostConfig {
+                    auth_principals: std::collections::HashMap::from([
+                        ("token-a".to_owned(), "alice".to_owned()),
+                        ("token-b".to_owned(), "bob".to_owned()),
+                    ]),
+                    ..HostConfig::default()
+                },
+            )
+            .expect("host"),
+        );
+        let app = router(host);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/raep/v1/sessions")
+                    .header("authorization", "Bearer token-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"agent_id":"norte-code"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(created.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let summary: Value = serde_json::from_slice(&body).expect("json");
+        let session = summary["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_owned();
+
+        let children = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}/children"))
+                    .header("authorization", "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(children.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(children.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let children: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(children["children"], json!([]));
+
+        let hidden_children = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}/children"))
+                    .header("authorization", "Bearer token-b")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(hidden_children.status(), StatusCode::NOT_FOUND);
     }
 
     async fn create_session(app: &Router) -> String {

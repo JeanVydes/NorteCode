@@ -98,6 +98,20 @@ fn load_catalog(offered: Catalogue) -> Result<Catalog, Box<dyn std::error::Error
     }
 }
 
+fn allowed_origins() -> Vec<String> {
+    std::env::var("NORTE_CODE_ALLOWED_ORIGINS").map_or_else(
+        |_| HostConfig::default().allowed_origins,
+        |origins| {
+            origins
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_owned)
+                .collect()
+        },
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace = std::env::current_dir()?;
@@ -164,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_id,
         auth_token: std::env::var("NORTE_CODE_AUTH_TOKEN").ok(),
         auth_principals,
+        allowed_origins: allowed_origins(),
         ..HostConfig::default()
     };
     let pin_store = Arc::new(FilePinStore::new(database.with_file_name("pins")));
