@@ -624,7 +624,7 @@ impl ApiClient {
             FrameType::Standard(StandardFrameType::CancelJob),
             serde_json::to_value(CancelJobRequest { grace_ms: 5_000 })
                 .map_err(|error| ApiError::InvalidResponse(error.to_string()))?,
-            now_millis(),
+            now_millis()?,
         );
         frame.session_id = session_id.to_owned();
         frame.job_id = Some(
@@ -680,7 +680,7 @@ impl ApiClient {
         let url = self.session_url(session_id, "commands")?;
         let payload = serde_json::to_value(payload)
             .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
-        let mut frame = Envelope::new(kind, payload, now_millis());
+        let mut frame = Envelope::new(kind, payload, now_millis()?);
         frame.session_id = session_id.to_owned();
         self.send_json(self.auth(self.http.post(url).json(&frame)))
             .await
@@ -696,7 +696,7 @@ impl ApiClient {
         let url = self.session_url(session_id, "commands")?;
         let payload = serde_json::to_value(payload)
             .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
-        let mut frame = Envelope::new(kind, payload, now_millis());
+        let mut frame = Envelope::new(kind, payload, now_millis()?);
         frame.session_id = session_id.to_owned();
         frame.turn_id = Some(turn_id.clone());
         self.send_json(self.auth(self.http.post(url).json(&frame)))
@@ -743,10 +743,28 @@ fn decode_payload<T: DeserializeOwned>(payload: &Value) -> Result<T, ApiError> {
         .map_err(|error| ApiError::InvalidResponse(error.to_string()))
 }
 
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+fn now_millis() -> Result<i64, ApiError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let timestamp = js_sys::Date::now();
+        if !timestamp.is_finite() {
+            return Err(ApiError::InvalidResponse(
+                "The browser clock returned an invalid timestamp.".to_owned(),
+            ));
+        }
+        timestamp.round().to_string().parse().map_err(|error| {
+            ApiError::InvalidResponse(format!("Could not read the browser clock: {error}"))
         })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| ApiError::InvalidResponse(error.to_string()))
+            .and_then(|duration| {
+                i64::try_from(duration.as_millis())
+                    .map_err(|error| ApiError::InvalidResponse(error.to_string()))
+            })
+    }
 }

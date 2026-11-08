@@ -76,9 +76,7 @@ pub fn SessionsPage() -> Element {
                             match api.create_session(&agent_id, (!title_value.is_empty()).then_some(title_value.as_str())).await {
                                 Ok(session) => {
                                     context.update_sessions(|sessions| sessions.insert(0, session.clone()));
-                                    context.set_selected_session(Some(session));
-                                    context.set_chat_items(Vec::new());
-                                    context.set_page(Page::Chat);
+                                    context.select_session(session, Page::Chat);
                                     title.set(String::new());
                                 }
                                 Err(error) => context.set_page_error(Some(error.to_string())),
@@ -129,6 +127,12 @@ fn SessionCard(session: SessionSummary) -> Element {
         .agent
         .as_ref()
         .map_or("Unknown".to_owned(), |agent| agent.id.clone());
+    let is_current = context
+        .selected_session
+        .read()
+        .as_ref()
+        .is_some_and(|selected| selected.session_id == session.session_id);
+    let switching_disabled = context.chat_state.read().is_busy() && !is_current;
     let created = session
         .created_at
         .filter(|value| *value > 0)
@@ -151,14 +155,20 @@ fn SessionCard(session: SessionSummary) -> Element {
                 span { "{created}" }
                 span { "{turn_count}" }
             }
-            div { class: "button-row", style: "margin-top: 1rem",
+            div { class: "button-row session-card-actions",
                 button {
                     class: "button-secondary",
+                    disabled: switching_disabled,
                     onclick: move |_| {
-                        context.set_selected_session(Some(session_for_open.clone()));
-                        context.set_page(Page::Chat);
+                        context.select_session(session_for_open.clone(), Page::Chat);
                     },
                     "Open conversation"
+                }
+                button {
+                    class: "button-secondary",
+                    disabled: switching_disabled,
+                    onclick: move |_| context.select_session(session.clone(), Page::Jobs),
+                    "Jobs"
                 }
             }
         }
