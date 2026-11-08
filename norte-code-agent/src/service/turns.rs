@@ -20,8 +20,8 @@ use norte::{
 };
 use norte_code_protocol::costs::{BudgetBook, BudgetNotice, CostRecord};
 use norte_code_protocol::{
-    Attachment, Budget, ErrorCode, MessageRole, Reasoning as ProtocolReasoning, ServerEvent,
-    ServerEventKind, SessionKey,
+    Attachment, Budget, ErrorCode, MessageRole, Reasoning as ProtocolReasoning, ReplayedKind,
+    ServerEvent, ServerEventKind, SessionKey,
 };
 
 use norte_code_protocol::sqlite::{RequestStatus, SessionDirectory};
@@ -156,12 +156,13 @@ impl Service {
             let requested_reasoning = reasoning
                 .or(pending_reasoning.clone())
                 .or(session_reasoning);
+            let session_config = self.profile_for_session(&key);
             let reasoning = resolve_reasoning(
                 requested_reasoning.as_ref(),
-                &self.config().reasoning.default,
+                &session_config.reasoning.default,
                 &spec.capabilities.reasoning,
             )?;
-            let configured_message = configured_budget(self.config().budgets.message.as_ref());
+            let configured_message = configured_budget(session_config.budgets.message.as_ref());
             let message = message_budget.map(|budget| budget.or(configured_message.clone()));
             if let Some(budget) = message.as_ref().and_then(Option::as_ref) {
                 self.validate_budget(&key, budget).await?;
@@ -189,7 +190,11 @@ impl Service {
                 None,
             )?;
             let state = engine.session(nid).await?;
-            let turn = state.turn + 1;
+            let last_turn = self
+                .lock_sessions()
+                .get(&key)
+                .map_or(0, |record| record.last_turn);
+            let turn = state.turn.max(last_turn) + 1;
             // The steering messages belong to the turn boundary that is starting
             // now. The interceptor takes them before the turn's input, so they keep
             // their arrival order; a message the engine already holds is not
@@ -290,6 +295,7 @@ impl Service {
 
             let this = Arc::clone(self);
             let task_key = key.clone();
+            self.set_active_turn(key.clone(), turn);
             tokio::spawn(async move {
                 let _turn_guard = turn_guard;
                 let runner = Arc::clone(&this);
@@ -310,6 +316,7 @@ impl Service {
                         &task_cancellation,
                     )
                     .await;
+                this.clear_active_turn(&task_key, turn);
                 if let Err(error) = result {
                     let _ = tx
                         .send(ServerEvent::error(
@@ -896,9 +903,13 @@ impl Service {
         phase: norte_code_protocol::Phase,
         committed: bool,
     ) -> bool {
+        self.clear_active_turn(ctx.key, ctx.stats.turn);
         self.set_phase(ctx.key, phase).await;
         let _ = self.settle(ctx, true).await;
         self.store_stats(ctx.key, ctx.stats).await;
+        if let Err(error) = self.record_turn_boundary(ctx.key, ctx.stats.turn).await {
+            tracing::warn!(session = %ctx.key, %error, "could not persist turn history boundary");
+        }
         emit(
             ctx.tx,
             ServerEvent::new(
@@ -939,6 +950,15 @@ impl Service {
                     delta,
                 })
             }
+            EngineEvent::PartCompleted {
+                index,
+                part: Part::Media(media),
+                ..
+            } => Some(ServerEventKind::MediaPartCompleted {
+                turn: stats.turn,
+                index: *index,
+                media: media.clone(),
+            }),
             // A tool that streams reports as it reads. It rides the same
             // channel as the call's own events, so the client sees the output
             // arrive instead of waiting for the call to finish.
@@ -1387,6 +1407,176 @@ async fn compaction_ancestors(
     chain
 }
 
+impl Service {
+    /// Reads the full replayable history of a session, including history
+    /// retained across compaction boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown or its history cannot be
+    /// read from the conversation store.
+    pub async fn session_history(
+        &self,
+        key: &SessionKey,
+    ) -> Result<Vec<(MessageRole, ReplayedKind, String)>, ServiceError> {
+        Ok(self
+            .session_history_with_turns(key)
+            .await?
+            .into_iter()
+            .map(|(_, role, kind, text, _)| (role, kind, text))
+            .collect())
+    }
+
+    /// Reads replayable history with the durable turn and timestamp metadata
+    /// needed by RAEP history pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session or any persisted conversation node
+    /// cannot be read.
+    pub async fn session_history_with_turns(
+        &self,
+        key: &SessionKey,
+    ) -> Result<Vec<(Option<u64>, MessageRole, ReplayedKind, String, i64)>, ServiceError> {
+        Ok(self
+            .session_history_with_provenance(key)
+            .await?
+            .into_iter()
+            .map(|(turn, role, kind, text, timestamp, _)| (turn, role, kind, text, timestamp))
+            .collect())
+    }
+
+    /// Reads replayable history with imported provenance where it was stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session or any persisted conversation node
+    /// cannot be read.
+    #[allow(clippy::type_complexity)]
+    pub async fn session_history_with_provenance(
+        &self,
+        key: &SessionKey,
+    ) -> Result<
+        Vec<(
+            Option<u64>,
+            MessageRole,
+            ReplayedKind,
+            String,
+            i64,
+            Option<serde_json::Value>,
+        )>,
+        ServiceError,
+    > {
+        let (nid, _, _) = self.require_record(key)?;
+        let mut sessions = compaction_ancestors(self.directory.as_ref(), nid).await;
+        sessions.reverse();
+        sessions.push(nid);
+        let boundaries = self
+            .lock_sessions()
+            .get(key)
+            .map(|record| record.turn_boundaries.clone())
+            .unwrap_or_default();
+        let mut replayed = Vec::new();
+        for session_id in sessions {
+            let session = self.store.load(session_id).await?;
+            let ids = if let Some(head) = session.head {
+                self.store.ancestors(head).await?
+            } else {
+                Vec::new()
+            };
+            let turn_ends: Vec<(usize, u64)> = boundaries
+                .iter()
+                .filter(|boundary| boundary.session == session_id)
+                .filter_map(|boundary| {
+                    let head = boundary.head?;
+                    ids.iter()
+                        .position(|id| *id == head)
+                        .map(|index| (index, boundary.turn))
+                })
+                .collect();
+            for (index, id) in ids.into_iter().enumerate() {
+                let node = self.store.node(id).await?;
+                let turn = turn_ends
+                    .iter()
+                    .filter(|(end, _)| *end >= index)
+                    .min_by_key(|(end, _)| *end)
+                    .map(|(_, turn)| *turn);
+                let provenance = node.metadata.get("provenance").cloned();
+                for (kind, text) in replay_text(&node.message) {
+                    replayed.push((
+                        turn,
+                        role_name(node.message.role),
+                        kind,
+                        text,
+                        node.created_at.timestamp_millis(),
+                        provenance.clone(),
+                    ));
+                }
+            }
+        }
+        Ok(replayed)
+    }
+
+    /// Whether every persisted history part is plain text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session graph cannot be read.
+    pub async fn session_history_is_plain_text(
+        &self,
+        key: &SessionKey,
+    ) -> Result<bool, ServiceError> {
+        let (session_id, _, _) = self.require_record(key)?;
+        let mut sessions = compaction_ancestors(self.directory.as_ref(), session_id).await;
+        sessions.push(session_id);
+        for session_id in sessions {
+            let session = self.store.load(session_id).await?;
+            let Some(head) = session.head else {
+                continue;
+            };
+            for node_id in self.store.ancestors(head).await? {
+                let node = self.store.node(node_id).await?;
+                if node
+                    .message
+                    .parts
+                    .iter()
+                    .any(|part| !matches!(part, Part::Text(_)))
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Reads the text history removed from the active model context by rewind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown.
+    #[allow(clippy::type_complexity)]
+    pub fn session_rewound_history_with_turns(
+        &self,
+        key: &SessionKey,
+    ) -> Result<Vec<(Option<u64>, MessageRole, ReplayedKind, String, i64)>, ServiceError> {
+        self.require_record(key)?;
+        Ok(self
+            .lock_sessions()
+            .get(key)
+            .map(|record| {
+                record
+                    .rewound_history
+                    .iter()
+                    .cloned()
+                    .map(|(turn, role, kind, text, timestamp)| {
+                        (Some(turn), role, kind, text, timestamp)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+}
+
 /// The most recent messages a resume replays, so a client that starts blank can
 /// show where the conversation was.
 const REPLAY_MESSAGES: usize = 100;
@@ -1491,17 +1681,16 @@ async fn replay_events(
     }
     let start = history.len().saturating_sub(REPLAY_MESSAGES);
     let mut out: Vec<ServerEvent> = Vec::new();
-    for (offset, message) in history[start..].iter().enumerate() {
+    let mut index = 0_u64;
+    for message in &history[start..] {
         let parts = replay_text(message);
-        if parts.is_empty() {
-            continue;
-        }
         for (kind, text) in parts {
+            index = index.saturating_add(1);
             out.push(ServerEvent::new(
                 request_id,
                 Some(key.clone()),
                 ServerEventKind::MessageReplayed {
-                    index: u64::try_from(offset + 1).unwrap_or(u64::MAX),
+                    index,
                     role: role_name(message.role),
                     kind,
                     text,
@@ -1559,11 +1748,10 @@ impl Service {
                 .await
                 .map_err(|error| error.to_string())?
         };
-        Ok(Some(MediaPart::new(
-            kind_of_mime(&attachment.mime),
-            MediaSource::Blob(id),
-            mime,
-        )))
+        let mut part = MediaPart::new(kind_of_mime(&attachment.mime), MediaSource::Blob(id), mime);
+        part.metadata.duration_ms = attachment.duration_ms;
+        part.metadata.transcript.clone_from(&attachment.transcript);
+        Ok(Some(part))
     }
 }
 

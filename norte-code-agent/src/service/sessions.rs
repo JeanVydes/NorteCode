@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 
 use norte_code_protocol::costs::BudgetBook;
 use norte_code_protocol::{
-    Budget, Phase as ProtocolPhase, Reasoning, ReasoningScope, SessionInfo, SessionKey,
+    Budget, Phase as ProtocolPhase, Reasoning, ReasoningScope, ServerEvent, ServerEventKind,
+    SessionInfo, SessionKey,
 };
 
 use crate::provider::ModelSpec;
@@ -24,12 +25,47 @@ use super::mapping::to_phase;
 use super::{Service, ServiceError, Stats, StoredSession};
 use crate::provider::ModelSpec as ProviderModelSpec;
 
+const MAX_HELD_DELEGATOR_MESSAGES: usize = 20;
+
+/// The immutable conversation head reached when one turn finished.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(super) struct TurnBoundary {
+    pub(super) turn: u64,
+    pub(super) session: norte::SessionId,
+    pub(super) head: Option<norte::NodeId>,
+}
+
+/// Persisted terminal result of a child delegation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChildTerminalState {
+    /// The child ended with an unrecoverable error.
+    Failed,
+    /// The child was stopped by its parent.
+    Stopped,
+}
+
+/// Parent-side metadata recorded when a child session is created.
+pub(super) struct ChildSessionMetadata {
+    pub(super) parent: SessionKey,
+    pub(super) tool_call_id: String,
+    pub(super) task_summary: String,
+    pub(super) lifetime: String,
+    pub(super) agent_profile: String,
+    pub(super) system_prompt: String,
+    pub(super) cancel: Arc<norte::Cancellation>,
+}
+
 /// What the service remembers about a session.
 #[derive(Debug)]
 pub(super) struct SessionRecord {
     pub(super) id: norte::SessionId,
     pub(super) title: Option<String>,
     pub(super) spec: Option<ProviderModelSpec>,
+    /// Agent profile selected when this session was created.
+    ///
+    /// Persisted so a restored child uses the same profile for nested
+    /// delegation rather than inheriting the service's default agent.
+    pub(super) agent_profile: Option<String>,
     /// A model switch accepted while the session was busy. It replaces the
     /// current spec at the next idle turn boundary.
     ///
@@ -57,6 +93,22 @@ pub(super) struct SessionRecord {
     /// and the whole conversation is in it. It is what the footer's dial shows
     /// and what a plugin asking about the context is told.
     pub(super) context_used: u64,
+    /// Highest RAEP turn id assigned to this logical session.
+    pub(super) last_turn: u64,
+    /// Durable turn-to-conversation boundaries, including compacted ancestors.
+    pub(super) turn_boundaries: Vec<TurnBoundary>,
+    /// History items retained after their turns leave the active model context.
+    pub(super) rewound_history: Vec<(
+        u64,
+        norte_code_protocol::MessageRole,
+        norte_code_protocol::ReplayedKind,
+        String,
+        i64,
+    )>,
+    /// Origin metadata for imported session history.
+    pub(super) imported_from: Option<serde_json::Value>,
+    /// Imported root session awaits its first controller attachment.
+    pub(super) imported_suspended: bool,
     /// Output tokens, summed over reported requests.
     pub(super) output_tokens: u64,
     /// Prompt tokens the provider served from its cache, summed.
@@ -92,9 +144,30 @@ pub(super) struct SessionRecord {
     pub(super) pending_reasoning: Option<Reasoning>,
     /// Messages queued for the next turn boundary, in arrival order.
     pub(super) pending_steers: Vec<Steered>,
+    /// The parent session this one was spawned from (`spawn_agent`).
+    ///
+    /// `None` for a session created directly by the client. Persisted in
+    /// `stats` so a reload still knows who a child's parent is; `list_agents`
+    /// finds a parent's children by it.
+    pub(super) parent_client: Option<SessionKey>,
+    /// The tool call that created this child.
+    pub(super) parent_tool_call_id: Option<String>,
+    /// Terminal delegation state, if the child has ended.
+    pub(super) child_terminal: Option<ChildTerminalState>,
+    /// The delegation depth: 0 for a session the client made, one more than
+    /// its parent's for a child (RFC 8.2.4). Anidación se limita con este
+    /// número, no cortando la tool `spawn_agent` del hijo.
+    pub(super) depth: u32,
+    /// Whether the delegator (the human or the parent driving this child) is
+    /// suspended (RFC 8.2.11): held messages wait and `stop_agent` fails.
+    pub(super) delegator_suspended: bool,
+    /// Messages the parent sent while the delegator was suspended, held
+    /// until it is released.
+    pub(super) delegator_queue: Vec<String>,
 }
 
 /// Builds the record of a stored session.
+#[allow(clippy::too_many_lines)]
 fn record_from(
     entry: StoredSession,
     spec: Option<ProviderModelSpec>,
@@ -106,6 +179,7 @@ fn record_from(
         id: entry.north,
         title: entry.title,
         spec,
+        agent_profile: stat(stats, "agent_profile"),
         pending_provider: stat(stats, "pending_provider"),
         pending_model: stat(stats, "pending_model"),
         created_at: entry.created_at,
@@ -123,6 +197,14 @@ fn record_from(
         // A session stored before the context was kept has none, and the
         // footer falls back to what it can measure on its own.
         context_used: number("context_used").unwrap_or(0),
+        last_turn: number("last_turn").unwrap_or(0),
+        turn_boundaries: stat(stats, "turn_boundaries").unwrap_or_default(),
+        rewound_history: stat(stats, "rewound_history").unwrap_or_default(),
+        imported_from: stat(stats, "imported_from"),
+        imported_suspended: stats
+            .get("imported_suspended")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         output_tokens: number("output_tokens").unwrap_or(0),
         cache_read_tokens: number("cache_read_tokens").unwrap_or(0),
         cache_write_tokens: number("cache_write_tokens").unwrap_or(0),
@@ -149,6 +231,33 @@ fn record_from(
             .unwrap_or(0),
         reasoning: stat(stats, "reasoning"),
         pending_reasoning: stat(stats, "pending_reasoning"),
+        parent_client: stat(stats, "parent_client"),
+        parent_tool_call_id: stat(stats, "parent_tool_call_id"),
+        child_terminal: stats
+            .get("child_state")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|state| match state {
+                "failed" => Some(ChildTerminalState::Failed),
+                "stopped" => Some(ChildTerminalState::Stopped),
+                _ => None,
+            })
+            .or_else(|| {
+                stats
+                    .get("child_terminal")
+                    .and_then(serde_json::Value::as_bool)
+                    .filter(|terminal| *terminal)
+                    .map(|_| {
+                        if stats
+                            .get("child_failed")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            ChildTerminalState::Failed
+                        } else {
+                            ChildTerminalState::Stopped
+                        }
+                    })
+            }),
         pending_steers: stat(stats, "pending_steers")
             .map(|steers: Vec<Steered>| {
                 // A message stored before the names existed has none, and two
@@ -165,6 +274,14 @@ fn record_from(
                     .collect()
             })
             .unwrap_or_default(),
+        depth: number("depth")
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0),
+        delegator_suspended: stats
+            .get("delegator_suspended")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        delegator_queue: stat(stats, "delegator_queue").unwrap_or_default(),
     }
 }
 
@@ -173,6 +290,73 @@ fn stat<T: serde::de::DeserializeOwned>(stats: &serde_json::Value, key: &str) ->
     stats
         .get(key)
         .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+fn imported_history_nodes(
+    session_id: norte::SessionId,
+    mut parent: Option<norte::NodeId>,
+    items: Vec<super::ImportedHistoryItem>,
+) -> (
+    Vec<crate::runtime::Node>,
+    Option<norte::NodeId>,
+    Vec<TurnBoundary>,
+    u64,
+) {
+    let mut nodes = Vec::with_capacity(items.len());
+    let mut boundaries = Vec::new();
+    let mut current_source_turn: Option<String> = None;
+    let mut current_turn = 0_u64;
+    let mut current_turn_head = None;
+    for (index, item) in items.into_iter().enumerate() {
+        let source_turn = item.turn_id.clone().unwrap_or_else(|| {
+            if item.role == "user" || current_source_turn.is_none() {
+                format!("imported-{index}")
+            } else {
+                current_source_turn.clone().unwrap_or_default()
+            }
+        });
+        if current_source_turn.as_deref() != Some(source_turn.as_str()) {
+            if let Some(head) = current_turn_head.take() {
+                boundaries.push(TurnBoundary {
+                    turn: current_turn,
+                    session: session_id,
+                    head: Some(head),
+                });
+            }
+            current_turn = current_turn.saturating_add(1);
+            current_source_turn = Some(source_turn);
+        }
+        let message = if item.role == "user" {
+            norte::Message::user(item.content)
+        } else {
+            norte::Message::assistant(item.content)
+        };
+        let mut node = crate::runtime::Node::message(message, parent);
+        node.metadata.insert(
+            "provenance".to_owned(),
+            serde_json::json!({
+                "kind": "imported",
+                "origin": item.origin,
+                "source_timestamp": item.timestamp,
+            }),
+        );
+        if let Some(timestamp) = item.timestamp
+            && let Some(created_at) = DateTime::from_timestamp_millis(timestamp)
+        {
+            node.created_at = created_at;
+        }
+        parent = Some(node.id);
+        current_turn_head = Some(node.id);
+        nodes.push(node);
+    }
+    if let Some(head) = current_turn_head {
+        boundaries.push(TurnBoundary {
+            turn: current_turn,
+            session: session_id,
+            head: Some(head),
+        });
+    }
+    (nodes, parent, boundaries, current_turn)
 }
 
 impl Service {
@@ -233,6 +417,7 @@ impl Service {
         for key in &repaired {
             self.persist(key).await?;
         }
+        self.restore_child_registry();
         Ok(())
     }
 
@@ -343,10 +528,16 @@ impl Service {
                 "unpriced": record.unpriced,
                 "input_tokens": record.input_tokens,
                 "context_used": record.context_used,
+                "last_turn": record.last_turn,
+                "turn_boundaries": record.turn_boundaries,
+                "rewound_history": record.rewound_history,
+                "imported_from": record.imported_from,
+                "imported_suspended": record.imported_suspended,
                 "output_tokens": record.output_tokens,
                 "cache_read_tokens": record.cache_read_tokens,
                 "cache_write_tokens": record.cache_write_tokens,
                 "budget": record.budget,
+                "agent_profile": record.agent_profile,
                 "compaction_baseline": record.compaction_baseline,
                 "reasoning": record.reasoning,
                 "pending_reasoning": record.pending_reasoning,
@@ -354,6 +545,15 @@ impl Service {
                 "pending_provider": record.pending_provider,
                 "pending_model": record.pending_model,
                 "disabled_tools": record.disabled_tools,
+                "parent_client": record.parent_client,
+                "parent_tool_call_id": record.parent_tool_call_id,
+                "child_state": record.child_terminal.map(|state| match state {
+                    ChildTerminalState::Failed => "failed",
+                    ChildTerminalState::Stopped => "stopped",
+                }),
+                "depth": record.depth,
+                "delegator_suspended": record.delegator_suspended,
+                "delegator_queue": record.delegator_queue,
             }),
             denied_tools: record.denied_tools.clone(),
             allowed_tools: record.allowed_tools.clone(),
@@ -378,24 +578,176 @@ impl Service {
         &self,
         title: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
-        self.create_session_with_prompt(title, &self.system_prompt)
-            .await
+        let spec = self
+            .default_spec
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.create_session_with_settings(
+            title,
+            &self.system_prompt,
+            spec,
+            self.configured_disabled_tools(),
+            Some(self.config().name),
+        )
+        .await
     }
 
-    async fn create_session_with_prompt(
+    /// Creates a new, suspended session containing imported plain-text
+    /// user/assistant history.
+    ///
+    /// Imported items retain their roles and carry provenance in node
+    /// metadata. System prompts, tool calls, and media are intentionally not
+    /// accepted by this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported roles, oversized input, or failures
+    /// creating/persisting the session history.
+    pub async fn import_plain_history(
+        &self,
+        title: Option<String>,
+        items: Vec<super::ImportedHistoryItem>,
+        imported_from: serde_json::Value,
+        usage_total: Option<serde_json::Value>,
+    ) -> Result<SessionKey, ServiceError> {
+        const MAX_ITEMS: usize = 100_000;
+        const MAX_TEXT_BYTES: usize = 64 * 1024 * 1024;
+        let text_bytes = items
+            .iter()
+            .try_fold(0_usize, |total, item| total.checked_add(item.content.len()));
+        if items.len() > MAX_ITEMS || text_bytes.is_none_or(|size| size > MAX_TEXT_BYTES) {
+            return Err(ServiceError::History(
+                "import history exceeds the item or text limit".to_owned(),
+            ));
+        }
+        if items
+            .iter()
+            .any(|item| item.role != "user" && item.role != "assistant")
+        {
+            return Err(ServiceError::History(
+                "import history supports only user and assistant roles".to_owned(),
+            ));
+        }
+
+        let key = self.create_session(title).await?;
+        let session_id = self
+            .lock_sessions()
+            .get(&key)
+            .map(|record| record.id)
+            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        let current = self.store.load(session_id).await?;
+        let (nodes, parent, boundaries, current_turn) =
+            imported_history_nodes(session_id, current.head, items);
+        let existing_messages = match current.head {
+            Some(head) => self.store.ancestors(head).await?.len(),
+            None => 0,
+        };
+        let billed = existing_messages.saturating_add(nodes.len());
+        self.store
+            .commit(crate::runtime::Commit {
+                session_id,
+                expected_version: Some(current.version),
+                nodes,
+                head: parent,
+                phase: crate::runtime::Phase::Idle,
+                turn: current.turn,
+                metadata: None,
+            })
+            .await?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.turn_boundaries = boundaries;
+            record.last_turn = current_turn;
+            record.imported_from = Some(imported_from);
+            record.imported_suspended = true;
+            record.billed = billed;
+            if let Some(usage) = usage_total {
+                record.input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                record.output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
+                record.cache_read_tokens = usage["cached_tokens"].as_u64().unwrap_or(0);
+                record.cost = usage["cost"]["amount"].as_f64().unwrap_or(0.0);
+                record.requests = usage["extra"]["requests"].as_u64().unwrap_or(0);
+                record.unpriced = usage["extra"]["unpriced_requests"].as_u64().unwrap_or(0);
+            }
+        }
+        self.persist(&key).await?;
+        Ok(key)
+    }
+
+    /// Returns the usage counters in the portable RAEP usage shape.
+    #[must_use]
+    pub fn session_usage_total(&self, key: &SessionKey) -> Option<serde_json::Value> {
+        let sessions = self.lock_sessions();
+        let record = sessions.get(key)?;
+        Some(serde_json::json!({
+            "input_tokens": record.input_tokens,
+            "output_tokens": record.output_tokens,
+            "cached_tokens": record.cache_read_tokens.saturating_add(record.cache_write_tokens),
+            "cost": {
+                "amount": record.cost.max(0.0),
+                "currency": "USD",
+            },
+            "extra": {
+                "requests": record.requests,
+                "unpriced_requests": record.unpriced,
+            },
+        }))
+    }
+
+    /// Returns importer provenance stored with a portable session.
+    #[must_use]
+    pub fn session_imported_from(&self, key: &SessionKey) -> Option<serde_json::Value> {
+        self.lock_sessions()
+            .get(key)
+            .and_then(|record| record.imported_from.clone())
+    }
+
+    /// Whether a portable session is waiting for its first controller attach.
+    #[must_use]
+    pub fn session_imported_suspended(&self, key: &SessionKey) -> bool {
+        self.lock_sessions()
+            .get(key)
+            .is_some_and(|record| record.imported_suspended)
+    }
+
+    /// Activates an imported session when its first controller attaches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is unknown or its directory record
+    /// cannot be updated.
+    pub async fn activate_imported_session(&self, key: &SessionKey) -> Result<bool, ServiceError> {
+        let was_suspended = {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            let was_suspended = record.imported_suspended;
+            record.imported_suspended = false;
+            was_suspended
+        };
+        if was_suspended {
+            self.persist(key).await?;
+        }
+        Ok(was_suspended)
+    }
+
+    async fn create_session_with_settings(
         &self,
         title: Option<String>,
         system_prompt: &str,
+        stored_spec: Option<ProviderModelSpec>,
+        disabled_tools: Vec<String>,
+        agent_profile: Option<String>,
     ) -> Result<SessionKey, ServiceError> {
         // A run with no configured model still needs an engine to create the
         // session, so the first catalogue model is borrowed for that alone. The
         // session itself carries no spec (`None`): it is not a model the person
         // chose, and a message sent on it is refused until one is.
-        let stored_spec = self
-            .default_spec
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let engine_spec = stored_spec.clone().unwrap_or_else(|| {
             // Fallback for a session created without a configured model: borrow
             // the first catalogue entry to build the engine, never to serve a
@@ -474,6 +826,11 @@ impl Service {
             unpriced: 0,
             input_tokens: 0,
             context_used: 0,
+            last_turn: 0,
+            turn_boundaries: Vec::new(),
+            rewound_history: Vec::new(),
+            imported_from: None,
+            imported_suspended: false,
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
@@ -481,7 +838,7 @@ impl Service {
             // Frozen here, at the one moment the prefix is not yet cached: the
             // tool declarations are part of it, so the set a session starts
             // with is the set it keeps.
-            disabled_tools: self.configured_disabled_tools(),
+            disabled_tools,
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
             compacted_from: None,
@@ -490,6 +847,13 @@ impl Service {
             reasoning: None,
             pending_reasoning: None,
             pending_steers: Vec::new(),
+            parent_client: None,
+            parent_tool_call_id: None,
+            child_terminal: None,
+            agent_profile,
+            depth: 0,
+            delegator_suspended: false,
+            delegator_queue: Vec::new(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -497,30 +861,127 @@ impl Service {
     }
 
     /// Copies a session into a new one, under a new key.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn fork_session(
         &self,
         from: &SessionKey,
         title: Option<String>,
-    ) -> Result<SessionKey, ServiceError> {
-        let (source, spec, _) = self.require_record(from)?;
+        from_turn_id: Option<&str>,
+        inclusive: bool,
+        carry_usage: bool,
+    ) -> Result<(SessionKey, Option<String>), ServiceError> {
+        let (
+            source,
+            spec,
+            agent_profile,
+            disabled_tools,
+            last_turn,
+            boundaries,
+            source_phase,
+            usage,
+            budget,
+        ) = {
+            let sessions = self.lock_sessions();
+            let record = sessions
+                .get(from)
+                .ok_or_else(|| ServiceError::UnknownSession(from.to_string()))?;
+            (
+                record.id,
+                record.spec.clone(),
+                record.agent_profile.clone(),
+                record.disabled_tools.clone(),
+                record.last_turn,
+                record.turn_boundaries.clone(),
+                record.phase,
+                (
+                    record.billed,
+                    record.requests,
+                    record.cost,
+                    record.unpriced,
+                    record.input_tokens,
+                    record.context_used,
+                    record.output_tokens,
+                    record.cache_read_tokens,
+                    record.cache_write_tokens,
+                ),
+                record.budget.clone(),
+            )
+        };
         let spec = spec.ok_or_else(|| ServiceError::UnknownSession(from.to_string()))?;
-        // Copy the source's committed history into a fresh session id, so the
-        // fork does not collide with its parent and the provider cache is
-        // rebuilt for the copied prefix.
-        let source_state = self.store.load(source).await.map_err(ServiceError::from)?;
-        let messages = self
-            .store
-            .history(source_state.head)
-            .await
-            .map_err(ServiceError::from)?;
+        let requested_turn = match from_turn_id {
+            Some(id) => Some(
+                id.strip_prefix("turn_")
+                    .unwrap_or(id)
+                    .parse::<u64>()
+                    .map_err(|_| ServiceError::History("TURN_NOT_FOUND".to_owned()))?,
+            ),
+            None => boundaries.iter().map(|boundary| boundary.turn).max(),
+        };
+        let requested_turn = requested_turn.ok_or_else(|| {
+            ServiceError::History("TURN_NOT_FOUND: no terminal turn is available".to_owned())
+        })?;
+        let target = boundaries
+            .iter()
+            .find(|boundary| boundary.turn == requested_turn)
+            .ok_or_else(|| {
+                if requested_turn > last_turn && !matches!(source_phase, ProtocolPhase::Idle) {
+                    ServiceError::History("TURN_NOT_ACTIVE".to_owned())
+                } else {
+                    ServiceError::History("TURN_NOT_FOUND".to_owned())
+                }
+            })?;
+        let included_boundary = if inclusive {
+            Some(target)
+        } else {
+            boundaries
+                .iter()
+                .filter(|boundary| boundary.turn < requested_turn)
+                .max_by_key(|boundary| boundary.turn)
+        };
+        let effective_turn = included_boundary.map_or(0, |boundary| boundary.turn);
+        let first_boundary = boundaries.iter().min_by_key(|boundary| boundary.turn);
+        let source_session = included_boundary
+            .or(first_boundary)
+            .map_or(source, |boundary| boundary.session);
+        let source_state = self.store.load(source_session).await?;
+        let mut source_nodes = if let Some(head) = included_boundary.and_then(|b| b.head) {
+            self.store.ancestors(head).await?
+        } else if let Some(head) = first_boundary.and_then(|boundary| boundary.head) {
+            self.store
+                .ancestors(head)
+                .await?
+                .into_iter()
+                .take(1)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let new_id = norte::SessionId::new();
         let mut parent = None;
-        let mut nodes = Vec::with_capacity(messages.len());
-        for message in messages {
-            let node = crate::runtime::Node::message(message, parent);
+        let mut nodes = Vec::with_capacity(source_nodes.len());
+        let mut remapped = Vec::with_capacity(source_nodes.len());
+        for old_id in source_nodes.drain(..) {
+            let old_node = self.store.node(old_id).await?;
+            let node = crate::runtime::Node::message(old_node.message, parent);
             parent = Some(node.id);
+            remapped.push((old_id, node.id));
             nodes.push(node);
         }
+        let turn_boundaries = boundaries
+            .iter()
+            .filter(|boundary| boundary.turn <= effective_turn)
+            .filter_map(|boundary| {
+                let head = boundary.head?;
+                let new_head = remapped
+                    .iter()
+                    .find_map(|(old, new)| (*old == head).then_some(*new))?;
+                Some(TurnBoundary {
+                    turn: boundary.turn,
+                    session: new_id,
+                    head: Some(new_head),
+                })
+            })
+            .collect();
         let imported = self
             .store
             .commit(crate::runtime::Commit {
@@ -529,38 +990,59 @@ impl Service {
                 nodes,
                 head: parent,
                 phase: crate::runtime::Phase::Idle,
-                turn: source_state.turn,
+                turn: effective_turn,
                 metadata: Some(source_state.metadata),
             })
             .await
             .map_err(ServiceError::from)?;
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
+        let (
+            billed,
+            requests,
+            cost,
+            unpriced,
+            input_tokens,
+            context_used,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        ) = if carry_usage {
+            usage
+        } else {
+            (0, 0, 0.0, 0, 0, 0, 0, 0, 0)
+        };
         let record = SessionRecord {
             id: imported.id,
             title,
             spec: Some(spec),
+            agent_profile,
             pending_provider: None,
             pending_model: None,
             created_at: Utc::now(),
             phase: ProtocolPhase::Idle,
-            billed: 0,
-            requests: 0,
-            cost: 0.0,
-            unpriced: 0,
-            input_tokens: 0,
-            context_used: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            budget: self.configured_session_budget(),
+            billed,
+            requests,
+            cost,
+            unpriced,
+            input_tokens,
+            context_used,
+            last_turn: effective_turn,
+            turn_boundaries,
+            rewound_history: Vec::new(),
+            imported_from: None,
+            imported_suspended: false,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            budget: if carry_usage {
+                budget
+            } else {
+                self.configured_session_budget()
+            },
             // A fork copies the conversation, so it copies the tool set the
             // conversation was held in: a branch that quietly gained a tool the
             // source did not have would answer the same history differently.
-            disabled_tools: self
-                .lock_sessions()
-                .get(from)
-                .map(|record| record.disabled_tools.clone())
-                .unwrap_or_default(),
+            disabled_tools,
             denied_tools: Vec::new(),
             allowed_tools: Vec::new(),
             // A fork is a new branch, not a compaction of the source.
@@ -570,6 +1052,12 @@ impl Service {
             reasoning: None,
             pending_reasoning: None,
             pending_steers: Vec::new(),
+            parent_client: None,
+            parent_tool_call_id: None,
+            child_terminal: None,
+            depth: 0,
+            delegator_suspended: false,
+            delegator_queue: Vec::new(),
         };
         self.lock_sessions().insert(key.clone(), record);
         self.persist(&key).await?;
@@ -577,32 +1065,338 @@ impl Service {
             .copy_session(source, imported.id)
             .await
             .map_err(ServiceError::Plan)?;
-        Ok(key)
+        Ok((key, Some(format!("turn_{requested_turn}"))))
+    }
+
+    /// Moves a session's active head to a terminal turn while retaining the
+    /// removed text history for explicit `include_rewound` reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the turn is unknown, the session is blocked, the
+    /// turn contains a tool call whose side effects cannot be reported, or
+    /// durable storage fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn rewind_session(
+        &self,
+        key: &SessionKey,
+        to_turn_id: &str,
+        inclusive: bool,
+        cancel_pending: bool,
+        restore_workspace: bool,
+    ) -> Result<Vec<String>, ServiceError> {
+        if restore_workspace {
+            return Err(ServiceError::History("SNAPSHOT_NOT_FOUND".to_owned()));
+        }
+        let to_turn = to_turn_id
+            .strip_prefix("turn_")
+            .unwrap_or(to_turn_id)
+            .parse::<u64>()
+            .map_err(|_| ServiceError::History("TURN_NOT_FOUND".to_owned()))?;
+        let (session_id, phase, boundaries) = {
+            let sessions = self.lock_sessions();
+            let record = sessions
+                .get(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            (record.id, record.phase, record.turn_boundaries.clone())
+        };
+        if phase != ProtocolPhase::Idle {
+            if !cancel_pending || !self.cancel_turn(key) {
+                return Err(ServiceError::History(
+                    "REWIND_BLOCKED: active turn".to_owned(),
+                ));
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if self
+                        .require_record(key)
+                        .is_ok_and(|(_, _, phase)| phase == ProtocolPhase::Idle)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                ServiceError::History("REWIND_BLOCKED: turn cancellation timed out".to_owned())
+            })?;
+        }
+        if self.jobs.any_running(session_id) {
+            if !cancel_pending {
+                return Err(ServiceError::History(
+                    "REWIND_BLOCKED: running jobs".to_owned(),
+                ));
+            }
+            self.jobs.cancel_session(session_id);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while self.jobs.any_running(session_id) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                ServiceError::History("REWIND_BLOCKED: job cancellation timed out".to_owned())
+            })?;
+        }
+        if self
+            .children
+            .of(key)
+            .iter()
+            .any(|child| !child.is_terminal())
+        {
+            return Err(ServiceError::History(
+                "REWIND_BLOCKED: non-terminal child session".to_owned(),
+            ));
+        }
+        let target = boundaries
+            .iter()
+            .find(|boundary| boundary.turn == to_turn)
+            .ok_or_else(|| ServiceError::History("TURN_NOT_FOUND".to_owned()))?;
+        let rewound: Vec<_> = boundaries
+            .iter()
+            .filter(|boundary| boundary.turn > to_turn || (inclusive && boundary.turn == to_turn))
+            .cloned()
+            .collect();
+        if rewound.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rewound_ids: Vec<String> = rewound
+            .iter()
+            .map(|boundary| format!("turn_{}", boundary.turn))
+            .collect();
+        let history = self.session_history_with_turns(key).await?;
+        let archived: Vec<_> = history
+            .into_iter()
+            .filter_map(|(turn, role, kind, text, timestamp)| {
+                turn.filter(|turn| rewound_ids.contains(&format!("turn_{turn}")))
+                    .map(|turn| (turn, role, kind, text, timestamp))
+            })
+            .collect();
+        if archived
+            .iter()
+            .any(|(_, _, kind, _, _)| *kind == norte_code_protocol::ReplayedKind::ToolCall)
+        {
+            return Err(ServiceError::History(
+                "REWIND_BLOCKED: tool side-effect metadata is unavailable".to_owned(),
+            ));
+        }
+        let kept_turn = boundaries
+            .iter()
+            .filter(|boundary| boundary.turn < to_turn || (!inclusive && boundary.turn == to_turn))
+            .map(|boundary| boundary.turn)
+            .max()
+            .unwrap_or(0);
+        let kept = boundaries
+            .iter()
+            .find(|boundary| boundary.turn == kept_turn);
+        let source_head = kept.and_then(|boundary| boundary.head).or(target.head);
+        let mut old_ids = match source_head {
+            Some(head) => self.store.ancestors(head).await?,
+            None => Vec::new(),
+        };
+        if kept.is_none() {
+            old_ids.truncate(1);
+        }
+        let mut parent = None;
+        let mut nodes = Vec::with_capacity(old_ids.len());
+        let mut remapped = Vec::with_capacity(old_ids.len());
+        for old_id in old_ids {
+            let old = self.store.node(old_id).await?;
+            let node = crate::runtime::Node::message(old.message, parent);
+            parent = Some(node.id);
+            remapped.push((old_id, node.id));
+            nodes.push(node);
+        }
+        let current = self.store.load(session_id).await?;
+        self.store
+            .commit(crate::runtime::Commit {
+                session_id,
+                expected_version: Some(current.version),
+                nodes,
+                head: parent,
+                phase: crate::runtime::Phase::Idle,
+                turn: kept_turn,
+                metadata: Some(current.metadata),
+            })
+            .await?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.turn_boundaries = boundaries
+                .iter()
+                .filter(|boundary| boundary.turn <= kept_turn)
+                .filter_map(|boundary| {
+                    let old_head = boundary.head?;
+                    let head = remapped
+                        .iter()
+                        .find_map(|(old, new)| (*old == old_head).then_some(*new))?;
+                    Some(TurnBoundary {
+                        turn: boundary.turn,
+                        session: session_id,
+                        head: Some(head),
+                    })
+                })
+                .collect();
+            record.rewound_history.extend(archived);
+            record.compacted_from = None;
+        }
+        self.persist(key).await?;
+        Ok(rewound_ids)
     }
 
     /// Creates a child session for a subagent with frozen settings.
     ///
-    /// The child's tool list is frozen without `subagent`: it starts blank
-    /// and cannot spawn another one, so the recursion depth is one. The
+    /// The child keeps the delegation tools: nesting is bounded by `depth`
+    /// (RFC 8.2.4) against [`MAX_DELEGATION_DEPTH`], not by cutting the tool
+    /// from the child. The `parent` is kept on the record (`parent_client`)
+    /// so `list_agents` finds a parent's children; the RAEP `spawn_agent`
+    /// tool is the same tool, so its children are kept the same way.
     pub(super) async fn create_session_child(
         &self,
+        metadata: ChildSessionMetadata,
         spec: ModelSpec,
         disabled_tools: Vec<String>,
         budget: Arc<Mutex<BudgetBook>>,
     ) -> Result<SessionKey, ServiceError> {
+        let ChildSessionMetadata {
+            parent,
+            tool_call_id,
+            task_summary,
+            lifetime,
+            agent_profile,
+            system_prompt,
+            cancel,
+        } = metadata;
         let key = self
-            .create_session_with_prompt(None, &self.subagent_system_prompt)
+            .create_session_with_settings(
+                None,
+                &system_prompt,
+                Some(spec.clone()),
+                disabled_tools.clone(),
+                Some(agent_profile.clone()),
+            )
             .await?;
         {
             let mut sessions = self.lock_sessions();
+            let depth = sessions.get(&parent).map_or(0, |record| record.depth) + 1;
             if let Some(record) = sessions.get_mut(&key) {
-                record.spec = Some(spec.clone());
-                record.disabled_tools = disabled_tools;
+                record.parent_client = Some(parent.clone());
+                record.parent_tool_call_id = Some(tool_call_id.clone());
+                record.child_terminal = None;
+                record.agent_profile = Some(agent_profile.clone());
+                record.depth = depth;
             }
         }
         self.persist(&key).await?;
         self.lock_budget_states().insert(key.clone(), budget);
+        self.children.register(
+            parent.clone(),
+            super::delegator::Child::new(key.clone(), tool_call_id.clone()),
+        );
+        self.children.set_cancel(&parent, &key, Arc::clone(&cancel));
+        self.emit_delegation(ServerEvent::new(
+            0,
+            Some(parent),
+            ServerEventKind::ChildSessionStarted {
+                child_session_id: key.as_str().to_owned(),
+                agent_id: agent_profile,
+                tool_call_id,
+                lifetime,
+                task_summary: task_summary.chars().take(512).collect(),
+            },
+        ));
         Ok(key)
+    }
+
+    /// The delegation depth of `key`: 0 for a session the client made.
+    pub(super) fn depth_of(&self, key: &SessionKey) -> u32 {
+        self.lock_sessions()
+            .get(key)
+            .map_or(0, |record| record.depth)
+    }
+
+    /// Whether `key`'s delegator is suspended (RFC 8.2.11).
+    pub fn delegator_suspended(&self, key: &SessionKey) -> bool {
+        self.lock_sessions()
+            .get(key)
+            .is_some_and(|record| record.delegator_suspended)
+    }
+
+    /// Suspends or releases `key`'s delegator (RFC 8.2.11), returning the
+    /// new state and how many messages were held. Releasing flushes the
+    /// queue into the session's steering: a held message is a message that
+    /// still has to reach the child. The updated state is persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::UnknownSession`] when `key` is not known or a
+    /// persistence error when the updated state cannot be saved.
+    pub async fn set_delegator_suspended(
+        &self,
+        key: &SessionKey,
+        suspended: bool,
+    ) -> Result<(bool, usize), ServiceError> {
+        let service = self;
+        let (parent, nid, held) = {
+            let mut sessions = service.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record.delegator_suspended = suspended;
+            let held = if suspended {
+                Vec::new()
+            } else {
+                std::mem::take(&mut record.delegator_queue)
+            };
+            (record.parent_client.clone(), record.id, held)
+        };
+        let queued = held.len();
+        if let Some(parent) = parent {
+            let _ = service.children.set_suspended(&parent, key, suspended);
+        }
+        for text in held {
+            service
+                .steering
+                .push(nid, Steered::new(uuid::Uuid::new_v4().to_string(), text));
+        }
+        service.persist(key).await?;
+        Ok((suspended, queued))
+    }
+
+    /// Holds a message for `key` while its delegator is suspended (RFC
+    /// 8.2.11). Returns how many messages are held now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::UnknownSession`] when `key` is not known,
+    /// [`ServiceError::Delegation`] when the held-message limit is reached, or
+    /// a persistence error when the queue cannot be saved.
+    pub async fn hold_delegator_message(
+        &self,
+        key: &SessionKey,
+        text: String,
+    ) -> Result<usize, ServiceError> {
+        let (parent, held) = {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            if record.delegator_queue.len() >= MAX_HELD_DELEGATOR_MESSAGES {
+                return Err(ServiceError::Delegation(format!(
+                    "DELEGATOR_SUSPENDED: at most {MAX_HELD_DELEGATOR_MESSAGES} messages may be queued"
+                )));
+            }
+            record.delegator_queue.push(text.clone());
+            (record.parent_client.clone(), record.delegator_queue.len())
+        };
+        if let Some(parent) = parent {
+            let _ = self.children.hold(&parent, key, text);
+        }
+        self.persist(key).await?;
+        Ok(held)
     }
 
     /// The sessions the client can see.
@@ -671,6 +1465,10 @@ impl Service {
 
     /// Forgets the session and its row.
     pub(super) async fn delete(&self, key: &SessionKey) -> Result<(), ServiceError> {
+        let parent = self
+            .lock_sessions()
+            .get(key)
+            .and_then(|record| record.parent_client.clone());
         if !self.lock_sessions().contains_key(key) {
             return Err(ServiceError::UnknownSession(key.to_string()));
         }
@@ -681,6 +1479,9 @@ impl Service {
         self.lock_sessions()
             .remove(key)
             .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        if let Some(parent) = parent {
+            self.children.remove(&parent, key);
+        }
         self.directory.delete_session(key.as_str()).await?;
         Ok(())
     }
@@ -728,6 +1529,67 @@ impl Service {
     /// The sessions the service holds.
     pub(super) fn lock_sessions(&self) -> MutexGuard<'_, BTreeMap<SessionKey, SessionRecord>> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The children of `parent`: sessions whose `parent_client` is `parent`,
+    /// oldest first. Used by `list_agents` and the delegator tools, which
+    /// address a child by the id `spawn_agent` returned.
+    pub fn children_of(
+        &self,
+        parent: &SessionKey,
+    ) -> Vec<(SessionKey, norte::SessionId, ProtocolPhase, Option<String>)> {
+        let sessions = self.lock_sessions();
+        let mut children: Vec<_> = sessions
+            .iter()
+            .filter(|(_, record)| record.parent_client.as_ref() == Some(parent))
+            .map(|(key, record)| (key.clone(), record.id, record.phase, record.title.clone()))
+            .collect();
+        children.sort_by_key(|(key, _, _, _)| key.as_str().to_owned());
+        children
+    }
+
+    /// Rebuilds the in-memory child registry from the persisted
+    /// `parent_client` links (point 2 of the delegation cleanup).
+    ///
+    /// The registry is the tools' live view (`spawn_agent` registers there);
+    /// the session records are the durable one. After a restart only the
+    /// records remain, so the registry is rebuilt from them: a child that
+    /// survived the restart is still inspectable, messageable and stoppable
+    /// by its parent. The registry is rebuilt, not merged, so a child that
+    /// was deleted while down does not reappear.
+    pub fn restore_child_registry(&self) {
+        let links = {
+            let sessions = self.lock_sessions();
+            sessions
+                .iter()
+                .filter_map(|(key, record)| {
+                    record.parent_client.as_ref().map(|parent| {
+                        (
+                            parent.clone(),
+                            key.clone(),
+                            record.parent_tool_call_id.clone().unwrap_or_default(),
+                            record.delegator_suspended,
+                            record.delegator_queue.clone(),
+                            matches!(record.phase, ProtocolPhase::Idle),
+                            record.child_terminal,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        self.children.clear();
+        for (parent, child, tool_call_id, suspended, held, finished, terminal) in links {
+            let mut entry = super::delegator::Child::new(child, tool_call_id);
+            entry.suspended = suspended;
+            entry.held = held;
+            entry.state = match terminal {
+                Some(ChildTerminalState::Failed) => super::delegator::ChildState::Failed,
+                Some(ChildTerminalState::Stopped) => super::delegator::ChildState::Stopped,
+                None if finished => super::delegator::ChildState::Idle,
+                None => super::delegator::ChildState::Running,
+            };
+            self.children.register(parent, entry);
+        }
     }
 
     /// Consumes the pending overrides this turn started with, without removing
@@ -832,6 +1694,37 @@ impl Service {
         if let Err(error) = self.persist(key).await {
             tracing::warn!(session = %key, %error, "could not persist session counters");
         }
+    }
+
+    /// Persists the graph head reached by a terminal turn.
+    pub(super) async fn record_turn_boundary(
+        &self,
+        key: &SessionKey,
+        turn: u64,
+    ) -> Result<(), ServiceError> {
+        let session_id = self
+            .lock_sessions()
+            .get(key)
+            .map(|record| record.id)
+            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        let session = self.store.load(session_id).await?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record
+                .turn_boundaries
+                .retain(|boundary| boundary.turn != turn);
+            record.turn_boundaries.push(TurnBoundary {
+                turn,
+                session: session_id,
+                head: session.head,
+            });
+            record.turn_boundaries.sort_by_key(|boundary| boundary.turn);
+            record.last_turn = record.last_turn.max(turn);
+        }
+        self.persist(key).await
     }
 
     /// Records the phase the session is in.

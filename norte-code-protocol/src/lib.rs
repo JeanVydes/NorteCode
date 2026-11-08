@@ -57,6 +57,7 @@ mod tests {
                 reasoning: Some(Reasoning::Effort {
                     effort: "high".to_owned(),
                 }),
+                metadata: None,
                 replay: false,
             },
         };

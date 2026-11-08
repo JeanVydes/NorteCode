@@ -343,6 +343,12 @@ impl Harness {
                         EngineEvent::PartCompleted {
                             session: session.id,
                             turn: session.turn,
+                            index: match &event {
+                                StreamEvent::MediaChunk { index, .. }
+                                | StreamEvent::ToolCallDone { index }
+                                | StreamEvent::Part { index, .. } => *index,
+                                _ => 0,
+                            },
                             part,
                         },
                     ) => delivered,

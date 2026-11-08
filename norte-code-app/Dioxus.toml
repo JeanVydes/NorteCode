@@ -1,0 +1,9 @@
+[application]
+name = "norte-code-app"
+default_platform = "web"
+
+[web.app]
+title = "Norte Code"
+
+[web.resource]
+style = ["/assets/app.css"]

@@ -11,18 +11,19 @@
 //! where its cancellation token lives, so `Ctrl-C` and `/jobs stop` can end
 //! it. Nothing else needs to know whether a call was waited for.
 //!
-//! That is what makes the end of a job unambiguous: the job ends when it says
-//! it has ended (the streams closed, the child turn settled), never when
-//! the call that started it finished — for a call that let go happens at
-//! the very start.
+//! That is what makes the end of a job unambiguous: it ends when its runner
+//! settles, never when the call that started it finished — for a call that let
+//! go happens at the very start. For shell jobs, stream closure and the runner's
+//! terminal result together provide that settlement.
 //!
 //! There is no unbounded job: the executor that runs the work applies its
 //! own bound either way (a shell timeout, a subagent's max iterations), so
 //! a background job is killed at the same bound a waited one is.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use norte::{CallId, Cancellation, SessionId};
 use norte_code_protocol::JobInfo;
@@ -33,6 +34,14 @@ use norte_code_protocol::JobInfo;
 /// registry holds on top of that, so a chatty job cannot grow without limit
 /// while nobody is looking at it.
 pub(super) const JOB_BUFFER_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_CONCURRENT_JOBS: usize = 8;
+const DEFAULT_JOB_OUTPUT_RETENTION_S: u64 = 86_400;
+
+#[derive(Debug, thiserror::Error)]
+#[error("SANDBOX_LIMIT_EXCEEDED: maximum concurrent jobs per session is {limit}")]
+pub(super) struct JobStartError {
+    limit: usize,
+}
 
 /// Where a job stands, as the wire names it.
 ///
@@ -67,6 +76,8 @@ pub(super) struct JobSummary {
     pub(super) output: String,
     /// Whether older output was dropped to stay within the buffer.
     pub(super) dropped: bool,
+    /// Total bytes written, including output no longer retained.
+    pub(super) output_bytes_total: u64,
 }
 
 /// One job, as the registry holds it.
@@ -74,7 +85,10 @@ struct Job {
     summary: JobSummary,
     cancel: Arc<Cancellation>,
     started: std::time::Instant,
+    finished: Option<std::time::Instant>,
     bytes: usize,
+    terminal: bool,
+    terminal_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl Job {
@@ -92,25 +106,53 @@ impl Job {
 }
 
 /// The jobs a service knows about, oldest last.
-#[derive(Default)]
 pub(super) struct JobRegistry {
     jobs: Mutex<BTreeMap<String, Job>>,
     next: AtomicU64,
+    max_concurrent: AtomicUsize,
+    output_retention_s: AtomicU64,
+}
+
+impl Default for JobRegistry {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::new(BTreeMap::new()),
+            next: AtomicU64::new(0),
+            max_concurrent: AtomicUsize::new(DEFAULT_MAX_CONCURRENT_JOBS),
+            output_retention_s: AtomicU64::new(DEFAULT_JOB_OUTPUT_RETENTION_S),
+        }
+    }
 }
 
 impl JobRegistry {
+    /// Applies the server's concurrent-job and output-retention limits.
+    pub(super) fn configure_limits(&self, max_concurrent: usize, output_retention_s: u64) {
+        self.max_concurrent.store(max_concurrent, Ordering::Relaxed);
+        self.output_retention_s
+            .store(output_retention_s, Ordering::Relaxed);
+    }
+
     /// Registers a job that has just been started, and returns the id to hand
     /// the model.
     ///
     /// The cancellation token is the caller's: cancelling it is what stops the
     /// call, and the registry only holds it so `/jobs stop` can reach it.
-    pub(super) fn start(
+    pub(super) fn try_start(
         &self,
         session: SessionId,
         call_id: CallId,
         label: &str,
         cancel: Arc<Cancellation>,
-    ) -> String {
+    ) -> Result<String, JobStartError> {
+        let mut jobs = self.jobs();
+        let limit = self.max_concurrent.load(Ordering::Relaxed);
+        let running = jobs
+            .values()
+            .filter(|job| job.summary.session == session && !job.terminal)
+            .count();
+        if running >= limit {
+            return Err(JobStartError { limit });
+        }
         let number = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let id = format!("job-{number}");
         let summary = JobSummary {
@@ -124,17 +166,34 @@ impl JobRegistry {
             elapsed_ms: 0,
             output: String::new(),
             dropped: false,
+            output_bytes_total: 0,
         };
-        self.jobs().insert(
+        let (terminal_tx, _) = tokio::sync::watch::channel(false);
+        jobs.insert(
             id.clone(),
             Job {
                 summary,
                 cancel,
                 started: std::time::Instant::now(),
+                finished: None,
                 bytes: 0,
+                terminal: false,
+                terminal_tx,
             },
         );
-        id
+        Ok(id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn start(
+        &self,
+        session: SessionId,
+        call_id: CallId,
+        label: &str,
+        cancel: Arc<Cancellation>,
+    ) -> String {
+        self.try_start(session, call_id, label, cancel)
+            .expect("test job is within the default limit")
     }
 
     /// Appends a chunk of a call's output to its job, when it is one.
@@ -144,15 +203,14 @@ impl JobRegistry {
     /// waited path. Callers that hold no call id (a subagent job, whose
     /// session is the child's) use [`JobRegistry::write_id`].
     /// Writers that do hold the job's id use that directly.
-    pub(super) fn write(&self, call_id: CallId, text: &str) {
+    pub(super) fn write(&self, call_id: CallId, text: &str) -> Option<u64> {
         let mut jobs = self.jobs();
-        let Some(job) = jobs
+        let job = jobs
             .values_mut()
-            .find(|job| job.summary.call_id == call_id && !job.summary.state.is_done())
-        else {
-            return;
-        };
+            .find(|job| job.summary.call_id == call_id && !job.terminal)?;
+        let index = job.summary.output_bytes_total;
         append_output(job, text);
+        Some(index)
     }
 
     /// Appends to a job by its id.
@@ -165,7 +223,7 @@ impl JobRegistry {
         let Some(job) = jobs.get_mut(id) else {
             return;
         };
-        if job.summary.state.is_done() {
+        if job.terminal {
             return;
         }
         append_output(job, text);
@@ -180,39 +238,21 @@ impl JobRegistry {
         let Some(job) = jobs.get_mut(id) else {
             return;
         };
-        if job.summary.state == JobState::Cancelled {
-            return;
-        }
-        if job.summary.state.is_done() {
+        if job.terminal {
             return;
         }
         job.summary.elapsed_ms = millis(job.started.elapsed());
-        job.summary.state = JobState::Finished;
-        if let Some(code) = exit_code {
+        if job.summary.state != JobState::Cancelled {
+            job.summary.state = JobState::Finished;
+        }
+        if job.summary.state != JobState::Cancelled
+            && let Some(code) = exit_code
+        {
             job.summary.exit_code = Some(code);
         }
-    }
-
-    /// Marks a job's streams as closed, which is the process exiting.
-    ///
-    /// A stream reports `last` when its pipe closes, and the closing chunk
-    /// always arrives, even when the process wrote nothing. It is the one end a
-    /// job cannot miss: the call that started it answered at once, so its own
-    /// finish says nothing about the process, and a job nobody is holding has
-    /// no other task to report it.
-    pub(super) fn close(&self, call_id: CallId, last: bool) {
-        if !last {
-            return;
-        }
-        let mut jobs = self.jobs();
-        let Some(job) = jobs
-            .values_mut()
-            .find(|job| job.summary.call_id == call_id && !job.summary.state.is_done())
-        else {
-            return;
-        };
-        job.summary.elapsed_ms = millis(job.started.elapsed());
-        job.summary.state = JobState::Finished;
+        job.terminal = true;
+        job.finished = Some(std::time::Instant::now());
+        job.terminal_tx.send_replace(true);
     }
 
     /// Records the exit code a job's process reported.
@@ -229,19 +269,25 @@ impl JobRegistry {
         };
         job.summary.elapsed_ms = millis(job.started.elapsed());
         job.summary.timed_out = timed_out;
-        if job.summary.state == JobState::Cancelled {
-            return;
-        }
-        if !job.summary.state.is_done() {
+        if !job.terminal && job.summary.state != JobState::Cancelled {
             job.summary.state = JobState::Finished;
         }
-        if let Some(code) = exit_code {
+        if job.summary.state != JobState::Cancelled
+            && let Some(code) = exit_code
+        {
             job.summary.exit_code = Some(code);
         }
+        job.terminal = true;
+        job.finished = Some(std::time::Instant::now());
+        job.terminal_tx.send_replace(true);
     }
 
     /// Marks a job cancelled and signals its token. Answers whether it was one.
     pub(super) fn cancel(&self, id: &str) -> bool {
+        self.cancel_with_grace(id, None)
+    }
+
+    pub(super) fn cancel_with_grace(&self, id: &str, grace: Option<Duration>) -> bool {
         let mut jobs = self.jobs();
         let Some(job) = jobs.get_mut(id) else {
             return false;
@@ -250,8 +296,43 @@ impl JobRegistry {
             return false;
         }
         job.summary.state = JobState::Cancelled;
-        job.cancel.cancel();
+        Self::signal_cancel(Arc::clone(&job.cancel), grace);
         true
+    }
+
+    /// Cancels a job only when it belongs to the supplied session.
+    pub(super) fn cancel_in_session(&self, session: SessionId, id: &str) -> bool {
+        self.cancel_in_session_with_grace(session, id, None)
+    }
+
+    pub(super) fn cancel_in_session_with_grace(
+        &self,
+        session: SessionId,
+        id: &str,
+        grace: Option<Duration>,
+    ) -> bool {
+        let mut jobs = self.jobs();
+        let Some(job) = jobs.get_mut(id) else {
+            return false;
+        };
+        if job.summary.session != session || job.summary.state.is_done() {
+            return false;
+        }
+        job.summary.state = JobState::Cancelled;
+        Self::signal_cancel(Arc::clone(&job.cancel), grace);
+        true
+    }
+
+    fn signal_cancel(cancel: Arc<Cancellation>, grace: Option<Duration>) {
+        match grace.filter(|duration| !duration.is_zero()) {
+            Some(grace) => {
+                tokio::spawn(async move {
+                    tokio::time::sleep(grace).await;
+                    cancel.cancel();
+                });
+            }
+            None => cancel.cancel(),
+        }
     }
 
     /// Stops every running job of one session, and answers how many it stopped.
@@ -280,17 +361,61 @@ impl JobRegistry {
         })
     }
 
+    /// One job, only when it belongs to the supplied session.
+    pub(super) fn get_for_session(&self, session: SessionId, id: &str) -> Option<JobSummary> {
+        let job = self.get(id)?;
+        (job.session == session).then_some(job)
+    }
+
+    /// One job, applying the RFC output-retention window before returning it.
+    pub(super) fn get_for_session_with_retention(
+        &self,
+        session: SessionId,
+        id: &str,
+    ) -> Option<JobSummary> {
+        let mut jobs = self.jobs();
+        let job = jobs.get_mut(id)?;
+        if job.summary.session != session {
+            return None;
+        }
+        expire_output(
+            job,
+            self.output_retention_s.load(Ordering::Relaxed),
+            std::time::Instant::now(),
+        );
+        job.refresh_elapsed();
+        Some(job.summary.clone())
+    }
+
+    /// Subscribes to the actual process/runner termination of a job.
+    ///
+    /// Cancellation marks the job as killed when requested, but the terminal
+    /// result is not ready until the runner has closed its streams or settled.
+    pub(super) fn terminal_for_session(
+        &self,
+        session: SessionId,
+        id: &str,
+    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.jobs()
+            .get(id)
+            .filter(|job| job.summary.session == session)
+            .map(|job| job.terminal_tx.subscribe())
+    }
+
     /// The jobs of one session, oldest first. `None` means every session.
     pub(super) fn list(&self, session: Option<SessionId>) -> Vec<JobSummary> {
         let mut jobs = self.jobs();
-        let mut out: Vec<JobSummary> = jobs
-            .values_mut()
-            .filter(|job| session.is_none_or(|session| job.summary.session == session))
-            .map(|job| {
-                job.refresh_elapsed();
-                job.summary.clone()
-            })
-            .collect();
+        let retention_s = self.output_retention_s.load(Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        let mut out = Vec::new();
+        for job in jobs.values_mut() {
+            if session.is_some_and(|session| job.summary.session != session) {
+                continue;
+            }
+            expire_output(job, retention_s, now);
+            job.refresh_elapsed();
+            out.push(job.summary.clone());
+        }
         out.sort_by_key(|job| job.id.clone());
         out
     }
@@ -324,6 +449,7 @@ pub(super) fn job_info(job: &JobSummary) -> JobInfo {
         elapsed_ms: job.elapsed_ms,
         output: job.output.clone(),
         dropped: job.dropped,
+        output_bytes_total: job.output_bytes_total,
     }
 }
 
@@ -335,6 +461,10 @@ fn millis(duration: std::time::Duration) -> u64 {
 fn append_output(job: &mut Job, text: &str) {
     job.summary.output.push_str(text);
     job.bytes += text.len();
+    job.summary.output_bytes_total = job
+        .summary
+        .output_bytes_total
+        .saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
     if job.bytes <= JOB_BUFFER_BYTES {
         return;
     }
@@ -349,6 +479,19 @@ fn append_output(job: &mut Job, text: &str) {
     job.summary.output.drain(..drop_to);
     job.bytes -= drop_to;
     job.summary.dropped = true;
+}
+
+fn expire_output(job: &mut Job, retention_s: u64, now: std::time::Instant) {
+    let retention = Duration::from_secs(retention_s);
+    if job
+        .finished
+        .is_some_and(|finished| now.saturating_duration_since(finished) >= retention)
+        && !job.summary.output.is_empty()
+    {
+        job.summary.output.clear();
+        job.bytes = 0;
+        job.summary.dropped = true;
+    }
 }
 
 /// The label as one line, for a listing that has one line per job.

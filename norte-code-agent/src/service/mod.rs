@@ -9,6 +9,7 @@ mod approvals;
 mod background;
 mod budgets;
 mod compaction;
+mod delegator;
 mod detach;
 mod effects;
 mod jobs;
@@ -29,11 +30,12 @@ mod tooling;
 mod turns;
 mod workspace;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Duration;
 
 use crate::runtime::TurnInterceptor;
 use crate::runtime::{Harness, HarnessBuilder, HarnessConfig, InMemoryBlobStore, Store};
@@ -62,19 +64,24 @@ use norte_code_protocol::catalog::{Catalog, Models, Providers, load_catalog_file
 use norte_code_protocol::config::{ApiKey, CompactionTrigger, Config};
 use norte_code_protocol::keys::KeyStore;
 use norte_code_protocol::plugins::ContextUsage;
-use norte_code_protocol::{Phase, Reasoning, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_protocol::{
+    JobInfo, JobTurnPolicy, Phase, Reasoning, ServerEvent, ServerEventKind, SessionKey,
+};
 
 use crate::provider::{ModelFactory, ModelSpec};
 use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 use crate::{DEFAULT_SUBAGENT_SYSTEM_PROMPT, ServiceError};
 
 use self::screenshots::{ScreenshotInterceptor, Screenshots, publishing_tool};
-use self::sessions::SessionRecord;
+use self::sessions::{ChildSessionMetadata, SessionRecord};
 use self::steering::{Steered, Steering, SteeringInterceptor};
-use self::subagents::{SubagentOutcome, SubagentRunner, SubagentTool};
+use self::subagents::{
+    MAX_DELEGATION_DEPTH, SubagentOutcome, SubagentRequest, SubagentRunner, SubagentTool,
+};
 use approvals::{ApprovalRules, ToolRuleInterceptor};
 use background::ShellCalls;
 use compaction::{CompactionGate, CompactionLayer};
+use delegator::SharedChildren;
 use detach::DetachRegistry;
 use effects::{EffectJournal, journalled};
 use jobs::{JobRegistry, job_info};
@@ -93,7 +100,6 @@ use workspace::{Confined, PathKind, Workspace, confined};
 pub use approvals::{RuleScope, ToolStatus};
 pub use models::{effective_reasoning, model_list};
 pub use prompt::PromptSize;
-
 /// A stream of events answering one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 
@@ -179,6 +185,8 @@ pub struct Service {
     skills: RwLock<Arc<SkillRegistry>>,
     todo: Arc<TodoState>,
     questions: Arc<QuestionBroker>,
+    /// The children the service has spawned, by parent (RFC 8.2).
+    children: SharedChildren,
     secrets: RwLock<Vec<String>>,
     directory: Arc<dyn SessionDirectory>,
     effects: Arc<EffectJournal>,
@@ -202,6 +210,12 @@ pub struct Service {
     mcp_servers: RwLock<McpServers>,
     /// The runner the `subagent` tool asks, set once the service is built.
     subagent_runner: RwLock<Option<Arc<dyn SubagentRunner>>>,
+    /// Delegation events outbound to clients (RFC 8.2.10): the RAEP host
+    /// subscribes and emits the `CHILD_SESSION_*` frames on the parent's
+    /// stream. Events carry no request id (0); the host only reads `kind`
+    /// and `session`.
+    delegation_events: Arc<tokio::sync::broadcast::Sender<ServerEvent>>,
+    delegation_rx: Arc<Mutex<Option<tokio::sync::broadcast::Receiver<ServerEvent>>>>,
     /// The service reference the shell calls hold, so a finished job can
     /// start a turn of its own when the flag is on. Set the same way the
     /// subagent runner is.
@@ -209,6 +223,13 @@ pub struct Service {
     /// Sessions with an auto-turn already running, so a second job end for the
     /// same session does not start a duplicate one at the same time.
     auto_turns: Mutex<BTreeSet<SessionKey>>,
+    /// The turn currently running for each session, when one has started.
+    active_turns: Mutex<BTreeMap<SessionKey, u64>>,
+    /// Jobs whose terminal result reserved a new turn.
+    job_auto_turns: Mutex<HashMap<String, Option<u64>>>,
+    job_auto_turn_changed: tokio::sync::Notify,
+    /// Per-session job turn policies. Unset sessions use the configured default.
+    job_turn_policies: Mutex<HashMap<norte::SessionId, JobTurnPolicy>>,
     /// Serializes durable turn boundaries for each session. Steering does not
     /// take this lock; it is deliberately allowed to reach the turn in flight.
     turn_locks: Mutex<BTreeMap<SessionKey, Arc<AsyncMutex<()>>>>,
@@ -229,7 +250,39 @@ fn withheld(disabled: &[String], name: &str) -> bool {
     disabled.iter().any(|entry| entry == name)
 }
 
+/// One plain-text message restored from a portable RAEP history.
+#[derive(Clone, Debug)]
+pub struct ImportedHistoryItem {
+    /// The original RAEP role. Portable imports preserve `user` and
+    /// `assistant` rather than promoting untrusted tool or system content.
+    pub role: String,
+    /// Text content from the history item.
+    pub content: String,
+    /// Original turn identifier, when present.
+    pub turn_id: Option<String>,
+    /// Original timestamp in Unix milliseconds, when present.
+    pub timestamp: Option<i64>,
+    /// Original provenance retained as node metadata.
+    pub origin: Option<serde_json::Value>,
+}
+
 impl Service {
+    pub(super) fn profile_for_session(&self, key: &SessionKey) -> Config {
+        let profile_id = self
+            .lock_sessions()
+            .get(key)
+            .and_then(|record| record.agent_profile.clone());
+        profile_id
+            .and_then(|id| {
+                self.agent_profiles
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&id)
+                    .cloned()
+            })
+            .unwrap_or_else(|| self.config())
+    }
+
     /// Returns the gate that serializes turn starts for one session.
     pub(super) fn turn_lock(&self, key: &SessionKey) -> Arc<AsyncMutex<()>> {
         self.turn_locks
@@ -244,40 +297,60 @@ impl Service {
     async fn subagent_settings(
         &self,
         parent: &SessionKey,
+        requested_agent: Option<&str>,
     ) -> Result<
         (
+            String,
             ModelSpec,
             Vec<String>,
             Arc<Mutex<BudgetBook>>,
-            Option<usize>,
+            String,
         ),
         ServiceError,
     > {
         let (_, parent_spec, _) = self.require_record(parent)?;
         let parent_spec =
             parent_spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
-        let parent_config = self.config();
-        let target_name = parent_config
-            .subagent
-            .as_deref()
-            .unwrap_or(&parent_config.name);
-        let target_config = self
-            .agent_profiles
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(target_name)
-            .cloned()
-            .ok_or_else(|| {
-                ServiceError::Config(norte_code_protocol::config::ConfigError::Invalid {
-                    path: "subagent".to_owned(),
-                    message: format!("does not name a configured agent: {target_name}"),
-                })
+        let (parent_profile, target_name, target_config) = {
+            let root_config = self.config();
+            let profiles = self
+                .agent_profiles
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let parent_profile = self
+                .lock_sessions()
+                .get(parent)
+                .and_then(|record| record.agent_profile.clone())
+                .unwrap_or_else(|| root_config.name.clone());
+            let parent_config = profiles
+                .get(&parent_profile)
+                .cloned()
+                .unwrap_or(root_config);
+            let target_name = requested_agent
+                .or(parent_config.subagent.as_deref())
+                .unwrap_or(&parent_profile)
+                .to_owned();
+            if !parent_config
+                .delegates
+                .iter()
+                .any(|delegate| delegate == &target_name)
+            {
+                return Err(ServiceError::Delegation(format!(
+                    "DELEGATE_NOT_ALLOWED: agent `{target_name}` is not in `{parent_profile}`'s delegates"
+                )));
+            }
+            let target_config = profiles.get(&target_name).cloned().ok_or_else(|| {
+                ServiceError::Delegation(format!(
+                    "AGENT_NOT_FOUND: configured child agent `{target_name}` does not exist"
+                ))
             })?;
+            (parent_profile, target_name, target_config)
+        };
         let spec = match (
             target_config.default_provider.as_deref(),
             target_config.default_model.as_deref(),
         ) {
-            (Some(provider), Some(model)) if target_name != parent_config.name => {
+            (Some(provider), Some(model)) if target_name != parent_profile => {
                 self.default_spec_for(&target_config, &self.lock_catalog(), provider, model)?
             }
             _ => parent_spec,
@@ -289,15 +362,67 @@ impl Service {
             .unwrap_or_default();
         let mut disabled = parent_disabled;
         disabled.extend(target_config.tools.disabled.iter().cloned());
-        disabled.extend([
-            "ask_user".to_owned(),
-            "browser_use".to_owned(),
-            "subagent".to_owned(),
-        ]);
+        disabled.extend(["ask_user".to_owned(), "browser_use".to_owned()]);
+        // Nesting is bounded by the depth check in `spawn_agent` and, for the
+        // internal `subagent` tool, by not registering it on a child at all:
+        // a child keeps `spawn_agent` (which enforces the depth) but never
+        // the internal name, so the two spellings cannot drift apart at the
+        // limit. The child's depth is always one past its parent's, so a
+        // child (depth >= 1) never sees `subagent`.
+        disabled.extend(["subagent".to_owned()]);
+        if self.depth_of(parent) >= MAX_DELEGATION_DEPTH {
+            disabled.extend(["spawn_agent".to_owned()]);
+        }
         disabled.sort();
         disabled.dedup();
         let budget = self.budget_book(parent).await?;
-        Ok((spec, disabled, budget, target_config.max_iterations))
+        let system_prompt = target_config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| self.subagent_system_prompt.clone());
+        Ok((target_name.clone(), spec, disabled, budget, system_prompt))
+    }
+
+    pub(super) async fn delegation_context_summary(
+        &self,
+        parent: &SessionKey,
+    ) -> Result<String, ServiceError> {
+        let (nid, spec, _) = self.require_record(parent)?;
+        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(parent.to_string()))?;
+        let history = self.engine(&spec, Some(parent))?.history(nid).await?;
+        let secrets = self
+            .secrets
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut lines = Vec::new();
+        let mut chars = 0usize;
+        for message in history.iter().rev() {
+            if !matches!(message.role, norte::Role::User | norte::Role::Assistant) {
+                continue;
+            }
+            let role = match message.role {
+                norte::Role::User => "user",
+                norte::Role::Assistant => "assistant",
+                _ => continue,
+            };
+            let mut text = norte::Message::text(message);
+            for secret in &secrets {
+                if !secret.is_empty() {
+                    text = text.replace(secret, "[redacted]");
+                }
+            }
+            let line = format!("{role}: {}", text.trim());
+            let remaining = 4096usize.saturating_sub(chars);
+            if remaining == 0 {
+                break;
+            }
+            let line: String = line.chars().take(remaining).collect();
+            chars += line.chars().count();
+            lines.push(line);
+        }
+        lines.reverse();
+        Ok(lines.join("\n"))
     }
 
     /// Builds a service with an in-memory session directory.
@@ -460,6 +585,11 @@ impl Service {
         let plans = Arc::new(PlanRepository::new(Arc::clone(&directory)));
         let approval_rules = Arc::new(ApprovalRules::new(&config.approvals));
         let agent_profiles = BTreeMap::from([(config.name.clone(), config.clone())]);
+        // The delegation channel is built before the struct so the receiver
+        // can be stored beside the sender: the host takes it once at startup
+        // and spawns the drain that turns these events into RAEP frames.
+        let (delegation_sender, delegation_receiver) =
+            tokio::sync::broadcast::channel::<ServerEvent>(256);
         let service = Self {
             max_queued_inputs: 8,
             config: RwLock::new(config),
@@ -478,6 +608,7 @@ impl Service {
             skills: RwLock::new(skills),
             todo: Arc::new(TodoState::default()),
             questions,
+            children: Arc::new(delegator::ChildRegistry::new()),
             secrets: RwLock::new(secrets),
             directory,
             effects,
@@ -494,8 +625,14 @@ impl Service {
             // Connected in `with_directory`, which can await; `new` cannot.
             mcp_servers: RwLock::new(McpServers::none()),
             subagent_runner: RwLock::new(None),
+            delegation_events: Arc::new(delegation_sender),
+            delegation_rx: Arc::new(Mutex::new(Some(delegation_receiver))),
             job_host: Arc::new(RwLock::new(None)),
             auto_turns: Mutex::new(BTreeSet::new()),
+            active_turns: Mutex::new(BTreeMap::new()),
+            job_auto_turns: Mutex::new(HashMap::new()),
+            job_auto_turn_changed: tokio::sync::Notify::new(),
+            job_turn_policies: Mutex::new(HashMap::new()),
             turn_locks: Mutex::new(BTreeMap::new()),
             auto_request_id: AtomicU64::new(1 << 62),
             budget_states: Mutex::new(BTreeMap::new()),
@@ -602,6 +739,9 @@ impl Service {
             .tools(self.tools(key)?)
             .config(HarnessConfig {
                 max_iterations: max_iterations
+                    .or_else(|| {
+                        key.and_then(|session| self.profile_for_session(session).max_iterations)
+                    })
                     .or(self.config().max_iterations)
                     .unwrap_or(usize::MAX),
                 ..HarnessConfig::default()
@@ -806,17 +946,12 @@ impl Service {
         if let Ok(path) = std::env::var("PATH") {
             env.insert("PATH".to_owned(), path);
         }
-        // The zero the host grants, because one of the two shapes a call can
-        // take is a process nobody waits for: a server started for the rest of
-        // the session needs no bound, and its own bound is what ends it if it
-        // has one. A call that asks for the same zero *and* holds the turn is
-        // the one shape this host refuses, and the wrapper is where it is
-        // refused: it drops the field, so the request falls through to the
-        // default above. Keeping that rule in one place is the reason the two
-        // shells became one.
+        // Detached jobs are bounded too: RAEP requires every job to have a
+        // runtime ceiling, and a requested zero falls back to the executor's
+        // default timeout rather than creating an unbounded process.
         let limits = ShellLimits {
             max_model_bytes: self.config().tools.command_max_model_bytes,
-            allow_indefinite: true,
+            allow_indefinite: false,
             ..ShellLimits::default()
         };
         let secrets = self
@@ -847,8 +982,9 @@ impl Service {
         // the sandbox, the secrets, the output bounds and the limits are one
         // set, and the flag is the only thing that differs.
         let command = build(limits);
-        let command = ShellCalls::declaration(
+        let command = ShellCalls::declaration_with_limits(
             command,
+            limits,
             Arc::clone(&self.jobs),
             Arc::clone(&self.steering),
             Arc::clone(&self.detaches),
@@ -859,6 +995,63 @@ impl Service {
             tools,
             disabled,
             ManageJobs::new(Arc::clone(&self.jobs)).into_declaration(),
+        )?;
+        Ok(())
+    }
+
+    /// Registers the delegating tools (RFC 8.2.5–8.2.9) over the shared
+    /// child registry: they are what the parent uses to look at, talk to,
+    /// stop and wait for the children `spawn_agent` made.
+    fn register_delegator_tools(
+        &self,
+        tools: &mut ToolRegistry,
+        disabled: &[String],
+    ) -> Result<(), ServiceError> {
+        use subagents::{
+            ApproveChildCall, AskDelegator, HandoffAgent, InspectAgent, ListAgents, MessageAgent,
+            StopAgent, WaitAgent,
+        };
+        let children = Arc::clone(&self.children);
+        self.register_tool(
+            tools,
+            disabled,
+            InspectAgent::new(Arc::clone(&children), Arc::clone(&self.job_host)).into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            MessageAgent::new(Arc::clone(&children), Arc::clone(&self.job_host)).into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            StopAgent::new(Arc::clone(&children), Arc::clone(&self.job_host)).into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            WaitAgent::new(Arc::clone(&children), Arc::clone(&self.job_host)).into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            ListAgents::new(Arc::clone(&children), Arc::clone(&self.job_host)).into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            ApproveChildCall::new(Arc::clone(&children), Arc::clone(&self.questions))
+                .into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            AskDelegator::new(Arc::clone(&self.questions)).into_declaration(),
+        )?;
+        self.register_tool(
+            tools,
+            disabled,
+            HandoffAgent::new(Arc::clone(&self.job_host)).into_declaration(),
         )?;
         Ok(())
     }
@@ -925,19 +1118,21 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .unwrap_or_else(|| Arc::new(SubagentRunnerImpl::new(None)) as Arc<dyn SubagentRunner>);
+        let subagent = SubagentTool::with_children(
+            runner,
+            Arc::clone(&self.jobs),
+            Arc::clone(&self.steering),
+            Arc::clone(&self.detaches),
+            Arc::clone(&self.children),
+            Arc::clone(&self.job_host),
+            3,
+        );
         self.register_tool(
             &mut tools,
             &disabled,
-            SubagentTool::new(
-                runner,
-                Arc::clone(&self.jobs),
-                Arc::clone(&self.steering),
-                Arc::clone(&self.detaches),
-                Arc::clone(&self.job_host),
-                3,
-            )
-            .into_declaration(),
+            subagent.into_delegation_declaration(),
         )?;
+        self.register_delegator_tools(&mut tools, &disabled)?;
 
         if self.config().tools.web_fetch {
             self.register_tool(
@@ -1378,6 +1573,132 @@ impl Service {
             .and_then(|record| record.spec.clone())
     }
 
+    /// Returns a background job only when it belongs to `session`.
+    #[must_use]
+    pub fn session_job(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<norte_code_protocol::JobInfo> {
+        let session_id = self.lock_sessions().get(session)?.id;
+        self.jobs
+            .get_for_session(session_id, job_id)
+            .map(|job| job_info(&job))
+    }
+
+    /// Returns a session job after applying the configured output-retention window.
+    #[must_use]
+    pub fn session_job_with_output_retention(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<norte_code_protocol::JobInfo> {
+        let session_id = self.lock_sessions().get(session)?.id;
+        self.jobs
+            .get_for_session_with_retention(session_id, job_id)
+            .map(|job| job_info(&job))
+    }
+
+    /// Sets the limits applied to detached jobs owned by this service.
+    pub fn configure_job_limits(&self, max_concurrent: usize, output_retention_s: u64) {
+        self.jobs
+            .configure_limits(max_concurrent, output_retention_s);
+    }
+
+    /// Sets the session's policy for turns caused by detached job results.
+    #[must_use]
+    pub fn set_job_turn_policy(&self, session: &SessionKey, policy: JobTurnPolicy) -> bool {
+        let Some(session_id) = self.lock_sessions().get(session).map(|record| record.id) else {
+            return false;
+        };
+        self.job_turn_policies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id, policy);
+        true
+    }
+
+    /// Whether a session's finished job reserved a new turn.
+    #[must_use]
+    pub fn session_job_triggered_new_turn(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<bool> {
+        self.session_job(session, job_id)?;
+        Some(
+            self.job_auto_turns
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(job_id),
+        )
+    }
+
+    /// Waits for the turn reserved by a job to start, or returns `None` if it
+    /// could not be started.
+    pub async fn session_job_new_turn_id(&self, session: &SessionKey, job_id: &str) -> Option<u64> {
+        self.session_job(session, job_id)?;
+        loop {
+            let notified = self.job_auto_turn_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let state = self
+                .job_auto_turns
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(job_id)
+                .copied();
+            match state {
+                Some(Some(turn)) => return Some(turn),
+                Some(None) => notified.await,
+                None => return None,
+            }
+        }
+    }
+
+    /// The turn currently running for a session, if one has started.
+    #[must_use]
+    pub fn session_active_turn_id(&self, session: &SessionKey) -> Option<u64> {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session)
+            .copied()
+    }
+
+    /// Cancels a job belonging to `session` and waits for its runner to settle.
+    ///
+    /// The job may show as killed as soon as cancellation is requested, but the
+    /// final output and duration are not stable until its streams have closed.
+    pub async fn stop_session_job(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<norte_code_protocol::JobInfo> {
+        self.stop_session_job_with_grace(session, job_id, None)
+            .await
+    }
+
+    /// Cancels a job, applying an optional grace before forced process termination.
+    pub async fn stop_session_job_with_grace(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+        grace: Option<Duration>,
+    ) -> Option<norte_code_protocol::JobInfo> {
+        let session_id = self.lock_sessions().get(session)?.id;
+        let mut terminal = self.jobs.terminal_for_session(session_id, job_id)?;
+        let _ = self
+            .jobs
+            .cancel_in_session_with_grace(session_id, job_id, grace);
+        while !*terminal.borrow() {
+            if terminal.changed().await.is_err() {
+                break;
+            }
+        }
+        self.session_job(session, job_id)
+    }
+
     /// How much of its model's context a session is using.
     ///
     /// The used part is what the last request carried — the whole
@@ -1714,9 +2035,18 @@ impl Service {
         use norte_code_protocol::ClientRequestKind as Kind;
         let resolve = |key: SessionKey| self.resolve_key(&key);
         Ok(match kind {
-            Kind::ForkSession { session, title } => Kind::ForkSession {
+            Kind::ForkSession {
+                session,
+                title,
+                from_turn_id,
+                inclusive,
+                carry_usage,
+            } => Kind::ForkSession {
                 session: resolve(session)?,
                 title,
+                from_turn_id,
+                inclusive,
+                carry_usage,
             },
             Kind::RenameSession { session, title } => Kind::RenameSession {
                 session: resolve(session)?,
@@ -1731,6 +2061,7 @@ impl Service {
                 attachments,
                 budget,
                 reasoning,
+                metadata,
                 replay,
             } => Kind::SendMessage {
                 session: session.map(resolve).transpose()?,
@@ -1738,6 +2069,7 @@ impl Service {
                 attachments,
                 budget,
                 reasoning,
+                metadata,
                 replay,
             },
             Kind::Steer {
@@ -1847,12 +2179,30 @@ impl Service {
                     sessions: self.list_sessions(),
                 },
             )),
-            Kind::ForkSession { session, title } => {
-                let key = self.fork_session(&session, title.clone()).await?;
+            Kind::ForkSession {
+                session,
+                title,
+                from_turn_id,
+                inclusive,
+                carry_usage,
+            } => {
+                let (key, from_turn_id) = self
+                    .fork_session(
+                        &session,
+                        title.clone(),
+                        from_turn_id.as_deref(),
+                        inclusive.unwrap_or(true),
+                        carry_usage.unwrap_or(true),
+                    )
+                    .await?;
                 Ok(single(
                     request_id,
                     Some(key),
-                    ServerEventKind::SessionForked { from: session },
+                    ServerEventKind::SessionForked {
+                        from: session,
+                        from_turn_id,
+                        title,
+                    },
                 ))
             }
             Kind::RenameSession { session, title } => {
@@ -1877,6 +2227,7 @@ impl Service {
                 attachments,
                 budget,
                 reasoning,
+                metadata: _,
                 replay,
             } => {
                 self.start_turn(
@@ -1920,7 +2271,7 @@ impl Service {
                     let sessions = self.lock_sessions();
                     match sessions.get(&session) {
                         Some(record) => match id.as_deref() {
-                            Some(id) => usize::from(self.jobs.cancel(id)),
+                            Some(id) => usize::from(self.jobs.cancel_in_session(record.id, id)),
                             None => self.jobs.cancel_session(record.id),
                         },
                         None => 0,
@@ -2201,6 +2552,39 @@ impl Service {
         Ok(Box::pin(futures_util::stream::empty()))
     }
 
+    async fn queue_job_result(
+        &self,
+        session: norte::SessionId,
+        steered: &steering::Steered,
+    ) -> Result<(), ServiceError> {
+        let key = self
+            .lock_sessions()
+            .iter()
+            .find(|(_, record)| record.id == session)
+            .map(|(key, _)| key.clone())
+            .ok_or_else(|| ServiceError::UnknownSession(session.to_string()));
+        let key = match key {
+            Ok(key) => key,
+            Err(error) => return Err(error),
+        };
+        let queued = {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            if record.pending_steers.len() >= self.max_queued_inputs {
+                false
+            } else {
+                record.pending_steers.push(steered.clone());
+                true
+            }
+        };
+        if !queued {
+            return Err(ServiceError::SessionBusy);
+        }
+        self.persist(&key).await
+    }
+
     pub(super) fn lock_cancels(&self) -> MutexGuard<'_, BTreeMap<SessionKey, CancelRegistration>> {
         self.cancels.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -2280,7 +2664,44 @@ impl Service {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(self));
     }
 
-    /// Schedules an auto-turn after a detached job reports its result.
+    /// Subscribes to the delegation events the service emits (RFC 8.2.10).
+    ///
+    /// The RAEP host is the only consumer: it drains this and emits the
+    /// `CHILD_SESSION_STARTED/UPDATED` and `DELEGATOR_STATE_CHANGED` frames
+    /// on the parent's stream. Returns the replaceable receiver: the host
+    /// takes it once at startup.
+    pub fn delegation_events(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<tokio::sync::broadcast::Receiver<ServerEvent>>> {
+        self.delegation_rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the delegation event receiver, once.
+    ///
+    /// The RAEP host calls this at startup and spawns the drain that turns
+    /// the service's events into standard RAEP frames. A second call
+    /// returns `None`: there is only one drain.
+    #[must_use]
+    pub fn delegation_rx_take(&self) -> Option<tokio::sync::broadcast::Receiver<ServerEvent>> {
+        self.delegation_rx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Emits a delegation event to the host subscribers.
+    pub(super) fn emit_delegation(&self, event: ServerEvent) {
+        let _ = self.delegation_events.send(event);
+    }
+
+    /// The next request id for an auto-turn.
+    fn next_auto_request_id(&self) -> u64 {
+        self.auto_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Schedules the configured automatic turn for a completed child task.
     pub(super) fn schedule_auto_turn(self: &Arc<Self>, session: norte::SessionId) {
         if !self.config().tools.auto_turn_on_job_end {
             return;
@@ -2291,9 +2712,197 @@ impl Service {
         });
     }
 
-    /// The next request id for an auto-turn.
-    fn next_auto_request_id(&self) -> u64 {
-        self.auto_request_id.fetch_add(1, Ordering::Relaxed)
+    /// Reserves an auto-turn when the session policy allows this job result.
+    ///
+    /// Reserving synchronously lets `JOB_FINISHED` accurately report whether
+    /// a new turn is queued, while preventing two job completions from
+    /// scheduling duplicate turns.
+    pub(super) fn reserve_job_auto_turn(
+        &self,
+        session: norte::SessionId,
+        job: &JobInfo,
+    ) -> Option<SessionKey> {
+        let policy = self
+            .job_turn_policies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session)
+            .copied()
+            .unwrap_or_else(|| {
+                if self.config().tools.auto_turn_on_job_end {
+                    JobTurnPolicy::Always
+                } else {
+                    JobTurnPolicy::Never
+                }
+            });
+        if !job_policy_allows_turn(policy, job) {
+            return None;
+        }
+        let key = self.reserve_auto_turn(session)?;
+        self.job_auto_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(job.id.clone(), None);
+        Some(key)
+    }
+
+    /// Queues a completed job's report and emits its terminal event.
+    fn complete_background_job(
+        self: &Arc<Self>,
+        session: norte::SessionId,
+        steering: Arc<steering::Steering>,
+        steered: steering::Steered,
+        job: JobInfo,
+        reserved_turn: Option<SessionKey>,
+        emit_event: bool,
+    ) {
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(error) = service.queue_job_result(session, &steered).await {
+                tracing::warn!(session = %session, %error, "could not persist job result in session history");
+            }
+            steering.push(session, steered);
+            if let Some(key) = reserved_turn {
+                service
+                    .run_reserved_job_turn(key, session, job, emit_event)
+                    .await;
+            } else if emit_event {
+                let injected_into_turn_id = service.active_turn_id(session);
+                service.emit_job_finished(session, job, false, None, injected_into_turn_id);
+            }
+        });
+    }
+
+    fn active_turn_id(&self, session: norte::SessionId) -> Option<u64> {
+        let key = self
+            .lock_sessions()
+            .iter()
+            .find(|(_, record)| record.id == session)
+            .map(|(key, _)| key.clone())?;
+        self.active_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .copied()
+    }
+
+    fn set_active_turn(&self, key: SessionKey, turn: u64) {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, turn);
+    }
+
+    fn clear_active_turn(&self, key: &SessionKey, turn: u64) {
+        let mut active_turns = self
+            .active_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if active_turns.get(key) == Some(&turn) {
+            active_turns.remove(key);
+        }
+    }
+
+    fn emit_job_finished(
+        &self,
+        session_id: norte::SessionId,
+        job: JobInfo,
+        triggered_new_turn: bool,
+        new_turn_id: Option<u64>,
+        injected_into_turn_id: Option<u64>,
+    ) {
+        let session = self
+            .lock_sessions()
+            .iter()
+            .find(|(_, record)| record.id == session_id)
+            .map(|(key, _)| key.clone())
+            .or_else(|| Some(SessionKey::new(session_id.to_string())));
+        self.emit_delegation(ServerEvent {
+            request_id: 0,
+            session,
+            kind: ServerEventKind::JobFinished {
+                job,
+                triggered_new_turn,
+                new_turn_id,
+                injected_into_turn_id,
+            },
+        });
+    }
+
+    async fn run_reserved_job_turn(
+        self: &Arc<Self>,
+        key: SessionKey,
+        session_id: norte::SessionId,
+        job: JobInfo,
+        emit_event: bool,
+    ) {
+        let request_id = self.next_auto_request_id();
+        let mut reported = false;
+        match self
+            .start_turn(
+                request_id,
+                Some(key.clone()),
+                None,
+                Vec::new(),
+                None,
+                None,
+                false,
+            )
+            .await
+        {
+            Ok(mut stream) => {
+                while let Some(event) = stream.next().await {
+                    if !reported && let ServerEventKind::TurnStarted { turn } = event.kind {
+                        self.job_auto_turns
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(job.id.clone(), Some(turn));
+                        self.job_auto_turn_changed.notify_waiters();
+                        if emit_event {
+                            self.emit_job_finished(session_id, job.clone(), true, Some(turn), None);
+                        }
+                        reported = true;
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(session = %key, %error, "job-triggered turn could not start");
+            }
+        }
+        if !reported {
+            self.job_auto_turns
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&job.id);
+            self.job_auto_turn_changed.notify_waiters();
+            if emit_event {
+                self.emit_job_finished(session_id, job, false, None, None);
+            }
+        }
+        self.auto_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&key);
+    }
+
+    fn reserve_auto_turn(&self, session: norte::SessionId) -> Option<SessionKey> {
+        let key = self
+            .lock_sessions()
+            .iter()
+            .find(|(_, record)| record.id == session)
+            .map(|(key, _)| key.clone())?;
+        if !self
+            .lock_sessions()
+            .get(&key)
+            .is_some_and(|record| record.phase == Phase::Idle)
+        {
+            return None;
+        }
+        self.auto_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone())
+            .then_some(key)
     }
 
     /// Starts a turn on its own because a job ended with a result to read.
@@ -2363,11 +2972,26 @@ impl Service {
     }
 }
 
+fn job_policy_allows_turn(policy: JobTurnPolicy, job: &JobInfo) -> bool {
+    if !job.state.is_done() {
+        return false;
+    }
+    match policy {
+        JobTurnPolicy::Always => true,
+        JobTurnPolicy::OnFailure => {
+            job.state == norte_code_protocol::JobState::Cancelled
+                || job.timed_out
+                || job.exit_code.is_some_and(|code| code != 0)
+        }
+        JobTurnPolicy::Never => false,
+    }
+}
+
 /// Runs a subagent's turn on a child session.
 ///
-/// The child is created with the same rules as any other session, except
-/// its tool list is frozen without `subagent`: it starts blank and cannot
-/// spawn another one, so the depth is one and the recursion is impossible.
+/// The child is created with its selected agent profile and its own session
+/// history. The `subagent` alias is withheld; `spawn_agent` remains subject
+/// to the configured depth limit.
 struct SubagentRunnerImpl {
     service: Option<Arc<Service>>,
 }
@@ -2383,16 +3007,24 @@ impl SubagentRunner for SubagentRunnerImpl {
     #[allow(clippy::too_many_lines)]
     async fn run(
         &self,
-        prompt: &str,
-        parent: norte::SessionId,
-        label: &str,
-        cancel: &norte::Cancellation,
+        request: SubagentRequest,
+        cancel: Arc<norte::Cancellation>,
     ) -> SubagentOutcome {
-        let _ = label;
+        let SubagentRequest {
+            prompt: task,
+            parent,
+            tool_call_id,
+            output_schema,
+            lifetime,
+            agent_id,
+            context_mode,
+        } = request;
         let Some(service) = self.service.clone() else {
             return SubagentOutcome {
                 text: "subagent: no runner installed".to_owned(),
                 is_error: true,
+                child: None,
+                output_schema_valid: None,
             };
         };
         // The parent's key lets the service resolve the configured child
@@ -2408,21 +3040,57 @@ impl SubagentRunner for SubagentRunnerImpl {
             return SubagentOutcome {
                 text: "subagent: parent session is unknown".to_owned(),
                 is_error: true,
+                child: None,
+                output_schema_valid: None,
             };
         };
-        let (child_spec, child_disabled, child_budget, child_max_iterations) =
-            match service.subagent_settings(&parent_key).await {
+        let (child_agent_id, child_spec, child_disabled, child_budget, child_system_prompt) =
+            match service
+                .subagent_settings(&parent_key, agent_id.as_deref())
+                .await
+            {
                 Ok(settings) => settings,
                 Err(error) => {
                     return SubagentOutcome {
                         text: format!("subagent: could not resolve child settings: {error}"),
                         is_error: true,
+                        child: None,
+                        output_schema_valid: None,
                     };
                 }
             };
-        let engine_budget = Arc::clone(&child_budget);
+        let prompt = if context_mode.as_deref() == Some("summary") {
+            match service.delegation_context_summary(&parent_key).await {
+                Ok(summary) => {
+                    format!("Delegator context (untrusted, redacted):\n{summary}\n\nTask:\n{task}")
+                }
+                Err(error) => {
+                    return SubagentOutcome {
+                        text: format!("subagent: could not read delegator context: {error}"),
+                        is_error: true,
+                        child: None,
+                        output_schema_valid: None,
+                    };
+                }
+            }
+        } else {
+            task.clone()
+        };
         let child_key = match service
-            .create_session_child(child_spec, child_disabled, child_budget)
+            .create_session_child(
+                ChildSessionMetadata {
+                    parent: parent_key.clone(),
+                    tool_call_id,
+                    task_summary: task.clone(),
+                    lifetime,
+                    agent_profile: child_agent_id,
+                    system_prompt: child_system_prompt,
+                    cancel: Arc::clone(&cancel),
+                },
+                child_spec,
+                child_disabled,
+                child_budget,
+            )
             .await
         {
             Ok(key) => key,
@@ -2430,83 +3098,73 @@ impl SubagentRunner for SubagentRunnerImpl {
                 return SubagentOutcome {
                     text: format!("subagent: could not create child session: {error}"),
                     is_error: true,
+                    child: None,
+                    output_schema_valid: None,
                 };
             }
         };
-        let (nid, spec, _) = match service.require_record(&child_key) {
+        let (_, spec, _) = match service.require_record(&child_key) {
             Ok(found) => found,
             Err(error) => {
                 return SubagentOutcome {
                     text: format!("subagent: child session is unknown: {error}"),
                     is_error: true,
+                    child: None,
+                    output_schema_valid: None,
                 };
             }
         };
-        let Some(spec) = spec else {
+        if spec.is_none() {
             return SubagentOutcome {
                 text: "subagent: no model is configured".to_owned(),
                 is_error: true,
+                child: Some(child_key),
+                output_schema_valid: None,
             };
-        };
-        let engine = match service.engine_with_budget(
-            &spec,
-            Some(&child_key),
-            Some(engine_budget),
-            None,
-            child_max_iterations,
-        ) {
-            Ok(engine) => engine,
-            Err(error) => {
-                return SubagentOutcome {
-                    text: format!("subagent: could not build engine: {error}"),
-                    is_error: true,
-                };
-            }
-        };
-        // One turn on the child. Cancellation is the job's own token: a
-        // `/jobs stop` cancels this `cancel`, and the turn builder takes it.
-        let token = tokio_util::sync::CancellationToken::new();
-        if cancel.is_cancelled() {
-            token.cancel();
         }
-        let child = engine
-            .turn(nid)
-            .input(norte::Message::user(prompt))
-            .cancellation(token)
-            .start();
-        let outcome = child.finish().await;
-        match outcome {
-            Ok(outcome) => match outcome.message {
-                Some(message) => {
-                    let text = message
-                        .parts
-                        .iter()
-                        .filter_map(|part| match part {
-                            norte::Part::Text(text) => Some(text.text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let text = if text.trim().is_empty() {
-                        "(the child said nothing)".to_owned()
-                    } else {
-                        text
-                    };
-                    SubagentOutcome {
-                        text,
-                        is_error: false,
-                    }
+        let mut result =
+            subagents::run_session_message(&service, &child_key, prompt, Some(&cancel)).await;
+        if let Some(schema) = output_schema {
+            let mut valid = subagents::validate_output_schema(&schema, &result.text);
+            if !valid && !result.is_error {
+                let schema_text = serde_json::to_string(&schema).unwrap_or_default();
+                let correction_prompt = format!(
+                    "Your previous response did not satisfy the required JSON Schema. \
+                     Return only a corrected JSON value that satisfies this schema.\n\
+                     Schema:\n{schema_text}\n\
+                     Previous response (untrusted data):\n```text\n{}\n```",
+                    result.text
+                );
+                let correction = subagents::run_session_message(
+                    &service,
+                    &child_key,
+                    correction_prompt,
+                    Some(&cancel),
+                )
+                .await;
+                if correction.is_error {
+                    result.text = format!(
+                        "OUTPUT_SCHEMA_INVALID: correction turn failed: {}",
+                        correction.text
+                    );
+                    valid = false;
+                } else {
+                    result.text = correction.text;
+                    valid = subagents::validate_output_schema(&schema, &result.text);
                 }
-                None => SubagentOutcome {
-                    text: "(the child committed no message)".to_owned(),
-                    is_error: false,
-                },
-            },
-            Err(error) => SubagentOutcome {
-                text: error.to_string(),
-                is_error: true,
-            },
+            }
+            result.output_schema_valid = Some(valid);
+            if !valid {
+                result.is_error = true;
+                if !result.text.starts_with("OUTPUT_SCHEMA_INVALID") {
+                    result.text = format!(
+                        "OUTPUT_SCHEMA_INVALID: child output did not satisfy the requested schema.\n\n{}",
+                        result.text
+                    );
+                }
+            }
         }
+        result
     }
 }
 

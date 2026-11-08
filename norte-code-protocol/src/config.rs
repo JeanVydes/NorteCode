@@ -49,6 +49,11 @@ pub struct Agent {
     /// `None` keeps the parent session's model. When set, the name must refer
     /// to another configured agent; that agent supplies the child defaults.
     pub subagent: Option<String>,
+    /// Agent ids this profile may delegate to.
+    ///
+    /// An empty list disables delegation. `subagent`, when set, is the default
+    /// target and must also appear here.
+    pub delegates: Vec<String>,
     /// The provider a new session uses when none is named.
     ///
     /// It is separate from the model because a model name is a string and may
@@ -225,12 +230,35 @@ impl ServiceConfig {
             }
         }
         for agent in &self.agents {
+            let mut delegates = std::collections::BTreeSet::new();
+            for delegate in &agent.delegates {
+                if !names.contains(delegate) {
+                    return Err(invalid(
+                        format!("agents.{}.delegates", agent.name),
+                        format!("does not name a configured agent: {delegate}"),
+                    ));
+                }
+                if !delegates.insert(delegate) {
+                    return Err(invalid(
+                        format!("agents.{}.delegates", agent.name),
+                        format!("duplicate delegate `{delegate}`"),
+                    ));
+                }
+            }
             if let Some(subagent) = &agent.subagent
                 && !names.contains(subagent)
             {
                 return Err(invalid(
                     format!("agents.{}.subagent", agent.name),
                     format!("does not name a configured agent: {subagent}"),
+                ));
+            }
+            if let Some(subagent) = &agent.subagent
+                && !delegates.contains(subagent)
+            {
+                return Err(invalid(
+                    format!("agents.{}.subagent", agent.name),
+                    format!("default subagent `{subagent}` must also appear in delegates"),
                 ));
             }
         }
@@ -340,6 +368,7 @@ impl Default for Agent {
             origin_url: None,
             author: None,
             subagent: None,
+            delegates: Vec::new(),
             default_provider: None,
             default_model: None,
             compaction: CompactionConfig::default(),

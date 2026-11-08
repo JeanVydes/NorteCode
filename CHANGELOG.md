@@ -8,6 +8,19 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- RAEP history now persists turn-to-conversation boundaries, keeps turn ids
+  monotonic across compaction, and pages `HISTORY_GET` by `before_turn_id` with
+  timestamps and `has_more`.
+- `SESSION_FORK` can branch at a named terminal turn, include or exclude that
+  turn, and carry the source session's usage counters by default.
+- `SESSION_REWIND` now removes text-only turns from the active model context
+  while retaining them for `HISTORY_GET` with `include_rewound`; rewinds that
+  cross tool calls are rejected until side-effect metadata is available.
+- Delegation can select child agent profiles through each agent's `delegates`
+  allow-list. Detached child runs execute as background jobs, and parents can
+  message, wait for, inspect, list and stop their children. Existing service
+  configurations that set `subagent` must also list that profile in
+  `delegates`.
 - `ui.queue_mode` in `cli.json` chooses what a message typed while a turn runs does: `reject` starts a new turn, `queue` steers into the running one, and `interrupt` cancels the turn first. `Steer` now carries the policy, and the RAEP host maps `USER_INPUT.queue_policy` onto it.
 - A steering message that reached the request in flight is now also reported as a standard `USER_INPUT_ACCEPTED` frame, with the accepted `content` and an `origin` (`kind: "user"`); the queued-input limit (`limits.max_queued_inputs`, default 8) now fails with `SESSION_BUSY` instead of growing the queue without bound.
 - Browser requests are checked against a new `allowed_origins` list: a request that carries an `Origin` header is rejected unless the origin is listed. A non-browser client sends no `Origin` and is unaffected.

@@ -28,6 +28,9 @@ pub enum ServiceError {
     /// The named session is not known.
     #[error("session `{0}` is not known")]
     UnknownSession(String),
+    /// A history operation could not resolve a terminal turn.
+    #[error("history: {0}")]
+    History(String),
     /// A name matched more than one session.
     ///
     /// The footer shows a session by a prefix of its id, so a client may send
@@ -61,6 +64,9 @@ pub enum ServiceError {
     /// Compaction could not produce a safe summary.
     #[error("compaction: {0}")]
     Compaction(String),
+    /// A delegation operation could not be completed.
+    #[error("delegation: {0}")]
+    Delegation(String),
     /// A session could not be named after its first message.
     #[error("name: {0}")]
     Name(String),

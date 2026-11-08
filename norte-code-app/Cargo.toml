@@ -1,0 +1,35 @@
+[package]
+name = "norte-code-app"
+description = "Multiplatform Dioxus application for Norte Code RAEP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+
+[dependencies]
+dioxus = { version = "0.7", default-features = false, features = ["minimal", "launch", "asset", "document"] }
+raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["time"] }
+uuid = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+uuid = { workspace = true, features = ["js"] }
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+
+[lints]
+workspace = true

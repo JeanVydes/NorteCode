@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "norte-code-agent",
+    "norte-code-app",
     "norte-code-client",
     "norte-code-cli",
     "norte-code-protocol",
@@ -37,6 +38,7 @@ globset = "0.4"
 ignore = "0.4"
 regex = "1"
 schemars = "1.1.0"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1"
 serde_json = "1"
@@ -51,6 +53,7 @@ tower-http = { version = "0.6", features = ["limit", "timeout", "trace"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
 missing_docs = "deny"

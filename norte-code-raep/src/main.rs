@@ -18,7 +18,8 @@ use norte_code_protocol::{
     sqlite::{SessionDirectory, SqliteStore},
 };
 use norte_code_raep::{
-    BlobArtifactStore, HostConfig, NorteCodeRaepHost, SqliteReplayStore, router,
+    BlobArtifactStore, FilePinStore, HostConfig, NorteCodeRaepHost, SqliteReplayStore,
+    SqliteUploadIndex, router,
 };
 
 async fn build_services(
@@ -165,17 +166,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_principals,
         ..HostConfig::default()
     };
+    let pin_store = Arc::new(FilePinStore::new(database.with_file_name("pins")));
     let replay_database = database.with_extension("replay.db");
     let replay_store = Arc::new(SqliteReplayStore::open(
         replay_database,
         host_config.replay_capacity,
     )?);
+    let upload_index = Arc::new(SqliteUploadIndex::open(
+        database.with_extension("uploads.db"),
+    )?);
     let artifact_store = Arc::new(BlobArtifactStore::new(blobs));
     let host = Arc::new(
         NorteCodeRaepHost::with_agents(services, host_config)?
             .with_replay_store_instance(replay_store)
-            .with_artifact_store(artifact_store),
+            .with_pin_store(pin_store)
+            .with_artifact_store(artifact_store)
+            .with_upload_index(upload_index),
     );
+    // The service's delegation events are emitted on their own broadcast;
+    // this drain is what turns them into the standard RAEP frames on the
+    // parent's stream (RFC 8.2.10).
+    host.spawn_delegation_drain()?;
     let app = router(host);
     let bind = std::env::var("NORTE_CODE_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
