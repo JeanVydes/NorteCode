@@ -113,6 +113,13 @@ pub struct TelemetryReport {
     pub summary: TelemetrySummary,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct UploadReceipt {
+    pub upload_id: String,
+    pub mime_type: String,
+    pub bytes: u64,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TelemetrySummary {
     #[serde(default)]
@@ -430,23 +437,68 @@ impl ApiClient {
 
     pub async fn send_text(&self, session_id: &str, text: &str) -> Result<TurnId, ApiError> {
         let turn_id = TurnId::generate();
-        let request = crate::wire::UserInputRequest { prompt: text };
+        let request = crate::wire::UserInputRequest {
+            prompt: Some(text),
+            content: None,
+        };
+        self.send_user_input(session_id, &turn_id, &request).await?;
+        Ok(turn_id)
+    }
+
+    pub async fn send_content(
+        &self,
+        session_id: &str,
+        content: Vec<crate::wire::UserInputPart>,
+    ) -> Result<TurnId, ApiError> {
+        let turn_id = TurnId::generate();
+        let request = crate::wire::UserInputRequest {
+            prompt: None,
+            content: Some(content),
+        };
+        self.send_user_input(session_id, &turn_id, &request).await?;
+        Ok(turn_id)
+    }
+
+    async fn send_user_input(
+        &self,
+        session_id: &str,
+        turn_id: &TurnId,
+        request: &crate::wire::UserInputRequest<'_>,
+    ) -> Result<(), ApiError> {
         let response = self
             .post_turn_frame(
                 session_id,
                 FrameType::Standard(StandardFrameType::UserInput),
-                &turn_id,
+                turn_id,
                 &request,
             )
             .await?;
         if response.accepted {
-            Ok(turn_id)
+            Ok(())
         } else {
             Err(ApiError::InvalidResponse(response.error.map_or_else(
                 || "Message was rejected.".to_owned(),
                 |e| e.message,
             )))
         }
+    }
+
+    pub async fn upload(
+        &self,
+        session_id: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<UploadReceipt, ApiError> {
+        let url = self.session_url(session_id, "uploads")?;
+        self.send_json(
+            self.auth(
+                self.http
+                    .post(url)
+                    .header(reqwest::header::CONTENT_TYPE, mime_type)
+                    .body(bytes),
+            ),
+        )
+        .await
     }
 
     pub async fn history(&self, session_id: &str) -> Result<Vec<ConversationItem>, ApiError> {

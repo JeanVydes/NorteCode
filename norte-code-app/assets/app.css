@@ -161,6 +161,9 @@ h3 { margin: 0; font-size: 0.98rem; }
 .conversation-body { margin: 0; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer { position: sticky; bottom: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: 0 0.5rem 1.5rem var(--color-shadow); }
 .composer textarea { display: block; width: 100%; min-height: 5rem; border: 0; outline: 0; resize: vertical; background: transparent; color: var(--color-text); }
+.file-picker { margin: var(--space-2) 0; }
+.attachment-list { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0; }
+.attachment-chip { max-width: 100%; overflow-wrap: anywhere; padding: 0.25rem 0.55rem; border: 1px solid var(--color-border); border-radius: var(--radius-pill); color: var(--color-text-muted); font-size: 0.75rem; }
 .composer-footer { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); color: var(--color-text-muted); font-size: 0.76rem; }
 .capability-list { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .capability-chip { padding: 0.42rem 0.65rem; border: 1px solid var(--color-border); border-radius: 999px; color: var(--color-text-muted); font-size: 0.76rem; }
