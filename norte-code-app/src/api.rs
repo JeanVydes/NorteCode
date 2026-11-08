@@ -717,7 +717,7 @@ impl ApiClient {
     }
 
     fn session_url(&self, session_id: &str, suffix: &str) -> Result<Url, ApiError> {
-        let mut url = self.resource_url("raep/v1/sessions/")?;
+        let mut url = self.resource_url("raep/v1/sessions")?;
         url.path_segments_mut()
             .map_err(|()| {
                 ApiError::InvalidUrl("Server URL cannot contain path segments.".to_owned())
@@ -766,5 +766,37 @@ fn now_millis() -> Result<i64, ApiError> {
                 i64::try_from(duration.as_millis())
                     .map_err(|error| ApiError::InvalidResponse(error.to_string()))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiClient;
+
+    #[test]
+    fn session_url_has_no_empty_path_segment() {
+        let client = ApiClient::new("http://127.0.0.1:8787", "").expect("valid server URL");
+        let url = client
+            .session_url("00fae2ff-5474-482b-9751-6d11b084345f", "commands")
+            .expect("valid session URL");
+
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:8787/raep/v1/sessions/00fae2ff-5474-482b-9751-6d11b084345f/commands"
+        );
+    }
+
+    #[test]
+    fn session_url_preserves_server_base_path() {
+        let client =
+            ApiClient::new("https://example.test/raep-proxy/", "").expect("valid server URL");
+        let url = client
+            .session_url("session-id", "uploads")
+            .expect("valid session URL");
+
+        assert_eq!(
+            url.as_str(),
+            "https://example.test/raep-proxy/raep/v1/sessions/session-id/uploads"
+        );
     }
 }
