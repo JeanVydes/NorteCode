@@ -56,6 +56,9 @@ enum Capability {
     /// `NorteCode`'s bounded job query/control subset, not the full RFC profile.
     #[serde(rename = "X_NORTECODE_JOBS_BASIC")]
     NorteCodeJobsBasic,
+    /// `NorteCode`'s basic child-session inspection subset.
+    #[serde(rename = "X_NORTECODE_DELEGATION_BASIC")]
+    NorteCodeDelegationBasic,
 }
 
 /// Every capability this host advertises, in wire order.
@@ -68,6 +71,7 @@ fn advertised_capabilities(uploads: bool) -> Vec<Capability> {
         Capability::NorteCodeCompactionBasic,
         Capability::NorteCodeForkText,
         Capability::NorteCodeJobsBasic,
+        Capability::NorteCodeDelegationBasic,
     ];
     if uploads {
         capabilities.push(Capability::Uploads);
@@ -3389,6 +3393,17 @@ impl NorteCodeRaepHost {
             .into_iter()
             .find(|info| info.session.as_str() == session_id)?;
         Some(self.session_summary_value(&info, now_millis()))
+    }
+
+    /// Returns child sessions only when the principal owns the parent session.
+    pub async fn child_sessions(
+        &self,
+        parent_session_id: &str,
+        principal: &str,
+    ) -> Option<Vec<norte_code_agent::service::ChildSessionSummary>> {
+        self.session_summary(parent_session_id, principal).await?;
+        let service = self.service_for_session(parent_session_id).await.ok()?;
+        Some(service.children_of(&SessionKey::new(parent_session_id)))
     }
 
     fn session_summary_value(&self, info: &norte_code_protocol::SessionInfo, now: i64) -> Value {
@@ -8157,6 +8172,7 @@ mod tests {
         assert!(capability_names.contains("transport.sse"));
         assert!(capability_names.contains("history"));
         assert!(capability_names.contains("X_NORTECODE_JOBS_BASIC"));
+        assert!(capability_names.contains("X_NORTECODE_DELEGATION_BASIC"));
         for unsupported in [
             "jobs",
             "delegation",

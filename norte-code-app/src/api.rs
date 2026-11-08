@@ -103,6 +103,23 @@ pub struct SessionSummary {
     pub has_pending: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildSessionState {
+    Idle,
+    Streaming,
+    AwaitingTool,
+    Failed,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ChildSessionSummary {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub state: ChildSessionState,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct TelemetryReport {
     #[serde(default)]
@@ -242,6 +259,12 @@ struct SessionListResponse {
 }
 
 #[derive(Deserialize)]
+struct ChildSessionListResponse {
+    #[serde(default)]
+    children: Vec<ChildSessionSummary>,
+}
+
+#[derive(Deserialize)]
 struct CommandResponse {
     #[serde(default)]
     accepted: bool,
@@ -361,6 +384,16 @@ impl ApiClient {
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>, ApiError> {
         let response: SessionListResponse = self.get_json("raep/v1/sessions").await?;
         Ok(response.sessions)
+    }
+
+    pub async fn child_sessions(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<ChildSessionSummary>, ApiError> {
+        let url = self.session_url(parent_session_id, "children")?;
+        let response: ChildSessionListResponse =
+            self.send_json(self.auth(self.http.get(url))).await?;
+        Ok(response.children)
     }
 
     pub async fn create_session(

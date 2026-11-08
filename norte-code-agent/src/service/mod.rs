@@ -242,6 +242,33 @@ pub struct Service {
     telemetry: Arc<Telemetry>,
 }
 
+/// A child session spawned by a parent session.
+#[derive(Clone, Debug)]
+pub struct ChildSessionSummary {
+    /// The child session's RAEP identifier.
+    pub session: SessionKey,
+    /// The title assigned to the child, if any.
+    pub title: Option<String>,
+    /// The child's current runner state.
+    pub state: ChildSessionState,
+}
+
+/// The current state of a child session runner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildSessionState {
+    /// The child is not currently producing a turn.
+    Idle,
+    /// The child is producing a turn.
+    Streaming,
+    /// The child is waiting for a tool call to run.
+    AwaitingTool,
+    /// The child stopped after an unrecoverable error.
+    Failed,
+    /// The child was stopped by its parent.
+    Stopped,
+}
+
 /// Whether a name is in a session's withheld list.
 ///
 /// The comparison is exact: a name is what the model calls a tool, and a prefix

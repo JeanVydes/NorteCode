@@ -71,6 +71,18 @@ struct SessionListPayload {
     next_cursor: Value,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ChildSessionPayload {
+    session_id: String,
+    title: Option<String>,
+    state: norte_code_agent::service::ChildSessionState,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ChildSessionListPayload {
+    children: Vec<ChildSessionPayload>,
+}
+
 /// An artifact reference payload.
 #[derive(Debug, serde::Serialize)]
 struct ArtifactRefPayload<'a> {
@@ -143,6 +155,10 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
                 .patch(patch_session)
                 .delete(delete_session)
                 .layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
+        .route(
+            "/raep/v1/sessions/{session_id}/children",
+            get(list_child_sessions),
         )
         .route("/raep/v1/sessions/{session_id}/events", get(events))
         .route(
@@ -320,6 +336,31 @@ async fn list_sessions(State(host): State<Arc<NorteCodeRaepHost>>, headers: Head
         next_cursor: Value::Null,
     }))
     .into_response()
+}
+
+async fn list_child_sessions(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.child_sessions(&session_id, &principal).await {
+        Some(children) => Json(payload(ChildSessionListPayload {
+            children: children
+                .into_iter()
+                .map(|child| ChildSessionPayload {
+                    session_id: child.session.to_string(),
+                    title: child.title,
+                    state: child.state,
+                })
+                .collect(),
+        }))
+        .into_response(),
+        None => not_found(),
+    }
 }
 
 async fn create_session(
@@ -2523,6 +2564,42 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(stolen.status(), StatusCode::NOT_FOUND);
+
+        let children = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}/children"))
+                    .header("authorization", "Bearer token-a")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(children.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(children.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let children: Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            children["children"]
+                .as_array()
+                .expect("children")
+                .is_empty()
+        );
+
+        let hidden_children = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/raep/v1/sessions/{session}/children"))
+                    .header("authorization", "Bearer token-b")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(hidden_children.status(), StatusCode::NOT_FOUND);
 
         let list = app
             .oneshot(

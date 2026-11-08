@@ -8396,6 +8396,13 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
         )),
         "the turn finished with the child's answer: {events:?}"
     );
+    let parent = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("parent session");
+    let children = service.children_of(&parent);
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].state, super::ChildSessionState::Idle);
 }
 
 #[tokio::test]
