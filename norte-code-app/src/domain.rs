@@ -198,6 +198,7 @@ pub enum HistoryKind {
 pub enum ChatState {
     #[default]
     Idle,
+    LoadingHistory,
     Attaching,
     Sending,
     WaitingForReply,
@@ -208,13 +209,14 @@ impl ChatState {
     pub fn is_busy(self) -> bool {
         matches!(
             self,
-            Self::Attaching | Self::Sending | Self::WaitingForReply
+            Self::LoadingHistory | Self::Attaching | Self::Sending | Self::WaitingForReply
         )
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "Ready",
+            Self::LoadingHistory => "Loading history",
             Self::Attaching => "Attaching to session",
             Self::Sending => "Sending message",
             Self::WaitingForReply => "Waiting for response",
