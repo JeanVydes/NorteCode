@@ -1,6 +1,6 @@
 //! Canonical RAEP payloads emitted by the `NorteCode` adapter.
 
-use norte_code_protocol::{Delta, ServerEventKind};
+use norte_code_protocol::{Delta, JobInfo, OutputStream, ServerEventKind, TodoInfo};
 use raep_types::{ErrorPayload, HistoryItem, HistoryPage, StopReason, TurnState, TurnStateChanged};
 use serde::Serialize;
 use serde_json::Value;
@@ -23,7 +23,14 @@ pub(crate) fn payload<T: Serialize>(value: T) -> Value {
 struct TokenDeltaPayload {
     delta: String,
     index: u32,
-    channel: &'static str,
+    channel: TokenChannel,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum TokenChannel {
+    Text,
+    Reasoning,
 }
 
 /// A tool call start frame.
@@ -35,8 +42,14 @@ struct ToolCallStartedPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
     requires_approval: bool,
-    executor: &'static str,
+    executor: ToolExecutor,
     attempt: u32,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ToolExecutor {
+    Server,
 }
 
 /// A tool call finish frame.
@@ -44,10 +57,20 @@ struct ToolCallStartedPayload<'a> {
 struct ToolCallFinishedPayload<'a> {
     tool_call_id: &'a str,
     tool_name: &'a str,
-    status: &'static str,
+    status: ToolCallStatus,
     duration_ms: u64,
     result_summary: String,
     result_truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+enum ToolCallStatus {
+    #[serde(rename = "OK")]
+    Ok,
+    #[serde(rename = "ERROR")]
+    Error,
+    #[serde(rename = "CANCELLED")]
+    Cancelled,
 }
 
 /// A tool output delta frame.
@@ -65,13 +88,32 @@ struct ToolOutputDeltaPayload<'a> {
 struct JobEntryPayload {
     job_id: String,
     command: String,
-    status: &'static str,
+    status: super::host::JobStatus,
 }
 
 /// A job list frame.
 #[derive(Debug, Serialize)]
 struct JobListPayload {
     jobs: Vec<JobEntryPayload>,
+}
+
+/// A detached tool call became a job.
+#[derive(Debug, Serialize)]
+struct JobStartedPayload<'a> {
+    job_id: &'a str,
+    tool_call_id: &'a str,
+    command: &'a str,
+    detached: bool,
+    started_at: u64,
+    limits: &'a norte_code_protocol::JobLimits,
+}
+
+/// One output chunk from a detached job.
+#[derive(Debug, Serialize)]
+struct JobProgressDeltaPayload<'a> {
+    stream: &'a OutputStream,
+    delta: &'a str,
+    index: u64,
 }
 
 /// How a turn ended, in the canonical payload's spelling.
@@ -159,8 +201,17 @@ struct McpListData {
 /// The `content` of a replayed history item.
 #[derive(Debug, Serialize)]
 struct HistoryContent<'a> {
-    role: &'a str,
+    role: HistorySpeaker,
     content: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HistorySpeaker {
+    Tool,
+    SystemEvent,
+    User,
+    Assistant,
 }
 
 /// Who originated an accepted input, in the standard payload's spelling.
@@ -172,19 +223,31 @@ struct HistoryContent<'a> {
 /// sends them.
 #[derive(Debug, Serialize)]
 struct OriginPayload<'a> {
-    kind: &'static str,
+    kind: OriginKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<&'a str>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum OriginKind {
+    User,
+}
+
 /// One part of the accepted content.
 #[derive(Debug, Serialize)]
 struct AcceptedPart<'a> {
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: AcceptedContentKind,
     text: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AcceptedContentKind {
+    Text,
 }
 
 /// A standard `USER_INPUT_ACCEPTED` payload (RFC 12.4): `turn_id`, `origin`,
@@ -199,6 +262,196 @@ struct UserInputAcceptedPayload<'a> {
     position: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     replaces_turn_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct BudgetNoticePayload {
+    scope: RaepBudgetScope,
+    metric: RaepBudgetUnit,
+    used: f64,
+    limit: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<RaepBudgetAction>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RaepBudgetScope {
+    Message,
+    Session,
+    #[serde(rename = "globaldaily")]
+    GlobalDaily,
+}
+
+impl From<norte_code_protocol::BudgetScope> for RaepBudgetScope {
+    fn from(value: norte_code_protocol::BudgetScope) -> Self {
+        match value {
+            norte_code_protocol::BudgetScope::Message => Self::Message,
+            norte_code_protocol::BudgetScope::Session => Self::Session,
+            norte_code_protocol::BudgetScope::GlobalDaily => Self::GlobalDaily,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RaepBudgetUnit {
+    Usd,
+    Tokens,
+    Requests,
+}
+
+impl From<norte_code_protocol::BudgetUnit> for RaepBudgetUnit {
+    fn from(value: norte_code_protocol::BudgetUnit) -> Self {
+        match value {
+            norte_code_protocol::BudgetUnit::Usd => Self::Usd,
+            norte_code_protocol::BudgetUnit::Tokens => Self::Tokens,
+            norte_code_protocol::BudgetUnit::Requests => Self::Requests,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RaepBudgetAction {
+    Warn,
+    Ask,
+    Stop,
+}
+
+impl From<norte_code_protocol::BudgetAction> for RaepBudgetAction {
+    fn from(value: norte_code_protocol::BudgetAction) -> Self {
+        match value {
+            norte_code_protocol::BudgetAction::Warn => Self::Warn,
+            norte_code_protocol::BudgetAction::Ask => Self::Ask,
+            norte_code_protocol::BudgetAction::Stop => Self::Stop,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RetryStartedPayload {
+    turn_id: u64,
+    attempt: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct RetryScheduledPayload<'a> {
+    turn_id: u64,
+    attempt: u32,
+    delay_ms: u64,
+    reason: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct CompactionFinishedPayload<'a> {
+    trigger: CompactionTrigger,
+    summary: &'a Option<String>,
+    error: &'a Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CompactionTrigger {
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CompactionState {
+    Started,
+    Finished,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ProviderRetryState {
+    Scheduled,
+    Started,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionStatsPayload {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    requests: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct QuestionAskedPayload<'a> {
+    turn_id: u64,
+    question: &'a str,
+    prompt: &'a str,
+    options: &'a [String],
+    multiple: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct QuestionAnsweredPayload<'a> {
+    question: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionTodosPayload<'a> {
+    todos: &'a [TodoInfo],
+}
+
+#[derive(Debug, Serialize)]
+struct AgentReferencePayload<'a> {
+    id: &'a str,
+    version: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentChangedPayload<'a> {
+    from_agent: AgentReferencePayload<'a>,
+    to_agent: AgentReferencePayload<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReasoningDowngradedPayload<'a> {
+    from: &'a str,
+    to: &'a str,
+    reason: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct JobsStoppedPayload {
+    stopped: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ChildSessionStartedPayload<'a> {
+    child_session_id: &'a str,
+    agent_id: &'a str,
+    tool_call_id: &'a str,
+    lifetime: &'a str,
+    task_summary: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ChildSessionUpdatedPayload<'a> {
+    child_session_id: &'a str,
+    state: &'a str,
+    reason: &'a str,
+    result: Option<&'a Value>,
+    output_schema_valid: Option<&'a bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct DelegatorStateChangedPayload<'a> {
+    child_session_id: &'a str,
+    suspended: bool,
+    by: &'a Option<String>,
+    queued_messages: &'a Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChildAwaitingInputPayload<'a> {
+    child_session_id: &'a str,
+    question: &'a str,
+    prompt: &'a str,
 }
 
 /// Converts a `NorteCode` event into the stable payload understood by RAEP
@@ -216,8 +469,14 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         },
         ServerEventKind::SessionDeleted => CanonicalEvent::SessionDeleted,
         ServerEventKind::SessionRenamed { title } => CanonicalEvent::SessionRenamed { title },
-        ServerEventKind::SessionForked { from } => CanonicalEvent::SessionForked {
-            from: from.as_str(),
+        ServerEventKind::SessionForked {
+            from,
+            from_turn_id,
+            title,
+        } => CanonicalEvent::SessionForked {
+            from_session_id: from.as_str(),
+            from_turn_id: from_turn_id.as_deref(),
+            title: title.as_deref(),
         },
         ServerEventKind::TurnStarted { turn } => CanonicalEvent::TurnStarted { turn: *turn },
         ServerEventKind::Delta { turn, delta } => CanonicalEvent::TokenDelta {
@@ -279,6 +538,42 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::JobsStopped { stopped } => {
             CanonicalEvent::JobsStopped { stopped: *stopped }
         }
+        ServerEventKind::JobStarted {
+            job_id,
+            tool_call_id,
+            command,
+            started_at,
+            limits,
+        } => CanonicalEvent::JobStarted {
+            job_id,
+            tool_call_id,
+            command,
+            started_at: *started_at,
+            limits,
+        },
+        ServerEventKind::JobProgressDelta {
+            job_id,
+            stream,
+            delta,
+            index,
+        } => CanonicalEvent::DetachedJobProgress {
+            job_id,
+            stream: serde_json::to_value(stream).expect("job output stream is serializable"),
+            delta,
+            index: *index,
+        },
+        ServerEventKind::JobFinished {
+            job,
+            triggered_new_turn,
+            new_turn_id,
+            injected_into_turn_id,
+        } => CanonicalEvent::JobFinished {
+            job_id: &job.id,
+            job,
+            triggered_new_turn: *triggered_new_turn,
+            new_turn_id: (*new_turn_id).map(|turn| turn.to_string()),
+            injected_into_turn_id: (*injected_into_turn_id).map(|turn| turn.to_string()),
+        },
         ServerEventKind::QuestionAsked {
             turn,
             question,
@@ -351,15 +646,13 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             text,
         } => CanonicalEvent::HistoryMessage {
             index: *index,
-            role: serde_json::to_value(role).expect("message role is serializable"),
-            kind: serde_json::to_value(kind).expect("replay kind is serializable"),
+            role: *role,
+            kind: *kind,
             text,
         },
-        ServerEventKind::SessionTodos { todos } => CanonicalEvent::SessionTodos {
-            todos: serde_json::to_value(todos).expect("todo list is serializable"),
-        },
+        ServerEventKind::SessionTodos { todos } => CanonicalEvent::SessionTodos { todos },
         ServerEventKind::CompactionStarted { reason } => CanonicalEvent::ContextUpdate {
-            state: "started",
+            state: CompactionState::Started,
             reason: Some(serde_json::to_value(reason).expect("compaction reason is serializable")),
             compacted: None,
             summary: None,
@@ -372,7 +665,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             summary,
             error,
         } => CanonicalEvent::ContextUpdate {
-            state: "finished",
+            state: CompactionState::Finished,
             reason: None,
             compacted: Some(*compacted),
             summary: summary.as_deref(),
@@ -385,8 +678,8 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             spent,
             limit,
         } => CanonicalEvent::BudgetWarning {
-            scope: serde_json::to_value(scope).expect("budget scope is serializable"),
-            unit: serde_json::to_value(unit).expect("budget unit is serializable"),
+            scope: (*scope).into(),
+            unit: (*unit).into(),
             spent: *spent,
             limit: *limit,
         },
@@ -397,16 +690,14 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             limit,
             action,
         } => CanonicalEvent::BudgetExceeded {
-            scope: serde_json::to_value(scope).expect("budget scope is serializable"),
-            unit: serde_json::to_value(unit).expect("budget unit is serializable"),
+            scope: (*scope).into(),
+            unit: (*unit).into(),
             spent: *spent,
             limit: *limit,
-            action: serde_json::to_value(action).expect("budget action is serializable"),
+            action: (*action).into(),
         },
         ServerEventKind::BudgetChanged { budget } => CanonicalEvent::BudgetChanged {
-            budget: budget
-                .as_ref()
-                .map(|value| serde_json::to_value(value).expect("budget is serializable")),
+            budget: budget.as_ref(),
         },
         ServerEventKind::SessionStats {
             input_tokens,
@@ -498,22 +789,19 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             reason,
         } => CanonicalEvent::ProviderRetry {
             turn: *turn,
-            state: "scheduled",
+            state: ProviderRetryState::Scheduled,
             attempt: *attempt,
             delay_ms: Some(*delay_ms),
             reason: Some(reason),
         },
         ServerEventKind::RetryStarted { turn, attempt } => CanonicalEvent::ProviderRetry {
             turn: *turn,
-            state: "started",
+            state: ProviderRetryState::Started,
             attempt: *attempt,
             delay_ms: None,
             reason: None,
         },
-        ServerEventKind::Error { code, message } => CanonicalEvent::Error {
-            code: serde_json::to_value(code).expect("error code is serializable"),
-            message,
-        },
+        ServerEventKind::Error { code, message } => CanonicalEvent::Error { code, message },
         ServerEventKind::Telemetry { records } => CanonicalEvent::ServiceData {
             kind: ServiceDataKind::Telemetry,
             data: serde_json::to_value(records).expect("telemetry is serializable"),
@@ -529,6 +817,69 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
                 failures: failures.clone(),
             }),
         },
+        ServerEventKind::SessionExportReady { export_id, bundle } => {
+            CanonicalEvent::SessionExportReady {
+                export_id,
+                bundle: serde_json::to_value(bundle).expect("export bundle is serializable"),
+            }
+        }
+        ServerEventKind::ImportResult { session_id, id_map } => CanonicalEvent::ImportResult {
+            session_id,
+            id_map: serde_json::to_value(id_map).expect("id map is serializable"),
+        },
+        ServerEventKind::ChildSessionStarted {
+            child_session_id,
+            agent_id,
+            tool_call_id,
+            lifetime,
+            task_summary,
+        } => CanonicalEvent::ChildSessionStarted {
+            child_session_id,
+            agent_id,
+            tool_call_id,
+            lifetime,
+            task_summary,
+        },
+        ServerEventKind::ChildSessionUpdated {
+            child_session_id,
+            state,
+            reason,
+            result,
+            output_schema_valid,
+        } => CanonicalEvent::ChildSessionUpdated {
+            child_session_id,
+            state,
+            reason,
+            result: result.as_ref(),
+            output_schema_valid: output_schema_valid.unwrap_or(false),
+        },
+        ServerEventKind::DelegatorStateChanged {
+            child_session_id,
+            delegator_suspended,
+            by,
+            queued_messages,
+        } => CanonicalEvent::DelegatorStateChanged {
+            child_session_id,
+            delegator_suspended: *delegator_suspended,
+            by: by.as_deref().unwrap_or(""),
+            queued_messages: queued_messages.unwrap_or(0),
+        },
+        ServerEventKind::ChildAwaitingInput {
+            child_session_id,
+            question,
+            prompt,
+        } => CanonicalEvent::ChildAwaitingInput {
+            child_session_id,
+            question,
+            prompt,
+        },
+        ServerEventKind::MediaPartCompleted { turn, index, media } => {
+            CanonicalEvent::MediaPartCompleted {
+                turn: *turn,
+                index: *index,
+                media,
+            }
+        }
     };
     serde_json::to_value(payload).expect("canonical event is serializable")
 }
@@ -540,7 +891,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
 pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
     match kind {
         ServerEventKind::TurnStarted { .. } => Some(payload(TurnStateChanged {
-            state: TurnState::Queued,
+            state: TurnState::CallingProvider,
             stop_reason: None,
             usage: None,
             error: None,
@@ -548,13 +899,13 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
         ServerEventKind::Delta { delta, .. } => {
             let (text, index, channel) = match delta {
                 Delta::Text { index, text } | Delta::Refusal { index, text } => {
-                    (text.clone(), *index, "text")
+                    (text.clone(), *index, TokenChannel::Text)
                 }
-                Delta::Reasoning { index, text } => (text.clone(), *index, "reasoning"),
+                Delta::Reasoning { index, text } => (text.clone(), *index, TokenChannel::Reasoning),
                 Delta::ToolArguments {
                     index, arguments, ..
-                } => (arguments.clone(), *index, "text"),
-                Delta::Media { index, .. } => (String::new(), *index, "text"),
+                } => (arguments.clone(), *index, TokenChannel::Text),
+                Delta::Media { index, .. } => (String::new(), *index, TokenChannel::Text),
             };
             Some(payload(TokenDeltaPayload {
                 delta: text,
@@ -580,7 +931,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 arguments: Value::Object(arguments),
                 source: source.as_deref(),
                 requires_approval: false,
-                executor: "server",
+                executor: ToolExecutor::Server,
                 attempt: 1,
             }))
         }
@@ -596,11 +947,11 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             ..
         } => {
             let status = if *detached {
-                "CANCELLED"
+                ToolCallStatus::Cancelled
             } else if *is_error {
-                "ERROR"
+                ToolCallStatus::Error
             } else {
-                "OK"
+                ToolCallStatus::Ok
             };
             let summary = error.clone().or_else(|| output.clone()).unwrap_or_default();
             Some(payload(ToolCallFinishedPayload {
@@ -625,6 +976,45 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             delta: text,
             index: 0,
         })),
+        ServerEventKind::JobStarted {
+            job_id,
+            tool_call_id,
+            command,
+            started_at,
+            limits,
+        } => Some(payload(JobStartedPayload {
+            job_id,
+            tool_call_id,
+            command,
+            detached: true,
+            started_at: *started_at,
+            limits,
+        })),
+        ServerEventKind::JobProgressDelta {
+            stream,
+            delta,
+            index,
+            ..
+        } => Some(payload(JobProgressDeltaPayload {
+            stream,
+            delta,
+            index: *index,
+        })),
+        ServerEventKind::JobFinished {
+            job,
+            triggered_new_turn,
+            new_turn_id,
+            injected_into_turn_id,
+        } => {
+            let new_turn_id = new_turn_id.map(|turn| turn.to_string());
+            let injected_into_turn_id = injected_into_turn_id.map(|turn| turn.to_string());
+            Some(super::host::job_finished_payload(
+                job,
+                *triggered_new_turn,
+                new_turn_id.as_deref(),
+                injected_into_turn_id.as_deref(),
+            ))
+        }
         // RAEP `TurnStateChanged` carries only `state` and `stop_reason`;
         // `phase`/`committed` are NorteCode's own and travel in the
         // compatibility extension (see `canonical_event_payload`), never
@@ -636,25 +1026,20 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             error: None,
         })),
         ServerEventKind::TurnStopped { reason } => Some(payload(TurnStateChanged {
-            state: TurnState::Cancelled,
-            stop_reason: Some(match reason.as_str() {
-                "max_tokens" => StopReason::MaxTokens,
-                "tool_limit" => StopReason::ToolLimit,
-                "budget" | "budget_exceeded" => StopReason::BudgetExceeded,
-                _ => StopReason::Cancelled,
-            }),
+            state: TurnState::Failed,
+            stop_reason: Some(StopReason::Error),
             usage: None,
-            error: None,
+            error: Some(ErrorPayload {
+                code: "INTERNAL".to_owned(),
+                message: format!("turn stopped: {reason}"),
+                retryable: Some(false),
+                details: None,
+            }),
         })),
         ServerEventKind::JobList { jobs } => {
             let jobs = jobs
                 .iter()
                 .map(|job| {
-                    let status = match job.state {
-                        norte_code_protocol::JobState::Running => "RUNNING",
-                        norte_code_protocol::JobState::Finished => "COMPLETED",
-                        norte_code_protocol::JobState::Cancelled => "KILLED",
-                    };
                     let command = if job.script.is_empty() {
                         job.label.clone()
                     } else {
@@ -663,25 +1048,42 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                     JobEntryPayload {
                         job_id: job.id.clone(),
                         command,
-                        status,
+                        status: super::host::job_status(job),
                     }
                 })
                 .collect::<Vec<_>>();
             Some(payload(JobListPayload { jobs }))
         }
-        ServerEventKind::MessageReplayed { role, text, .. } => {
+        ServerEventKind::MessageReplayed {
+            index,
+            role,
+            kind,
+            text,
+        } => {
             let role = match role {
-                norte_code_protocol::MessageRole::Tool => "tool",
+                norte_code_protocol::MessageRole::Tool => HistorySpeaker::Tool,
                 norte_code_protocol::MessageRole::System
                 | norte_code_protocol::MessageRole::Developer
-                | norte_code_protocol::MessageRole::Unknown => "system_event",
-                norte_code_protocol::MessageRole::User => "user",
-                norte_code_protocol::MessageRole::Assistant => "assistant",
+                | norte_code_protocol::MessageRole::Unknown => HistorySpeaker::SystemEvent,
+                norte_code_protocol::MessageRole::User => HistorySpeaker::User,
+                norte_code_protocol::MessageRole::Assistant => HistorySpeaker::Assistant,
+            };
+            let kind = match kind {
+                norte_code_protocol::ReplayedKind::Text => match role {
+                    HistorySpeaker::Tool => "tool",
+                    HistorySpeaker::SystemEvent => "system_event",
+                    HistorySpeaker::User => "user",
+                    HistorySpeaker::Assistant => "assistant",
+                },
+                norte_code_protocol::ReplayedKind::Reasoning => "reasoning",
+                norte_code_protocol::ReplayedKind::ToolCall => "tool_call",
+                norte_code_protocol::ReplayedKind::ToolResult => "tool_result",
+                norte_code_protocol::ReplayedKind::Refusal => "refusal",
             };
             Some(payload(HistoryPage {
                 items: vec![HistoryItem {
-                    id: String::new(),
-                    kind: role.to_owned(),
+                    id: index.to_string(),
+                    kind: kind.to_owned(),
                     content: payload(HistoryContent {
                         role,
                         content: text,
@@ -705,12 +1107,15 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
         ServerEventKind::SteerApplied { ids, messages } => {
             let mut content = Vec::with_capacity(messages.len());
             for text in messages {
-                content.push(AcceptedPart { kind: "text", text });
+                content.push(AcceptedPart {
+                    kind: AcceptedContentKind::Text,
+                    text,
+                });
             }
             Some(payload(UserInputAcceptedPayload {
                 turn_id: ids.first().map_or("", String::as_str),
                 origin: OriginPayload {
-                    kind: "user",
+                    kind: OriginKind::User,
                     user_id: None,
                     display_name: None,
                 },
@@ -719,6 +1124,158 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 replaces_turn_id: None,
             }))
         }
+        // Notifications the spec asks for as events, mapped from the
+        // service's own events. Output parts are emitted by the host after it
+        // stores `MediaPartCompleted`; `ProviderRetry`, `QuotaWarning`,
+        // `ServerDraining` and `Presence` have no service-side source yet.
+        ServerEventKind::BudgetWarning {
+            scope,
+            unit,
+            spent,
+            limit,
+        } => Some(payload(BudgetNoticePayload {
+            scope: (*scope).into(),
+            metric: (*unit).into(),
+            used: *spent,
+            limit: *limit,
+            action: None,
+        })),
+        ServerEventKind::BudgetExceeded {
+            scope,
+            unit,
+            spent,
+            limit,
+            action,
+        } => Some(payload(BudgetNoticePayload {
+            scope: (*scope).into(),
+            metric: (*unit).into(),
+            used: *spent,
+            limit: *limit,
+            action: Some((*action).into()),
+        })),
+        ServerEventKind::RetryStarted { turn, attempt } => Some(payload(RetryStartedPayload {
+            turn_id: *turn,
+            attempt: *attempt,
+        })),
+        ServerEventKind::RetryScheduled {
+            turn,
+            attempt,
+            delay_ms,
+            reason,
+        } => Some(payload(RetryScheduledPayload {
+            turn_id: *turn,
+            attempt: *attempt,
+            delay_ms: *delay_ms,
+            reason,
+        })),
+        ServerEventKind::CompactionFinished {
+            compacted,
+            summary,
+            error,
+            ..
+        } => {
+            if *compacted {
+                Some(payload(CompactionFinishedPayload {
+                    trigger: CompactionTrigger::Auto,
+                    summary,
+                    error,
+                }))
+            } else {
+                None
+            }
+        }
+        ServerEventKind::SessionStats {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            requests,
+            ..
+        } => Some(payload(SessionStatsPayload {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+            cost_usd: *cost_usd,
+            requests: *requests,
+        })),
+        ServerEventKind::QuestionAsked {
+            turn,
+            question,
+            prompt,
+            options,
+            multiple,
+        } => Some(payload(QuestionAskedPayload {
+            turn_id: *turn,
+            question,
+            prompt,
+            options,
+            multiple: *multiple,
+        })),
+        ServerEventKind::QuestionAnswered { question } => {
+            Some(payload(QuestionAnsweredPayload { question }))
+        }
+        ServerEventKind::SessionTodos { todos } => Some(payload(SessionTodosPayload { todos })),
+        ServerEventKind::ModelChanged { provider, model }
+        | ServerEventKind::ModelQueued { provider, model } => Some(payload(AgentChangedPayload {
+            from_agent: AgentReferencePayload {
+                id: "",
+                version: "",
+            },
+            to_agent: AgentReferencePayload {
+                id: provider,
+                version: model,
+            },
+        })),
+        ServerEventKind::ReasoningDowngraded { from, to, reason } => {
+            Some(payload(ReasoningDowngradedPayload { from, to, reason }))
+        }
+        ServerEventKind::JobsStopped { stopped } => {
+            Some(payload(JobsStoppedPayload { stopped: *stopped }))
+        }
+        ServerEventKind::ChildSessionStarted {
+            child_session_id,
+            agent_id,
+            tool_call_id,
+            lifetime,
+            task_summary,
+        } => Some(payload(ChildSessionStartedPayload {
+            child_session_id,
+            agent_id,
+            tool_call_id,
+            lifetime,
+            task_summary,
+        })),
+        ServerEventKind::ChildSessionUpdated {
+            child_session_id,
+            state,
+            reason,
+            result,
+            output_schema_valid,
+        } => Some(payload(ChildSessionUpdatedPayload {
+            child_session_id,
+            state,
+            reason,
+            result: result.as_ref(),
+            output_schema_valid: output_schema_valid.as_ref(),
+        })),
+        ServerEventKind::DelegatorStateChanged {
+            child_session_id,
+            delegator_suspended,
+            by,
+            queued_messages,
+        } => Some(payload(DelegatorStateChangedPayload {
+            child_session_id,
+            suspended: *delegator_suspended,
+            by,
+            queued_messages,
+        })),
+        ServerEventKind::ChildAwaitingInput {
+            child_session_id,
+            question,
+            prompt,
+        } => Some(payload(ChildAwaitingInputPayload {
+            child_session_id,
+            question,
+            prompt,
+        })),
         _ => None,
     }
 }
@@ -744,7 +1301,13 @@ enum CanonicalEvent<'a> {
     /// A session was renamed.
     SessionRenamed { title: &'a str },
     /// A session was forked.
-    SessionForked { from: &'a str },
+    SessionForked {
+        from_session_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_turn_id: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<&'a str>,
+    },
     /// A turn began.
     TurnStarted { turn: u64 },
     /// A model token delta.
@@ -754,12 +1317,12 @@ enum CanonicalEvent<'a> {
     /// A replayed history message.
     HistoryMessage {
         index: u64,
-        role: Value,
-        kind: Value,
+        role: norte_code_protocol::MessageRole,
+        kind: norte_code_protocol::ReplayedKind,
         text: &'a str,
     },
     /// The current session todos.
-    SessionTodos { todos: Value },
+    SessionTodos { todos: &'a Vec<TodoInfo> },
     /// A tool call began.
     ToolCallStarted {
         turn: u64,
@@ -797,6 +1360,29 @@ enum CanonicalEvent<'a> {
     JobList { jobs: Value },
     /// The result of stopping jobs.
     JobsStopped { stopped: usize },
+    /// A detached tool call became a job.
+    JobStarted {
+        job_id: &'a str,
+        tool_call_id: &'a str,
+        command: &'a str,
+        started_at: u64,
+        limits: &'a norte_code_protocol::JobLimits,
+    },
+    /// A detached job wrote a chunk of output.
+    DetachedJobProgress {
+        job_id: &'a str,
+        stream: Value,
+        delta: &'a str,
+        index: u64,
+    },
+    /// A background job reached a terminal state.
+    JobFinished {
+        job_id: &'a str,
+        job: &'a JobInfo,
+        triggered_new_turn: bool,
+        new_turn_id: Option<String>,
+        injected_into_turn_id: Option<String>,
+    },
     /// A question requiring client input.
     QuestionAsked {
         turn: u64,
@@ -826,9 +1412,15 @@ enum CanonicalEvent<'a> {
         cache_hit: bool,
         tools: &'a Vec<String>,
     },
+    /// Generated media collected by Norte Code for the RAEP output store.
+    MediaPartCompleted {
+        turn: u64,
+        index: u32,
+        media: &'a norte::MediaPart,
+    },
     /// A context compaction lifecycle update.
     ContextUpdate {
-        state: &'static str,
+        state: CompactionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -842,23 +1434,23 @@ enum CanonicalEvent<'a> {
     },
     /// A budget warning.
     BudgetWarning {
-        scope: Value,
-        unit: Value,
+        scope: RaepBudgetScope,
+        unit: RaepBudgetUnit,
         spent: f64,
         limit: f64,
     },
     /// A budget was exhausted.
     BudgetExceeded {
-        scope: Value,
-        unit: Value,
+        scope: RaepBudgetScope,
+        unit: RaepBudgetUnit,
         spent: f64,
         limit: f64,
-        action: Value,
+        action: RaepBudgetAction,
     },
     /// The session budget changed.
     BudgetChanged {
         #[serde(skip_serializing_if = "Option::is_none")]
-        budget: Option<Value>,
+        budget: Option<&'a norte_code_protocol::Budget>,
     },
     /// Session usage totals.
     SessionStats {
@@ -896,19 +1488,61 @@ enum CanonicalEvent<'a> {
     /// A provider retry changed state.
     ProviderRetry {
         turn: u64,
-        state: &'static str,
+        state: ProviderRetryState,
         attempt: u32,
         delay_ms: Option<u64>,
         reason: Option<&'a String>,
     },
     /// A protocol error.
-    Error { code: Value, message: &'a str },
+    Error {
+        code: &'a norte_code_protocol::ErrorCode,
+        message: &'a str,
+    },
+    /// A session was exported.
+    SessionExportReady {
+        export_id: &'a String,
+        bundle: Value,
+    },
+    /// A session was imported.
+    ImportResult {
+        session_id: &'a String,
+        id_map: Value,
+    },
+    /// A child session was started.
+    ChildSessionStarted {
+        child_session_id: &'a String,
+        agent_id: &'a String,
+        tool_call_id: &'a String,
+        lifetime: &'a String,
+        task_summary: &'a String,
+    },
+    /// A child session changed state.
+    ChildSessionUpdated {
+        child_session_id: &'a String,
+        state: &'a String,
+        reason: &'a String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<&'a Value>,
+        output_schema_valid: bool,
+    },
+    /// Delegator state changed.
+    DelegatorStateChanged {
+        child_session_id: &'a String,
+        delegator_suspended: bool,
+        by: &'a str,
+        queued_messages: usize,
+    },
+    /// A child is waiting for its delegator's answer.
+    ChildAwaitingInput {
+        child_session_id: &'a String,
+        question: &'a String,
+        prompt: &'a String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norte_code_protocol::types::OutputStream;
 
     #[test]
     fn tool_output_uses_canonical_job_payload_and_preserves_wire_event() {
@@ -929,7 +1563,45 @@ mod tests {
     }
 
     #[test]
+    fn session_forked_uses_the_raep_turn_and_source_fields() {
+        let payload = canonical_event_payload(&ServerEventKind::SessionForked {
+            from: norte_code_protocol::SessionKey::new("source"),
+            from_turn_id: Some("turn_4".to_owned()),
+            title: Some("branch".to_owned()),
+        });
+
+        assert_eq!(
+            payload,
+            json!({
+                "event": "session_forked",
+                "from_session_id": "source",
+                "from_turn_id": "turn_4",
+                "title": "branch"
+            })
+        );
+    }
+
+    #[test]
     fn standard_payloads_match_the_raep_schemas() {
+        let budget = standard_event_payload(&ServerEventKind::BudgetExceeded {
+            scope: norte_code_protocol::BudgetScope::GlobalDaily,
+            unit: norte_code_protocol::BudgetUnit::Usd,
+            spent: 4.5,
+            limit: 5.0,
+            action: norte_code_protocol::BudgetAction::Stop,
+        })
+        .expect("standard budget payload");
+        assert_eq!(
+            budget,
+            json!({
+                "scope": "globaldaily",
+                "metric": "usd",
+                "used": 4.5,
+                "limit": 5.0,
+                "action": "stop"
+            })
+        );
+
         let tool_output = standard_event_payload(&ServerEventKind::ToolOutput {
             turn: 2,
             call_id: "call-1".to_owned(),
@@ -951,7 +1623,7 @@ mod tests {
         );
 
         let history = standard_event_payload(&ServerEventKind::MessageReplayed {
-            index: 0,
+            index: 1,
             role: norte_code_protocol::MessageRole::User,
             kind: norte_code_protocol::ReplayedKind::Text,
             text: "hi".to_owned(),
@@ -961,13 +1633,30 @@ mod tests {
             history,
             json!({
                 "items": [{
-                    "id": "",
+                    "id": "1",
                     "kind": "user",
                     "content": {"role": "user", "content": "hi"},
                     "created_at": 0
                 }]
             })
         );
+
+        let child = standard_event_payload(&ServerEventKind::ChildSessionUpdated {
+            child_session_id: "child-1".to_owned(),
+            state: "IDLE".to_owned(),
+            reason: "turn_finished".to_owned(),
+            result: Some(json!({
+                "status": "completed",
+                "summary": r#"{"answer":42}"#,
+                "output": {"answer": 42},
+                "output_schema_valid": true,
+            })),
+            output_schema_valid: Some(true),
+        })
+        .expect("child update");
+        assert_eq!(child["result"]["output"]["answer"], 42);
+        assert_eq!(child["result"]["output_schema_valid"], true);
+        assert_eq!(child["output_schema_valid"], true);
 
         let error = standard_event_payload(&ServerEventKind::Error {
             code: norte_code_protocol::ErrorCode::Internal,
@@ -989,6 +1678,7 @@ mod tests {
                 elapsed_ms: 10,
                 output: String::new(),
                 dropped: false,
+                output_bytes_total: 0,
             }],
         })
         .expect("standard job list");
@@ -1025,6 +1715,17 @@ mod tests {
             finished,
             json!({"state": "COMPLETED", "stop_reason": "end_turn"})
         );
+        assert_eq!(
+            standard_event_payload(&ServerEventKind::TurnStarted { turn: 2 }).expect("turn start"),
+            json!({"state": "CALLING_PROVIDER"})
+        );
+        let failed = standard_event_payload(&ServerEventKind::TurnStopped {
+            reason: "provider_failure".to_owned(),
+        })
+        .expect("failed turn");
+        assert_eq!(failed["state"], "FAILED");
+        assert_eq!(failed["stop_reason"], "error");
+        assert_eq!(failed["error"]["code"], "INTERNAL");
 
         let started = standard_event_payload(&ServerEventKind::ToolStarted {
             turn: 2,
@@ -1069,5 +1770,67 @@ mod tests {
                 "result_truncated": false
             })
         );
+    }
+
+    #[test]
+    fn detached_job_lifecycle_payloads_match_the_raep_schemas() {
+        let started = standard_event_payload(&ServerEventKind::JobStarted {
+            job_id: "job-1".to_owned(),
+            tool_call_id: "call-1".to_owned(),
+            command: "make".to_owned(),
+            started_at: 1_700_000_000_000,
+            limits: norte_code_protocol::JobLimits {
+                timeout_s: Some(120),
+                max_output_bytes: Some(1_048_576),
+            },
+        })
+        .expect("job started");
+        assert_eq!(started["job_id"], "job-1");
+        assert_eq!(started["tool_call_id"], "call-1");
+        assert_eq!(started["command"], "make");
+        assert_eq!(started["detached"], true);
+        assert_eq!(started["started_at"], 1_700_000_000_000_u64);
+        assert_eq!(
+            started["limits"],
+            json!({"timeout_s": 120, "max_output_bytes": 1_048_576})
+        );
+
+        let progress = standard_event_payload(&ServerEventKind::JobProgressDelta {
+            job_id: "job-1".to_owned(),
+            stream: OutputStream::Stderr,
+            delta: "warning\n".to_owned(),
+            index: 17,
+        })
+        .expect("job progress");
+        assert_eq!(
+            progress,
+            json!({"stream": "stderr", "delta": "warning\n", "index": 17})
+        );
+
+        let finished = standard_event_payload(&ServerEventKind::JobFinished {
+            job: JobInfo {
+                id: "job-1".to_owned(),
+                label: "make".to_owned(),
+                script: "make".to_owned(),
+                state: norte_code_protocol::JobState::Finished,
+                exit_code: Some(0),
+                timed_out: false,
+                elapsed_ms: 21,
+                output: "done\n".to_owned(),
+                dropped: false,
+                output_bytes_total: 5,
+            },
+            triggered_new_turn: true,
+            new_turn_id: Some(12),
+            injected_into_turn_id: None,
+        })
+        .expect("job finished");
+        assert_eq!(finished["status"], "COMPLETED");
+        assert_eq!(finished["exit_code"], 0);
+        assert_eq!(finished["summary"], "make");
+        assert_eq!(finished["output_snapshot"], "done\n");
+        assert_eq!(finished["triggered_new_turn"], true);
+        assert_eq!(finished["new_turn_id"], "12");
+        assert!(finished["injected_into_turn_id"].is_null());
     }
 }

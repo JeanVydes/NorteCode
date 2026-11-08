@@ -113,6 +113,8 @@ pub enum EngineEvent {
         session: SessionId,
         /// The turn that is running.
         turn: u64,
+        /// The part's index in the assistant message.
+        index: u32,
         /// The settled part.
         part: Part,
     },

@@ -10,9 +10,10 @@
 use async_trait::async_trait;
 use futures_core::Stream;
 use futures_util::stream::{self, StreamExt};
-use norte_code_protocol::AgentCommand;
 use norte_code_protocol::{ClientRequest, QueueMode, ServerEvent};
-use raep_types::{Ack, Envelope, FrameType, SessionAttach, StandardFrameType, UserInput};
+use raep_types::{
+    Ack, ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameType, UserInput,
+};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -333,6 +334,10 @@ enum CanonicalKind {
     PluginList,
     PluginChanged,
     ServiceData,
+    ChildSessionStarted,
+    ChildSessionUpdated,
+    DelegatorStateChanged,
+    ChildAwaitingInput,
     Error,
     Other,
 }
@@ -371,6 +376,10 @@ impl CanonicalKind {
             "plugin_list" => Self::PluginList,
             "plugin_changed" => Self::PluginChanged,
             "service_data" => Self::ServiceData,
+            "child_session_started" => Self::ChildSessionStarted,
+            "child_session_updated" => Self::ChildSessionUpdated,
+            "delegator_state_changed" => Self::DelegatorStateChanged,
+            "child_awaiting_input" => Self::ChildAwaitingInput,
             "error" => Self::Error,
             _ => Self::Other,
         }
@@ -475,7 +484,12 @@ struct CanonicalSessionList {
 /// A canonical `session_forked` payload.
 #[derive(Debug, serde::Deserialize)]
 struct CanonicalSessionForked {
+    #[serde(rename = "from_session_id", alias = "from")]
     from: String,
+    #[serde(default)]
+    from_turn_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 /// A canonical `turn_started` payload.
@@ -748,6 +762,56 @@ struct CanonicalServiceData {
     data: Value,
 }
 
+/// A canonical `child_session_started` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalChildSessionStarted {
+    child_session_id: String,
+    #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
+    tool_call_id: String,
+    #[serde(default)]
+    lifetime: String,
+    #[serde(default)]
+    task_summary: String,
+}
+
+/// A canonical `child_session_updated` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalChildSessionUpdated {
+    child_session_id: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    output_schema_valid: Option<bool>,
+}
+
+/// A canonical `delegator_state_changed` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalDelegatorStateChanged {
+    child_session_id: String,
+    #[serde(default)]
+    delegator_suspended: bool,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    queued_messages: Option<usize>,
+}
+
+/// A canonical `child_awaiting_input` payload.
+#[derive(Debug, serde::Deserialize)]
+struct CanonicalChildAwaitingInput {
+    child_session_id: String,
+    #[serde(default)]
+    question: String,
+    #[serde(default)]
+    prompt: String,
+}
+
 /// The `data` of an `mcp_list` service payload.
 #[derive(Debug, serde::Deserialize)]
 struct McpListData {
@@ -871,6 +935,16 @@ pub trait AgentClient: Send + Sync {
 
     /// Compacts a session through `SessionCompact`.
     async fn compact_session(&self, session: &str) -> Result<EventStream, ClientError>;
+
+    /// Exports a session through `SessionExport`.
+    async fn export_session(&self, session: &str) -> Result<EventStream, ClientError>;
+
+    /// Imports a session through `SessionImport`.
+    async fn import_session(
+        &self,
+        session: &str,
+        bundle: serde_json::Value,
+    ) -> Result<EventStream, ClientError>;
 }
 
 /// A session summary as the RAEP management resource returns it.
@@ -978,6 +1052,45 @@ impl RemoteClient {
     pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
         self.agent_id = agent_id.into();
         self
+    }
+
+    /// Converts a Norte Code [`norte_code_protocol::Reasoning`] into the
+    /// `reasoning` fragment of a RAEP `agent_override` object (RFC 7).
+    fn reasoning_override(reasoning: &norte_code_protocol::Reasoning) -> serde_json::Value {
+        match reasoning {
+            norte_code_protocol::Reasoning::Automatic => serde_json::json!({
+                "reasoning": { "mode": "auto" }
+            }),
+            norte_code_protocol::Reasoning::Disabled => serde_json::json!({
+                "reasoning": { "mode": "off" }
+            }),
+            norte_code_protocol::Reasoning::Effort { effort } => serde_json::json!({
+                "reasoning": { "mode": "on", "effort": effort }
+            }),
+            norte_code_protocol::Reasoning::Budget { tokens } => serde_json::json!({
+                "reasoning": { "mode": "on", "budget_tokens": tokens }
+            }),
+        }
+    }
+
+    /// Converts a Norte Code [`norte_code_protocol::Budget`] into the
+    /// `budgets` fragment of a RAEP `agent_override` object (RFC 7).
+    fn budget_override(budget: &norte_code_protocol::Budget) -> serde_json::Value {
+        let on_exceed = match budget.action {
+            norte_code_protocol::BudgetAction::Ask => "ask",
+            norte_code_protocol::BudgetAction::Warn => "degrade",
+            norte_code_protocol::BudgetAction::Stop => "stop",
+        };
+        match budget.unit {
+            norte_code_protocol::BudgetUnit::Usd => serde_json::json!({
+                "budgets": { "max_session_cost": budget.limit, "currency": "USD", "on_exceed": on_exceed }
+            }),
+            norte_code_protocol::BudgetUnit::Tokens | norte_code_protocol::BudgetUnit::Requests => {
+                serde_json::json!({
+                    "budgets": { "max_session_tokens": budget.limit, "on_exceed": on_exceed }
+                })
+            }
+        }
     }
 
     /// Fetches the public RAEP discovery information.
@@ -1128,21 +1241,27 @@ impl RemoteClient {
         Ok(body.events)
     }
 
-    /// Posts a `SessionConfigure`-style agent command and streams the
-    /// resulting events. `SessionConfigure` is the standard frame for
-    /// model/reasoning/budget/resume/compact changes; the host maps the
-    /// operation onto its service.
+    /// Posts a standard `SESSION_CONFIGURE` frame (RFC 8.1) with an
+    /// `agent_override` fragment and streams the resulting events. The wire
+    /// shape is the spec's — `agent_id`, `agent_override`, `options`,
+    /// `apply` — not a serialised command enum; the host maps its known
+    /// fields onto its service. Operations without an `agent_override`
+    /// equivalent (resume, compact, jobs, questions) do not go through
+    /// here: they use the extension command or their standard frame.
     async fn submit_configure(
         &self,
         session: &str,
-        command: AgentCommand,
+        agent_override: serde_json::Value,
     ) -> Result<EventStream, ClientError> {
         let frames = self
             .post_standard(
                 session,
                 FrameType::Standard(StandardFrameType::SessionConfigure),
-                serde_json::to_value(command)
-                    .map_err(|error| ClientError::new(format!("serialize command: {error}")))?,
+                serde_json::to_value(serde_json::json!({
+                    "agent_override": agent_override,
+                    "apply": "now",
+                }))
+                .map_err(|error| ClientError::new(format!("serialize command: {error}")))?,
             )
             .await?;
         let events = frames
@@ -1240,6 +1359,9 @@ impl RemoteClient {
         let input = UserInput {
             prompt: Some(text.to_owned()),
             queue_policy: Some(queue_policy),
+            // Caller metadata (RFC 12.4): opaque to the model, stored with
+            // the turn. The CLI sends only which client it is.
+            metadata: Some(serde_json::json!({ "client_id": "cli" })),
             ..UserInput::default()
         };
         let frames = self
@@ -1632,7 +1754,12 @@ impl RemoteClient {
                     takeover: None,
                     resume_from_seq: self.last_seq(session_id),
                     capabilities: None,
-                    client_info: None,
+                    // Client identity (RFC 6): diagnostics only. No behavior
+                    // hangs off this; it names the client in the server log.
+                    client_info: Some(ClientInfo {
+                        name: Some("norte-cli".to_owned()),
+                        version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+                    }),
                     options: None,
                 })
                 .unwrap_or(Value::Null),
@@ -1682,6 +1809,7 @@ impl AgentClient for RemoteClient {
                     attachments: attachments.to_vec(),
                     budget: None,
                     reasoning: None,
+                    metadata: None,
                     replay: false,
                 },
             },
@@ -1715,14 +1843,14 @@ impl AgentClient for RemoteClient {
         provider: &str,
         model: &str,
     ) -> Result<EventStream, ClientError> {
-        self.submit_configure(
-            session,
-            AgentCommand::SetModel {
-                provider: provider.to_owned(),
-                model: model.to_owned(),
-            },
-        )
-        .await
+        // `SESSION_CONFIGURE.agent_override` with the `model` fragment.
+        let mut override_value = serde_json::json!({
+            "model": { "id": model },
+        });
+        if !provider.is_empty() {
+            override_value["provider"] = serde_json::Value::String(provider.to_owned());
+        }
+        self.submit_configure(session, override_value).await
     }
 
     async fn set_reasoning(
@@ -1730,8 +1858,8 @@ impl AgentClient for RemoteClient {
         session: &str,
         reasoning: norte_code_protocol::Reasoning,
     ) -> Result<EventStream, ClientError> {
-        self.submit_configure(session, AgentCommand::SetReasoning { reasoning })
-            .await
+        let override_value = Self::reasoning_override(&reasoning);
+        self.submit_configure(session, override_value).await
     }
 
     async fn set_budget(
@@ -1739,12 +1867,51 @@ impl AgentClient for RemoteClient {
         session: &str,
         budget: norte_code_protocol::Budget,
     ) -> Result<EventStream, ClientError> {
-        self.submit_configure(session, AgentCommand::SetBudget { budget })
-            .await
+        let override_value = Self::budget_override(&budget);
+        self.submit_configure(session, override_value).await
     }
 
     async fn resume(&self, session: &str) -> Result<EventStream, ClientError> {
-        self.submit_configure(session, AgentCommand::Resume).await
+        // No `agent_override` equivalent: resume goes through the extension
+        // command as a `ClientRequestKind::Resume`.
+        let request = ClientRequest {
+            request_id: 0,
+            kind: norte_code_protocol::ClientRequestKind::Resume {
+                session: norte_code_protocol::SessionKey::new(session),
+                replay: true,
+            },
+        };
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let response = self
+            .http
+            .post(self.command_url(session))
+            .headers(headers)
+            .json(&Envelope::new(
+                FrameType::Extension("norte_code.command".to_owned()),
+                serde_json::to_value(&request)
+                    .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
+                timestamp_millis(),
+            ))
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP request failed: {error}")))?;
+        let status = response.status();
+        let response_body: CommandResponseBody = response
+            .json()
+            .await
+            .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
+        if !status.is_success() {
+            return Err(ClientError::new(response_body.error_message()));
+        }
+        let events = response_body
+            .events
+            .iter()
+            .map(server_event_from_frame)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::pin(iter(events)))
     }
 
     async fn fork_session(&self, session: &str) -> Result<SessionSummary, ClientError> {
@@ -1777,8 +1944,80 @@ impl AgentClient for RemoteClient {
         ))
     }
 
+    async fn export_session(&self, session: &str) -> Result<EventStream, ClientError> {
+        let frames = self
+            .post_standard(
+                session,
+                FrameType::Standard(StandardFrameType::SessionExport),
+                serde_json::json!({ "include": {} }),
+            )
+            .await?;
+        let events = frames
+            .iter()
+            .map(server_event_from_frame)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::pin(iter(events)))
+    }
+
+    async fn import_session(
+        &self,
+        session: &str,
+        bundle: serde_json::Value,
+    ) -> Result<EventStream, ClientError> {
+        let frames = self
+            .post_standard(
+                session,
+                FrameType::Standard(StandardFrameType::SessionImport),
+                serde_json::json!({ "bundle": bundle }),
+            )
+            .await?;
+        let events = frames
+            .iter()
+            .map(server_event_from_frame)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::pin(iter(events)))
+    }
+
     async fn compact_session(&self, session: &str) -> Result<EventStream, ClientError> {
-        self.submit_configure(session, AgentCommand::Compact).await
+        // No `agent_override` equivalent: compact goes through the extension
+        // command as `ClientRequestKind::Compact`.
+        let request = ClientRequest {
+            request_id: 0,
+            kind: norte_code_protocol::ClientRequestKind::Compact {
+                session: norte_code_protocol::SessionKey::new(session),
+            },
+        };
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            headers.insert(AUTHORIZATION, token.clone());
+        }
+        let response = self
+            .http
+            .post(self.command_url(session))
+            .headers(headers)
+            .json(&Envelope::new(
+                FrameType::Extension("norte_code.command".to_owned()),
+                serde_json::to_value(&request)
+                    .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
+                timestamp_millis(),
+            ))
+            .send()
+            .await
+            .map_err(|error| ClientError::new(format!("RAEP request failed: {error}")))?;
+        let status = response.status();
+        let response_body: CommandResponseBody = response
+            .json()
+            .await
+            .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
+        if !status.is_success() {
+            return Err(ClientError::new(response_body.error_message()));
+        }
+        let events = response_body
+            .events
+            .iter()
+            .map(server_event_from_frame)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Box::pin(iter(events)))
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ClientError> {
@@ -2108,6 +2347,7 @@ fn standard_event_from_frame(frame: &Envelope<Value>) -> Result<Option<ServerEve
                                 elapsed_ms: 0,
                                 output: String::new(),
                                 dropped: false,
+                                output_bytes_total: 0,
                             }
                         })
                         .collect();
@@ -2175,6 +2415,8 @@ fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, Clien
             let decoded: CanonicalSessionForked = canonical.decode()?;
             norte_code_protocol::ServerEventKind::SessionForked {
                 from: norte_code_protocol::SessionKey::new(decoded.from),
+                from_turn_id: decoded.from_turn_id,
+                title: decoded.title,
             }
         }
         CanonicalKind::TurnStarted => {
@@ -2470,6 +2712,43 @@ fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, Clien
                         failures: data.failures,
                     }
                 }
+            }
+        }
+        CanonicalKind::ChildSessionStarted => {
+            let decoded: CanonicalChildSessionStarted = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::ChildSessionStarted {
+                child_session_id: decoded.child_session_id,
+                agent_id: decoded.agent_id,
+                tool_call_id: decoded.tool_call_id,
+                lifetime: decoded.lifetime,
+                task_summary: decoded.task_summary,
+            }
+        }
+        CanonicalKind::ChildSessionUpdated => {
+            let decoded: CanonicalChildSessionUpdated = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::ChildSessionUpdated {
+                child_session_id: decoded.child_session_id,
+                state: decoded.state,
+                reason: decoded.reason,
+                result: decoded.result,
+                output_schema_valid: decoded.output_schema_valid,
+            }
+        }
+        CanonicalKind::DelegatorStateChanged => {
+            let decoded: CanonicalDelegatorStateChanged = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::DelegatorStateChanged {
+                child_session_id: decoded.child_session_id,
+                delegator_suspended: decoded.delegator_suspended,
+                by: decoded.by,
+                queued_messages: decoded.queued_messages,
+            }
+        }
+        CanonicalKind::ChildAwaitingInput => {
+            let decoded: CanonicalChildAwaitingInput = canonical.decode()?;
+            norte_code_protocol::ServerEventKind::ChildAwaitingInput {
+                child_session_id: decoded.child_session_id,
+                question: decoded.question,
+                prompt: decoded.prompt,
             }
         }
         CanonicalKind::Error => {

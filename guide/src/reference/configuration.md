@@ -41,6 +41,11 @@ Its service settings are:
 Each agent has a unique required `name`; `description`, `origin_url` and
 `author` are optional metadata. The RAEP server exposes all named agents, and
 `cli.json.agent_id` selects the agent used by the CLI.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `subagent` | string or null | null | Default child agent; it must also be in `delegates`. |
+| `delegates` | array of agent ids | `[]` | Child profiles this agent may spawn. |
 | `compaction` | object | see below | Automatic compaction. |
 | `retry` | object | see below | Transient retry policy. |
 | `reasoning` | object | `{"default":"auto"}` | Default reasoning setting. |
@@ -107,29 +112,29 @@ What the client shows, as opposed to what the engine does.
 diff in two shapes: `unified` (patch, fits narrow terminals) and `split`
 (before/after side by side, shows changes inside a line).
 
-## `subagent`
+## Delegation
 
-`subagent` belongs to each entry in `service.json`'s `agents` array. It is
-either `null` or the name of another configured agent. `null` keeps the
-parent session's provider and model; a name selects that agent's defaults.
-The name may refer to the same agent.
+Each agent may set `subagent` to its default child profile and `delegates` to
+the list of configured agent names it is allowed to spawn. An empty
+`delegates` list disables delegation; a configured `subagent` must also appear
+in `delegates`. `spawn_agent.agent_id` may select another profile from that
+allow-list. The selected profile supplies the child's model, system prompt
+and disabled-tool policy.
 
-The `subagent` tool is available unless it is listed in the agent's
-`tools.disabled` list. A child starts blank and never receives the
-`subagent` tool, so nesting stops at one. With `detach: true` the call becomes a job (`job-N`), like a detached shell:
-`manage_jobs` reads and stops it, and its result arrives as a message when it
-ends.
+The child starts with the task only. `context_mode: "summary"` adds a bounded,
+redacted excerpt of the parent's history. Children can spawn further children
+up to the host's maximum delegation depth. Child turns share the parent's
+budget ledger; separate budget-share reservation is not implemented.
 
-The tool accepts only `prompt`, `title` and `detach`. The child starts without
-the parent's conversation history. It uses the selected agent's model when
-configured, otherwise the exact provider/model of the parent.
-Child turns use the parent's budget ledger, so request and token limits are
-shared. Reported provider costs are charged to that same ledger; requests
-without a reported cost remain measurable by requests/tokens but cannot be
-used to validate a USD budget.
-The selected agent's `tools.disabled` policy is applied when the child session
-is created.
-`ask_user`, `browser_use` and `subagent` are never available to a child.
+With `detach: true`, the child runs as a `job-N`; `manage_jobs` can inspect or
+stop it, and its result is delivered to the parent when the run finishes.
+`message_agent`, `stop_agent`, `wait_agent`, `list_agents` and
+`inspect_agent` provide child lifecycle controls.
+
+The tool accepts `lifetime: "turn"` or `"session"`, but the host does not yet
+enforce different cleanup behavior for those values. Automatic idle expiry,
+parent-close cleanup, full event inspection, approval routing and
+delegation-tool idempotency are also not implemented.
 
 ## `tools.auto_turn_on_job_end`
 
@@ -138,6 +143,10 @@ job finishes, so the model can read the result without waiting for another
 user message. The result is still queued through the normal steering path, and
 an active turn is never interrupted. It is disabled by default because each
 automatically started turn can spend model tokens.
+
+RAEP sessions use the RFC `job_turn_policy` session option instead: `always`
+(the RAEP default), `on_failure`, or `never`. A controller can set it through
+`SESSION_ATTACH` or `SESSION_CONFIGURE`; observer attachments cannot change it.
 
 ## `budgets`
 

@@ -60,6 +60,12 @@ pub struct Attachment {
     pub mime: String,
     /// What the client called it, for a person reading the transcript.
     pub name: String,
+    /// Media duration in milliseconds, for audio or video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Client-provided transcript for audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
 }
 
 /// A session as the client sees it.
@@ -301,6 +307,31 @@ impl JobState {
     }
 }
 
+/// Effective limits applied to a detached job.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobLimits {
+    /// Runtime ceiling in seconds, when the runner is bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u64>,
+    /// Maximum captured output in bytes, when the runner has an output cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+}
+
+/// When the result of a detached job is offered to the agent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobTurnPolicy {
+    /// Start a turn for every terminal job result.
+    Always,
+    /// Start a turn only for failed, killed, or timed-out jobs.
+    OnFailure,
+    /// Record the result for the next user turn without starting one.
+    #[default]
+    Never,
+}
+
 /// One background job, as a client sees it.
 ///
 /// It is the registry's summary, flattened for the wire: the output is a string
@@ -332,6 +363,14 @@ pub struct JobInfo {
     pub output: String,
     /// Whether older output was dropped to stay within the buffer.
     pub dropped: bool,
+    /// Total output bytes written, including bytes no longer retained.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub output_bytes_total: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One installed Agent Skill, as a client sees it.

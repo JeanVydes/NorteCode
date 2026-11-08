@@ -21,9 +21,9 @@ use crate::runtime::{Interception, InterceptionContext, TurnInterceptor};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use norte::{
-    CallId, Capabilities, Message, ModelId, ModelRef, ModelRequest, ModelStream, ProviderErrorKind,
-    ProviderId, Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, SessionId,
-    ToolContext, Usage,
+    CallId, Capabilities, FnExecutor, Message, ModelId, ModelRef, ModelRequest, ModelStream,
+    ProviderErrorKind, ProviderId, Reasoning as ReasoningCapability, ReasoningEffort,
+    ReasoningRequest, SessionId, ToolContext, Usage,
 };
 use norte_code_protocol::InMemoryStore;
 use norte_code_protocol::catalog::WireSchema;
@@ -47,6 +47,25 @@ impl ModelFactory for ScriptedFactory {
         _capabilities: &Capabilities,
     ) -> Result<Arc<dyn Model>, ServiceError> {
         Ok(Arc::clone(&self.model) as Arc<dyn Model>)
+    }
+}
+
+struct DelayedSubagentRunner;
+
+#[async_trait]
+impl super::subagents::SubagentRunner for DelayedSubagentRunner {
+    async fn run(
+        &self,
+        _request: super::subagents::SubagentRequest,
+        _cancel: Arc<norte::Cancellation>,
+    ) -> super::subagents::SubagentOutcome {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        super::subagents::SubagentOutcome {
+            text: "child done".to_owned(),
+            is_error: false,
+            child: None,
+            output_schema_valid: None,
+        }
     }
 }
 
@@ -356,7 +375,9 @@ fn scripted_service_with_config(
 
 #[allow(dead_code)]
 fn subagent_config() -> Config {
-    config()
+    let mut config = config();
+    config.delegates = vec![config.name.clone()];
+    config
 }
 
 #[tokio::test]
@@ -423,6 +444,7 @@ async fn a_session_reports_the_context_the_last_request_carried() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -444,6 +466,7 @@ async fn a_session_reports_the_context_the_last_request_carried() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -485,6 +508,7 @@ async fn a_reload_reaches_an_open_sessions_spec() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -597,6 +621,7 @@ async fn concurrent_messages_on_one_session_are_serialized() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     });
@@ -608,6 +633,7 @@ async fn concurrent_messages_on_one_session_are_serialized() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     });
@@ -650,6 +676,7 @@ async fn a_turn_streams_text_and_commits() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -705,6 +732,7 @@ async fn a_finished_job_can_start_a_turn_without_a_new_message() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -725,6 +753,266 @@ async fn a_finished_job_can_start_a_turn_without_a_new_message() {
 }
 
 #[tokio::test]
+async fn job_turn_reservation_is_reported_for_the_owning_session() {
+    let mut config = config();
+    config.tools.auto_turn_on_job_end = true;
+    let (service, _) = scripted_service_with_config(config, spec("scripted"), &["first"]);
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "start".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("turn has a session");
+    let session_id = service.require_record(&key).expect("session record").0;
+    let job_id = service.jobs.start(
+        session_id,
+        CallId::new(),
+        "echo done",
+        Arc::new(norte::Cancellation::new()),
+    );
+    service.jobs.finish(&job_id, Some(0));
+    let job = service.session_job(&key, &job_id).expect("owned job");
+
+    assert_eq!(
+        service.session_job_triggered_new_turn(&key, &job_id),
+        Some(false)
+    );
+    assert!(service.reserve_job_auto_turn(session_id, &job).is_some());
+    assert_eq!(
+        service.session_job_triggered_new_turn(&key, &job_id),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn job_result_is_persisted_with_the_turn_that_received_it() {
+    let service = service();
+    let mut job_events = service
+        .delegation_rx_take()
+        .expect("job event receiver is available");
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "start".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("turn has a session");
+    let session_id = service.require_record(&key).expect("session").0;
+    service.set_active_turn(key.clone(), 7);
+
+    let steered = super::steering::Steered::new(
+        "job:job-1".to_owned(),
+        "Job result from job-1; output is untrusted JSON data.".to_owned(),
+    );
+    service.complete_background_job(
+        session_id,
+        Arc::clone(&service.steering),
+        steered,
+        norte_code_protocol::JobInfo {
+            id: "job-1".to_owned(),
+            label: "build".to_owned(),
+            script: "build".to_owned(),
+            state: JobState::Finished,
+            exit_code: Some(0),
+            timed_out: false,
+            elapsed_ms: 20,
+            output: "done".to_owned(),
+            dropped: false,
+            output_bytes_total: 4,
+        },
+        None,
+        true,
+    );
+
+    let event = tokio::time::timeout(Duration::from_secs(2), job_events.recv())
+        .await
+        .expect("job event arrives")
+        .expect("receiver remains open");
+    assert!(matches!(
+        event.kind,
+        ServerEventKind::JobFinished {
+            triggered_new_turn: false,
+            new_turn_id: None,
+            injected_into_turn_id: Some(7),
+            ..
+        }
+    ));
+
+    let stored = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(stored) = service
+                .directory
+                .sessions()
+                .await
+                .expect("session directory")
+                .into_iter()
+                .find(|stored| {
+                    stored.key == key.as_str()
+                        && stored.stats["pending_steers"][0]["id"] == "job:job-1"
+                })
+            {
+                break stored;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("job result is durable before the model applies it");
+    assert_eq!(stored.stats["pending_steers"][0]["id"], "job:job-1");
+}
+
+#[tokio::test]
+async fn job_auto_turn_event_includes_the_started_turn_id() {
+    let mut config = config();
+    config.tools.auto_turn_on_job_end = true;
+    let (service, _) = scripted_service_with_config(config, spec("scripted"), &["first", "second"]);
+    let mut job_events = service
+        .delegation_rx_take()
+        .expect("job event receiver is available");
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "start".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    let key = events
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("turn has a session");
+    let session_id = service.require_record(&key).expect("session").0;
+    let job = norte_code_protocol::JobInfo {
+        id: "job-auto".to_owned(),
+        label: "build".to_owned(),
+        script: "build".to_owned(),
+        state: JobState::Finished,
+        exit_code: Some(0),
+        timed_out: false,
+        elapsed_ms: 20,
+        output: "done".to_owned(),
+        dropped: false,
+        output_bytes_total: 4,
+    };
+    let reserved_turn = service
+        .reserve_job_auto_turn(session_id, &job)
+        .expect("successful job reserves an auto-turn");
+    let steered = super::steering::Steered::new("job:job-auto".to_owned(), "job result".to_owned());
+    service.complete_background_job(
+        session_id,
+        Arc::clone(&service.steering),
+        steered,
+        job,
+        Some(reserved_turn),
+        true,
+    );
+
+    let event = tokio::time::timeout(Duration::from_secs(2), job_events.recv())
+        .await
+        .expect("job event arrives")
+        .expect("receiver remains open");
+    assert!(matches!(
+        event.kind,
+        ServerEventKind::JobFinished {
+            triggered_new_turn: true,
+            new_turn_id: Some(2),
+            injected_into_turn_id: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn job_turn_policy_selects_terminal_results() {
+    let completed = norte_code_protocol::JobInfo {
+        id: "job-1".to_owned(),
+        label: "build".to_owned(),
+        script: "build".to_owned(),
+        state: JobState::Finished,
+        exit_code: Some(0),
+        timed_out: false,
+        elapsed_ms: 10,
+        output: String::new(),
+        dropped: false,
+        output_bytes_total: 0,
+    };
+    let failed = norte_code_protocol::JobInfo {
+        exit_code: Some(2),
+        ..completed.clone()
+    };
+    let running = norte_code_protocol::JobInfo {
+        state: JobState::Running,
+        exit_code: None,
+        ..completed.clone()
+    };
+    let timed_out = norte_code_protocol::JobInfo {
+        timed_out: true,
+        exit_code: None,
+        ..completed.clone()
+    };
+    let killed = norte_code_protocol::JobInfo {
+        state: JobState::Cancelled,
+        exit_code: None,
+        ..completed.clone()
+    };
+
+    assert!(super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::Always,
+        &completed
+    ));
+    assert!(!super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::OnFailure,
+        &completed
+    ));
+    assert!(super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::OnFailure,
+        &failed
+    ));
+    assert!(super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::OnFailure,
+        &timed_out
+    ));
+    assert!(super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::OnFailure,
+        &killed
+    ));
+    assert!(!super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::Always,
+        &running
+    ));
+    assert!(!super::job_policy_allows_turn(
+        norte_code_protocol::JobTurnPolicy::Never,
+        &failed
+    ));
+}
+
+#[tokio::test]
 async fn auto_turn_does_nothing_when_disabled() {
     let (service, model) = scripted_service(spec("scripted"), &["first", "unused"]);
     let events = drain(
@@ -735,6 +1023,7 @@ async fn auto_turn_does_nothing_when_disabled() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -764,6 +1053,7 @@ async fn an_existing_auto_turn_blocks_a_duplicate() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -887,6 +1177,7 @@ mod streaming_regressions {
                     attachments: Vec::new(),
                     budget: None,
                     reasoning: None,
+                    metadata: None,
                     replay: false,
                 },
             )
@@ -981,6 +1272,7 @@ mod streaming_regressions {
                         attachments: Vec::new(),
                         budget: None,
                         reasoning: None,
+                        metadata: None,
                         replay: false,
                     },
                 })
@@ -1182,6 +1474,7 @@ async fn a_transient_failure_retries_the_same_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -1284,6 +1577,7 @@ async fn cancelling_a_turn_stops_a_running_command() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         })
@@ -1346,6 +1640,7 @@ async fn cancelling_a_turn_before_its_first_token_stops_it() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         })
@@ -1423,6 +1718,7 @@ async fn cancelling_immediately_after_a_message_stops_the_turn() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         })
@@ -1488,6 +1784,7 @@ async fn retries_report_increasing_attempts_and_backoff() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -1544,6 +1841,7 @@ async fn a_permanent_failure_is_not_retried() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -1801,6 +2099,7 @@ async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -2166,6 +2465,7 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -2185,6 +2485,9 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
         ClientRequestKind::ForkSession {
             session: source_key.clone(),
             title: Some("branch".to_owned()),
+            from_turn_id: None,
+            inclusive: None,
+            carry_usage: None,
         },
     )
     .await;
@@ -2212,6 +2515,169 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
         .await
         .expect("export");
     assert_eq!(copied.messages.len(), source_messages);
+}
+
+#[tokio::test]
+async fn a_fork_can_include_or_exclude_a_named_terminal_turn() {
+    let (service, _) = scripted_service(spec("scripted"), &["first answer", "second answer"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let source_key = created[0].session.clone().expect("source session");
+
+    for text in ["first", "second"] {
+        drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: Some(source_key.clone()),
+                text: text.to_owned(),
+                attachments: Vec::new(),
+                budget: None,
+                reasoning: None,
+                metadata: None,
+                replay: false,
+            },
+        )
+        .await;
+    }
+
+    let included = drain(
+        &service,
+        ClientRequestKind::ForkSession {
+            session: source_key.clone(),
+            title: None,
+            from_turn_id: Some("turn_1".to_owned()),
+            inclusive: Some(true),
+            carry_usage: Some(false),
+        },
+    )
+    .await;
+    assert!(matches!(
+        &included[0].kind,
+        ServerEventKind::SessionForked {
+            from_turn_id: Some(turn),
+            ..
+        } if turn == "turn_1"
+    ));
+    let included_key = included[0].session.clone().expect("included fork");
+    let (included_id, included_spec, _) = service
+        .require_record(&included_key)
+        .expect("included fork record");
+    let included_messages = service
+        .engine(included_spec.as_ref().expect("included fork spec"), None)
+        .expect("engine")
+        .export(included_id)
+        .await
+        .expect("export")
+        .messages;
+    assert_eq!(included_messages.len(), 3);
+    assert_eq!(
+        service
+            .lock_sessions()
+            .get(&included_key)
+            .expect("included fork record")
+            .last_turn,
+        1
+    );
+
+    let excluded = drain(
+        &service,
+        ClientRequestKind::ForkSession {
+            session: source_key,
+            title: None,
+            from_turn_id: Some("1".to_owned()),
+            inclusive: Some(false),
+            carry_usage: Some(false),
+        },
+    )
+    .await;
+    let excluded_key = excluded[0].session.clone().expect("excluded fork");
+    let (excluded_id, excluded_spec, _) = service
+        .require_record(&excluded_key)
+        .expect("excluded fork record");
+    let excluded_messages = service
+        .engine(excluded_spec.as_ref().expect("excluded fork spec"), None)
+        .expect("engine")
+        .export(excluded_id)
+        .await
+        .expect("export")
+        .messages;
+    assert_eq!(excluded_messages.len(), 1);
+    assert_eq!(
+        service
+            .lock_sessions()
+            .get(&excluded_key)
+            .expect("excluded fork record")
+            .last_turn,
+        0
+    );
+}
+
+#[tokio::test]
+async fn rewind_keeps_removed_text_history_readable_without_model_context() {
+    let (service, _) = scripted_service(
+        spec("scripted"),
+        &["first answer", "second answer", "third answer"],
+    );
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+    for text in ["first", "second"] {
+        drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: Some(key.clone()),
+                text: text.to_owned(),
+                attachments: Vec::new(),
+                budget: None,
+                reasoning: None,
+                metadata: None,
+                replay: false,
+            },
+        )
+        .await;
+    }
+
+    let rewound = service
+        .rewind_session(&key, "turn_1", true, false, false)
+        .await
+        .expect("rewind");
+    assert_eq!(rewound, ["turn_1", "turn_2"]);
+
+    let active = service
+        .session_history_with_turns(&key)
+        .await
+        .expect("active history");
+    assert!(
+        active
+            .iter()
+            .all(|(turn, _, _, text, _)| turn.is_none() && text == "system")
+    );
+    let archived = service
+        .session_rewound_history_with_turns(&key)
+        .expect("rewound history");
+    assert_eq!(
+        archived
+            .iter()
+            .filter_map(|(turn, _, _, _, _)| *turn)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([1, 2])
+    );
+    let next_turn = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key),
+            text: "third".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    assert!(
+        next_turn
+            .iter()
+            .any(|event| matches!(event.kind, ServerEventKind::TurnStarted { turn: 3 }))
+    );
 }
 
 #[tokio::test]
@@ -2271,6 +2737,7 @@ async fn two_sessions_run_turns_concurrently() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         })
@@ -2285,6 +2752,7 @@ async fn two_sessions_run_turns_concurrently() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         })
@@ -2757,6 +3225,7 @@ async fn set_reasoning_applies_to_the_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -2799,6 +3268,7 @@ async fn a_message_reasoning_override_is_used_once() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         )
@@ -2885,6 +3355,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -2914,6 +3385,7 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -2938,6 +3410,7 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3020,6 +3493,7 @@ async fn a_queued_model_that_cannot_be_honoured_does_not_break_the_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3083,6 +3557,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3103,6 +3578,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3123,6 +3599,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3229,6 +3706,7 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3310,6 +3788,7 @@ async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3415,6 +3894,7 @@ async fn the_budget_stops_the_next_request_every_time() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         )
@@ -3491,6 +3971,7 @@ async fn reasoning_and_steering_survive_a_restart() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3615,6 +4096,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3662,6 +4144,7 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3732,6 +4215,7 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3821,6 +4305,7 @@ async fn a_failed_eager_summary_stops_at_the_safe_point() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3882,6 +4367,7 @@ async fn manual_compaction_links_the_new_session_and_keeps_the_old_one() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -3966,6 +4452,7 @@ async fn a_failed_summary_leaves_the_session_unchanged() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4052,6 +4539,7 @@ async fn the_request_table_records_usage_latency_and_metadata() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4227,6 +4715,7 @@ async fn a_reconstructed_request_carries_its_tools_and_timing() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4307,6 +4796,7 @@ async fn two_tools_in_one_answer_produce_one_request_summary() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4370,6 +4860,7 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4383,6 +4874,7 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4441,6 +4933,7 @@ async fn a_session_budget_stops_the_next_request() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4532,6 +5025,7 @@ async fn vendor_extensions_reach_the_model_request() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4566,6 +5060,7 @@ async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4639,6 +5134,7 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4721,6 +5217,7 @@ async fn a_global_allow_skips_the_approval_prompt() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4771,6 +5268,7 @@ async fn a_global_deny_refuses_without_asking() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4835,6 +5333,7 @@ async fn a_session_deny_refuses_only_the_session_it_names() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4858,6 +5357,7 @@ async fn a_session_deny_refuses_only_the_session_it_names() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -4922,6 +5422,7 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5018,6 +5519,7 @@ async fn forgetting_a_session_rule_clears_memory_and_the_record() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5097,9 +5599,12 @@ async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
                 blob: None,
                 mime: "image/png".to_owned(),
                 name: "photo.png".to_owned(),
+                duration_ms: None,
+                transcript: None,
             }],
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5157,9 +5662,12 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
                 blob: None,
                 mime: "image/png".to_owned(),
                 name: "photo.png".to_owned(),
+                duration_ms: None,
+                transcript: None,
             }],
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5199,6 +5707,7 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5281,28 +5790,27 @@ async fn the_shell_tools_and_the_job_manager_are_registered() {
 }
 
 #[tokio::test]
-async fn a_zero_bound_is_granted_only_to_a_call_nobody_waits_for() {
-    // One shell means one set of limits, so the host grants the zero and says
-    // which shape gets it. The shape is the whole rule: a call nobody waits for
-    // may run unbounded, and the same zero on a call that holds the turn is
-    // dropped before it reaches the executor. What the executor then does with
-    // the field is tested in `norte-tools`, where waiting out a bound is cheap.
-    let keeper = ShellCalls::declaration(
-        ShellTool::new()
-            .with_limits(ShellLimits {
-                default_timeout: std::time::Duration::from_millis(150),
-                grace: std::time::Duration::from_millis(50),
-                allow_indefinite: true,
-                ..ShellLimits::default()
-            })
-            .into_declaration(),
-        Arc::new(JobRegistry::default()),
+async fn a_zero_bound_is_refused_for_foreground_and_detached_shell_calls() {
+    // Detached work has a runtime ceiling too: zero falls back to the executor's
+    // default in both shapes, so a job cannot outlive its configured bound.
+    let jobs = Arc::new(JobRegistry::default());
+    let limits = ShellLimits {
+        default_timeout: std::time::Duration::from_millis(150),
+        grace: std::time::Duration::from_millis(50),
+        allow_indefinite: false,
+        ..ShellLimits::default()
+    };
+    let keeper = ShellCalls::declaration_with_limits(
+        ShellTool::new().with_limits(limits).into_declaration(),
+        limits,
+        Arc::clone(&jobs),
         Arc::new(Steering::default()),
         Arc::new(DetachRegistry::default()),
         Arc::new(std::sync::RwLock::new(None)),
     );
+    let session = SessionId::new();
     let context = ToolContext::new()
-        .with_session(SessionId::new())
+        .with_session(session)
         .with_call(CallId::new());
 
     let held = keeper
@@ -5331,9 +5839,8 @@ async fn a_zero_bound_is_granted_only_to_a_call_nobody_waits_for() {
         )
         .await
         .expect("execute");
-    // The answer to a call let go of from the start is the job's name, not a
-    // shell result: the shell result is what arrives when the process ends, and
-    // the model is told where to find it.
+    // The answer remains the job's name; the eventual timed-out result is kept
+    // in the registry and delivered through the normal terminal path.
     let text: String = let_go
         .parts
         .iter()
@@ -5347,6 +5854,49 @@ async fn a_zero_bound_is_granted_only_to_a_call_nobody_waits_for() {
         !let_go.is_error,
         "being let go of is not a failure: it is what was asked for"
     );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !jobs.get("job-1").is_some_and(|job| job.timed_out) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("detached job reaches its runtime limit");
+}
+
+#[tokio::test]
+async fn a_detached_shell_call_surfaces_the_session_job_limit() {
+    let jobs = Arc::new(JobRegistry::default());
+    jobs.configure_limits(0, 86_400);
+    let shell = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&jobs),
+        Arc::new(Steering::default()),
+        Arc::new(DetachRegistry::default()),
+        Arc::new(std::sync::RwLock::new(None)),
+    );
+    let context = ToolContext::new()
+        .with_session(SessionId::new())
+        .with_call(CallId::new());
+    let result = shell
+        .executor
+        .call_with_context(
+            &context,
+            serde_json::from_value(serde_json::json!({
+                "script": "echo must-not-run",
+                "detach": true
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("tool error is returned as a tool result");
+    let message: String = result
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect();
+    assert!(result.is_error);
+    assert!(message.contains("SANDBOX_LIMIT_EXCEEDED"));
+    assert!(jobs.list(None).is_empty());
 }
 
 #[tokio::test]
@@ -5401,6 +5951,7 @@ async fn ask_user_parks_the_turn_until_the_client_answers() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     };
@@ -5490,6 +6041,7 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     };
@@ -5591,6 +6143,7 @@ async fn an_unknown_session_is_an_error() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         })
@@ -5671,6 +6224,7 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5744,6 +6298,7 @@ async fn a_pending_question_survives_a_restart() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     };
@@ -5886,6 +6441,7 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5938,6 +6494,7 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -5952,6 +6509,7 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: true,
         },
     )
@@ -5973,6 +6531,7 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -6011,6 +6570,7 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -6088,6 +6648,7 @@ async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -6123,6 +6684,12 @@ async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
         replay.contains(&("assistant".to_owned(), "first answer".to_owned())),
         "the pre-compaction answer comes back: {replay:?}"
     );
+    let history = service
+        .session_history(&key)
+        .await
+        .expect("full history across compaction");
+    assert!(history.iter().any(|(_, _, text)| text == "first question"));
+    assert!(history.iter().any(|(_, _, text)| text == "first answer"));
 }
 
 #[tokio::test]
@@ -6139,6 +6706,7 @@ async fn a_resume_replays_the_recent_messages() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -6176,6 +6744,18 @@ async fn a_resume_replays_the_recent_messages() {
         replay.contains(&("assistant".to_owned(), "hello there".to_owned())),
         "the answer comes back: {replay:?}"
     );
+    let history = service
+        .session_history(&key)
+        .await
+        .expect("full session history");
+    assert!(history.iter().any(|(role, kind, text)| {
+        *role == norte_code_protocol::MessageRole::User
+            && *kind == norte_code_protocol::ReplayedKind::Text
+            && text == "hi"
+    }));
+    assert!(history.iter().any(|(role, _, text)| {
+        *role == norte_code_protocol::MessageRole::Assistant && text == "hello there"
+    }));
 
     // A normal message must not repeat history: only the resume shows it.
     let sent = drain(
@@ -6186,6 +6766,7 @@ async fn a_resume_replays_the_recent_messages() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -6208,23 +6789,88 @@ fn registry_with_job() -> (Arc<JobRegistry>, SessionId, CallId, String) {
 }
 
 #[test]
-fn a_job_ends_when_its_streams_close_not_when_its_call_finishes() {
-    // The whole reason the registry keys on the call: a `shell_bg` result
-    // arrives long before the process does, so the result cannot be the end.
-    let (registry, _, call, id) = registry_with_job();
+fn a_job_ends_when_its_runner_settles() {
+    let (registry, _, _, id) = registry_with_job();
     assert_eq!(registry.get(&id).expect("job").state, JobState::Running);
 
-    // One stream closing is not the end when the other is still open.
-    registry.close(call, false);
-    assert_eq!(registry.get(&id).expect("job").state, JobState::Running);
-    registry.close(call, true);
-    assert_eq!(registry.get(&id).expect("job").state, JobState::Finished);
-
-    // The exit code lands after the streams have closed, on a finished job.
+    // The runner's exit status and terminal notification arrive together.
     registry.settle(&id, Some(7), false);
     let job = registry.get(&id).expect("job");
     assert_eq!(job.exit_code, Some(7));
     assert_eq!(job.state, JobState::Finished);
+}
+
+#[test]
+fn job_concurrency_limit_counts_cancelled_processes_until_they_settle() {
+    let registry = JobRegistry::default();
+    registry.configure_limits(1, 86_400);
+    let session = SessionId::new();
+    let first = registry
+        .try_start(
+            session,
+            CallId::new(),
+            "first",
+            Arc::new(norte::Cancellation::new()),
+        )
+        .expect("first job");
+    assert!(
+        registry
+            .try_start(
+                session,
+                CallId::new(),
+                "second",
+                Arc::new(norte::Cancellation::new())
+            )
+            .is_err(),
+        "the running-job cap applies to one session"
+    );
+    assert!(registry.cancel(&first));
+    assert!(
+        registry
+            .try_start(
+                session,
+                CallId::new(),
+                "third",
+                Arc::new(norte::Cancellation::new())
+            )
+            .is_err(),
+        "a cancelled process still occupies a slot until its runner settles"
+    );
+    registry.settle(&first, None, false);
+    assert!(
+        registry
+            .try_start(
+                session,
+                CallId::new(),
+                "fourth",
+                Arc::new(norte::Cancellation::new())
+            )
+            .is_ok(),
+        "the slot is released after settlement"
+    );
+}
+
+#[test]
+fn job_output_expires_after_the_configured_retention_window() {
+    let registry = JobRegistry::default();
+    registry.configure_limits(8, 0);
+    let session = SessionId::new();
+    let call = CallId::new();
+    let id = registry.start(
+        session,
+        call,
+        "output",
+        Arc::new(norte::Cancellation::new()),
+    );
+    registry.write(call, "retained until completion");
+    registry.settle(&id, Some(0), false);
+
+    let job = registry
+        .get_for_session_with_retention(session, &id)
+        .expect("job record remains available");
+    assert_eq!(job.output, "");
+    assert!(job.dropped);
+    assert_eq!(job.output_bytes_total, 25);
 }
 
 #[test]
@@ -6243,6 +6889,24 @@ fn a_cancelled_job_keeps_its_state_when_the_call_reports_an_exit() {
         !registry.cancel(&id),
         "a cancelled job is not cancellable again"
     );
+}
+
+#[tokio::test]
+async fn cancelling_a_job_delays_the_runner_signal_for_the_requested_grace() {
+    let registry = JobRegistry::default();
+    let session = SessionId::new();
+    let call = CallId::new();
+    let cancel = Arc::new(norte::Cancellation::new());
+    let id = registry.start(session, call, "sleep 60", Arc::clone(&cancel));
+    let grace = Duration::from_millis(50);
+
+    assert!(registry.cancel_with_grace(&id, Some(grace)));
+    assert!(!cancel.is_cancelled());
+    tokio::time::sleep(grace / 2).await;
+    assert!(!cancel.is_cancelled());
+    tokio::time::timeout(grace, cancel.cancelled())
+        .await
+        .expect("runner receives cancellation after the grace period");
 }
 
 #[test]
@@ -6265,21 +6929,125 @@ fn stopping_a_session_reaches_only_its_own_jobs() {
 }
 
 #[test]
+fn cancelling_a_job_requires_its_owning_session() {
+    let registry = JobRegistry::default();
+    let owner = SessionId::new();
+    let other = SessionId::new();
+    let id = registry.start(
+        owner,
+        CallId::new(),
+        "job",
+        Arc::new(norte::Cancellation::new()),
+    );
+
+    assert!(registry.get_for_session(other, &id).is_none());
+    assert!(registry.get_for_session(owner, &id).is_some());
+    assert!(!registry.cancel_in_session(other, &id));
+    assert_eq!(registry.get(&id).expect("job").state, JobState::Running);
+    assert!(registry.cancel_in_session(owner, &id));
+    assert_eq!(registry.get(&id).expect("job").state, JobState::Cancelled);
+}
+
+#[test]
 fn the_job_buffer_keeps_the_tail_and_says_it_dropped_the_rest() {
     let (registry, _, call, id) = registry_with_job();
     // The cap is generous, so filling it needs a lot: this writes more than it
     // holds and checks the *end* survived, which is what a reader wants.
     let chunk = "x".repeat(JOB_BUFFER_BYTES);
-    registry.write(call, &chunk);
-    registry.write(call, "THE END");
+    assert_eq!(registry.write(call, &chunk), Some(0));
+    assert_eq!(
+        registry.write(call, "THE END"),
+        Some(JOB_BUFFER_BYTES as u64)
+    );
     let job = registry.get(&id).expect("job");
     assert!(job.dropped, "older output was dropped");
+    assert_eq!(
+        job.output_bytes_total,
+        (JOB_BUFFER_BYTES + "THE END".len()) as u64
+    );
     assert!(job.output.ends_with("THE END"), "the tail survives");
     assert!(
         job.output.len() <= JOB_BUFFER_BYTES + "THE END".len(),
         "the buffer stays bounded: {} bytes",
         job.output.len()
     );
+}
+
+#[tokio::test]
+async fn history_preserves_turn_boundaries_in_storage() {
+    let (service, _model) = scripted_service(spec("scripted"), &[]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+    let (nid, _, _) = service.require_record(&key).expect("record");
+
+    let first_state = service.store.load(nid).await.expect("first state");
+    let first = crate::runtime::Node::message(Message::user("first turn"), first_state.head);
+    service
+        .store
+        .commit(crate::runtime::Commit {
+            session_id: nid,
+            expected_version: Some(first_state.version),
+            nodes: vec![first.clone()],
+            head: Some(first.id),
+            phase: crate::runtime::Phase::Idle,
+            turn: first_state.turn,
+            metadata: None,
+        })
+        .await
+        .expect("commit first turn");
+    service
+        .record_turn_boundary(&key, 1)
+        .await
+        .expect("persist first boundary");
+
+    let second_state = service.store.load(nid).await.expect("second state");
+    let second =
+        crate::runtime::Node::message(Message::assistant("second turn"), second_state.head);
+    service
+        .store
+        .commit(crate::runtime::Commit {
+            session_id: nid,
+            expected_version: Some(second_state.version),
+            nodes: vec![second.clone()],
+            head: Some(second.id),
+            phase: crate::runtime::Phase::Idle,
+            turn: second_state.turn,
+            metadata: None,
+        })
+        .await
+        .expect("commit second turn");
+    service
+        .record_turn_boundary(&key, 2)
+        .await
+        .expect("persist second boundary");
+
+    let history = service
+        .session_history_with_turns(&key)
+        .await
+        .expect("turn-tagged history");
+    assert!(
+        history
+            .iter()
+            .any(|(turn, _, _, text, _)| { *turn == Some(1) && text == "first turn" })
+    );
+    assert!(
+        history
+            .iter()
+            .any(|(turn, _, _, text, _)| { *turn == Some(2) && text == "second turn" })
+    );
+
+    let stored = service
+        .directory
+        .sessions()
+        .await
+        .expect("read persisted sessions")
+        .into_iter()
+        .find(|stored| stored.key == key.to_string())
+        .expect("stored session");
+    let boundaries: Vec<super::sessions::TurnBoundary> =
+        serde_json::from_value(stored.stats["turn_boundaries"].clone())
+            .expect("decode persisted boundaries");
+    assert_eq!(boundaries.len(), 2);
 }
 
 #[tokio::test]
@@ -6290,6 +7058,10 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
     let dir = std::env::temp_dir().join(format!("norte-bg-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let marker = dir.join("done");
+    let service = service();
+    let mut job_events = service
+        .delegation_rx_take()
+        .expect("job event receiver is available");
     let jobs = Arc::new(JobRegistry::default());
     let steering = Arc::new(Steering::default());
     let declaration = ShellTool::new().into_declaration();
@@ -6298,13 +7070,13 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
         Arc::clone(&jobs),
         Arc::clone(&steering),
         Arc::new(DetachRegistry::default()),
-        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(Some(Arc::clone(&service)))),
     );
 
     // The process writes, waits, then writes again and touches its marker: the
     // call has to answer long before any of that is done.
     let script = format!(
-        "echo first; sleep 1; echo second; touch {}",
+        "echo first; sleep 1; echo second; touch {}; exit 7",
         marker.display()
     );
     let request: ShellRequest = serde_json::from_value(serde_json::json!({
@@ -6342,13 +7114,13 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
     assert_eq!(
         job.label,
         format!(
-            "echo first; sleep 1; echo second; touch {}",
+            "echo first; sleep 1; echo second; touch {}; exit 7",
             marker.display()
         )
     );
 
-    // Let the process finish of its own accord. The job ends because its
-    // streams closed, and its output is what its own sink collected.
+    // Let the process finish of its own accord. The streams close before the
+    // runner returns its exit status, and both are needed for the final result.
     for _ in 0..50 {
         if jobs.get("job-1").is_some_and(|job| job.state.is_done()) {
             break;
@@ -6359,8 +7131,9 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
     assert_eq!(
         job.state,
         JobState::Finished,
-        "the closing chunk ends the job, not its call: {job:?}"
+        "the runner result ends the job: {job:?}"
     );
+    assert_eq!(job.exit_code, Some(7));
     assert!(
         job.output.contains("first"),
         "the sink collected: {:?}",
@@ -6383,7 +7156,59 @@ async fn a_detached_call_answers_at_once_and_reports_when_the_process_ends() {
         "the report says it ended: {}",
         steered[0].text
     );
+    let events = recv_job_events_until_finished(&mut job_events).await;
+    assert_detached_job_events(&events);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn recv_job_events_until_finished(
+    receiver: &mut tokio::sync::broadcast::Receiver<ServerEvent>,
+) -> Vec<ServerEventKind> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut events = Vec::new();
+        loop {
+            let event = receiver.recv().await.expect("job event receiver");
+            let finished = matches!(event.kind, ServerEventKind::JobFinished { .. });
+            events.push(event.kind);
+            if finished {
+                break events;
+            }
+        }
+    })
+    .await
+    .expect("terminal job event arrives")
+}
+
+fn assert_detached_job_events(events: &[ServerEventKind]) {
+    assert!(matches!(
+        events.first(),
+        Some(ServerEventKind::JobStarted { job_id, .. }) if job_id == "job-1"
+    ));
+    let progress = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEventKind::JobProgressDelta {
+                job_id,
+                index,
+                stream,
+                ..
+            } => Some((job_id, *index, stream)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!progress.is_empty(), "the job emitted progress: {events:?}");
+    assert!(
+        progress.iter().all(|(job_id, _, stream)| {
+            job_id.as_str() == "job-1" && **stream == norte_code_protocol::OutputStream::Stdout
+        }),
+        "job output keeps its id and stream: {progress:?}"
+    );
+    assert_eq!(progress[0].1, 0, "progress is indexed from byte zero");
+    assert!(matches!(
+        events.last(),
+        Some(ServerEventKind::JobFinished { job, .. })
+            if job.id == "job-1" && job.output.contains("second") && job.exit_code == Some(7)
+    ));
 }
 
 #[tokio::test]
@@ -6402,14 +7227,18 @@ async fn stopping_a_job_through_the_registry_ends_its_process() {
         Arc::new(DetachRegistry::default()),
         Arc::new(std::sync::RwLock::new(None)),
     );
-    let script = format!("sleep 3; touch {}", marker.display());
+    let script = format!(
+        "trap '' TERM; touch {}; while :; do sleep 1; done",
+        marker.display()
+    );
     let request: ShellRequest = serde_json::from_value(serde_json::json!({
         "script": script,
         "detach": true
     }))
     .expect("request");
+    let session = SessionId::new();
     let context = ToolContext::new()
-        .with_session(SessionId::new())
+        .with_session(session)
         .with_call(CallId::new());
     let _ = background
         .executor
@@ -6417,11 +7246,82 @@ async fn stopping_a_job_through_the_registry_ends_its_process() {
         .await
         .expect("the call answers");
 
+    let mut terminal = jobs
+        .terminal_for_session(session, "job-1")
+        .expect("the session owns the running job");
     assert!(jobs.cancel("job-1"), "a running job is stoppable");
+    assert!(
+        !*terminal.borrow(),
+        "requesting cancellation is not process termination"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !*terminal.borrow() {
+            terminal.changed().await.expect("runner remains registered");
+        }
+    })
+    .await
+    .expect("the runner settles after cancellation");
     // The process was killed, so it never wrote its marker.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert!(!marker.exists(), "the stopped process did not finish");
     assert_eq!(jobs.get("job-1").expect("job").state, JobState::Cancelled);
+    assert!(*terminal.borrow(), "the process runner settled");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn stopping_a_session_job_returns_only_after_its_runner_settles() {
+    let dir = std::env::temp_dir().join(format!("norte-session-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let marker = dir.join("survived");
+    let service = service();
+    let session_key = service.start_session(None).await.expect("session");
+    let session_id = service.require_record(&session_key).expect("session").0;
+    let background = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&service.jobs),
+        Arc::clone(&service.steering),
+        Arc::clone(&service.detaches),
+        Arc::new(std::sync::RwLock::new(Some(Arc::clone(&service)))),
+    );
+    let request: ShellRequest = serde_json::from_value(serde_json::json!({
+        "script": format!("sleep 3; touch {}", marker.display()),
+        "detach": true
+    }))
+    .expect("request");
+    let context = ToolContext::new()
+        .with_session(session_id)
+        .with_call(CallId::new());
+    background
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("detached call");
+
+    let started = tokio::time::Instant::now();
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(5),
+        service.stop_session_job_with_grace(&session_key, "job-1", Some(Duration::from_millis(50))),
+    )
+    .await;
+    let result = stopped
+        .unwrap_or_else(|_| {
+            panic!(
+                "job runner did not settle: {:?}",
+                service.session_job(&session_key, "job-1")
+            )
+        })
+        .expect("owned job reaches a terminal state");
+    assert_eq!(result.state, JobState::Cancelled);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the requested grace overrides the default two seconds: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !marker.exists(),
+        "the command was stopped before its final side effect"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -6489,16 +7389,107 @@ async fn a_call_detached_from_outside_leaves_a_job_the_model_can_read() {
         text.contains("job-1"),
         "the answer names the job the process became: {text}"
     );
+    assert!(
+        text.contains("before"),
+        "the detached answer retains output produced before Ctrl-G: {text}"
+    );
     let job = jobs.get("job-1").expect("a job was registered");
     assert_eq!(job.state, JobState::Running, "the process is still running");
 
     // And it can be read and stopped, which is what a job is for.
+    let mut terminal = jobs
+        .terminal_for_session(session, "job-1")
+        .expect("the session owns the running job");
     assert!(jobs.cancel("job-1"), "the job can be stopped");
     assert_eq!(jobs.get("job-1").expect("job").state, JobState::Cancelled);
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !*terminal.borrow() {
+            terminal.changed().await.expect("runner remains registered");
+        }
+    })
+    .await
+    .expect("the detached runner reports its terminal result");
+    let job = jobs.get("job-1").expect("job");
+    assert_eq!(job.state, JobState::Cancelled);
+    assert!(
+        job.exit_code.is_none(),
+        "a cancelled process exit is not its natural exit status"
+    );
     assert!(
         !later.exists(),
         "the stopped process never reached its marker"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_ctrl_g_detached_job_reports_its_final_exit_code() {
+    let dir = std::env::temp_dir().join(format!("norte-detach-status-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let marker = dir.join("started");
+    let jobs = Arc::new(JobRegistry::default());
+    let steering = Arc::new(Steering::default());
+    let detaches = Arc::new(DetachRegistry::default());
+    let declaration = ShellCalls::declaration(
+        ShellTool::new().into_declaration(),
+        Arc::clone(&jobs),
+        Arc::clone(&steering),
+        Arc::clone(&detaches),
+        Arc::new(std::sync::RwLock::new(None)),
+    );
+
+    let session = SessionId::new();
+    let watched = marker.clone();
+    let registry = Arc::clone(&detaches);
+    tokio::spawn(async move {
+        for _ in 0..200 {
+            if watched.exists() {
+                assert!(
+                    registry.detach(session),
+                    "there is a foreground call to detach"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("shell command did not start");
+    });
+
+    let script = format!("echo before; touch {}; sleep 0.2; exit 7", marker.display());
+    let request: ShellRequest =
+        serde_json::from_value(serde_json::json!({ "script": script })).expect("request");
+    let context = ToolContext::new()
+        .with_session(session)
+        .with_call(CallId::new());
+    let answer = declaration
+        .executor
+        .call_with_context(&context, request)
+        .await
+        .expect("Ctrl-G returns a job answer");
+    let answer_text: String = answer
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect();
+    assert!(answer_text.contains("before"));
+    assert!(answer_text.contains("job-1"));
+
+    let mut terminal = jobs
+        .terminal_for_session(session, "job-1")
+        .expect("the session owns the detached job");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !*terminal.borrow() {
+            terminal.changed().await.expect("runner remains registered");
+        }
+    })
+    .await
+    .expect("the job reports the runner's terminal result");
+    let job = jobs.get("job-1").expect("job");
+    assert_eq!(job.state, JobState::Finished);
+    assert_eq!(job.exit_code, Some(7));
+    assert!(
+        steering.is_pending(session, "job:job-1"),
+        "the completed result is delivered to the session"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -6546,6 +7537,7 @@ async fn a_process_that_ends_after_the_detach_reports_once() {
         jobs.get("job-1").is_some_and(|job| job.state.is_done()),
         "the job ended when its streams closed"
     );
+    assert_eq!(jobs.get("job-1").expect("job").exit_code, Some(0));
     let steered = steering.take(session);
     assert_eq!(steered.len(), 1, "one report per job: {steered:?}");
     assert!(
@@ -6623,6 +7615,7 @@ async fn a_process_that_ends_before_the_detached_call_returns_reports_once() {
         jobs.get("job-1").is_some_and(|job| job.state.is_done()),
         "the job ended with its process"
     );
+    assert_eq!(jobs.get("job-1").expect("job").exit_code, Some(0));
     let steered = steering.take(session);
     assert_eq!(
         steered.len(),
@@ -6642,9 +7635,10 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
     let first = dir.join("first");
     let later = dir.join("later");
     let detaches = Arc::new(DetachRegistry::default());
+    let jobs = Arc::new(JobRegistry::default());
     let declaration = ShellCalls::declaration(
         ShellTool::new().into_declaration(),
-        Arc::new(JobRegistry::default()),
+        Arc::clone(&jobs),
         Arc::new(Steering::default()),
         Arc::clone(&detaches),
         Arc::new(std::sync::RwLock::new(None)),
@@ -6687,9 +7681,13 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
         "the call stopped waiting instead of running to the end: {:?}",
         started.elapsed()
     );
-    let structured = output.structured.expect("a shell result is structured");
-    assert_eq!(structured["code"], "detached");
-    assert_eq!(structured["detached"], true);
+    let detached_text: String = output
+        .parts
+        .iter()
+        .filter_map(norte::Part::as_text)
+        .collect();
+    assert!(detached_text.contains("before"));
+    assert!(detached_text.contains("job-1"));
 
     // The process outlived the call: it writes its second marker a second
     // after the call returned, which is exactly what cancelling would prevent.
@@ -6700,6 +7698,11 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert!(later.exists(), "the process kept running after the detach");
+    let job = jobs
+        .get("job-1")
+        .expect("the detached job remains registered");
+    assert_eq!(job.state, JobState::Finished);
+    assert_eq!(job.exit_code, Some(0));
 
     // A later detach finds nothing: the token was released with the call.
     assert!(!detaches.detach(session), "no call is waiting now");
@@ -6710,9 +7713,9 @@ async fn detaching_stops_waiting_and_leaves_the_process_running() {
 fn a_finished_job_keeps_the_time_its_end_recorded() {
     // It reported the time since it *started*, so a job that took a second read
     // as two, then three: the figure grew for as long as anyone looked at it.
-    let (registry, _, call, id) = registry_with_job();
+    let (registry, _, _, id) = registry_with_job();
     std::thread::sleep(std::time::Duration::from_millis(20));
-    registry.close(call, true);
+    registry.settle(&id, Some(0), false);
     let at_end = registry.get(&id).expect("job").elapsed_ms;
 
     std::thread::sleep(std::time::Duration::from_millis(30));
@@ -6782,6 +7785,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -6798,6 +7802,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -7091,6 +8096,7 @@ async fn a_resumed_session_sends_the_effort_it_was_left_on() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -7221,6 +8227,7 @@ async fn a_session_whose_tools_were_taken_away_still_runs_its_turns() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -7267,6 +8274,7 @@ async fn the_request_summary_follows_the_answer_it_describes() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -7294,9 +8302,26 @@ async fn the_request_summary_follows_the_answer_it_describes() {
     );
 }
 
+#[test]
+fn child_session_result_carries_validated_structured_output() {
+    let outcome = super::subagents::SubagentOutcome {
+        text: r#"{"answer":42}"#.to_owned(),
+        is_error: false,
+        child: None,
+        output_schema_valid: Some(true),
+    };
+
+    let result = super::subagents::child_result(&outcome);
+
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["output"], serde_json::json!({"answer": 42}));
+    assert_eq!(result["output_schema_valid"], true);
+    assert_eq!(result["summary"], r#"{"answer":42}"#);
+}
+
 #[tokio::test]
 async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
-    // The basic shape: the parent model calls `subagent` once, the child
+    // The basic shape: the parent model calls `spawn_agent` once, the child
     // runs one turn and answers, and the parent receives the child's text.
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
@@ -7305,19 +8330,19 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
     let call = CallId::new();
     let model = Arc::new(
         ScriptedModel::new(reference)
-            // Turn 1 (parent): call subagent.
+            // Turn 1 (parent): call spawn_agent.
             .turn(vec![
                 norte::StreamEvent::ToolCallStart {
                     index: 0,
                     call_id: call,
-                    name: "subagent".to_owned(),
+                    name: "spawn_agent".to_owned(),
                 },
                 norte::StreamEvent::ToolCallDelta {
                     index: 0,
                     call_id: call,
                     name: None,
                     arguments: serde_json::json!({
-                        "prompt": "What is 2 + 2?"
+                        "task": "What is 2 + 2?"
                     })
                     .to_string(),
                 },
@@ -7353,6 +8378,7 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            metadata: None,
             replay: false,
         },
     )
@@ -7374,46 +8400,20 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
 
 #[tokio::test]
 async fn a_detached_subagent_is_a_job_that_reports_and_can_be_stopped() {
-    // With `detach: true` the call becomes a job: it returns the job id at
-    // once, the run continues, and `manage_jobs` can read and stop it.
+    // With `detach: true` the tool returns while the child is still running,
+    // then the job retains the child's result.
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
         ModelId::new("scripted").expect("model"),
     );
-    let call = CallId::new();
-    let model = Arc::new(
-        ScriptedModel::new(reference)
-            .turn(vec![
-                norte::StreamEvent::ToolCallStart {
-                    index: 0,
-                    call_id: call,
-                    name: "subagent".to_owned(),
-                },
-                norte::StreamEvent::ToolCallDelta {
-                    index: 0,
-                    call_id: call,
-                    name: None,
-                    arguments: serde_json::json!({
-                        "prompt": "slow task",
-                        "detach": true
-                    })
-                    .to_string(),
-                },
-                norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
-            ])
-            // The child turn.
-            .turn_text("child done")
-            // The parent's next turn.
-            .turn_text("parent finished"),
-    );
-    let config = subagent_config();
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("unused"));
     let service = Arc::new(
         Service::new(
-            config,
+            subagent_config(),
             catalog(),
             Some(spec("scripted")),
             Arc::new(ScriptedFactory {
-                model: Arc::clone(&model) as Arc<dyn Model>,
+                model: model as Arc<dyn Model>,
             }),
             Arc::new(InMemoryStore::new()),
             Arc::new(InMemoryBlobStore::new()),
@@ -7421,40 +8421,63 @@ async fn a_detached_subagent_is_a_job_that_reports_and_can_be_stopped() {
         )
         .expect("service"),
     );
-    service.install_subagent_runner();
+    let parent = SessionId::new();
+    let call_id = CallId::new();
+    let tool = super::subagents::SubagentTool::new(
+        Arc::new(DelayedSubagentRunner),
+        Arc::clone(&service.jobs),
+        Arc::clone(&service.steering),
+        Arc::clone(&service.detaches),
+        Arc::new(std::sync::RwLock::new(None)),
+        3,
+    );
+    let context = ToolContext::new().with_session(parent).with_call(call_id);
+    let _result = tool
+        .call_with_context(
+            &context,
+            super::subagents::SubagentArgs {
+                prompt: "slow task".to_owned(),
+                title: None,
+                detach: true,
+                output_schema: None,
+                lifetime: "turn".to_owned(),
+                agent_id: None,
+                context_mode: None,
+            },
+        )
+        .await
+        .expect("detached spawn result");
 
-    let events = drain(
-        &service,
-        ClientRequestKind::SendMessage {
-            session: None,
-            text: "delegate in background".to_owned(),
-            attachments: Vec::new(),
-            budget: None,
-            reasoning: None,
-            replay: false,
-        },
-    )
-    .await;
-    let key = events
-        .iter()
-        .find_map(|event| event.session.clone())
-        .expect("session");
-    let nid = service
-        .lock_sessions()
-        .get(&key)
-        .map(|record| record.id)
-        .expect("record");
-
-    // The job is in the registry with the subagent label, and it finished
-    // with the child's text.
-    let jobs = service.jobs.list(Some(nid));
+    let jobs = service.jobs.list(Some(parent));
     assert_eq!(jobs.len(), 1, "one subagent job: {jobs:?}");
-    assert_eq!(jobs[0].state, JobState::Finished, "it finished: {jobs:?}");
+    assert_eq!(
+        jobs[0].state,
+        JobState::Running,
+        "the tool returned promptly"
+    );
     assert!(
         jobs[0].label.contains("subagent"),
         "the label names it a subagent: {:?}",
         jobs[0]
     );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if service
+                .jobs
+                .list(Some(parent))
+                .first()
+                .is_some_and(|job| job.state == JobState::Finished)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("detached child eventually finishes");
+    let jobs = service.jobs.list(Some(parent));
+    assert_eq!(jobs.len(), 1, "one subagent job: {jobs:?}");
+    assert_eq!(jobs[0].state, JobState::Finished, "it finished: {jobs:?}");
     assert!(
         jobs[0].output.contains("child done"),
         "the job output holds the child's answer: {:?}",
@@ -7516,10 +8539,7 @@ async fn too_many_subagents_is_an_error_the_model_reads() {
     );
 }
 
-#[tokio::test]
-async fn a_child_session_never_sees_the_subagent_tool() {
-    // The child's declaration list is frozen without `subagent`: a session
-    // created for a subagent cannot spawn one of its own, so depth is one.
+async fn service_with_child_session() -> (Arc<Service>, SessionKey, SessionKey) {
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
         ModelId::new("scripted").expect("model"),
@@ -7545,14 +8565,33 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     service.install_subagent_runner();
 
     let parent = service.create_session(None).await.expect("parent session");
-    let (child_spec, child_disabled, child_budget, _) = service
-        .subagent_settings(&parent)
+    let (child_agent_id, child_spec, child_disabled, child_budget, child_system_prompt) = service
+        .subagent_settings(&parent, None)
         .await
         .expect("child settings");
     let child = service
-        .create_session_child(child_spec, child_disabled, child_budget)
+        .create_session_child(
+            super::sessions::ChildSessionMetadata {
+                parent: parent.clone(),
+                tool_call_id: "call-1".to_owned(),
+                task_summary: "test task".to_owned(),
+                lifetime: "turn".to_owned(),
+                agent_profile: child_agent_id,
+                system_prompt: child_system_prompt,
+                cancel: Arc::new(norte::Cancellation::new()),
+            },
+            child_spec,
+            child_disabled,
+            child_budget,
+        )
         .await
         .expect("child session");
+    (service, parent, child)
+}
+
+#[tokio::test]
+async fn a_child_session_never_sees_the_subagent_tool() {
+    let (service, parent, child) = service_with_child_session().await;
     let parent_budget = service.budget_book(&parent).await.expect("parent budget");
     let child_budget = service.budget_book(&child).await.expect("child budget");
     assert!(
@@ -7577,8 +8616,12 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     let parent_tools = service.tools(Some(&parent)).expect("parent tools").specs();
     let parent_names: Vec<&str> = parent_tools.iter().map(|tool| tool.name.as_str()).collect();
     assert!(
-        parent_names.contains(&"subagent"),
-        "the parent has subagent: {parent_names:?}"
+        parent_names.contains(&"spawn_agent"),
+        "the parent has spawn_agent: {parent_names:?}"
+    );
+    assert!(
+        !parent_names.contains(&"subagent"),
+        "the internal subagent tool is gone: {parent_names:?}"
     );
 
     let child_tools = service.tools(Some(&child)).expect("child tools").specs();
@@ -7586,6 +8629,10 @@ async fn a_child_session_never_sees_the_subagent_tool() {
     assert!(
         !child_names.contains(&"subagent"),
         "the child never has subagent: {child_names:?}"
+    );
+    assert!(
+        child_names.contains(&"spawn_agent"),
+        "the child keeps spawn_agent, which enforces the depth: {child_names:?}"
     );
     assert!(
         !child_names.contains(&"ask_user"),
@@ -7607,4 +8654,48 @@ async fn a_child_session_never_sees_the_subagent_tool() {
         !child_names.contains(&"todo"),
         "deny withholds todo: {child_names:?}"
     );
+}
+
+#[tokio::test]
+async fn suspended_child_message_queue_is_bounded() {
+    let (service, _, child) = service_with_child_session().await;
+    service
+        .set_delegator_suspended(&child, true)
+        .await
+        .expect("suspend child");
+    for index in 0..20 {
+        service
+            .hold_delegator_message(&child, format!("held message {index}"))
+            .await
+            .expect("message is within the queue limit");
+    }
+    assert!(matches!(
+        service
+            .hold_delegator_message(&child, "one too many".to_owned())
+            .await,
+        Err(ServiceError::Delegation(message)) if message.contains("at most 20")
+    ));
+}
+
+#[tokio::test]
+async fn child_registry_restores_persisted_delegation_state() {
+    let (service, parent, child) = service_with_child_session().await;
+    service
+        .set_delegator_suspended(&child, true)
+        .await
+        .expect("suspend child");
+    service
+        .hold_delegator_message(&child, "held".to_owned())
+        .await
+        .expect("hold message");
+
+    service.restore_child_registry();
+
+    let restored = service
+        .children
+        .get(&parent, &child)
+        .expect("restored child");
+    assert!(restored.suspended);
+    assert_eq!(restored.held, ["held"]);
+    assert_eq!(restored.tool_call_id, "call-1");
 }

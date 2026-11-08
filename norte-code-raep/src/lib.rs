@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bundle;
 mod commands;
 mod host;
 mod http;
@@ -16,8 +17,9 @@ mod plugin_manager;
 
 pub use commands::AgentCommand;
 pub use host::{
-    ArtifactRef, ArtifactStore, BlobArtifactStore, FileReplayStore, HostConfig, HostError,
-    NorteCodeRaepHost, ReplayStore, SqliteReplayStore,
+    ArtifactRef, ArtifactStore, BlobArtifactStore, FilePinStore, FileReplayStore, HostConfig,
+    HostError, IdempotencyRecord, MemoryUploadIndex, NorteCodeRaepHost, PinStore, ReplayStore,
+    SqliteReplayStore, SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
 };
 pub use http::router;
 

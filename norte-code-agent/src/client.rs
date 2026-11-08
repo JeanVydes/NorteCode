@@ -152,6 +152,7 @@ impl AgentClient for InProcessClient {
                     attachments: attachments.to_vec(),
                     budget: None,
                     reasoning: None,
+                    metadata: None,
                     replay: false,
                 },
             })
@@ -273,6 +274,9 @@ impl AgentClient for InProcessClient {
                 kind: ClientRequestKind::ForkSession {
                     session: SessionKey::new(session),
                     title: None,
+                    from_turn_id: None,
+                    inclusive: None,
+                    carry_usage: None,
                 },
             })
             .await
@@ -307,5 +311,21 @@ impl AgentClient for InProcessClient {
             })
             .await
             .map_err(|error| ClientError::new(error.to_string()))
+    }
+
+    async fn export_session(&self, _session: &str) -> Result<EventStream, ClientError> {
+        Err(ClientError::new(
+            "export is only available through the RAEP server",
+        ))
+    }
+
+    async fn import_session(
+        &self,
+        _session: &str,
+        _bundle: serde_json::Value,
+    ) -> Result<EventStream, ClientError> {
+        Err(ClientError::new(
+            "import is only available through the RAEP server",
+        ))
     }
 }

@@ -167,6 +167,12 @@ pub(crate) fn built() -> Registry {
         "the request ledger: this session, and every provider",
     ));
     registry.register(
+        CommandSpec::new("/export", "export this session to a file").arg(ArgSpec::optional("path")),
+    );
+    registry.register(
+        CommandSpec::new("/import", "import a session from a file").arg(ArgSpec::required("path")),
+    );
+    registry.register(
         CommandSpec::new("/menu", "go back to choosing a provider and a model").aliased(&["/back"]),
     );
     registry.register(CommandSpec::new(

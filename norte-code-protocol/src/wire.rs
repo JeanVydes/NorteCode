@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::wildcard_imports)]
 
+use norte::MediaPart;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_commands::QueueMode;
@@ -52,6 +53,15 @@ pub enum ClientRequestKind {
         session: SessionKey,
         /// A label for the copy.
         title: Option<String>,
+        /// The terminal turn to fork from. Defaults to the latest terminal turn.
+        #[serde(default)]
+        from_turn_id: Option<String>,
+        /// Whether the named turn is included. Defaults to true.
+        #[serde(default)]
+        inclusive: Option<bool>,
+        /// Whether usage counters are carried to the fork. Defaults to true.
+        #[serde(default)]
+        carry_usage: Option<bool>,
     },
     /// Rename a session.
     RenameSession {
@@ -84,6 +94,10 @@ pub enum ClientRequestKind {
         budget: Option<Budget>,
         /// A reasoning override for this message only.
         reasoning: Option<Reasoning>,
+        /// Caller metadata (RFC 12.4): an opaque object of at most 4 KiB,
+        /// stored with the turn and never shown to the model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
         /// Whether the client is attaching to a session that already has a
         /// history, and wants it replayed before the answer.
         ///
@@ -330,6 +344,12 @@ pub enum ServerEventKind {
     SessionForked {
         /// The session the copy was made from.
         from: SessionKey,
+        /// The terminal turn copied into the fork.
+        #[serde(default)]
+        from_turn_id: Option<String>,
+        /// The title of the fork.
+        #[serde(default)]
+        title: Option<String>,
     },
     /// A turn started.
     TurnStarted {
@@ -342,6 +362,15 @@ pub enum ServerEventKind {
         turn: u64,
         /// The delta.
         delta: Delta,
+    },
+    /// A complete generated media part, ready for durable host storage.
+    MediaPartCompleted {
+        /// The turn.
+        turn: u64,
+        /// The part's index in the assistant message.
+        index: u32,
+        /// The generated media and its metadata.
+        media: MediaPart,
     },
     /// A tool call started.
     ToolStarted {
@@ -615,6 +644,45 @@ pub enum ServerEventKind {
         /// How many jobs the request stopped.
         stopped: usize,
     },
+    /// A detached tool call became a background job.
+    JobStarted {
+        /// The job's stable id.
+        job_id: String,
+        /// The tool call that started it.
+        tool_call_id: String,
+        /// The command or task description.
+        command: String,
+        /// Unix timestamp in milliseconds when the job started.
+        #[serde(default)]
+        started_at: u64,
+        /// Effective runtime and output limits.
+        #[serde(default)]
+        limits: JobLimits,
+    },
+    /// A detached job wrote a chunk of output.
+    JobProgressDelta {
+        /// The job the output belongs to.
+        job_id: String,
+        /// Which output stream produced the chunk.
+        stream: OutputStream,
+        /// The text in this chunk.
+        delta: String,
+        /// Byte offset in the job's combined output.
+        index: u64,
+    },
+    /// A background job reached a terminal state.
+    JobFinished {
+        /// Its final summary.
+        job: JobInfo,
+        /// Whether this result started a new turn.
+        triggered_new_turn: bool,
+        /// The turn started for this result, when one was started.
+        #[serde(default)]
+        new_turn_id: Option<u64>,
+        /// The active turn that received this result, when one was injected.
+        #[serde(default)]
+        injected_into_turn_id: Option<u64>,
+    },
     /// The engine applied a steering message to the request already in flight.
     SteerApplied {
         /// The names of the messages that reached the request.
@@ -735,6 +803,72 @@ pub enum ServerEventKind {
         code: ErrorCode,
         /// A message written for the person reading it.
         message: String,
+    },
+    /// A session was exported (RFC 11.1).
+    SessionExportReady {
+        /// The export id.
+        export_id: String,
+        /// The bundle as JSON (this host does not build ZIP archives yet).
+        bundle: serde_json::Value,
+    },
+    /// A session was imported (RFC 11.2).
+    ImportResult {
+        /// The new session id.
+        session_id: String,
+        /// Old id → new id.
+        id_map: serde_json::Value,
+    },
+    /// A child session was started (RFC 8.2.10).
+    ChildSessionStarted {
+        /// The child session id.
+        child_session_id: String,
+        /// The child agent id.
+        agent_id: String,
+        /// The tool call that spawned it.
+        tool_call_id: String,
+        /// The delegation lifetime.
+        lifetime: String,
+        /// Task summary (up to 512 chars).
+        task_summary: String,
+    },
+    /// A child session changed state (RFC 8.2.10).
+    ChildSessionUpdated {
+        /// The child session id.
+        child_session_id: String,
+        /// The new child state.
+        state: String,
+        /// Why it changed.
+        reason: String,
+        /// The child's final result, when it reached a terminal state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        /// Whether the child's output validated against `output_schema`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_schema_valid: Option<bool>,
+    },
+    /// Delegator state changed (RFC 8.2.11).
+    DelegatorStateChanged {
+        /// The child session id.
+        child_session_id: String,
+        /// Whether the delegator is suspended.
+        delegator_suspended: bool,
+        /// Who changed it: `client`, `server` or the parent agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+        /// Messages held while the delegator is suspended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queued_messages: Option<usize>,
+    },
+    /// A child session was asked a question and is waiting for its answer
+    /// (RFC 8.2.9). The question is the same one the child's `ask_user`
+    /// tool asked; a human answers it on the child's session.
+    ChildAwaitingInput {
+        /// The child session id.
+        child_session_id: String,
+        /// The question id the child asked.
+        question: String,
+        /// The prompt the child asked.
+        prompt: String,
     },
 }
 

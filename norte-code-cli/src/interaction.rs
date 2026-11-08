@@ -89,6 +89,10 @@ pub(crate) enum ChatCommand {
     Mcp { action: McpAction },
     /// The telemetry panel: this session's ledger, and every provider's.
     Telemetry,
+    /// Export this session to a file.
+    Export { path: Option<String> },
+    /// Import a session from a file.
+    Import { path: String },
     /// Leave the chat.
     Exit,
     /// Change an approval rule.
@@ -250,6 +254,12 @@ pub(crate) fn parse_chat_command(text: &str) -> Option<Result<ChatCommand, Strin
         },
         "/debug" => ChatCommand::Debug,
         "/telemetry" => ChatCommand::Telemetry,
+        "/export" => ChatCommand::Export {
+            path: invocation.arg("path").map(str::to_owned),
+        },
+        "/import" => ChatCommand::Import {
+            path: invocation.arg_or_empty("path").to_owned(),
+        },
         "/tools" => ChatCommand::Tools,
         "/exit" => ChatCommand::Exit,
         "/mcp" => match parse_mcp(&invocation) {
@@ -775,6 +785,12 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::Telemetry => {
                     report_telemetry(service, session.as_ref(), renderer).await;
                 }
+                ChatCommand::Export { path } => {
+                    handle_export(client, session.as_ref(), path, renderer).await;
+                }
+                ChatCommand::Import { path } => {
+                    handle_import(client, session.as_ref(), path, renderer).await;
+                }
                 ChatCommand::Plans => show_plans(session.as_ref(), renderer).await,
                 // A command from a plugin: the plugin answers with the lines
                 // of a panel, and the frame draws it like any other. The client
@@ -1180,10 +1196,13 @@ pub(crate) async fn interactive_loop(
                             blob: None,
                             mime: attachment.mime.clone(),
                             name: attachment.name.clone(),
+                            duration_ms: None,
+                            transcript: None,
                         })
                         .collect(),
                     budget: message_budget.clone(),
                     reasoning: reasoning.clone(),
+                    metadata: None,
                     // The transcript is already on screen; replaying it would
                     // print the conversation twice.
                     replay: false,
@@ -1603,6 +1622,74 @@ fn plan_file_metadata(contents: &str, key: &str) -> Option<String> {
     }
 }
 
+/// `/export [path]`: export the current session through `SessionExport`
+/// and write the bundle JSON to `path` (or `./session-<id>.export.json`).
+async fn handle_export(
+    client: &dyn AgentClient,
+    current: Option<&SessionKey>,
+    path: Option<String>,
+    renderer: &mut Renderer,
+) {
+    let Some(session) = current.cloned() else {
+        renderer.notice("no session to export");
+        return;
+    };
+    let events = match client.export_session(session.as_str()).await {
+        Ok(events) => events,
+        Err(error) => {
+            renderer.failure(format!("export failed: {error}"));
+            return;
+        }
+    };
+    let mut bundle = serde_json::Value::Null;
+    {
+        use futures_util::StreamExt;
+        let mut stream = events;
+        while let Some(event) = stream.next().await {
+            if let norte_code_protocol::ServerEventKind::SessionExportReady { bundle: b, .. } =
+                &event.kind
+            {
+                bundle = b.clone();
+            }
+        }
+    }
+    let path = path.unwrap_or_else(|| format!("session-{}.export.json", session.as_str()));
+    match std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&bundle).unwrap_or_default(),
+    ) {
+        Ok(()) => renderer.notice(format!("exported to {path}")),
+        Err(error) => renderer.failure(format!("could not write {path}: {error}")),
+    }
+}
+
+/// `/import <path>`: read a bundle JSON from `path` and import it, which
+/// creates a new session with the bundle's title and pins.
+async fn handle_import(
+    client: &dyn AgentClient,
+    current: Option<&SessionKey>,
+    path: String,
+    renderer: &mut Renderer,
+) {
+    let bundle = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::Value::Null)
+        }
+        Err(error) => {
+            renderer.failure(format!("could not read {path}: {error}"));
+            return;
+        }
+    };
+    let Some(session) = current.map(|key| key.as_str().to_owned()) else {
+        renderer.notice("no session to import into");
+        return;
+    };
+    match client.import_session(&session, bundle).await {
+        Ok(_) => renderer.notice(format!("imported from {path}")),
+        Err(error) => renderer.failure(format!("import failed: {error}")),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_live_command(
     service: &RemoteState,
@@ -1626,6 +1713,12 @@ async fn handle_live_command(
         ChatCommand::Tools => report_tools_now(service, current, renderer, style).await,
         ChatCommand::Telemetry => {
             report_telemetry(service, current, renderer).await;
+        }
+        ChatCommand::Export { path } => {
+            handle_export(client, current, path, renderer).await;
+        }
+        ChatCommand::Import { path } => {
+            handle_import(client, current, path, renderer).await;
         }
         ChatCommand::Plans => show_plans(current, renderer).await,
         // A command from a plugin: the plugin answers with the lines
@@ -3679,10 +3772,13 @@ pub(crate) async fn drive_turns(
                         blob: None,
                         mime: attachment.mime.clone(),
                         name: attachment.name.clone(),
+                        duration_ms: None,
+                        transcript: None,
                     })
                     .collect(),
                 budget: None,
                 reasoning: None,
+                metadata: None,
                 replay: false,
             },
         };
@@ -3743,6 +3839,7 @@ pub(crate) async fn headless_messages(
                     attachments: Vec::new(),
                     budget: None,
                     reasoning: None,
+                    metadata: None,
                     replay: false,
                 },
             })

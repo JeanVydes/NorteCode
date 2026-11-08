@@ -146,6 +146,7 @@ async fn server_process_serves_health_info_and_telemetry() {
 
     let events = client
         .get(format!("{base}/raep/v1/sessions/{session}/events"))
+        .header(reqwest::header::ACCEPT, "text/event-stream")
         .send()
         .await
         .expect("open SSE");

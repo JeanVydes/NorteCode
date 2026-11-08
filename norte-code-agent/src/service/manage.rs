@@ -11,7 +11,7 @@
 //! model guessing at a control surface it cannot see.
 
 use async_trait::async_trait;
-use norte::{FnExecutor, Result, ToolContext, ToolOutput};
+use norte::{FnExecutor, Result, SessionId, ToolContext, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -71,8 +71,8 @@ impl ManageJobs {
         )
     }
 
-    fn check(&self, id: &str) -> ToolOutput {
-        match self.jobs.get(id) {
+    fn check(&self, session: SessionId, id: &str) -> ToolOutput {
+        match self.jobs.get_for_session(session, id) {
             Some(job) => ToolOutput::text(describe(&job)),
             None => ToolOutput::error(format!(
                 "no job `{id}` in this session; use `action: list` to see the ones there are"
@@ -80,8 +80,8 @@ impl ManageJobs {
         }
     }
 
-    fn stop(&self, id: &str) -> ToolOutput {
-        if self.jobs.cancel(id) {
+    fn stop(&self, session: SessionId, id: &str) -> ToolOutput {
+        if self.jobs.cancel_in_session(session, id) {
             ToolOutput::text(format!(
                 "Job `{id}` was stopped. Its process is being killed, and whatever it wrote first \
                  is in `action: check`."
@@ -118,11 +118,11 @@ impl FnExecutor<ManageJobsArgs, ToolOutput> for ManageJobs {
                 ToolOutput::error("manage_jobs needs a client attached: a job belongs to a session")
             }
             JobAction::Check => match args.id.as_deref() {
-                Some(id) => self.check(id),
+                Some(_) => ToolOutput::error("manage_jobs needs a session"),
                 None => ToolOutput::error("`check` needs an `id`"),
             },
             JobAction::Stop => match args.id.as_deref() {
-                Some(id) => self.stop(id),
+                Some(_) => ToolOutput::error("manage_jobs needs a session"),
                 None => ToolOutput::error("`stop` needs an `id`"),
             },
         })
@@ -133,14 +133,19 @@ impl FnExecutor<ManageJobsArgs, ToolOutput> for ManageJobs {
         context: &ToolContext,
         args: ManageJobsArgs,
     ) -> Result<ToolOutput> {
+        let Some(session) = context.session else {
+            return Ok(ToolOutput::error(
+                "manage_jobs needs a session: jobs belong to a session",
+            ));
+        };
         Ok(match args.action {
             JobAction::List => self.list(context),
             JobAction::Check => match args.id.as_deref() {
-                Some(id) => self.check(id),
+                Some(id) => self.check(session, id),
                 None => ToolOutput::error("`check` needs an `id`"),
             },
             JobAction::Stop => match args.id.as_deref() {
-                Some(id) => self.stop(id),
+                Some(id) => self.stop(session, id),
                 None => ToolOutput::error("`stop` needs an `id`"),
             },
         })
