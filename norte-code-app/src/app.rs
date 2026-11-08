@@ -28,6 +28,7 @@ pub fn App() -> Element {
         selected_session: use_signal(|| None),
         chat_items: use_signal(Vec::new),
         chat_state: use_signal(|| ChatState::Idle),
+        active_turn_id: use_signal(|| None),
         jobs: use_signal(Vec::new),
         telemetry: use_signal(|| None),
         page_error: use_signal(|| None),

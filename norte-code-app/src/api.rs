@@ -1,16 +1,13 @@
 use crate::domain::{Capability, ConversationItem, HistoryKind, HistoryRole, SessionStatus};
+use raep_types::TurnId;
 use raep_types::{ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameType};
 use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
 const CLIENT_ID: &str = "norte-code-dioxus";
-const COMMAND_EXTENSION: &str = "norte_code.command";
-static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Clone)]
 pub struct ApiClient {
     http: reqwest::Client,
@@ -431,28 +428,19 @@ impl ApiClient {
         }
     }
 
-    pub async fn send_text(&self, session_id: &str, text: String) -> Result<(), ApiError> {
-        let request = crate::wire::AppClientRequest {
-            request_id: REQUEST_ID.fetch_add(1, Ordering::Relaxed),
-            kind: crate::wire::AppRequestKind::SendMessage {
-                session: session_id.to_owned(),
-                text,
-                attachments: Vec::new(),
-                budget: None,
-                reasoning: None,
-                metadata: None,
-                replay: false,
-            },
-        };
+    pub async fn send_text(&self, session_id: &str, text: &str) -> Result<TurnId, ApiError> {
+        let turn_id = TurnId::generate();
+        let request = crate::wire::UserInputRequest { prompt: text };
         let response = self
-            .post_frame(
+            .post_turn_frame(
                 session_id,
-                FrameType::Extension(COMMAND_EXTENSION.to_owned()),
+                FrameType::Standard(StandardFrameType::UserInput),
+                &turn_id,
                 &request,
             )
             .await?;
         if response.accepted {
-            Ok(())
+            Ok(turn_id)
         } else {
             Err(ApiError::InvalidResponse(response.error.map_or_else(
                 || "Message was rejected.".to_owned(),
@@ -526,11 +514,12 @@ impl ApiClient {
         Ok(result.jobs)
     }
 
-    pub async fn cancel_turn(&self, session_id: &str) -> Result<(), ApiError> {
+    pub async fn cancel_turn(&self, session_id: &str, turn_id: &TurnId) -> Result<(), ApiError> {
         let response = self
-            .post_frame(
+            .post_turn_frame(
                 session_id,
                 FrameType::Standard(StandardFrameType::CancelTurn),
+                turn_id,
                 &EmptyRequest {},
             )
             .await?;
@@ -608,6 +597,23 @@ impl ApiClient {
             .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
         let mut frame = Envelope::new(kind, payload, now_millis());
         frame.session_id = session_id.to_owned();
+        self.send_json(self.auth(self.http.post(url).json(&frame)))
+            .await
+    }
+
+    async fn post_turn_frame<P: Serialize>(
+        &self,
+        session_id: &str,
+        kind: FrameType,
+        turn_id: &TurnId,
+        payload: &P,
+    ) -> Result<CommandResponse, ApiError> {
+        let url = self.session_url(session_id, "commands")?;
+        let payload = serde_json::to_value(payload)
+            .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
+        let mut frame = Envelope::new(kind, payload, now_millis());
+        frame.session_id = session_id.to_owned();
+        frame.turn_id = Some(turn_id.clone());
         self.send_json(self.auth(self.http.post(url).json(&frame)))
             .await
     }
