@@ -159,6 +159,7 @@ fn submit_message(context: &AppContext, prompt: String) {
     let context = *context;
     spawn(async move {
         context.set_page_error(None);
+        context.set_active_turn_id(None);
         let Some((api, session_id, agent_id)) = session_api(&context) else {
             return;
         };
@@ -168,14 +169,19 @@ fn submit_message(context: &AppContext, prompt: String) {
             api.attach(&session_id, &agent_id).await?;
             attached = true;
             context.set_chat_state(ChatState::Sending);
-            api.send_text(&session_id, prompt.clone()).await?;
+            let turn_id = api.send_text(&session_id, &prompt).await?;
+            context.set_active_turn_id(Some(turn_id.clone()));
             context.set_chat_state(ChatState::WaitingForReply);
             for _ in 0..REPLY_POLL_ATTEMPTS {
+                if context.active_turn_id.read().as_ref() != Some(&turn_id) {
+                    return Ok(());
+                }
                 delay(REPLY_POLL_INTERVAL).await;
                 let items = api.history(&session_id).await?;
                 let reply_received = has_reply_after_prompt(&items, &prompt);
                 context.set_chat_items(items);
                 if reply_received {
+                    context.set_active_turn_id(None);
                     return Ok(());
                 }
             }
@@ -190,9 +196,15 @@ fn submit_message(context: &AppContext, prompt: String) {
             Ok(())
         };
         match (result, detach_result) {
-            (Ok(()), Ok(())) => context.set_chat_state(ChatState::Idle),
+            (Ok(()), Ok(())) => {
+                context.set_active_turn_id(None);
+                context.set_chat_state(ChatState::Idle);
+            }
             (Err(error), _) | (Ok(()), Err(error)) => {
-                context.set_chat_state(ChatState::Failed);
+                let pending = context.active_turn_id.read().is_some();
+                if !pending {
+                    context.set_chat_state(ChatState::Failed);
+                }
                 context.set_page_error(Some(error.to_string()));
             }
         }
@@ -205,10 +217,14 @@ fn cancel_turn(context: &AppContext) {
         let Some((api, session_id, _agent_id)) = session_api(&context) else {
             return;
         };
-        let result = api.cancel_turn(&session_id).await;
+        let Some(turn_id) = context.active_turn_id.read().clone() else {
+            context.set_page_error(Some("There is no active turn to cancel.".to_owned()));
+            return;
+        };
+        let result = api.cancel_turn(&session_id, &turn_id).await;
         match result {
             Ok(()) => {
-                context.set_chat_state(ChatState::Idle);
+                context.set_active_turn_id(None);
                 context.set_page_error(None);
             }
             Err(error) => context.set_page_error(Some(error.to_string())),

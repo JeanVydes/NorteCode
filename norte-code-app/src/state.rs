@@ -2,6 +2,7 @@ use crate::api::JobSummary;
 use crate::api::{AgentSummary, ServerInfo, SessionSummary, TelemetryReport};
 use crate::domain::{ChatState, ConnectionState, ConversationItem, Page, ServerProfile, ThemeMode};
 use dioxus::prelude::{ReadableExt, Signal, WritableExt};
+use raep_types::TurnId;
 
 #[derive(Clone, Copy)]
 pub struct AppContext {
@@ -16,6 +17,7 @@ pub struct AppContext {
     pub selected_session: Signal<Option<SessionSummary>>,
     pub chat_items: Signal<Vec<ConversationItem>>,
     pub chat_state: Signal<ChatState>,
+    pub active_turn_id: Signal<Option<TurnId>>,
     pub jobs: Signal<Vec<JobSummary>>,
     pub telemetry: Signal<Option<TelemetryReport>>,
     pub page_error: Signal<Option<String>>,
@@ -83,6 +85,11 @@ impl AppContext {
 
     pub fn set_chat_state(self, value: ChatState) {
         let mut signal = self.chat_state;
+        signal.set(value);
+    }
+
+    pub fn set_active_turn_id(self, value: Option<TurnId>) {
+        let mut signal = self.active_turn_id;
         signal.set(value);
     }
 
