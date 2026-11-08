@@ -205,6 +205,13 @@ pub enum ChatState {
 }
 
 impl ChatState {
+    pub fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::Attaching | Self::Sending | Self::WaitingForReply
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Idle => "Ready",

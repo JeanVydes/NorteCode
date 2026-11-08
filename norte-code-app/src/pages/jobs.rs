@@ -6,6 +6,16 @@ use dioxus::prelude::*;
 #[component]
 pub fn JobsPage() -> Element {
     let context = use_context::<AppContext>();
+    use_effect(move || {
+        let selected_session = context
+            .selected_session
+            .read()
+            .as_ref()
+            .map(|session| session.session_id.clone());
+        if selected_session.is_some() {
+            refresh_jobs(&context);
+        }
+    });
     let jobs = context.jobs.read().clone();
     let selected = context.selected_session.read().clone();
     rsx! {
@@ -83,6 +93,7 @@ fn JobCard(job: JobSummary) -> Element {
 
 fn refresh_jobs(context: &AppContext) {
     let context = *context;
+    context.set_jobs(Vec::new());
     spawn(async move {
         context.set_page_error(None);
         let Some((api, session_id, agent_id)) = active_session(&context) else {

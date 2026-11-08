@@ -16,6 +16,17 @@ pub fn ChatPage() -> Element {
     let context = use_context::<AppContext>();
     let mut draft = use_signal(String::new);
     let mut attachments = use_signal(Vec::<FileData>::new);
+    use_effect(move || {
+        let selected_session_id = context
+            .selected_session
+            .read()
+            .as_ref()
+            .map(|session| session.session_id.clone());
+        let loaded_session_id = context.chat_history_session_id.read().clone();
+        if selected_session_id.is_some() && selected_session_id != loaded_session_id {
+            load_history(&context);
+        }
+    });
     let selected = context.selected_session.read().clone();
     let chat_state = *context.chat_state.read();
     let items = context.chat_items.read().clone();
@@ -66,7 +77,7 @@ pub fn ChatPage() -> Element {
                 textarea {
                     value: "{draft}",
                     placeholder: "Write a message...",
-                    disabled: chat_state != ChatState::Idle,
+                    disabled: chat_state.is_busy(),
                     oninput: move |event| draft.set(event.value())
                 }
                 if uploads_supported {
@@ -76,7 +87,7 @@ pub fn ChatPage() -> Element {
                             r#type: "file",
                             multiple: true,
                             accept: "image/*,audio/*,video/*,application/pdf,text/plain,text/markdown",
-                            disabled: chat_state != ChatState::Idle,
+                            disabled: chat_state.is_busy(),
                             onchange: move |event| attachments.set(event.files())
                         }
                     }
@@ -93,13 +104,11 @@ pub fn ChatPage() -> Element {
                     div { class: "button-row",
                         button {
                             class: "button-secondary",
-                            disabled: chat_state != ChatState::Idle,
+                            disabled: chat_state.is_busy(),
                             onclick: move |_| load_history(&context),
                             "Load history"
                         }
-                        if chat_state == ChatState::Attaching
-                            || chat_state == ChatState::Sending
-                            || chat_state == ChatState::WaitingForReply {
+                        if chat_state.is_busy() {
                             button {
                                 class: "button-danger",
                                 onclick: move |_| cancel_turn(&context),
@@ -108,7 +117,9 @@ pub fn ChatPage() -> Element {
                         } else {
                             button {
                                 class: "button",
-                                disabled: draft.read().trim().is_empty() && attachments.read().is_empty(),
+                                disabled: chat_state.is_busy()
+                                    || (draft.read().trim().is_empty()
+                                        && attachments.read().is_empty()),
                                 onclick: move |_| {
                                     let prompt = draft.read().trim().to_owned();
                                     let files = attachments.read().clone();
@@ -167,21 +178,36 @@ fn load_history(context: &AppContext) {
             return;
         };
         context.set_chat_state(ChatState::Attaching);
-        let result = api.attach(&session_id, &agent_id).await;
-        match result {
+        let result = match api.attach(&session_id, &agent_id).await {
             Ok(()) => {
                 let history_result = api.history(&session_id).await;
                 let detach_result = api.detach(&session_id).await;
                 match (history_result, detach_result) {
-                    (Ok(items), Ok(())) => context.set_chat_items(items),
-                    (Err(error), _) | (Ok(_), Err(error)) => {
-                        context.set_page_error(Some(error.to_string()));
-                    }
+                    (Ok(items), Ok(())) => Ok(items),
+                    (Err(error), _) | (Ok(_), Err(error)) => Err(error),
                 }
             }
-            Err(error) => context.set_page_error(Some(error.to_string())),
+            Err(error) => Err(error),
+        };
+        let still_selected = context
+            .selected_session
+            .read()
+            .as_ref()
+            .is_some_and(|session| session.session_id == session_id);
+        if still_selected {
+            match result {
+                Ok(items) => {
+                    context.set_chat_items(items);
+                    context.set_chat_history_session_id(Some(session_id));
+                    context.set_chat_state(ChatState::Idle);
+                }
+                Err(error) => {
+                    context.set_chat_history_session_id(None);
+                    context.set_page_error(Some(error.to_string()));
+                    context.set_chat_state(ChatState::Failed);
+                }
+            }
         }
-        context.set_chat_state(ChatState::Idle);
     });
 }
 
@@ -204,6 +230,7 @@ fn submit_message(context: &AppContext, prompt: String, attachments: Vec<FileDat
                 .map(|item| item.id.clone())
                 .collect::<HashSet<_>>();
             context.set_chat_items(previous_items);
+            context.set_chat_history_session_id(Some(session_id.clone()));
             context.set_chat_state(ChatState::Sending);
             let turn_id = if attachments.is_empty() {
                 api.send_text(&session_id, &prompt).await?

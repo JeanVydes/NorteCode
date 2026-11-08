@@ -27,6 +27,7 @@ pub fn App() -> Element {
         sessions: use_signal(Vec::new),
         selected_session: use_signal(|| None),
         chat_items: use_signal(Vec::new),
+        chat_history_session_id: use_signal(|| None),
         chat_state: use_signal(|| ChatState::Idle),
         active_turn_id: use_signal(|| None),
         jobs: use_signal(Vec::new),
@@ -39,6 +40,11 @@ pub fn App() -> Element {
         developer_mode: use_signal(|| false),
     };
     use_context_provider(|| context);
+    use_effect(move || {
+        spawn(async move {
+            refresh_server(&context).await;
+        });
+    });
 
     let page = *context.page.read();
     let theme_class = context.theme.read().css_class();

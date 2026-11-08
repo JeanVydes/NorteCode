@@ -3,12 +3,23 @@ use crate::components::{EmptyState, MetricCard, PageHeader};
 use crate::state::AppContext;
 use dioxus::prelude::*;
 
+const RECORDS_PER_PAGE: usize = 25;
+
 #[component]
 pub fn TelemetryPage() -> Element {
     let context = use_context::<AppContext>();
     let report = context.telemetry.read().clone();
     let mut selected_only = use_signal(|| false);
+    let loading = use_signal(|| false);
+    let mut page = use_signal(|| 0usize);
     let selected_session = context.selected_session.read().clone();
+    use_effect(move || {
+        let only_selected = *selected_only.read();
+        let has_selected_session = context.selected_session.read().is_some();
+        if !only_selected || has_selected_session {
+            load_telemetry(&context, only_selected, loading, page);
+        }
+    });
     let records = report
         .as_ref()
         .map_or_else(Vec::new, |value| value.records.clone());
@@ -18,18 +29,43 @@ pub fn TelemetryPage() -> Element {
         .max()
         .unwrap_or_default();
     let record_count = records.len();
+    let current_page = *page.read();
+    let page_count = record_count.div_ceil(RECORDS_PER_PAGE).max(1);
+    let visible_records = records
+        .iter()
+        .rev()
+        .skip(current_page.saturating_mul(RECORDS_PER_PAGE))
+        .take(RECORDS_PER_PAGE)
+        .cloned()
+        .collect::<Vec<_>>();
+    let first_record = current_page
+        .saturating_mul(RECORDS_PER_PAGE)
+        .saturating_add(1);
+    let last_record = first_record
+        .saturating_add(visible_records.len())
+        .saturating_sub(1);
+    let empty_title: &'static str = if *loading.read() {
+        "Loading telemetry"
+    } else {
+        "Telemetry unavailable"
+    };
+    let empty_message: &'static str = if *loading.read() {
+        "The host is preparing the request report."
+    } else {
+        "Check the connection and refresh to load provider request activity."
+    };
     rsx! {
         PageHeader {
             eyebrow: "Observability",
             title: "Telemetry",
-            description: "Request-level provider metrics reported by RAEP. Missing token or cost values remain unreported rather than being estimated."
+            description: "Provider request activity reported by the RAEP host. Missing token and cost values are never estimated."
         }
         div { class: "section-heading",
             div {
                 h2 { "Request activity" }
-                p { class: "helper-text", "The host currently returns retained records without server-side date filters or pagination." }
+                p { class: "helper-text", "Metrics include every retained request; the list below is paginated locally." }
             }
-            div { class: "button-row",
+            div { class: "telemetry-controls",
                 label { class: "field",
                     span { "Scope" }
                     select {
@@ -45,24 +81,43 @@ pub fn TelemetryPage() -> Element {
                 }
                 button {
                     class: "button",
-                    onclick: move |_| load_telemetry(&context, *selected_only.read()),
-                    "Load telemetry"
+                    disabled: *loading.read()
+                        || (*selected_only.read() && selected_session.is_none()),
+                    onclick: move |_| load_telemetry(&context, *selected_only.read(), loading, page),
+                    if *loading.read() { "Refreshing…" } else { "Refresh" }
                 }
             }
         }
+        if *loading.read() {
+            div { class: "loading-state", role: "status",
+                span { class: "loading-indicator" }
+                "Loading provider activity…"
+            }
+        }
         if let Some(report) = report {
-            p { class: "helper-text", "Report scope: {report.session.as_deref().unwrap_or(\"All sessions\")}" }
+            p { class: "report-scope",
+                span { class: "scope-indicator" }
+                "Showing {report.session.as_deref().unwrap_or(\"all sessions\")}"
+            }
             div { class: "grid metric-grid",
                 MetricCard { label: "Requests", value: report.summary.requests.to_string(), note: "Provider attempts" }
                 MetricCard { label: "Errors", value: report.summary.errors.to_string(), note: "Reported failures" }
                 MetricCard { label: "Duration", value: format_duration(report.summary.duration_ms), note: "Sum of request durations" }
                 MetricCard { label: "Input tokens", value: report.summary.input_tokens.to_string(), note: "Provider-reported total" }
             }
-            div { class: "grid panel-grid", style: "margin-top: 1rem",
+            div { class: "grid panel-grid telemetry-panels",
                 section { class: "panel",
-                    div { class: "section-heading", h2 { "Latency by request" } }
+                    div { class: "section-heading",
+                        div {
+                            h2 { "Recent latency" }
+                            p { class: "helper-text", "Newest 12 requests · duration per provider call" }
+                        }
+                    }
                     if records.is_empty() {
-                        p { class: "helper-text", "No telemetry records were returned." }
+                        EmptyState {
+                            title: "No request samples yet",
+                            message: "Latency appears here after the host records provider requests."
+                        }
                     } else {
                         div { class: "chart-bars",
                             for record in records.iter().rev().take(12) {
@@ -72,7 +127,12 @@ pub fn TelemetryPage() -> Element {
                     }
                 }
                 section { class: "panel",
-                    div { class: "section-heading", h2 { "Token and cache usage" } }
+                    div { class: "section-heading",
+                        div {
+                            h2 { "Token and cache usage" }
+                            p { class: "helper-text", "Provider-reported totals" }
+                        }
+                    }
                     MetricCard { label: "Output tokens", value: report.summary.output_tokens.to_string(), note: "Provider-reported total" }
                     div { class: "session-meta",
                         span { "Cache read: {report.summary.cache_read_tokens}" }
@@ -81,20 +141,43 @@ pub fn TelemetryPage() -> Element {
                     }
                 }
             }
-            div { class: "section-heading", h2 { "Requests ({record_count})" } }
+            div { class: "section-heading telemetry-record-heading",
+                div {
+                    h2 { "Recent requests" }
+                    p { class: "helper-text", "{record_count} retained · newest first" }
+                }
+                if record_count > 0 {
+                    span { class: "page-indicator", "{first_record}–{last_record} of {record_count}" }
+                }
+            }
             if records.is_empty() {
-                EmptyState { title: "No activity", message: "There are no request records in this report." }
+                EmptyState { title: "No activity yet", message: "Provider requests will appear here after a session runs." }
             } else {
                 div { class: "record-grid",
-                    for record in records {
+                    for record in visible_records {
                         TelemetryCard { record }
+                    }
+                }
+                div { class: "telemetry-pagination",
+                    button {
+                        class: "button-secondary",
+                        disabled: current_page == 0,
+                        onclick: move |_| page.set(current_page.saturating_sub(1)),
+                        "Previous"
+                    }
+                    span { class: "page-indicator", "Page {current_page + 1} of {page_count}" }
+                    button {
+                        class: "button-secondary",
+                        disabled: current_page + 1 >= page_count,
+                        onclick: move |_| page.set((current_page + 1).min(page_count - 1)),
+                        "Next"
                     }
                 }
             }
         } else {
             EmptyState {
-                title: "Telemetry not loaded",
-                message: "Load the server report to view request metrics and charts."
+                title: empty_title,
+                message: empty_message,
             }
         }
     }
@@ -105,8 +188,15 @@ fn LatencyBar(record: TelemetryRecord, maximum: u64) -> Element {
     let height = chart_height(record.duration_ms, maximum);
     rsx! {
         div { class: "chart-bar-wrap", key: "{record.id}",
-            div { class: "chart-bar", style: "height: {height}%" }
+            div { class: "chart-bar-track",
+                div {
+                    class: "chart-bar",
+                    title: "{record.provider} · {format_duration(record.duration_ms)}",
+                    style: "height: {height}%"
+                }
+            }
             span { class: "chart-bar-label", "{record.provider}" }
+            span { class: "chart-bar-value", "{format_duration(record.duration_ms)}" }
         }
     }
 }
@@ -158,31 +248,46 @@ fn TelemetryCard(record: TelemetryRecord) -> Element {
     }
 }
 
-fn load_telemetry(context: &AppContext, selected_only: bool) {
+fn load_telemetry(
+    context: &AppContext,
+    selected_only: bool,
+    mut loading: Signal<bool>,
+    mut page: Signal<usize>,
+) {
     let context = *context;
+    let session_id = if selected_only {
+        let Some(session) = context.selected_session.read().clone() else {
+            context.set_page_error(Some("Choose a session first.".to_owned()));
+            return;
+        };
+        Some(session.session_id)
+    } else {
+        None
+    };
+    loading.set(true);
     spawn(async move {
         context.set_page_error(None);
         let Some(profile) = context.active_profile() else {
             context.set_page_error(Some("Select a server profile first.".to_owned()));
+            loading.set(false);
             return;
         };
-        let selected_session = context.selected_session.read().clone();
-        let session_id = if selected_only {
-            let Some(session) = selected_session else {
-                context.set_page_error(Some("Choose a session first.".to_owned()));
+        let api = match ApiClient::new(&profile.base_url, &profile.bearer_token) {
+            Ok(api) => api,
+            Err(error) => {
+                context.set_page_error(Some(error.to_string()));
+                loading.set(false);
                 return;
-            };
-            Some(session.session_id)
-        } else {
-            None
+            }
         };
-        match ApiClient::new(&profile.base_url, &profile.bearer_token) {
-            Ok(api) => match api.telemetry(session_id.as_deref()).await {
-                Ok(report) => context.set_telemetry(Some(report)),
-                Err(error) => context.set_page_error(Some(error.to_string())),
-            },
+        match api.telemetry(session_id.as_deref()).await {
+            Ok(report) => {
+                context.set_telemetry(Some(report));
+                page.set(0);
+            }
             Err(error) => context.set_page_error(Some(error.to_string())),
         }
+        loading.set(false);
     });
 }
 
