@@ -7,3 +7,5 @@ title = "Norte Code"
 
 [web.resource]
 style = ["/assets/app.css"]
+
+[web.resource.dev]
