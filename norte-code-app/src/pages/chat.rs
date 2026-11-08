@@ -16,19 +16,9 @@ pub fn ChatPage() -> Element {
     let context = use_context::<AppContext>();
     let mut draft = use_signal(String::new);
     let mut attachments = use_signal(Vec::<FileData>::new);
-    use_effect(move || {
-        let selected_session_id = context
-            .selected_session
-            .read()
-            .as_ref()
-            .map(|session| session.session_id.clone());
-        let loaded_session_id = context.chat_history_session_id.read().clone();
-        if selected_session_id.is_some() && selected_session_id != loaded_session_id {
-            load_history(&context);
-        }
-    });
     let selected = context.selected_session.read().clone();
     let chat_state = *context.chat_state.read();
+    let active_turn = context.active_turn_id.read().is_some();
     let items = context.chat_items.read().clone();
     let show_thinking = *context.show_thinking.read();
     let show_tool_output = *context.show_tool_output.read();
@@ -80,22 +70,10 @@ pub fn ChatPage() -> Element {
                     disabled: chat_state.is_busy(),
                     oninput: move |event| draft.set(event.value())
                 }
-                if uploads_supported {
-                    label { class: "field file-picker",
-                        span { "Attach image, audio, video, or document" }
-                        input {
-                            r#type: "file",
-                            multiple: true,
-                            accept: "image/*,audio/*,video/*,application/pdf,text/plain,text/markdown",
-                            disabled: chat_state.is_busy(),
-                            onchange: move |event| attachments.set(event.files())
-                        }
-                    }
-                    if !attachments.read().is_empty() {
-                        div { class: "attachment-list",
-                            for file in attachments.read().iter() {
-                                span { class: "attachment-chip", "{file.name()}" }
-                            }
+                if uploads_supported && !attachments.read().is_empty() {
+                    div { class: "attachment-list",
+                        for file in attachments.read().iter() {
+                            span { class: "attachment-chip", "{file.name()}" }
                         }
                     }
                 }
@@ -108,11 +86,29 @@ pub fn ChatPage() -> Element {
                             onclick: move |_| load_history(&context),
                             "Load history"
                         }
+                        if uploads_supported {
+                            label {
+                                class: "button-secondary attachment-picker",
+                                title: "Attach image, audio, video, or document",
+                                span { "Attach" }
+                                input {
+                                    class: "attachment-input",
+                                    r#type: "file",
+                                    multiple: true,
+                                    accept: "image/*,audio/*,video/*,application/pdf,text/plain,text/markdown",
+                                    disabled: chat_state.is_busy(),
+                                    "aria-label": "Choose files to attach",
+                                    onchange: move |event| attachments.set(event.files())
+                                }
+                            }
+                        }
                         if chat_state.is_busy() {
-                            button {
-                                class: "button-danger",
-                                onclick: move |_| cancel_turn(&context),
-                                "Stop turn"
+                            if active_turn {
+                                button {
+                                    class: "button-danger",
+                                    onclick: move |_| cancel_turn(&context),
+                                    "Stop turn"
+                                }
                             }
                         } else {
                             button {
@@ -177,7 +173,7 @@ fn load_history(context: &AppContext) {
         let Some((api, session_id, agent_id)) = session_api(&context) else {
             return;
         };
-        context.set_chat_state(ChatState::Attaching);
+        context.set_chat_state(ChatState::LoadingHistory);
         let result = match api.attach(&session_id, &agent_id).await {
             Ok(()) => {
                 let history_result = api.history(&session_id).await;
@@ -198,11 +194,9 @@ fn load_history(context: &AppContext) {
             match result {
                 Ok(items) => {
                     context.set_chat_items(items);
-                    context.set_chat_history_session_id(Some(session_id));
                     context.set_chat_state(ChatState::Idle);
                 }
                 Err(error) => {
-                    context.set_chat_history_session_id(None);
                     context.set_page_error(Some(error.to_string()));
                     context.set_chat_state(ChatState::Failed);
                 }
@@ -230,7 +224,6 @@ fn submit_message(context: &AppContext, prompt: String, attachments: Vec<FileDat
                 .map(|item| item.id.clone())
                 .collect::<HashSet<_>>();
             context.set_chat_items(previous_items);
-            context.set_chat_history_session_id(Some(session_id.clone()));
             context.set_chat_state(ChatState::Sending);
             let turn_id = if attachments.is_empty() {
                 api.send_text(&session_id, &prompt).await?

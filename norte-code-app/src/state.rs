@@ -16,7 +16,6 @@ pub struct AppContext {
     pub sessions: Signal<Vec<SessionSummary>>,
     pub selected_session: Signal<Option<SessionSummary>>,
     pub chat_items: Signal<Vec<ConversationItem>>,
-    pub chat_history_session_id: Signal<Option<String>>,
     pub chat_state: Signal<ChatState>,
     pub active_turn_id: Signal<Option<TurnId>>,
     pub jobs: Signal<Vec<JobSummary>>,
@@ -88,7 +87,6 @@ impl AppContext {
         if !is_current {
             self.set_selected_session(Some(session));
             self.set_chat_items(Vec::new());
-            self.set_chat_history_session_id(None);
             self.set_jobs(Vec::new());
             self.set_active_turn_id(None);
             self.set_chat_state(ChatState::Idle);
@@ -98,11 +96,6 @@ impl AppContext {
 
     pub fn set_chat_items(self, value: Vec<ConversationItem>) {
         let mut signal = self.chat_items;
-        signal.set(value);
-    }
-
-    pub fn set_chat_history_session_id(self, value: Option<String>) {
-        let mut signal = self.chat_history_session_id;
         signal.set(value);
     }
 
