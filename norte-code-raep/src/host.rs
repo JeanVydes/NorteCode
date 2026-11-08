@@ -3330,27 +3330,32 @@ impl NorteCodeRaepHost {
     }
 
     async fn service_for_session(&self, session_id: &str) -> Result<Arc<Service>, HostError> {
-        let configured_agent = self
+        if let Some(agent_id) = self.agent_for_session(session_id).await {
+            return self.service_for_agent(&agent_id);
+        }
+        Ok(Arc::clone(&self.service))
+    }
+
+    async fn agent_for_session(&self, session_id: &str) -> Option<String> {
+        if let Some(agent_id) = self
             .state
             .lock()
             .await
             .session_agents
             .get(session_id)
-            .cloned();
-        if let Some(agent_id) = configured_agent {
-            return self.service_for_agent(&agent_id);
+            .cloned()
+        {
+            return Some(agent_id);
         }
-        Ok(self
-            .services
-            .values()
-            .find(|service| {
+        self.services
+            .iter()
+            .find(|(_, service)| {
                 service
                     .sessions()
                     .iter()
                     .any(|session| session.session.as_str() == session_id)
             })
-            .cloned()
-            .unwrap_or_else(|| Arc::clone(&self.service)))
+            .map(|(agent_id, _)| agent_id.clone())
     }
 
     /// Returns the RAEP `session_summary` for every session `principal` may see.
@@ -4372,12 +4377,8 @@ impl NorteCodeRaepHost {
         // agent must equal the session's current agent.
         if exists && !created {
             let current_agent = self
-                .state
-                .lock()
+                .agent_for_session(&session_id)
                 .await
-                .session_agents
-                .get(&session_id)
-                .cloned()
                 .unwrap_or_else(|| self.config.agent_id.clone());
             if current_agent != agent_id {
                 return Err(HostError::InvalidFrame(format!(
@@ -8069,6 +8070,56 @@ mod tests {
         assert!(
             frames[1].payload["history_summary"].is_array(),
             "SESSION_STATE must carry history_summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn attaching_existing_session_infers_its_agent_from_service() {
+        let service = || {
+            Arc::new(
+                Service::new(
+                    norte_code_protocol::config::Config::default(),
+                    Arc::new(norte_code_protocol::catalog::Catalog::default()),
+                    None,
+                    Arc::new(norte_code_agent::VendorModels),
+                    Arc::new(norte_code_protocol::InMemoryStore::new()),
+                    Arc::new(norte::InMemoryBlobStore::new()),
+                    "system",
+                )
+                .expect("service"),
+            )
+        };
+        let default_service = service();
+        let subagent_service = service();
+        let session_id = subagent_service
+            .start_session(None)
+            .await
+            .expect("start session")
+            .to_string();
+        let host = NorteCodeRaepHost::with_agents(
+            HashMap::from([
+                ("norte-code".to_owned(), default_service),
+                ("norte-code-subagent".to_owned(), subagent_service),
+            ]),
+            HostConfig {
+                agent_id: "norte-code".to_owned(),
+                ..HostConfig::default()
+            },
+        )
+        .expect("host");
+        let mut frame = Envelope::new(
+            standard(StandardFrameType::SessionAttach),
+            json!({"agent_id": "norte-code-subagent", "create_if_missing": false}),
+            1,
+        );
+        frame.session_id = session_id;
+
+        assert!(
+            host.handle(frame)
+                .await
+                .expect("attach to existing subagent session")
+                .iter()
+                .any(|frame| frame.kind == standard(StandardFrameType::SessionAttached))
         );
     }
 
