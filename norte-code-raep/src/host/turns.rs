@@ -115,7 +115,21 @@ impl NorteCodeRaepHost {
                     {
                         return Ok(vec![latest.clone()]);
                     }
-                    return Ok(previous.response.clone());
+                    let cached = previous.response.clone();
+                    let store = self.replay_store.clone();
+                    let session_id = frame.session_id.clone();
+                    let frame_id = frame.id.as_str().to_owned();
+                    drop(state);
+                    if !cached.is_empty() {
+                        return Ok(cached);
+                    }
+                    let Some(store) = store else {
+                        return Ok(Vec::new());
+                    };
+                    return Ok(store
+                        .idempotency_response(&session_id, &frame_id)
+                        .await?
+                        .unwrap_or_default());
                 }
                 return Err(HostError::IdempotencyConflict(
                     "frame id was reused with a different request".to_owned(),

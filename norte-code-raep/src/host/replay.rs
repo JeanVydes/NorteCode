@@ -27,11 +27,24 @@ pub trait ReplayStore: Send + Sync {
     }
 
     /// Loads idempotency records retained for one session.
+    ///
+    /// The response body may be left empty: [`Self::idempotency_response`]
+    /// reads it when a duplicate frame actually needs it.
     async fn load_idempotency(
         &self,
         _session_id: &str,
     ) -> Result<Vec<IdempotencyRecord>, HostError> {
         Ok(Vec::new())
+    }
+
+    /// Reads the stored response for one frame, when the record did not carry
+    /// it.
+    async fn idempotency_response(
+        &self,
+        _session_id: &str,
+        _frame_id: &str,
+    ) -> Result<Option<Vec<Envelope<Value>>>, HostError> {
+        Ok(None)
     }
 }
 /// A newline-delimited JSON replay journal.
@@ -220,6 +233,39 @@ impl ReplayStore for SqliteReplayStore {
         .await
     }
 
+    async fn idempotency_response(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+    ) -> Result<Option<Vec<Envelope<Value>>>, HostError> {
+        let session_id = session_id.to_owned();
+        let frame_id = frame_id.to_owned();
+        self.with_connection(move |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT response FROM raep_idempotency
+                     WHERE session_id = ?1 AND frame_id = ?2",
+                )
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            let mut rows = statement
+                .query(rusqlite::params![session_id, frame_id])
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            let Some(row) = rows
+                .next()
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            let encoded: String = row
+                .get(0)
+                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+            serde_json::from_str(&encoded)
+                .map(Some)
+                .map_err(HostError::from)
+        })
+        .await
+    }
+
     async fn load_idempotency(
         &self,
         session_id: &str,
@@ -229,7 +275,7 @@ impl ReplayStore for SqliteReplayStore {
             let mut statement = connection
                 .prepare(
                     "SELECT frame_id, turn_id, fingerprint, turn_fingerprint,
-                            service_turn_id, response
+                            service_turn_id, NULL
                      FROM raep_idempotency
                      WHERE session_id = ?1 ORDER BY rowid ASC",
                 )
@@ -242,7 +288,7 @@ impl ReplayStore for SqliteReplayStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<u64>>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 })
                 .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
@@ -255,7 +301,8 @@ impl ReplayStore for SqliteReplayStore {
                     .map(TurnId::new)
                     .transpose()
                     .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-                let response = serde_json::from_str(&response)?;
+                let response =
+                    response.map_or(Ok(Vec::new()), |response| serde_json::from_str(&response))?;
                 Ok(IdempotencyRecord {
                     session_id: session_id.clone(),
                     frame_id,

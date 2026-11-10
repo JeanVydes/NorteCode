@@ -505,12 +505,21 @@ async fn sqlite_replay_store_round_trips_and_rotates() {
         .save_idempotency(&record)
         .await
         .expect("save idempotency record");
+    // The session-wide load leaves the body out; it is read back for the one
+    // frame a duplicate names.
+    let loaded = store
+        .load_idempotency("session-a")
+        .await
+        .expect("load idempotency record");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].fingerprint, record.fingerprint);
+    assert!(loaded[0].response.is_empty());
     assert_eq!(
         store
-            .load_idempotency("session-a")
+            .idempotency_response("session-a", "request-1")
             .await
-            .expect("load idempotency record"),
-        vec![record]
+            .expect("load idempotency response"),
+        Some(record.response.clone())
     );
     std::fs::remove_file(path).expect("remove replay database");
 }
