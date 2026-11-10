@@ -184,6 +184,42 @@ pub struct TurnUsage {
     pub model: Option<String>,
 }
 
+/// Folds one request's usage into the answer it belongs to.
+///
+/// The numbers go on the newest assistant row of that turn; when the turn
+/// produced no text (a tool-only request) a row is created to hold them, so
+/// the cost is never silently dropped.
+pub fn fold_usage(
+    items: &mut Vec<ConversationItem>,
+    turn_id: Option<String>,
+    usage: &TurnUsage,
+    created_at: i64,
+) {
+    let target = items.iter_mut().rev().find(|item| {
+        item.kind == HistoryKind::Assistant
+            && item.turn_id.is_some()
+            && (turn_id.is_none() || item.turn_id == turn_id)
+    });
+    if let Some(item) = target {
+        match &mut item.usage {
+            Some(existing) => existing.merge(usage),
+            slot => *slot = Some(usage.clone()),
+        }
+        return;
+    }
+    items.push(ConversationItem {
+        id: format!("usage:{}", turn_id.as_deref().unwrap_or("turn")),
+        turn_id,
+        role: HistoryRole::Assistant,
+        kind: HistoryKind::Assistant,
+        content: String::new(),
+        created_at,
+        delivery: MessageDelivery::Sent,
+        tool: None,
+        usage: Some(usage.clone()),
+    });
+}
+
 impl TurnUsage {
     /// `openrouter / stealth/crouton-alpha`, when the host named them.
     pub fn model_label(&self) -> Option<String> {

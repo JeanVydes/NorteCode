@@ -325,29 +325,7 @@ pub(super) fn apply(context: AppContext, frame: norte_code_client::DecodedEvent)
             // the provider used tools and left no text yet.
             let turn_id = turn_id.or_else(|| context.streaming_turn_id.read().clone());
             context.update_chat_items(|items| {
-                let target = items.iter_mut().rev().find(|item| {
-                    item.kind == HistoryKind::Assistant
-                        && item.turn_id.is_some()
-                        && (turn_id.is_none() || item.turn_id == turn_id)
-                });
-                if let Some(item) = target {
-                    match &mut item.usage {
-                        Some(existing) => existing.merge(&usage),
-                        slot => *slot = Some(usage.clone()),
-                    }
-                } else {
-                    items.push(ConversationItem {
-                        id: format!("usage:{}", turn_id.as_deref().unwrap_or("turn")),
-                        turn_id,
-                        role: HistoryRole::Assistant,
-                        kind: HistoryKind::Assistant,
-                        content: String::new(),
-                        created_at: timestamp,
-                        delivery: MessageDelivery::Sent,
-                        tool: None,
-                        usage: Some(usage),
-                    });
-                }
+                crate::domain::fold_usage(items, turn_id, &usage, timestamp);
             });
             // Cost and speed arrive as the request closes, which is often
             // after the turn's `COMPLETED`. Setting a working state here put

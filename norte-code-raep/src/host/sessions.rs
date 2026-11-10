@@ -199,6 +199,7 @@ impl NorteCodeRaepHost {
         &self,
         agent_id: &str,
         title: Option<String>,
+        agent_override: Option<&Value>,
         principal: &str,
     ) -> Result<String, HostError> {
         let key = self
@@ -207,8 +208,61 @@ impl NorteCodeRaepHost {
             .await
             .map_err(|error| HostError::Service(error.to_string()))?;
         self.claim_session(key.as_str(), principal).await?;
+        if let Some(value) = agent_override {
+            self.apply_agent_override(key.as_str(), value).await?;
+        }
         Ok(key.to_string())
     }
+    /// Applies a `SESSION_CONFIGURE`-shaped override to a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the override is malformed or the service refuses
+    /// one of the settings it names.
+    pub(crate) async fn apply_agent_override(
+        &self,
+        session_id: &str,
+        value: &Value,
+    ) -> Result<Vec<Envelope<Value>>, HostError> {
+        let decoded = decode_override(value)?;
+        validate_override(decoded.0.as_ref(), decoded.1.as_ref(), decoded.2.as_ref())?;
+        let session = SessionKey::new(session_id);
+        let mut frames = Vec::new();
+        if let Some((provider, model_id)) = decoded.1 {
+            frames.extend(
+                self.submit_service(
+                    session_id,
+                    ClientRequestKind::SetModel {
+                        session: session.clone(),
+                        provider,
+                        model: model_id,
+                    },
+                )
+                .await?,
+            );
+        }
+        if let Some(reasoning) = decoded.0 {
+            frames.extend(
+                self.submit_service(
+                    session_id,
+                    ClientRequestKind::SetReasoning {
+                        session: session.clone(),
+                        scope: norte_code_wire::ReasoningScope::Session,
+                        reasoning,
+                    },
+                )
+                .await?,
+            );
+        }
+        if let Some(budget) = decoded.2 {
+            frames.extend(
+                self.submit_service(session_id, ClientRequestKind::SetBudget { session, budget })
+                    .await?,
+            );
+        }
+        Ok(frames)
+    }
+
     /// Renames a session through the management API.
     ///
     /// Returns `false` when the session is unknown or belongs to another
@@ -406,50 +460,10 @@ impl NorteCodeRaepHost {
         // `agent_override` on attach (RFC 6/7): same fragment as in
         // `SESSION_CONFIGURE`. Applied through the same translation, after
         // the session is bound but before `SESSION_ATTACHED` is emitted.
-        let mut override_frames = Vec::new();
-        if let Some(ref override_value) = attach.agent_override {
-            let decoded = decode_override(override_value)?;
-            validate_override(decoded.0.as_ref(), decoded.1.as_ref(), decoded.2.as_ref())?;
-            let session = SessionKey::new(session_id.clone());
-            if let Some((provider, model_id)) = decoded.1 {
-                override_frames.extend(
-                    self.submit_service(
-                        &session_id,
-                        ClientRequestKind::SetModel {
-                            session: session.clone(),
-                            provider,
-                            model: model_id,
-                        },
-                    )
-                    .await?,
-                );
-            }
-            if let Some(reasoning) = decoded.0 {
-                override_frames.extend(
-                    self.submit_service(
-                        &session_id,
-                        ClientRequestKind::SetReasoning {
-                            session: session.clone(),
-                            scope: norte_code_wire::ReasoningScope::Session,
-                            reasoning,
-                        },
-                    )
-                    .await?,
-                );
-            }
-            if let Some(budget) = decoded.2 {
-                override_frames.extend(
-                    self.submit_service(
-                        &session_id,
-                        ClientRequestKind::SetBudget {
-                            session: session.clone(),
-                            budget,
-                        },
-                    )
-                    .await?,
-                );
-            }
-        }
+        let override_frames = match attach.agent_override.as_ref() {
+            Some(value) => self.apply_agent_override(&session_id, value).await?,
+            None => Vec::new(),
+        };
         self.state
             .lock()
             .await

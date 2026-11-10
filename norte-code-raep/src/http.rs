@@ -413,7 +413,11 @@ async fn create_session(
         };
     }
     let title = body.get("title").and_then(Value::as_str).map(str::to_owned);
-    let session = match host.create_session(agent_id, title, &principal).await {
+    let agent_override = body.get("agent_override").filter(|value| !value.is_null());
+    let session = match host
+        .create_session(agent_id, title, agent_override, &principal)
+        .await
+    {
         Ok(session) => session,
         Err(error) => return invalid(&error.to_string()),
     };
