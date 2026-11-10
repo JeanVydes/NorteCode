@@ -88,9 +88,7 @@ use crate::{DEFAULT_SUBAGENT_SYSTEM_PROMPT, ServiceError};
 use self::screenshots::{ScreenshotInterceptor, Screenshots};
 use self::session_record::{ChildSessionMetadata, SessionRecord};
 use self::steering::{Steered, Steering, SteeringInterceptor};
-use self::subagents::{
-    MAX_DELEGATION_DEPTH, SubagentOutcome, SubagentRequest, SubagentRunner, SubagentTool,
-};
+use self::subagents::{MAX_DELEGATION_DEPTH, SubagentOutcome, SubagentRequest, SubagentRunner};
 use approvals::{ApprovalRules, ToolRuleInterceptor};
 use compaction::{CompactionGate, CompactionLayer};
 use delegator::SharedChildren;
