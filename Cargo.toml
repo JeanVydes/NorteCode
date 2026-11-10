@@ -4,7 +4,6 @@ members = [
     "norte-code-agent",
     "norte-code-app",
     "norte-code-client",
-    "norte-code-cli",
     "norte-code-protocol",
     "norte-code-wire",
     "norte-code-raep",

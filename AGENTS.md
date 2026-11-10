@@ -22,19 +22,22 @@ norte-code-wire        shapes only: serde derives, no socket, no runtime, no DB.
                        Compiles to wasm. Owns every type that travels.
   norte-code-protocol  the server's model: store, config, catalog, costs, plans,
                        skills, tools. Imports wire, never re-exports it.
-  norte-code-client    transport-neutral client contract and RAEP HTTP adapter.
+  norte-code-client    the client protocol: frame decoding, SSE reading and the
+                       native RAEP HTTP adapter (feature `native`). Every
+                       client decodes through it; wasm clients compile it
+                       without default features and supply only a transport.
   norte-code-agent     the agent loop and services.
   norte-code-plugin-host  dynamic plugin ABI and the command registry plugins
                        declare into. The only crate allowed to use `unsafe`.
   norte-code-raep      the server process and HTTP host.
-  norte-code-cli       the terminal client.
-  norte-code-app       the Dioxus client; depends on wire and raep-types only.
+  norte-code-app       the Dioxus client; depends on client, wire and raep-types.
 ```
 
 Rules that follow from this:
 
 - A type that crosses a process boundary lives in `norte-code-wire`, and only there. No crate re-exports it and no crate defines a second copy. Import `norte_code_wire::...` directly.
-- `norte-code-protocol` must stay client-agnostic: no slash-command parsing, no CLI presentation, no plugin command surface. Those live in the CLI or in `norte-code-plugin-host`.
+- `norte-code-protocol` must stay client-agnostic: no slash-command parsing, no presentation, no plugin command surface. Those live in `norte-code-plugin-host`.
+- A client never decodes RAEP payloads on its own. It uses `norte-code-client`, so there is one decoder and one SSE reader, and a wire change cannot half-land.
 - Anything that needs a socket, a database, a clock or a filesystem does not belong in `norte-code-wire`.
 - When moving a type, move its pure methods too. A method that needs the engine becomes an extension trait in the engine-side crate.
 - A payload that the host serializes and a client deserializes is one struct with both derives, not two mirror definitions.

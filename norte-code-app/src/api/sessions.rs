@@ -98,22 +98,27 @@ impl ApiClient {
             .ok_or_else(|| {
                 ApiError::InvalidResponse("History page was not returned.".to_owned())
             })?;
-        let page: HistoryPage = decode_payload(&page.payload)?;
-        Ok(page
-            .items
-            .into_iter()
+        let items = norte_code_client::history_items(&page.payload)
+            .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
+        Ok(items
+            .iter()
             .enumerate()
             .map(|(index, item)| ConversationItem {
-                id: format!(
-                    "{}:{}:{index}",
-                    item.turn_id.as_deref().unwrap_or("unassigned"),
-                    item.timestamp
-                ),
-                turn_id: item.turn_id,
-                role: item.role,
-                kind: item.kind,
-                content: item.content,
-                created_at: item.timestamp,
+                id: format!("{}:{}:{index}", item.id, item.created_at),
+                turn_id: item.turn_id.clone(),
+                role: match item.role {
+                    norte_code_wire::HistorySpeaker::User => crate::domain::HistoryRole::User,
+                    norte_code_wire::HistorySpeaker::Assistant => {
+                        crate::domain::HistoryRole::Assistant
+                    }
+                    norte_code_wire::HistorySpeaker::Tool => crate::domain::HistoryRole::Tool,
+                    norte_code_wire::HistorySpeaker::SystemEvent => {
+                        crate::domain::HistoryRole::SystemEvent
+                    }
+                },
+                kind: crate::domain::HistoryKind::from_wire(&item.kind),
+                content: item.content.clone(),
+                created_at: item.created_at,
                 delivery: MessageDelivery::Sent,
                 tool: None,
                 usage: None,

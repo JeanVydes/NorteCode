@@ -8,19 +8,24 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["native"]
+# The RAEP HTTP adapter. Off for wasm, where the UI supplies its own
+# platform transport and uses only the shared protocol decoding.
+native = ["dep:futures-util", "dep:reqwest", "dep:tokio", "dep:tokio-stream"]
+
 [dependencies]
 async-trait = { workspace = true }
 futures-core = { workspace = true }
-futures-util = { workspace = true }
-norte-code-protocol = { path = "../norte-code-protocol" }
 norte-code-wire = { path = "../norte-code-wire" }
 raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio-stream = { workspace = true }
-tokio = { workspace = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true, features = ["json", "stream"] }
+tokio-stream = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [lints]
 workspace = true

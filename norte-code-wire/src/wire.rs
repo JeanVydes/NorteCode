@@ -703,6 +703,20 @@ pub struct HistoryItem {
     pub provenance: Option<serde_json::Value>,
 }
 
+/// A turn's live phase, between its start and its terminal state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPhaseName {
+    /// Accepted, waiting for the turn already running.
+    Queued,
+    /// Waiting on the provider.
+    CallingProvider,
+    /// Running a tool call.
+    ExecutingTool,
+    /// Waiting for a person to approve a call.
+    AwaitingApproval,
+}
+
 /// A service event: a numbered answer to a [`ClientRequest`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -751,6 +765,25 @@ pub enum ServerEventKind {
     TurnStarted {
         /// The turn number.
         turn: u64,
+    },
+    /// The turn moved to a new live phase.
+    ///
+    /// The host reports the phases between a turn's start and its terminal
+    /// state so a client can say what the turn is doing. They are not turn
+    /// boundaries: `TurnFinished`/`TurnStopped` still end the turn.
+    TurnPhase {
+        /// The turn.
+        turn: u64,
+        /// What it is doing now.
+        phase: TurnPhaseName,
+    },
+    /// The host accepted a user input and named the turn it will run as.
+    InputAccepted {
+        /// The turn.
+        turn_id: String,
+        /// Whether it waits behind the turn already running.
+        #[serde(default)]
+        queued: bool,
     },
     /// A stream delta.
     Delta {

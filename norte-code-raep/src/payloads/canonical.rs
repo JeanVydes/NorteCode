@@ -134,6 +134,30 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::QuestionAnswered { question } => CanonicalEvent::ApprovalResolved {
             approval_id: question,
         },
+        ServerEventKind::TurnPhase { turn, phase } => CanonicalEvent::TurnStateChanged {
+            turn: Some(*turn),
+            state: TurnStateChangedPayload {
+                state: match phase {
+                    norte_code_wire::TurnPhaseName::Queued => CanonicalTurnState::Queued,
+                    norte_code_wire::TurnPhaseName::CallingProvider => {
+                        CanonicalTurnState::CallingProvider
+                    }
+                    norte_code_wire::TurnPhaseName::ExecutingTool => {
+                        CanonicalTurnState::ExecutingTool
+                    }
+                    norte_code_wire::TurnPhaseName::AwaitingApproval => {
+                        CanonicalTurnState::AwaitingApproval
+                    }
+                },
+                phase: None,
+                committed: None,
+                reason: None,
+            },
+        },
+        ServerEventKind::InputAccepted { turn_id, .. } => CanonicalEvent::UserInputAccepted {
+            ids: vec![turn_id.clone()],
+            messages: Vec::new(),
+        },
         ServerEventKind::TurnFinished {
             turn,
             phase,
@@ -283,9 +307,10 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::PluginChanged { operation, name } => {
             CanonicalEvent::PluginChanged { operation, name }
         }
-        ServerEventKind::SteerApplied { ids, messages } => {
-            CanonicalEvent::UserInputAccepted { ids, messages }
-        }
+        ServerEventKind::SteerApplied { ids, messages } => CanonicalEvent::UserInputAccepted {
+            ids: ids.clone(),
+            messages: messages.clone(),
+        },
         ServerEventKind::ModelChanged { provider, model } => CanonicalEvent::AgentChanged {
             change: AgentChange::ModelChanged,
             provider: Some(provider),

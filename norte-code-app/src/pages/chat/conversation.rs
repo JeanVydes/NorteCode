@@ -111,14 +111,15 @@ pub(super) async fn read_conversation(
         if !still_selected(context, &request.session_id) {
             return;
         }
-        apply(*context, &frame);
+        apply(*context, frame);
     }
 }
 
 #[allow(clippy::too_many_lines, clippy::large_types_passed_by_value)]
-pub(super) fn apply(context: AppContext, frame: &raep_types::Envelope<serde_json::Value>) {
-    let turn_of_frame = frame.turn_id.as_ref().map(ToString::to_string);
-    match chat_client::decode_frame(frame) {
+pub(super) fn apply(context: AppContext, frame: norte_code_client::DecodedEvent) {
+    let turn_of_frame = frame.turn_id.clone();
+    let timestamp = frame.timestamp;
+    match chat_client::decode_event(frame) {
         DecodedFrame::Accepted { turn_id, queued } => {
             // The server names the turn. A queued one waits behind the turn
             // already running: it must not steal the streaming id, or the
@@ -275,10 +276,6 @@ pub(super) fn apply(context: AppContext, frame: &raep_types::Envelope<serde_json
                     Some(ChatState::Thinking)
                 }
                 TurnPhase::ExecutingTool => Some(ChatState::RunningTool),
-                TurnPhase::Completed
-                | TurnPhase::Cancelled
-                | TurnPhase::Failed
-                | TurnPhase::Stopped => None,
             } {
                 context.set_chat_state(state);
             }
@@ -345,7 +342,7 @@ pub(super) fn apply(context: AppContext, frame: &raep_types::Envelope<serde_json
                         role: HistoryRole::Assistant,
                         kind: HistoryKind::Assistant,
                         content: String::new(),
-                        created_at: frame.timestamp,
+                        created_at: timestamp,
                         delivery: MessageDelivery::Sent,
                         tool: None,
                         usage: Some(usage),

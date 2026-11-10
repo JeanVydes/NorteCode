@@ -1,6 +1,6 @@
-use norte_code_wire::{
-    AgentChange, CatalogKind, ClientRequest, JobStatus, ServerEvent, ServiceDataKind,
-};
+#[cfg(feature = "native")]
+use norte_code_wire::ClientRequest;
+use norte_code_wire::{AgentChange, CatalogKind, JobStatus, ServerEvent, ServiceDataKind};
 use raep_types::Envelope;
 use serde_json::Value;
 
@@ -10,6 +10,7 @@ use crate::error::ClientError;
 #[allow(clippy::wildcard_imports)]
 use crate::frame::*;
 
+#[cfg(feature = "native")]
 pub(crate) fn timestamp_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -18,6 +19,7 @@ pub(crate) fn timestamp_millis() -> i64 {
         })
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn percent_encode(value: &str) -> String {
     value
         .bytes()
@@ -39,6 +41,85 @@ pub(crate) struct CatalogCount {
     pub(crate) skills: usize,
 }
 
+/// One frame decoded for a client.
+///
+/// The event is the protocol-level fact; the rest is the envelope metadata a
+/// UI needs to route it (which turn, which job, when, and where in the
+/// stream it landed). Every client decodes through this, so no client can
+/// drift from the protocol on its own.
+#[derive(Clone, Debug)]
+pub struct DecodedEvent {
+    /// What happened.
+    pub event: ServerEvent,
+    /// The frame's position in the session stream, when the server sent one.
+    pub seq: Option<u64>,
+    /// The turn the frame belongs to, as the envelope names it.
+    pub turn_id: Option<String>,
+    /// The job the frame belongs to, as the envelope names it.
+    pub job_id: Option<String>,
+    /// The server's timestamp for the frame.
+    pub timestamp: i64,
+}
+
+/// Decodes a `HISTORY_PAGE` payload into the shared history items.
+///
+/// The page travels both as a frame payload and as the body of a plain
+/// history request, so clients decode both through this.
+///
+/// # Errors
+///
+/// Returns [`ClientError`] when the payload is not a history page.
+pub fn history_items(payload: &Value) -> Result<Vec<norte_code_wire::HistoryItem>, ClientError> {
+    let page: crate::frame::HistoryPagePayload = serde_json::from_value(payload.clone())
+        .map_err(|error| ClientError::new(format!("invalid history page: {error}")))?;
+    Ok(page
+        .items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| item.into_wire(index))
+        .collect())
+}
+
+/// Decodes one RAEP frame into the protocol event plus envelope metadata.
+///
+/// # Errors
+///
+/// Returns [`ClientError`] when the frame is not a valid Norte Code event or
+/// the canonical payload does not match its declared kind.
+pub fn decode_frame(frame: &Envelope<Value>) -> Result<DecodedEvent, ClientError> {
+    Ok(DecodedEvent {
+        event: server_event_from_frame(frame)?,
+        seq: frame.seq,
+        turn_id: frame.turn_id.as_ref().map(ToString::to_string),
+        job_id: frame.job_id.as_ref().map(ToString::to_string),
+        timestamp: frame.timestamp,
+    })
+}
+
+/// Builds the job summary the wire event carries from the fields a finished
+/// job frame reports.
+fn job_info(finished: &norte_code_wire::JobFinished) -> norte_code_wire::JobInfo {
+    let state = match finished.status {
+        JobStatus::Completed => norte_code_wire::JobState::Finished,
+        JobStatus::Failed | JobStatus::Killed | JobStatus::TimedOut => {
+            norte_code_wire::JobState::Cancelled
+        }
+        JobStatus::Running => norte_code_wire::JobState::Running,
+    };
+    norte_code_wire::JobInfo {
+        id: finished.job_id.clone().unwrap_or_default(),
+        label: finished.summary.clone(),
+        script: String::new(),
+        state,
+        exit_code: finished.exit_code,
+        timed_out: finished.status == JobStatus::TimedOut,
+        elapsed_ms: finished.duration_ms,
+        output: finished.output_snapshot.clone(),
+        dropped: finished.output_truncated,
+        output_bytes_total: finished.output_bytes_total,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn standard_event_from_frame(
     frame: &Envelope<Value>,
@@ -46,6 +127,7 @@ pub(crate) fn standard_event_from_frame(
     let frame = FrameView::from_envelope(frame);
     let frame_type = frame.frame_type;
     let turn = frame.turn;
+    let job_id = frame.job_id;
     let extension_finished = frame.extension_turn_finished.clone();
     let payload = frame.payload;
     let session = frame.session;
@@ -69,6 +151,14 @@ pub(crate) fn standard_event_from_frame(
                             index: decoded.index,
                             text: decoded.delta,
                         },
+                        // A call's arguments are not answer text: the frame
+                        // says so, and a client that draws them as text is
+                        // the bug this channel exists to prevent.
+                        "tool_arguments" => norte_code_wire::Delta::ToolArguments {
+                            index: decoded.index,
+                            call_id: String::new(),
+                            arguments: decoded.delta,
+                        },
                         _ => norte_code_wire::Delta::Text {
                             index: decoded.index,
                             text: decoded.delta,
@@ -83,7 +173,10 @@ pub(crate) fn standard_event_from_frame(
                     let changed: raep_types::TurnStateChanged = from_payload(payload)?;
                     match changed.state {
                         raep_types::TurnState::Queued => {
-                            event(norte_code_wire::ServerEventKind::TurnStarted { turn })
+                            event(norte_code_wire::ServerEventKind::TurnPhase {
+                                turn,
+                                phase: norte_code_wire::TurnPhaseName::Queued,
+                            })
                         }
                         raep_types::TurnState::Completed => {
                             // `phase`/`committed` are NorteCode's own fields: the RAEP
@@ -107,22 +200,52 @@ pub(crate) fn standard_event_from_frame(
                             })
                         }
                         raep_types::TurnState::Cancelled | raep_types::TurnState::Failed => {
-                            let reason = match changed.stop_reason {
-                                Some(raep_types::StopReason::EndTurn) => "end_turn",
-                                Some(raep_types::StopReason::MaxTokens) => "max_tokens",
-                                Some(raep_types::StopReason::Error) => "error",
-                                Some(raep_types::StopReason::ToolLimit) => "tool_limit",
-                                Some(raep_types::StopReason::BudgetExceeded) => "budget_exceeded",
-                                Some(raep_types::StopReason::Cancelled) | None => "cancelled",
-                            }
-                            .to_owned();
+                            // A failure carries the text the provider or the
+                            // host wrote for the person reading it. Prefer it
+                            // over the stop reason: "provider said no" is
+                            // actionable, "error" is not.
+                            let reason = changed
+                                .error
+                                .map(|error| error.message)
+                                .filter(|message| !message.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    match changed.stop_reason {
+                                        Some(raep_types::StopReason::EndTurn) => "end_turn",
+                                        Some(raep_types::StopReason::MaxTokens) => "max_tokens",
+                                        Some(raep_types::StopReason::Error) => "error",
+                                        Some(raep_types::StopReason::ToolLimit) => "tool_limit",
+                                        Some(raep_types::StopReason::BudgetExceeded) => {
+                                            "budget_exceeded"
+                                        }
+                                        Some(raep_types::StopReason::Cancelled) | None => {
+                                            "cancelled"
+                                        }
+                                    }
+                                    .to_owned()
+                                });
                             event(norte_code_wire::ServerEventKind::TurnStopped { reason })
                         }
-                        // Intermediate states carry no turn-boundary meaning for the
-                        // client; the next terminal state will arrive on its own.
-                        raep_types::TurnState::CallingProvider
-                        | raep_types::TurnState::ExecutingTool
-                        | raep_types::TurnState::AwaitingApproval => return Ok(None),
+                        // Between the boundaries the turn is doing something the
+                        // client shows (waiting on the provider, running a tool,
+                        // waiting for an approval). It is not an ending.
+                        raep_types::TurnState::CallingProvider => {
+                            event(norte_code_wire::ServerEventKind::TurnPhase {
+                                turn,
+                                phase: norte_code_wire::TurnPhaseName::CallingProvider,
+                            })
+                        }
+                        raep_types::TurnState::ExecutingTool => {
+                            event(norte_code_wire::ServerEventKind::TurnPhase {
+                                turn,
+                                phase: norte_code_wire::TurnPhaseName::ExecutingTool,
+                            })
+                        }
+                        raep_types::TurnState::AwaitingApproval => {
+                            event(norte_code_wire::ServerEventKind::TurnPhase {
+                                turn,
+                                phase: norte_code_wire::TurnPhaseName::AwaitingApproval,
+                            })
+                        }
                     }
                 }
                 FrameKind::ToolCallStarted => {
@@ -161,6 +284,79 @@ pub(crate) fn standard_event_from_frame(
                         truncated: decoded.result_truncated,
                         detached: decoded.status == ToolStatus::Cancelled,
                         duration_ms: decoded.duration_ms,
+                    })
+                }
+                FrameKind::UserInputAccepted => {
+                    let decoded: norte_code_wire::UserInputAccepted = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::InputAccepted {
+                        turn_id: decoded.turn_id,
+                        queued: decoded.position.is_some(),
+                    })
+                }
+                FrameKind::HistoryPage => {
+                    let decoded: HistoryPagePayload = from_payload(payload)?;
+                    let has_more = decoded.has_more || decoded.next.is_some();
+                    let items = decoded
+                        .items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, item)| item.into_wire(index))
+                        .collect();
+                    event(norte_code_wire::ServerEventKind::HistoryPage { items, has_more })
+                }
+                FrameKind::SessionForked => {
+                    let decoded: norte_code_wire::SessionForked = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::SessionForked {
+                        from: norte_code_wire::SessionKey::new(
+                            decoded.from_session_id.unwrap_or_default(),
+                        ),
+                        from_turn_id: decoded.from_turn_id,
+                        title: decoded.title,
+                    })
+                }
+                FrameKind::HistoryRewound => {
+                    let decoded: HistoryRewoundPayload = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::HistoryRewound {
+                        to_turn_id: decoded.to_turn_id.unwrap_or_default(),
+                        inclusive: decoded.inclusive,
+                        rewound_turn_ids: decoded.rewound_turn_ids,
+                        side_effects: decoded
+                            .side_effects
+                            .into_iter()
+                            .map(HistorySideEffectPayload::into_wire)
+                            .collect(),
+                        workspace_restored: decoded.workspace_restored,
+                    })
+                }
+                FrameKind::JobStarted => {
+                    let decoded: norte_code_wire::JobStarted = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::JobStarted {
+                        job_id: decoded.job_id,
+                        tool_call_id: decoded.tool_call_id,
+                        command: decoded.command,
+                        started_at: decoded.started_at,
+                        limits: decoded.limits.unwrap_or_default(),
+                    })
+                }
+                FrameKind::JobProgressDelta => {
+                    let decoded: norte_code_wire::JobProgress = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::JobProgressDelta {
+                        job_id: job_id.unwrap_or_default(),
+                        stream: decoded.stream,
+                        delta: decoded.delta,
+                        index: decoded.index,
+                    })
+                }
+                FrameKind::JobFinished => {
+                    let decoded: norte_code_wire::JobFinished = from_payload(payload)?;
+                    let job = job_info(&decoded);
+                    event(norte_code_wire::ServerEventKind::JobFinished {
+                        job,
+                        triggered_new_turn: decoded.triggered_new_turn,
+                        new_turn_id: decoded.new_turn_id.and_then(|id| id.parse().ok()),
+                        injected_into_turn_id: decoded
+                            .injected_into_turn_id
+                            .and_then(|id| id.parse().ok()),
                     })
                 }
                 FrameKind::JobListResult => {
@@ -342,8 +538,21 @@ pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerE
                 duration_ms: decoded.duration_ms,
             }
         }
-        CanonicalKind::OutputPartFinished | CanonicalKind::RequestCompleted => {
+        CanonicalKind::OutputPartFinished => {
             let decoded: CanonicalOutputPartFinished = canonical.decode()?;
+            norte_code_wire::ServerEventKind::OutputPartFinished {
+                turn: decoded.turn,
+                part_id: decoded.part_id,
+                index: decoded.index,
+                modality: decoded.modality,
+                bytes: decoded.bytes,
+                sha256: decoded.sha256,
+                blob: decoded.blob,
+                error: decoded.error,
+            }
+        }
+        CanonicalKind::RequestCompleted => {
+            let decoded: CanonicalRequestCompleted = canonical.decode()?;
             norte_code_wire::ServerEventKind::RequestReconstructed {
                 turn: decoded.turn,
                 index: decoded.index,
@@ -663,6 +872,7 @@ pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerE
     })
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn session_from_request(request: &ClientRequest) -> Option<String> {
     use norte_code_wire::ClientRequestKind;
     let session = match &request.kind {

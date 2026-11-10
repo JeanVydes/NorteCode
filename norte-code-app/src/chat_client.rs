@@ -8,9 +8,9 @@
 
 use crate::api::{ApiClient, ApiError};
 use crate::domain::{ConversationItem, HistoryKind, HistoryRole, MessageDelivery, SessionTodo};
-use crate::frames;
 use crate::wire::UserInputPart;
-use norte_code_wire::{JobStatus, JobSummary};
+use norte_code_client as client;
+use norte_code_wire::{JobStatus, JobSummary, ServerEventKind};
 
 #[derive(serde::Serialize)]
 struct RewindRequest<'a> {
@@ -90,374 +90,301 @@ pub enum TokenChannel {
     Reasoning,
 }
 
-/// Decodes the frames the conversation renders and reports what changed.
+/// Decodes one protocol event into what the conversation renders.
 ///
-/// Frames the transcript does not draw (completions, budget notices, retries)
-/// are ignored here on purpose: the conversation is history plus live deltas,
-/// not a log of every protocol event.
+/// The frame itself was already decoded by `norte-code-client`: this only
+/// decides what the page draws, so there is exactly one place that knows the
+/// RAEP payloads and exactly one that knows the UI.
 #[allow(clippy::too_many_lines)]
-pub fn decode_frame(frame: &Envelope<Value>) -> DecodedFrame {
-    let turn_id = frame.turn_id.as_ref().map(ToString::to_string);
-    let payload = &frame.payload;
-    match &frame.kind {
-        FrameType::Standard(StandardFrameType::TokenDelta) => {
-            let Ok(delta) = serde_json::from_value::<norte_code_wire::TokenDelta>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            if delta.delta.is_empty() {
-                return DecodedFrame::Ignored;
-            }
-            DecodedFrame::Token {
-                turn_id,
-                channel: match delta.channel {
-                    norte_code_wire::TokenChannel::Text => TokenChannel::Text,
-                    norte_code_wire::TokenChannel::Reasoning => TokenChannel::Reasoning,
-                    // A tool call's arguments are not answer text. The row is
-                    // opened by `TOOL_CALL_STARTED`, which carries them whole;
-                    // drawing the fragments here is what painted raw JSON into
-                    // the conversation before the call rendered.
-                    norte_code_wire::TokenChannel::ToolArguments => return DecodedFrame::Ignored,
-                },
-                index: delta.index,
-                delta: delta.delta,
-                timestamp: frame.timestamp,
-            }
-        }
-        FrameType::Standard(StandardFrameType::ToolCallStarted) => {
-            let Ok(started) =
-                serde_json::from_value::<norte_code_wire::ToolStarted>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::ToolStarted {
-                turn_id,
-                call_id: started.tool_call_id,
-                tool: started.tool_name,
-                arguments: started.arguments,
-                timestamp: frame.timestamp,
-            }
-        }
-        FrameType::Standard(StandardFrameType::ToolOutputDelta) => {
-            let Ok(output) = serde_json::from_value::<norte_code_wire::ToolOutput>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::ToolOutput {
-                call_id: output.tool_call_id,
-                delta: output.delta,
-            }
-        }
-        FrameType::Standard(StandardFrameType::ToolCallFinished) => {
-            let Ok(finished) =
-                serde_json::from_value::<norte_code_wire::ToolFinished>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::ToolFinished {
-                call_id: finished.tool_call_id,
-                failed: finished.status == norte_code_wire::ToolStatus::Error,
-                cancelled: finished.status == norte_code_wire::ToolStatus::Cancelled,
-                duration_ms: finished.duration_ms,
-                result_summary: finished.result_summary,
-            }
-        }
-        FrameType::Standard(StandardFrameType::TurnStateChanged) => {
-            let Ok(state) = serde_json::from_value::<frames::TurnState>(payload.clone()) else {
-                return DecodedFrame::Ignored;
-            };
-            match state.state {
-                frames::TurnStateName::CallingProvider
-                | frames::TurnStateName::ExecutingTool
-                | frames::TurnStateName::AwaitingApproval
-                | frames::TurnStateName::Queued => DecodedFrame::TurnPhase(state.state),
-                frames::TurnStateName::Completed => DecodedFrame::TurnEnded {
+pub fn decode_event(decoded: client::DecodedEvent) -> DecodedFrame {
+    let turn_id = decoded.turn_id.clone();
+    let timestamp = decoded.timestamp;
+    let frame_session = decoded
+        .event
+        .session
+        .as_ref()
+        .map(|session| session.as_str().to_owned());
+    match decoded.event.kind {
+        ServerEventKind::Delta { delta, .. } => match delta {
+            norte_code_wire::Delta::Text { index, text }
+            | norte_code_wire::Delta::Refusal { index, text } => {
+                if text.is_empty() {
+                    return DecodedFrame::Ignored;
+                }
+                DecodedFrame::Token {
                     turn_id,
-                    outcome: TurnOutcome::Completed,
-                },
-                frames::TurnStateName::Cancelled => DecodedFrame::TurnEnded {
-                    turn_id,
-                    outcome: TurnOutcome::Cancelled,
-                },
-                frames::TurnStateName::Failed | frames::TurnStateName::Stopped => {
-                    DecodedFrame::TurnEnded {
-                        turn_id,
-                        outcome: TurnOutcome::Failed(
-                            state
-                                .error
-                                .map(|error| error.message)
-                                .filter(|message| !message.trim().is_empty()),
-                        ),
-                    }
+                    channel: TokenChannel::Text,
+                    index: u64::from(index),
+                    delta: text,
+                    timestamp,
                 }
             }
-        }
-        FrameType::Standard(StandardFrameType::HistoryPage) => {
-            let Ok(page) = serde_json::from_value::<frames::HistoryPage>(payload.clone()) else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::History(
-                page.items
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| history_item_to_conversation(item, index))
-                    .collect(),
-            )
-        }
-        FrameType::Standard(StandardFrameType::JobStarted) => {
-            let Ok(started) =
-                serde_json::from_value::<norte_code_wire::JobStarted>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Job(JobMutation::Started {
-                job_id: started.job_id,
-                command: started.command,
-            })
-        }
-        FrameType::Standard(StandardFrameType::JobProgressDelta) => {
-            let Ok(progress) =
-                serde_json::from_value::<norte_code_wire::JobProgress>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Job(JobMutation::Output {
-                job_id: frame
-                    .job_id
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
-                delta: progress.delta,
-                index: progress.index,
-            })
-        }
-        FrameType::Standard(StandardFrameType::JobFinished) => {
-            let Ok(finished) =
-                serde_json::from_value::<norte_code_wire::JobFinished>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Job(JobMutation::Finished {
-                job_id: finished
-                    .job_id
-                    .or_else(|| frame.job_id.as_ref().map(ToString::to_string))
-                    .unwrap_or_default(),
-                status: job_status(finished.status),
-                exit_code: finished.exit_code,
-                summary: finished.summary,
-                output_snapshot: finished.output_snapshot,
-                output_truncated: finished.output_truncated,
-                output_bytes_total: finished.output_bytes_total,
-                duration_ms: finished.duration_ms,
-            })
-        }
-        FrameType::Standard(StandardFrameType::UserInputAccepted) => {
-            let Ok(accepted) =
-                serde_json::from_value::<norte_code_wire::UserInputAccepted>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Accepted {
-                turn_id: accepted.turn_id,
-                queued: accepted.position.is_some(),
+            norte_code_wire::Delta::Reasoning { index, text } => {
+                if text.is_empty() {
+                    return DecodedFrame::Ignored;
+                }
+                DecodedFrame::Token {
+                    turn_id,
+                    channel: TokenChannel::Reasoning,
+                    index: u64::from(index),
+                    delta: text,
+                    timestamp,
+                }
             }
-        }
-        FrameType::Standard(StandardFrameType::SessionForked) => {
-            let Ok(forked) =
-                serde_json::from_value::<norte_code_wire::SessionForked>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Forked {
-                from: forked.from_session_id,
-                from_turn_id: forked.from_turn_id,
-                new_session_id: (!frame.session_id.is_empty()).then(|| frame.session_id.clone()),
+            // A tool call's arguments are not answer text. The row is opened
+            // by `ToolStarted`, which carries them whole; drawing the
+            // fragments here is what painted raw JSON into the conversation.
+            norte_code_wire::Delta::ToolArguments { .. } | norte_code_wire::Delta::Media { .. } => {
+                DecodedFrame::Ignored
             }
+        },
+        ServerEventKind::ToolStarted {
+            call_id,
+            tool,
+            arguments,
+            ..
+        } => DecodedFrame::ToolStarted {
+            turn_id,
+            call_id,
+            tool,
+            arguments: arguments.unwrap_or(Value::Null),
+            timestamp,
+        },
+        ServerEventKind::ToolOutput { call_id, text, .. } => DecodedFrame::ToolOutput {
+            call_id,
+            delta: text,
+        },
+        ServerEventKind::ToolFinished {
+            call_id,
+            is_error,
+            detached,
+            error,
+            output,
+            duration_ms,
+            ..
+        } => DecodedFrame::ToolFinished {
+            call_id,
+            failed: is_error,
+            cancelled: detached,
+            duration_ms: Some(duration_ms),
+            result_summary: error.or(output),
+        },
+        ServerEventKind::TurnPhase { phase, .. } => DecodedFrame::TurnPhase(phase),
+        ServerEventKind::TurnFinished { .. } => DecodedFrame::TurnEnded {
+            turn_id,
+            outcome: TurnOutcome::Completed,
+        },
+        ServerEventKind::TurnStopped { reason } => DecodedFrame::TurnEnded {
+            turn_id,
+            outcome: if reason == "cancelled" {
+                TurnOutcome::Cancelled
+            } else {
+                TurnOutcome::Failed(Some(reason))
+            },
+        },
+        ServerEventKind::InputAccepted {
+            turn_id: accepted,
+            queued,
+        } => DecodedFrame::Accepted {
+            turn_id: accepted,
+            queued,
+        },
+        ServerEventKind::HistoryPage { items, .. } => DecodedFrame::History(
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| history_item_to_conversation(item, index))
+                .collect(),
+        ),
+        ServerEventKind::SessionForked { from_turn_id, .. } => DecodedFrame::Forked {
+            from: frame_session.clone(),
+            from_turn_id,
+            new_session_id: frame_session,
+        },
+        ServerEventKind::HistoryRewound {
+            rewound_turn_ids,
+            side_effects,
+            ..
+        } => DecodedFrame::Rewound {
+            turns: rewound_turn_ids,
+            side_effects: side_effects
+                .into_iter()
+                .map(|effect| (effect.tool_name, effect.side_effects))
+                .collect(),
+        },
+        ServerEventKind::SessionTodos { todos } => DecodedFrame::Todos(
+            todos
+                .into_iter()
+                .map(|todo| SessionTodo {
+                    content: todo.content,
+                    status: match todo.status {
+                        norte_code_wire::TodoStatus::Pending => crate::domain::TodoStatus::Pending,
+                        norte_code_wire::TodoStatus::InProgress => {
+                            crate::domain::TodoStatus::InProgress
+                        }
+                        norte_code_wire::TodoStatus::Completed => {
+                            crate::domain::TodoStatus::Completed
+                        }
+                    },
+                })
+                .collect(),
+        ),
+        ServerEventKind::JobStarted {
+            job_id, command, ..
+        } => DecodedFrame::Job(JobMutation::Started { job_id, command }),
+        ServerEventKind::JobProgressDelta {
+            job_id,
+            delta,
+            index,
+            ..
+        } => DecodedFrame::Job(JobMutation::Output {
+            job_id,
+            delta,
+            index,
+        }),
+        ServerEventKind::JobFinished { job, .. } => DecodedFrame::Job(JobMutation::Finished {
+            status: job_status_from_info(&job),
+            job_id: job.id,
+            exit_code: job.exit_code,
+            summary: job.label,
+            output_snapshot: job.output,
+            output_truncated: job.dropped,
+            output_bytes_total: job.output_bytes_total,
+            duration_ms: job.elapsed_ms,
+        }),
+        ServerEventKind::CompactionStarted { .. } => DecodedFrame::Compacting,
+        ServerEventKind::CompactionFinished {
+            compacted,
+            summary,
+            error,
+            ..
+        } => DecodedFrame::Compacted {
+            compacted,
+            summary,
+            error,
+        },
+        ServerEventKind::ChildSessionStarted {
+            child_session_id,
+            agent_id,
+            task_summary,
+            ..
+        } => DecodedFrame::ChildStarted {
+            session_id: child_session_id,
+            agent_id,
+            task_summary,
+        },
+        ServerEventKind::ChildSessionUpdated {
+            child_session_id,
+            state,
+            ..
+        } => DecodedFrame::ChildUpdated {
+            session_id: child_session_id,
+            state,
+        },
+        ServerEventKind::QuestionAsked {
+            turn,
+            question,
+            prompt,
+            options,
+            multiple,
+        } => DecodedFrame::QuestionAsked {
+            turn,
+            id: question,
+            prompt,
+            options,
+            multiple,
+        },
+        ServerEventKind::QuestionAnswered { question } => {
+            DecodedFrame::QuestionAnswered { id: question }
         }
-        FrameType::Standard(StandardFrameType::HistoryRewound) => {
-            let Ok(rewound) =
-                serde_json::from_value::<norte_code_wire::HistoryRewound>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Rewound {
-                turns: rewound.rewound_turn_ids,
-                side_effects: rewound
-                    .side_effects
-                    .into_iter()
-                    .map(|effect| (effect.tool_name, effect.side_effects))
-                    .collect(),
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("request_completed") => {
-            let Ok(completed) =
-                serde_json::from_value::<norte_code_wire::RequestCompleted>(payload.clone())
-            else {
-                return DecodedFrame::Ignored;
-            };
-            DecodedFrame::Usage {
-                turn_id,
-                usage: crate::domain::TurnUsage {
-                    input_tokens: completed.usage.input_tokens,
-                    output_tokens: completed.usage.output_tokens,
-                    cache_read_tokens: completed.usage.cache_read_tokens,
-                    cache_write_tokens: completed.usage.cache_write_tokens,
-                    cost_usd: completed.cost_usd,
-                    duration_ms: completed.duration_ms,
-                    first_token_ms: completed.first_token_ms,
-                    tokens_per_second: completed.tokens_per_second,
-                    cache_hit: completed.cache_hit,
-                    provider: completed.provider,
-                    model: completed.model,
-                },
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("output_part_finished") => {
-            match serde_json::from_value::<norte_code_wire::OutputPart>(payload.clone()) {
-                Ok(part) => DecodedFrame::OutputPart {
-                    id: part.part_id,
-                    modality: part.modality,
-                    bytes: part.bytes,
-                    blob: part.blob,
-                    error: part.error,
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("question_asked") => {
-            match serde_json::from_value::<norte_code_wire::QuestionAsked>(payload.clone()) {
-                Ok(asked) => DecodedFrame::QuestionAsked {
-                    turn: asked.turn_id,
-                    id: asked.question,
-                    prompt: asked.prompt,
-                    options: asked.options,
-                    multiple: asked.multiple,
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("question_answered") => {
-            match serde_json::from_value::<norte_code_wire::QuestionAnswered>(payload.clone()) {
-                Ok(answered) => DecodedFrame::QuestionAnswered {
-                    id: answered.question,
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("session_todos") => {
-            match serde_json::from_value::<norte_code_wire::SessionTodos>(payload.clone()) {
-                Ok(todos) => DecodedFrame::Todos(
-                    todos
-                        .todos
-                        .into_iter()
-                        .map(|todo| crate::domain::SessionTodo {
-                            content: todo.content,
-                            status: match todo.status {
-                                norte_code_wire::TodoStatus::Pending => {
-                                    crate::domain::TodoStatus::Pending
-                                }
-                                norte_code_wire::TodoStatus::InProgress => {
-                                    crate::domain::TodoStatus::InProgress
-                                }
-                                norte_code_wire::TodoStatus::Completed => {
-                                    crate::domain::TodoStatus::Completed
-                                }
-                            },
-                        })
-                        .collect(),
-                ),
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("compaction_finished") => {
-            match serde_json::from_value::<norte_code_wire::CompactionFinished>(payload.clone()) {
-                Ok(finished) => DecodedFrame::Compacted {
-                    // The host reports the summary, not a flag: a summary with
-                    // no error is a compaction that ran.
-                    compacted: finished
-                        .compacted
-                        .unwrap_or_else(|| finished.error.is_none() && finished.summary.is_some()),
-                    summary: finished.summary,
-                    error: finished.error,
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("compaction_started") => {
-            DecodedFrame::Compacting
-        }
-        FrameType::Extension(name) if name.ends_with("child_session_started") => {
-            match serde_json::from_value::<norte_code_wire::ChildSessionStarted>(payload.clone()) {
-                Ok(started) => DecodedFrame::ChildStarted {
-                    session_id: started.child_session_id,
-                    agent_id: started.agent_id,
-                    task_summary: started.task_summary,
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("child_session_updated") => {
-            match serde_json::from_value::<norte_code_wire::ChildSessionUpdated>(payload.clone()) {
-                Ok(updated) => DecodedFrame::ChildUpdated {
-                    session_id: updated.child_session_id,
-                    state: updated.state,
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
-        FrameType::Extension(name) if name.ends_with("agent_changed") => {
-            match serde_json::from_value::<norte_code_wire::AgentChanged>(payload.clone()) {
-                Ok(changed) => DecodedFrame::ModelChanged {
-                    // The canonical payload names the pair as the agent that
-                    // takes over: provider in `id`, model in `version`.
-                    provider: (!changed.to_agent.id.is_empty()).then_some(changed.to_agent.id),
-                    model: (!changed.to_agent.version.is_empty())
-                        .then_some(changed.to_agent.version),
-                },
-                Err(_) => DecodedFrame::Ignored,
-            }
-        }
+        ServerEventKind::ModelChanged { provider, model }
+        | ServerEventKind::ModelQueued { provider, model } => DecodedFrame::ModelChanged {
+            provider: (!provider.is_empty()).then_some(provider),
+            model: (!model.is_empty()).then_some(model),
+        },
+        ServerEventKind::OutputPartFinished {
+            part_id,
+            modality,
+            bytes,
+            blob,
+            error,
+            ..
+        } => DecodedFrame::OutputPart {
+            id: part_id,
+            modality: serde_json::to_value(modality)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            bytes,
+            blob,
+            error,
+        },
+        ServerEventKind::RequestReconstructed {
+            usage,
+            cost_usd,
+            duration_ms,
+            first_token_ms,
+            tokens_per_second,
+            cache_hit,
+            provider,
+            model,
+            ..
+        } => DecodedFrame::Usage {
+            turn_id,
+            usage: crate::domain::TurnUsage {
+                input_tokens: usage.input_tokens.unwrap_or(0),
+                output_tokens: usage.output_tokens.unwrap_or(0),
+                cache_read_tokens: usage.cache_read_tokens.unwrap_or(0),
+                cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
+                cost_usd: cost_usd.or(usage.cost_usd),
+                duration_ms,
+                first_token_ms,
+                tokens_per_second,
+                cache_hit,
+                provider,
+                model,
+            },
+        },
         _ => DecodedFrame::Ignored,
     }
 }
 
-fn job_status(status: norte_code_wire::JobStatus) -> JobStatus {
-    match status {
-        norte_code_wire::JobStatus::Running => JobStatus::Running,
-        norte_code_wire::JobStatus::Completed => JobStatus::Completed,
-        norte_code_wire::JobStatus::Failed => JobStatus::Failed,
-        norte_code_wire::JobStatus::Killed => JobStatus::Killed,
-        norte_code_wire::JobStatus::TimedOut => JobStatus::TimedOut,
+/// The job status a finished job is shown with.
+fn job_status_from_info(job: &norte_code_wire::JobInfo) -> JobStatus {
+    match job.state {
+        norte_code_wire::JobState::Running => JobStatus::Running,
+        norte_code_wire::JobState::Finished => JobStatus::Completed,
+        norte_code_wire::JobState::Cancelled if job.timed_out => JobStatus::TimedOut,
+        norte_code_wire::JobState::Cancelled => JobStatus::Failed,
     }
 }
 
-pub fn history_item_to_conversation(item: &frames::HistoryItem, index: usize) -> ConversationItem {
+pub fn history_item_to_conversation(
+    item: &norte_code_wire::HistoryItem,
+    index: usize,
+) -> ConversationItem {
     let role = match item.role {
-        frames::HistoryRole::User => HistoryRole::User,
-        frames::HistoryRole::Assistant => HistoryRole::Assistant,
-        frames::HistoryRole::Tool => HistoryRole::Tool,
-        frames::HistoryRole::SystemEvent => HistoryRole::SystemEvent,
+        norte_code_wire::HistorySpeaker::User => HistoryRole::User,
+        norte_code_wire::HistorySpeaker::Assistant => HistoryRole::Assistant,
+        norte_code_wire::HistorySpeaker::Tool => HistoryRole::Tool,
+        norte_code_wire::HistorySpeaker::SystemEvent => HistoryRole::SystemEvent,
     };
-    let kind = match item.kind {
-        frames::HistoryKind::User => HistoryKind::User,
-        frames::HistoryKind::Assistant => HistoryKind::Assistant,
-        frames::HistoryKind::Reasoning => HistoryKind::Reasoning,
-        frames::HistoryKind::ToolCall | frames::HistoryKind::Tool => HistoryKind::ToolCall,
-        frames::HistoryKind::ToolResult => HistoryKind::ToolResult,
-        frames::HistoryKind::Refusal => HistoryKind::Refusal,
-        frames::HistoryKind::SystemEvent => HistoryKind::SystemEvent,
+    let kind = match item.kind.as_str() {
+        "user" => HistoryKind::User,
+        "assistant" => HistoryKind::Assistant,
+        "reasoning" => HistoryKind::Reasoning,
+        "tool_call" | "tool" => HistoryKind::ToolCall,
+        "tool_result" => HistoryKind::ToolResult,
+        "refusal" => HistoryKind::Refusal,
+        _ => HistoryKind::SystemEvent,
     };
     ConversationItem {
-        id: format!(
-            "history:{}:{}:{index}",
-            item.turn_id.as_deref().unwrap_or("untracked"),
-            item.timestamp
-        ),
+        id: format!("history:{}:{}:{index}", item.id, item.created_at),
         turn_id: item.turn_id.clone(),
         role,
         kind,
         content: item.content.clone(),
-        created_at: item.timestamp,
+        created_at: item.created_at,
         delivery: MessageDelivery::Sent,
         tool: None,
         usage: None,
@@ -469,7 +396,7 @@ pub fn history_item_to_conversation(item: &frames::HistoryItem, index: usize) ->
 /// It used to be a second enum with the same four values, translated by a
 /// `match` at the one place that decoded it, two names for one state, which
 /// is how a new phase ends up handled in one and silently dropped in the other.
-pub use crate::frames::TurnStateName as TurnPhase;
+pub use norte_code_wire::TurnPhaseName as TurnPhase;
 
 /// How a turn ended, as the wire reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,17 +602,19 @@ impl ApiClient {
         frame.turn_id = Some(turn_id.clone());
         let response = self.post_command(session_id, &frame).await?;
         if response.accepted {
-            let accepted = response
-                .events
-                .iter()
-                .find(|event| {
-                    event.kind == FrameType::Standard(StandardFrameType::UserInputAccepted)
-                })
-                .and_then(|event| {
-                    event.payload["turn_id"]
-                        .as_str()
-                        .and_then(|id| TurnId::new(id).ok())
-                });
+            let accepted =
+                response
+                    .events
+                    .iter()
+                    .find_map(|event| match client::decode_frame(event) {
+                        Ok(decoded) => match decoded.event.kind {
+                            ServerEventKind::InputAccepted { turn_id, .. } => {
+                                TurnId::new(turn_id).ok()
+                            }
+                            _ => None,
+                        },
+                        Err(_) => None,
+                    });
             Ok(accepted.unwrap_or(turn_id))
         } else {
             Err(ApiError::InvalidResponse(response.error.map_or_else(
@@ -715,16 +644,17 @@ impl ApiClient {
         );
         frame.session_id = session_id.to_owned();
         let response = self.post_command(session_id, &frame).await?;
-        let rewound = response
+        Ok(response
             .events
             .iter()
-            .find(|event| event.kind == FrameType::Standard(StandardFrameType::HistoryRewound))
-            .and_then(|event| event.payload["rewound_turn_ids"].as_array().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|value| value.as_str().map(str::to_owned))
-            .collect();
-        Ok(rewound)
+            .filter_map(|event| client::decode_frame(event).ok())
+            .find_map(|decoded| match decoded.event.kind {
+                ServerEventKind::HistoryRewound {
+                    rewound_turn_ids, ..
+                } => Some(rewound_turn_ids),
+                _ => None,
+            })
+            .unwrap_or_default())
     }
 
     /// Forks a session, optionally from a specific turn, and returns the new id.
@@ -746,14 +676,22 @@ impl ApiClient {
         );
         frame.session_id = session_id.to_owned();
         let response = self.post_command(session_id, &frame).await?;
-        for event in &response.events {
-            if event.kind == FrameType::Standard(StandardFrameType::SessionForked) {
-                return Ok(event.session_id.clone());
-            }
-        }
-        Err(ApiError::InvalidResponse(
-            "The server did not return the forked session.".to_owned(),
-        ))
+        response
+            .events
+            .iter()
+            .filter_map(|event| client::decode_frame(event).ok())
+            .find(|decoded| matches!(decoded.event.kind, ServerEventKind::SessionForked { .. }))
+            .and_then(|decoded| {
+                decoded
+                    .event
+                    .session
+                    .map(|session| session.as_str().to_owned())
+            })
+            .ok_or_else(|| {
+                ApiError::InvalidResponse(
+                    "The server did not return the forked session.".to_owned(),
+                )
+            })
     }
 
     /// Compacts a session now.
@@ -801,7 +739,7 @@ impl ApiClient {
 /// Blocks the calling task until the next frame arrives.
 pub async fn next_frame(
     stream: &mut crate::sse::SessionEventStream,
-) -> Result<Option<Envelope<Value>>, ApiError> {
+) -> Result<Option<client::DecodedEvent>, ApiError> {
     stream.next().await
 }
 

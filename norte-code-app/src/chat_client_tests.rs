@@ -8,6 +8,35 @@ fn frame(kind: FrameType, payload: Value) -> Envelope<Value> {
     envelope
 }
 
+/// A frame the way the host writes an extension one: the standard payload
+/// plus the original event under `ext`.
+#[allow(clippy::needless_pass_by_value)]
+fn frame_with_event(kind: &str, payload: Value, event: Value) -> Envelope<Value> {
+    let mut envelope = Envelope::new(
+        FrameType::Extension(format!("norte_code.{kind}")),
+        payload,
+        1,
+    );
+    envelope.session_id = "s".to_owned();
+    envelope.ext = Some(serde_json::json!({
+        "norte_code": {
+            "request_id": 0,
+            "session": "s",
+            "kind": event,
+        }
+    }));
+    envelope
+}
+
+/// Frames go through the shared client decoder, exactly as at runtime, and
+/// then through the page's mapping.
+fn decode_frame(frame: &Envelope<Value>) -> DecodedFrame {
+    match norte_code_client::decode_frame(frame) {
+        Ok(decoded) => decode_event(decoded),
+        Err(_) => DecodedFrame::Ignored,
+    }
+}
+
 #[test]
 fn a_reasoning_delta_lands_on_the_reasoning_channel() {
     let decoded = decode_frame(&frame(
@@ -100,7 +129,10 @@ fn every_terminal_state_ends_the_turn_with_its_outcome() {
     }
     let failed = decode_frame(&frame(
         FrameType::Standard(StandardFrameType::TurnStateChanged),
-        serde_json::json!({ "state": "FAILED", "error": { "message": "provider said no" } }),
+        serde_json::json!({
+            "state": "FAILED",
+            "error": { "code": "INTERNAL", "message": "provider said no" },
+        }),
     ));
     assert!(matches!(
         failed,
@@ -113,9 +145,10 @@ fn every_terminal_state_ends_the_turn_with_its_outcome() {
 
 #[test]
 fn a_compaction_reported_only_by_its_summary_still_counts() {
-    let decoded = decode_frame(&frame(
-        FrameType::Extension("norte_code.compaction_finished".to_owned()),
+    let decoded = decode_frame(&frame_with_event(
+        "compaction_finished",
         serde_json::json!({ "error": null, "summary": "a handoff" }),
+        serde_json::json!({ "event": "compaction_finished", "compacted": true, "summary": "a handoff" }),
     ));
     assert!(matches!(
         decoded,
@@ -128,9 +161,10 @@ fn a_compaction_reported_only_by_its_summary_still_counts() {
 
 #[test]
 fn a_failed_compaction_is_not_reported_as_compacted() {
-    let decoded = decode_frame(&frame(
-        FrameType::Extension("norte_code.compaction_finished".to_owned()),
+    let decoded = decode_frame(&frame_with_event(
+        "compaction_finished",
         serde_json::json!({ "error": "no model", "summary": null }),
+        serde_json::json!({ "event": "compaction_finished", "compacted": false, "error": "no model" }),
     ));
     assert!(matches!(
         decoded,
@@ -143,10 +177,18 @@ fn a_failed_compaction_is_not_reported_as_compacted() {
 
 #[test]
 fn an_ask_user_question_is_decoded_with_its_choices() {
-    let decoded = decode_frame(&frame(
-        FrameType::Extension("norte_code.question_asked".to_owned()),
+    let decoded = decode_frame(&frame_with_event(
+        "question_asked",
         serde_json::json!({
             "turn_id": 3,
+            "question": "q-1",
+            "prompt": "Which color?",
+            "options": ["Red", "Blue"],
+            "multiple": false,
+        }),
+        serde_json::json!({
+            "event": "question_asked",
+            "turn": 3,
             "question": "q-1",
             "prompt": "Which color?",
             "options": ["Red", "Blue"],
@@ -167,28 +209,27 @@ fn an_ask_user_question_is_decoded_with_its_choices() {
 
 #[test]
 fn an_answered_question_names_the_question_that_closed() {
-    // The extension payload spells the id `question`; the canonical form
-    // of the same event spells it `approval_id`. Both must decode.
-    for payload in [
+    let decoded = decode_frame(&frame_with_event(
+        "question_answered",
         serde_json::json!({ "question": "q-1" }),
-        serde_json::json!({ "approval_id": "q-1" }),
-    ] {
-        let decoded = decode_frame(&frame(
-            FrameType::Extension("norte_code.question_answered".to_owned()),
-            payload,
-        ));
-        assert!(matches!(
-            decoded,
-            DecodedFrame::QuestionAnswered { id } if id == "q-1"
-        ));
-    }
+        serde_json::json!({ "event": "question_answered", "question": "q-1" }),
+    ));
+    assert!(matches!(
+        decoded,
+        DecodedFrame::QuestionAnswered { id } if id == "q-1"
+    ));
 }
 
 #[test]
 fn a_compaction_finished_event_reports_the_summary() {
-    let decoded = decode_frame(&frame(
-        FrameType::Extension("norte_code.compaction_finished".to_owned()),
+    let decoded = decode_frame(&frame_with_event(
+        "compaction_finished",
         serde_json::json!({ "compacted": true, "summary": "we talked about cats" }),
+        serde_json::json!({
+            "event": "compaction_finished",
+            "compacted": true,
+            "summary": "we talked about cats",
+        }),
     ));
     assert!(matches!(
         decoded,
@@ -199,11 +240,19 @@ fn a_compaction_finished_event_reports_the_summary() {
 
 #[test]
 fn a_child_session_start_is_typed() {
-    let decoded = decode_frame(&frame(
-        FrameType::Extension("norte_code.child_session_started".to_owned()),
+    let decoded = decode_frame(&frame_with_event(
+        "child_session_started",
         serde_json::json!({
             "child_session_id": "child-1",
             "agent_id": "sub",
+            "task_summary": "read the docs",
+        }),
+        serde_json::json!({
+            "event": "child_session_started",
+            "child_session_id": "child-1",
+            "agent_id": "sub",
+            "tool_call_id": "c-1",
+            "lifetime": "turn",
             "task_summary": "read the docs",
         }),
     ));

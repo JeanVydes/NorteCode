@@ -216,6 +216,19 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             retryable: Some(false),
             details: None,
         })),
+        ServerEventKind::InputAccepted { turn_id, queued } => {
+            Some(payload(UserInputAcceptedPayload {
+                turn_id,
+                origin: OriginPayload {
+                    kind: OriginKind::User,
+                    user_id: None,
+                    display_name: None,
+                },
+                content: Vec::new(),
+                position: queued.then_some(1),
+                replaces_turn_id: None,
+            }))
+        }
         ServerEventKind::SteerApplied { ids, messages } => {
             let mut content = Vec::with_capacity(messages.len());
             for text in messages {

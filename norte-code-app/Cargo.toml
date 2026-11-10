@@ -15,6 +15,7 @@ desktop = ["dioxus/desktop"]
 
 [dependencies]
 dioxus = { version = "0.7", default-features = false, features = ["minimal", "launch", "asset", "document"] }
+norte-code-client = { path = "../norte-code-client", default-features = false }
 norte-code-wire = { path = "../norte-code-wire" }
 raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
 serde = { workspace = true }

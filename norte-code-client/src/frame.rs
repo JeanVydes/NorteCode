@@ -1,56 +1,11 @@
 use raep_types::{Envelope, FrameType, StandardFrameType};
 use serde_json::Value;
 
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct FrameWire {
-    #[serde(default)]
-    pub(crate) version: String,
-    #[serde(default)]
-    pub(crate) id: Option<raep_types::FrameId>,
-    #[serde(default)]
-    pub(crate) seq: Option<u64>,
-    #[serde(default)]
-    pub(crate) session_id: String,
-    #[serde(default)]
-    pub(crate) turn_id: Option<raep_types::TurnId>,
-    #[serde(default)]
-    pub(crate) timestamp: i64,
-    #[serde(default)]
-    pub(crate) kind: Option<FrameType>,
-    #[serde(default)]
-    pub(crate) payload: Value,
-    #[serde(default)]
-    pub(crate) ext: Option<Value>,
-}
-
-impl FrameWire {
-    pub(crate) fn into_envelope(self) -> Envelope<Value> {
-        Envelope {
-            version: if self.version.is_empty() {
-                raep_types::WIRE_VERSION.to_owned()
-            } else {
-                self.version
-            },
-            id: self.id.unwrap_or_else(raep_types::FrameId::generate),
-            seq: self.seq,
-            reference: None,
-            session_id: self.session_id,
-            turn_id: self.turn_id,
-            job_id: None,
-            timestamp: self.timestamp,
-            kind: self
-                .kind
-                .unwrap_or(FrameType::Extension("canonical".to_owned())),
-            payload: self.payload,
-            ext: self.ext,
-        }
-    }
-}
-
 use crate::error::ClientError;
 
 /// A fork request payload. `raep-types` defines the `SessionFork` frame
 /// but no payload struct for it yet, so the client owns this one shape.
+#[cfg(feature = "native")]
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ForkPayload {
     pub(crate) session_id: String,
@@ -58,6 +13,7 @@ pub(crate) struct ForkPayload {
 
 /// A command response body: the events a command produced, or the error
 /// that rejected it. Decoded as a struct, never by key.
+#[cfg(feature = "native")]
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct CommandResponseBody {
     #[serde(default)]
@@ -66,6 +22,7 @@ pub(crate) struct CommandResponseBody {
     pub(crate) error: Option<RejectError>,
 }
 
+#[cfg(feature = "native")]
 impl CommandResponseBody {
     pub(crate) fn error_message(&self) -> String {
         self.error.as_ref().map_or_else(
@@ -76,10 +33,113 @@ impl CommandResponseBody {
 }
 
 /// A rejected command's error body.
+#[cfg(feature = "native")]
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct RejectError {
     #[serde(default)]
     pub(crate) message: String,
+}
+
+/// A `HISTORY_PAGE` payload as the host sends it.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HistoryPagePayload {
+    #[serde(default)]
+    pub(crate) items: Vec<HistoryItemPayload>,
+    #[serde(default)]
+    pub(crate) has_more: bool,
+    /// The spec's spelling of the same fact: another page exists.
+    #[serde(default)]
+    pub(crate) next: Option<String>,
+}
+
+/// One item of a `HISTORY_PAGE`.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HistoryItemPayload {
+    #[serde(default)]
+    pub(crate) turn_id: Option<String>,
+    #[serde(default)]
+    pub(crate) role: String,
+    #[serde(default)]
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) content: String,
+    #[serde(default, alias = "created_at")]
+    pub(crate) timestamp: i64,
+}
+
+impl HistoryItemPayload {
+    pub(crate) fn into_wire(self, index: usize) -> norte_code_wire::HistoryItem {
+        let role = match self.role.as_str() {
+            "user" => norte_code_wire::HistorySpeaker::User,
+            "assistant" => norte_code_wire::HistorySpeaker::Assistant,
+            "tool" => norte_code_wire::HistorySpeaker::Tool,
+            _ => norte_code_wire::HistorySpeaker::SystemEvent,
+        };
+        let kind = if self.kind.is_empty() {
+            match role {
+                norte_code_wire::HistorySpeaker::User => "user",
+                norte_code_wire::HistorySpeaker::Assistant => "assistant",
+                norte_code_wire::HistorySpeaker::Tool => "tool",
+                norte_code_wire::HistorySpeaker::SystemEvent => "system_event",
+            }
+            .to_owned()
+        } else {
+            self.kind
+        };
+        norte_code_wire::HistoryItem {
+            id: self.turn_id.as_ref().map_or_else(
+                || format!("history:{index}"),
+                |turn| format!("{turn}:{index}"),
+            ),
+            kind,
+            content: self.content,
+            created_at: self.timestamp,
+            turn_id: self.turn_id,
+            role,
+            provenance: None,
+        }
+    }
+}
+
+/// A `HISTORY_REWOUND` payload as the host sends it.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HistoryRewoundPayload {
+    #[serde(default)]
+    pub(crate) to_turn_id: Option<String>,
+    #[serde(default)]
+    pub(crate) inclusive: bool,
+    #[serde(default)]
+    pub(crate) rewound_turn_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) side_effects: Vec<HistorySideEffectPayload>,
+    #[serde(default)]
+    pub(crate) workspace_restored: bool,
+}
+
+/// What one tool did in a rewound turn.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HistorySideEffectPayload {
+    #[serde(default)]
+    pub(crate) tool_call_id: String,
+    #[serde(default)]
+    pub(crate) tool_name: String,
+    #[serde(default)]
+    pub(crate) side_effects: Value,
+}
+
+impl HistorySideEffectPayload {
+    pub(crate) fn into_wire(self) -> norte_code_wire::SideEffect {
+        let side_effects = match self.side_effects {
+            Value::String(text) => text,
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        norte_code_wire::SideEffect {
+            tool_call_id: self.tool_call_id,
+            tool_name: self.tool_name,
+            side_effects,
+        }
+    }
 }
 
 /// The frame kinds this client maps onto protocol events. The wire spells
@@ -92,6 +152,13 @@ pub(crate) enum FrameKind {
     ToolCallStarted,
     ToolOutputDelta,
     ToolCallFinished,
+    UserInputAccepted,
+    HistoryPage,
+    SessionForked,
+    HistoryRewound,
+    JobStarted,
+    JobProgressDelta,
+    JobFinished,
     JobListResult,
     Error,
     Other,
@@ -105,6 +172,13 @@ impl FrameKind {
             StandardFrameType::ToolCallStarted => Self::ToolCallStarted,
             StandardFrameType::ToolOutputDelta => Self::ToolOutputDelta,
             StandardFrameType::ToolCallFinished => Self::ToolCallFinished,
+            StandardFrameType::UserInputAccepted => Self::UserInputAccepted,
+            StandardFrameType::HistoryPage => Self::HistoryPage,
+            StandardFrameType::SessionForked => Self::SessionForked,
+            StandardFrameType::HistoryRewound => Self::HistoryRewound,
+            StandardFrameType::JobStarted => Self::JobStarted,
+            StandardFrameType::JobProgressDelta => Self::JobProgressDelta,
+            StandardFrameType::JobFinished => Self::JobFinished,
             StandardFrameType::JobListResult => Self::JobListResult,
             StandardFrameType::Error => Self::Error,
             _ => Self::Other,
@@ -201,6 +275,7 @@ pub(crate) struct FrameView {
     pub(crate) payload: Option<Value>,
     pub(crate) session: Option<norte_code_wire::SessionKey>,
     pub(crate) turn: u64,
+    pub(crate) job_id: Option<String>,
     pub(crate) extension_turn_finished: Option<ExtensionTurnFinished>,
 }
 
@@ -229,6 +304,7 @@ impl FrameView {
             payload: Some(frame.payload.clone()),
             session,
             turn,
+            job_id: frame.job_id.as_ref().map(ToString::to_string),
             extension_turn_finished,
         }
     }
