@@ -17,8 +17,8 @@ use norte_code_protocol::{
     sqlite::{SessionDirectory, SqliteStore},
 };
 use norte_code_raep::{
-    BlobArtifactStore, FilePinStore, HostConfig, NorteCodeRaepHost, SqliteReplayStore,
-    SqliteUploadIndex, router,
+    BlobArtifactStore, FilePinStore, HostConfig, NorteCodeRaepHost, ReplayLog, SqliteUploadIndex,
+    router,
 };
 use norte_code_wire::catalog::{Models, Providers};
 
@@ -182,18 +182,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..HostConfig::default()
     };
     let pin_store = Arc::new(FilePinStore::new(database.with_file_name("pins")));
-    let replay_database = database.with_extension("replay.db");
-    let replay_store = Arc::new(SqliteReplayStore::open(
-        replay_database,
-        host_config.replay_capacity,
-    )?);
+    let replay_log = ReplayLog::new(database.with_extension("replay"), host_config.replay_bytes);
     let upload_index = Arc::new(SqliteUploadIndex::open(
         database.with_extension("uploads.db"),
     )?);
     let artifact_store = Arc::new(BlobArtifactStore::new(blobs));
     let host = Arc::new(
         NorteCodeRaepHost::with_agents(services, host_config)?
-            .with_replay_store_instance(replay_store)
+            .with_replay_log(replay_log)
             .with_pin_store(pin_store)
             .with_artifact_store(artifact_store)
             .with_upload_index(upload_index),

@@ -974,8 +974,12 @@ pub struct HostConfig {
     pub agent_id: String,
     /// Advertised server version.
     pub server_version: String,
-    /// Maximum number of emitted frames retained per session.
+    /// Broadcast channel capacity for live frames.
     pub replay_capacity: usize,
+    /// Directory holding one replay file per session.
+    pub replay_dir: std::path::PathBuf,
+    /// Maximum bytes retained per session's replay file.
+    pub replay_bytes: u64,
     /// Maximum number of concurrently running jobs per session.
     pub max_concurrent_jobs: usize,
     /// Duration for which terminal job output remains queryable.
@@ -1013,6 +1017,8 @@ impl Default for HostConfig {
             agent_id: "norte-code".to_owned(),
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
             replay_capacity: 10_000,
+            replay_dir: std::path::PathBuf::from("norte-code-replay"),
+            replay_bytes: 8 * 1024 * 1024,
             max_concurrent_jobs: 8,
             job_output_retention_s: 86_400,
             idempotency_capacity: 4_096,
@@ -1075,7 +1081,7 @@ pub struct NorteCodeRaepHost {
     config: HostConfig,
     state: Mutex<HostState>,
     events: broadcast::Sender<Envelope<Value>>,
-    replay_store: Option<Arc<dyn ReplayStore>>,
+    replay: ReplayLog,
     artifact_store: Option<Arc<dyn ArtifactStore>>,
     upload_index: Option<Arc<dyn UploadIndex>>,
     pin_store: Option<Arc<dyn PinStore>>,
@@ -1145,13 +1151,14 @@ impl NorteCodeRaepHost {
         service.configure_job_limits(config.max_concurrent_jobs, config.job_output_retention_s);
         let max_connections = config.max_connections;
         let (events, _) = broadcast::channel(config.replay_capacity.max(16));
+        let replay = ReplayLog::new(config.replay_dir.clone(), config.replay_bytes);
         Ok(Self {
             services: HashMap::from([(config.agent_id.clone(), Arc::clone(&service))]),
             service,
             config,
             state: Mutex::new(HostState::default()),
             events,
-            replay_store: None,
+            replay,
             artifact_store: None,
             upload_index: None,
             pin_store: None,
@@ -1188,25 +1195,10 @@ impl NorteCodeRaepHost {
         Ok(host)
     }
 
-    /// Creates a host with a durable RAEP replay journal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the host configuration or journal path is invalid.
-    pub fn with_replay_store(
-        service: Arc<Service>,
-        config: HostConfig,
-        replay_store: Arc<dyn ReplayStore>,
-    ) -> Result<Self, HostError> {
-        let mut host = Self::new(service, config)?;
-        host.replay_store = Some(replay_store);
-        Ok(host)
-    }
-
-    /// Enables a durable replay journal on an already configured host.
+    /// Moves the replay log to another directory.
     #[must_use]
-    pub fn with_replay_store_instance(mut self, replay_store: Arc<dyn ReplayStore>) -> Self {
-        self.replay_store = Some(replay_store);
+    pub fn with_replay_log(mut self, log: ReplayLog) -> Self {
+        self.replay = log;
         self
     }
 

@@ -114,30 +114,28 @@ impl NorteCodeRaepHost {
         session_id: &str,
         mut frame: Envelope<Value>,
     ) -> Result<Envelope<Value>, HostError> {
-        let mut state = self.state.lock().await;
-        let sequence = state
-            .sequences
-            .get(session_id)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
-        frame.seq = Some(sequence);
-        if let Some(store) = &self.replay_store {
-            store.append(&frame).await?;
-        }
-        state.sequences.insert(session_id.to_owned(), sequence);
-        if let Some(turn_id) = &frame.turn_id {
-            let key = (session_id.to_owned(), turn_id.clone());
-            if state.turn_request_fingerprints.contains_key(&key) {
-                state.turn_request_frames.insert(key, frame.clone());
+        {
+            let mut state = self.state.lock().await;
+            // The log outlives the process: a session's sequence continues
+            // from what is already on disk instead of restarting at one.
+            let current = state
+                .sequences
+                .get(session_id)
+                .copied()
+                .unwrap_or_else(|| self.replay.last_seq(session_id).unwrap_or(0));
+            let sequence = current.saturating_add(1);
+            frame.seq = Some(sequence);
+            state.sequences.insert(session_id.to_owned(), sequence);
+            if let Some(turn_id) = &frame.turn_id {
+                let key = (session_id.to_owned(), turn_id.clone());
+                if state.turn_request_fingerprints.contains_key(&key) {
+                    state.turn_request_frames.insert(key, frame.clone());
+                }
             }
         }
-        let replay = state.replay.entry(session_id.to_owned()).or_default();
-        replay.push_back(frame.clone());
-        while replay.len() > self.config.replay_capacity {
-            replay.pop_front();
-        }
-        drop(state);
+        // The file write happens outside the state lock: a slow disk must not
+        // block every other session's frames.
+        self.replay.append(&frame)?;
         let _ = self.events.send(frame.clone());
         Ok(frame)
     }

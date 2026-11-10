@@ -5,7 +5,6 @@ use crate::payloads::payload;
 use norte_code_wire::{ClientRequest, ClientRequestKind, SessionKey};
 use raep_types::{Envelope, FrameType, StandardFrameType, WIRE_VERSION};
 use serde_json::Value;
-use std::collections::VecDeque;
 
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
@@ -97,16 +96,15 @@ impl NorteCodeRaepHost {
     /// `used`/`remaining` come from in-memory counters.
     #[must_use]
     pub async fn quota(&self, principal: &str) -> Value {
-        let (sessions, replay_frames) = {
+        let sessions = {
             let state = self.state.lock().await;
-            let sessions = state
+            state
                 .session_owners
                 .values()
                 .filter(|owner| *owner == principal)
-                .count() as u64;
-            let frames = state.replay.values().map(VecDeque::len).sum::<usize>() as u64;
-            (sessions, frames)
+                .count() as u64
         };
+        let (replay_frames, _) = self.replay.total();
         let session_limit = 100_u64;
         let frame_limit = self.config.replay_capacity as u64;
         payload(norte_code_wire::QuotaReport {
@@ -214,7 +212,7 @@ impl NorteCodeRaepHost {
             status: ReadinessStatus::Ready,
             agent_id: &self.config.agent_id,
             agents: self.services.len(),
-            replay: self.replay_store.is_some(),
+            replay: true,
             artifacts: self.artifact_store.is_some(),
             limits: ReadinessLimits {
                 max_connections: self.config.max_connections,
