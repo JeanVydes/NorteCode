@@ -2,7 +2,7 @@ use futures_util::stream::{self, StreamExt};
 use norte_code_wire::QueueMode;
 use norte_code_wire::{ClientRequest, ServerEvent};
 use raep_types::{Ack, Envelope, FrameType, StandardFrameType, UserInput};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -73,6 +73,8 @@ impl RemoteClient {
         request: ClientRequest,
     ) -> Result<EventStream, ClientError> {
         let mut headers = HeaderMap::new();
+        // The host answers 406 to a stream request that does not ask for one.
+        headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if let Some(token) = &self.bearer_token {
             headers.insert(AUTHORIZATION, token.clone());
         }

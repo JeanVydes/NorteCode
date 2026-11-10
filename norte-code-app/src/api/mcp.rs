@@ -10,14 +10,14 @@ impl ApiClient {
     }
 
     pub async fn refresh_mcp(&self) -> Result<McpCatalog, ApiError> {
-        self.norte_code_command("unused", ClientRequestKind::RefreshMcp)
+        self.norte_code_command(None, ClientRequestKind::RefreshMcp)
             .await?;
         self.read_mcp_catalog().await
     }
 
     async fn read_mcp_catalog(&self) -> Result<McpCatalog, ApiError> {
         let response = self
-            .norte_code_command("unused", ClientRequestKind::ListMcp)
+            .norte_code_command(None, ClientRequestKind::ListMcp)
             .await?;
         let payload = response
             .events
@@ -35,7 +35,7 @@ impl ApiClient {
 
     pub async fn set_mcp_active(&self, name: &str, active: bool) -> Result<(), ApiError> {
         self.norte_code_command(
-            "unused",
+            None,
             ClientRequestKind::SetMcpActive {
                 name: name.to_owned(),
                 active,

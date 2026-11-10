@@ -143,6 +143,21 @@ async fn poll_sessions(context: &AppContext) {
         return;
     };
     if let Ok(sessions) = client.sessions().await {
+        // The list is the host's answer, and the open session is refreshed
+        // from it: a session deleted elsewhere stops being shown, and one
+        // whose title or model changed elsewhere stops being a stale copy.
+        let selected = context.selected_session.read().clone();
+        if let Some(selected) = selected {
+            if let Some(fresh) = sessions
+                .iter()
+                .find(|session| session.session_id == selected.session_id)
+            {
+                context.set_selected_session(Some(fresh.clone()));
+            } else {
+                context.set_selected_session(None);
+                context.reset_conversation();
+            }
+        }
         context.set_sessions(sessions);
     }
 }

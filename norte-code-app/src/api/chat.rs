@@ -32,7 +32,7 @@ impl ApiClient {
         reasoning: Reasoning,
     ) -> Result<(), ApiError> {
         self.norte_code_command(
-            session_id,
+            Some(session_id),
             ClientRequestKind::SetReasoning {
                 session: SessionKey::new(session_id),
                 scope,
@@ -46,7 +46,7 @@ impl ApiClient {
     /// Sets the session's spending limit.
     pub async fn set_budget(&self, session_id: &str, budget: Budget) -> Result<(), ApiError> {
         self.norte_code_command(
-            session_id,
+            Some(session_id),
             ClientRequestKind::SetBudget {
                 session: SessionKey::new(session_id),
                 budget,
@@ -63,7 +63,7 @@ impl ApiClient {
         answer: &str,
     ) -> Result<(), ApiError> {
         self.norte_code_command(
-            session_id,
+            Some(session_id),
             ClientRequestKind::AnswerQuestion {
                 session: SessionKey::new(session_id),
                 question: question.to_owned(),

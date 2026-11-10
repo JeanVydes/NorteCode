@@ -7,7 +7,7 @@ use super::*;
 impl ApiClient {
     pub async fn models(&self) -> Result<Vec<ModelSummary>, ApiError> {
         let response = self
-            .norte_code_command("unused", ClientRequestKind::ListModels)
+            .norte_code_command(None, ClientRequestKind::ListModels)
             .await?;
         let payload = response
             .events
@@ -22,7 +22,7 @@ impl ApiClient {
     /// The catalogue with its origin, for the editor.
     pub async fn catalog_detail(&self) -> Result<CatalogDetail, ApiError> {
         let response = self
-            .norte_code_command("unused", ClientRequestKind::ListCatalog)
+            .norte_code_command(None, ClientRequestKind::ListCatalog)
             .await?;
         let payload = response
             .events
@@ -43,7 +43,7 @@ impl ApiClient {
         provider: norte_code_wire::catalog::Provider,
     ) -> Result<(), ApiError> {
         self.norte_code_command(
-            "unused",
+            None,
             ClientRequestKind::CatalogUpsertProvider {
                 provider_id: provider_id.to_owned(),
                 provider,
@@ -56,7 +56,7 @@ impl ApiClient {
     /// Removes a provider and its models from the catalogue files.
     pub async fn remove_provider(&self, provider_id: &str) -> Result<(), ApiError> {
         self.norte_code_command(
-            "unused",
+            None,
             ClientRequestKind::CatalogRemoveProvider {
                 provider_id: provider_id.to_owned(),
             },
@@ -70,7 +70,7 @@ impl ApiClient {
         &self,
         model: norte_code_wire::catalog::Model,
     ) -> Result<(), ApiError> {
-        self.norte_code_command("unused", ClientRequestKind::CatalogUpsertModel { model })
+        self.norte_code_command(None, ClientRequestKind::CatalogUpsertModel { model })
             .await
             .map(|_| ())
     }
@@ -78,7 +78,7 @@ impl ApiClient {
     /// Removes one model from `models.json`.
     pub async fn remove_model(&self, provider_id: &str, model_id: &str) -> Result<(), ApiError> {
         self.norte_code_command(
-            "unused",
+            None,
             ClientRequestKind::CatalogRemoveModel {
                 provider_id: provider_id.to_owned(),
                 model_id: model_id.to_owned(),

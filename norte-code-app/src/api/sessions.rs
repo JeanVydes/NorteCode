@@ -63,7 +63,7 @@ impl ApiClient {
     pub async fn plans(&self, session_id: &str) -> Result<Vec<PlanSummary>, ApiError> {
         let response = self
             .norte_code_command(
-                session_id,
+                Some(session_id),
                 ClientRequestKind::ListPlans {
                     session: SessionKey::new(session_id),
                 },
