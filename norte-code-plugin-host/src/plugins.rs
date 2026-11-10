@@ -45,8 +45,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::commands::{CommandSpec, Invocation};
-use norte_code_wire::SessionKey;
 use norte_code_wire::catalog::{Model, Provider};
+use norte_code_wire::{ContextUsage, SessionKey};
 
 /// The version of the plugin interface a plugin was built against.
 ///
@@ -151,36 +151,6 @@ pub struct Catalogue {
     /// The models, in the order the plugin listed them.
     #[serde(default)]
     pub models: Vec<Model>,
-}
-
-/// How much of a model's context a session is using.
-///
-/// The context is what the last request carried: the whole conversation is
-/// sent again every time, so the input tokens of the last request are the
-/// context, and the window is what the catalogue says the model holds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ContextUsage {
-    /// The tokens the last request carried.
-    pub used: u64,
-    /// The model's context window, when the catalogue knows it.
-    pub window: Option<u64>,
-}
-
-impl ContextUsage {
-    /// The share of the window in use, from 0 to 1, when the window is known.
-    ///
-    /// The share is a thousandth of the window computed in whole numbers: a
-    /// token count is 64 bits wide and a float holds 52, and the difference is
-    /// a rounding nobody can see in a number that is a percentage. A session
-    /// that holds more than the window holds reports a full window, because
-    /// that is what a full window looks like.
-    #[must_use]
-    pub fn share(&self) -> Option<f64> {
-        let window = self.window.filter(|window| *window > 0)?;
-        let thousandths = (u128::from(self.used) * 1_000) / u128::from(window);
-        let thousandths = u32::try_from(thousandths).unwrap_or(1_000);
-        Some(f64::from(thousandths) / 1_000.0)
-    }
 }
 
 /// What a plugin may ask the host about the session it is running in.

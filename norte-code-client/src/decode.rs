@@ -1,4 +1,6 @@
-use norte_code_wire::{ClientRequest, ServerEvent};
+use norte_code_wire::{
+    AgentChange, CatalogKind, ClientRequest, JobStatus, ServerEvent, ServiceDataKind,
+};
 use raep_types::Envelope;
 use serde_json::Value;
 
@@ -27,6 +29,16 @@ pub(crate) fn percent_encode(value: &str) -> String {
         })
         .collect()
 }
+#[allow(clippy::too_many_lines)]
+/// The counts a catalogue or skills update reports.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct CatalogCount {
+    #[serde(default)]
+    pub(crate) models: usize,
+    #[serde(default)]
+    pub(crate) skills: usize,
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn standard_event_from_frame(
     frame: &Envelope<Value>,
@@ -152,7 +164,7 @@ pub(crate) fn standard_event_from_frame(
                     })
                 }
                 FrameKind::JobListResult => {
-                    let decoded: JobListPayload = from_payload(payload)?;
+                    let decoded: norte_code_wire::JobList = from_payload(payload)?;
                     let jobs = decoded
                         .jobs
                         .into_iter()
@@ -405,6 +417,32 @@ pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerE
                         reason: details.reason,
                     }
                 }
+                AgentChange::CatalogUpdated => {
+                    let count: CatalogCount = decoded
+                        .details
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|error| {
+                            ClientError::new(format!("invalid catalogue update: {error}"))
+                        })?
+                        .unwrap_or_default();
+                    norte_code_wire::ServerEventKind::CatalogUpdated {
+                        models: count.models,
+                    }
+                }
+                AgentChange::SkillsUpdated => {
+                    let count: CatalogCount = decoded
+                        .details
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|error| {
+                            ClientError::new(format!("invalid skills update: {error}"))
+                        })?
+                        .unwrap_or_default();
+                    norte_code_wire::ServerEventKind::SkillsUpdated {
+                        skills: count.skills,
+                    }
+                }
             }
         }
         CanonicalKind::AgentCatalog => {
@@ -424,6 +462,14 @@ pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerE
                         skills: entries.skills,
                         warnings: entries.warnings,
                     }
+                }
+                // The editable catalogue and the plan list have their own
+                // frames; an `agent_catalog` carrying them has nothing to add
+                // to this event stream.
+                CatalogKind::Providers | CatalogKind::Plans => {
+                    return Err(ClientError::new(
+                        "agent_catalog carried a catalogue this client reads elsewhere",
+                    ));
                 }
             }
         }

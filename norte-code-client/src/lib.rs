@@ -20,7 +20,7 @@ pub(crate) mod frame;
 pub(crate) mod remote;
 pub(crate) mod sse;
 
-pub use agent::{AgentClient, EventStream, SessionSummary};
+pub use agent::{AgentClient, EventStream, SessionSummary, into_session_info};
 pub use error::ClientError;
 pub use remote::{RemoteClient, RemoteSessionStats};
 

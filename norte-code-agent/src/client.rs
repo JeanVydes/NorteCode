@@ -58,6 +58,7 @@ impl AgentClient for InProcessClient {
                 sessions.extend(listed.into_iter().map(|info| SessionSummary {
                     session_id: info.session.as_str().to_owned(),
                     title: info.title,
+                    ..SessionSummary::default()
                 }));
             } else if let ServerEventKind::Error { message, .. } = event.kind {
                 return Err(ClientError::new(message));
@@ -86,6 +87,7 @@ impl AgentClient for InProcessClient {
                     return Ok(SessionSummary {
                         session_id: session.as_str().to_owned(),
                         title,
+                        ..SessionSummary::default()
                     });
                 }
                 ServerEventKind::Error { message, .. } => return Err(ClientError::new(message)),
@@ -293,6 +295,7 @@ impl AgentClient for InProcessClient {
                     return Ok(SessionSummary {
                         session_id: session.as_str().to_owned(),
                         title: None,
+                        ..SessionSummary::default()
                     });
                 }
                 ServerEventKind::Error { message, .. } => return Err(ClientError::new(message)),

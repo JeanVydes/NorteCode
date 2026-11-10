@@ -157,7 +157,7 @@ pub(crate) async fn session_rows(client: &dyn AgentClient) -> Result<Vec<Session
         .await
         .map_err(|error| error.to_string())?
         .into_iter()
-        .map(norte_code_client::SessionSummary::into_session_info)
+        .map(norte_code_client::into_session_info)
         .collect::<Vec<_>>();
     let mut rows = sessions.into_iter().map(row_of_info).collect::<Vec<_>>();
     rows.sort_by_key(|row| std::cmp::Reverse(row.updated_at));

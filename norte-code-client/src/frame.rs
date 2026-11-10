@@ -121,19 +121,6 @@ pub(crate) enum ToolStatus {
     Cancelled,
 }
 
-/// A job's status, as the wire spells it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum JobStatus {
-    #[default]
-    Running,
-    Completed,
-    Failed,
-    Killed,
-    #[serde(rename = "TIMED_OUT")]
-    TimedOut,
-}
-
 /// A token delta payload.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct TokenDeltaPayload {
@@ -181,25 +168,6 @@ pub(crate) struct ToolCallFinishedPayload {
     pub(crate) result_truncated: bool,
     #[serde(default)]
     pub(crate) duration_ms: u64,
-}
-
-/// One job entry in a job list payload.
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct JobEntryPayload {
-    pub(crate) job_id: String,
-    #[serde(default)]
-    pub(crate) command: String,
-    #[serde(default)]
-    pub(crate) status: JobStatus,
-    #[serde(default)]
-    pub(crate) exit_code: Option<i32>,
-}
-
-/// A job list payload.
-#[derive(Debug, serde::Deserialize)]
-pub(crate) struct JobListPayload {
-    #[serde(default)]
-    pub(crate) jobs: Vec<JobEntryPayload>,
 }
 
 /// An error payload.

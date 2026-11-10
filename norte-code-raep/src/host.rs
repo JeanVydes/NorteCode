@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::payloads::payload;
-use norte_code_wire::JobStatus;
+use norte_code_wire::{JobStatus, ServiceDataKind};
 
 mod agents;
 mod artifacts;
@@ -25,9 +25,11 @@ mod frames;
 mod history;
 mod jobs;
 pub(crate) mod payloads;
+pub(crate) mod replay;
 mod sessions;
 pub(crate) mod stores;
 mod turns;
+pub(crate) mod uploads;
 
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
@@ -37,16 +39,13 @@ use capabilities::*;
 use payloads::*;
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
+use replay::*;
+#[allow(unused_imports)]
+#[allow(clippy::wildcard_imports)]
 use stores::*;
-
-/// The kind of a canonical `service_data` payload.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ServiceDataKind {
-    Telemetry,
-    ToolList,
-    McpList,
-}
+#[allow(unused_imports)]
+#[allow(clippy::wildcard_imports)]
+use uploads::*;
 
 /// A canonical `service_data` payload, decoded to find the telemetry rows.
 #[derive(Debug, serde::Deserialize)]

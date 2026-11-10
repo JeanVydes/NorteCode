@@ -92,6 +92,7 @@ impl CanonicalKind {
 }
 
 use crate::error::ClientError;
+use norte_code_wire::{AgentChange, CatalogKind, ServiceDataKind};
 
 /// How a turn state changed, in the canonical payload's spelling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
@@ -107,32 +108,6 @@ pub(crate) enum CanonicalTurnState {
 pub(crate) enum CanonicalContextState {
     Started,
     Finished,
-}
-
-/// What kind of agent change a canonical payload describes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AgentChange {
-    ModelChanged,
-    ModelQueued,
-    ReasoningDowngraded,
-}
-
-/// What kind of catalogue a canonical payload carries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CatalogKind {
-    Models,
-    Skills,
-}
-
-/// What kind of service data a canonical payload carries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ServiceDataKind {
-    Telemetry,
-    ToolList,
-    McpList,
 }
 
 /// How a provider retry is going, in the canonical spelling.
