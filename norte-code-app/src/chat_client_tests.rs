@@ -263,3 +263,15 @@ fn a_forked_event_names_the_new_session() {
         DecodedFrame::Forked { from_turn_id: Some(turn), .. } if turn == "turn_5"
     ));
 }
+
+#[test]
+fn a_text_token_frame_becomes_a_token_row() {
+    let decoded = decode_frame(&frame(
+        FrameType::Standard(StandardFrameType::TokenDelta),
+        serde_json::json!({"channel": "text", "delta": "hello", "index": 1}),
+    ));
+    assert!(
+        matches!(decoded, DecodedFrame::Token { ref delta, .. } if delta == "hello"),
+        "{decoded:?}"
+    );
+}

@@ -59,7 +59,8 @@ struct FrameIn {
     job_id: Option<raep_types::JobId>,
     #[serde(default)]
     timestamp: i64,
-    #[serde(default)]
+    // The envelope's field is spelled `type` on the wire.
+    #[serde(default, rename = "type")]
     kind: Option<raep_types::FrameType>,
     #[serde(default)]
     payload: serde_json::Value,
