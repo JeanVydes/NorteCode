@@ -9,21 +9,21 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// A steering message on its way to the model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct Steered {
+pub(crate) struct Steered {
     /// The name the client gave the message, or the one the service made.
-    pub(super) id: String,
+    pub(crate) id: String,
     /// The text the model reads.
-    pub(super) text: String,
+    pub(crate) text: String,
 }
 
 impl Steered {
     /// A message with a name.
-    pub(super) fn new(id: String, text: String) -> Self {
+    pub(crate) fn new(id: String, text: String) -> Self {
         Self { id, text }
     }
 
     /// The same message under another name.
-    pub(super) fn with_id(self, id: String) -> Self {
+    pub(crate) fn with_id(self, id: String) -> Self {
         Self { id, ..self }
     }
 }
@@ -56,7 +56,7 @@ impl<'de> Deserialize<'de> for Steered {
 /// engine takes them at the safe points of a turn. Nothing else has to know
 /// whether a turn is running.
 #[derive(Debug, Default)]
-pub(super) struct Steering {
+pub(crate) struct Steering {
     /// Waiting for the engine to take them.
     pending: Mutex<BTreeMap<SessionId, VecDeque<Steered>>>,
     /// Handed to the engine, waiting for the report that they were applied.
@@ -66,7 +66,7 @@ pub(super) struct Steering {
 impl Steering {
     /// Queues a message for the session. The next turn of that session takes
     /// it, before its own input.
-    pub(super) fn push(&self, session: SessionId, message: Steered) {
+    pub(crate) fn push(&self, session: SessionId, message: Steered) {
         self.pending()
             .entry(session)
             .or_default()
@@ -74,14 +74,14 @@ impl Steering {
     }
 
     /// Whether the session is already waiting for this message.
-    pub(super) fn is_pending(&self, session: SessionId, id: &str) -> bool {
+    pub(crate) fn is_pending(&self, session: SessionId, id: &str) -> bool {
         self.pending()
             .get(&session)
             .is_some_and(|queue| queue.iter().any(|message| message.id == id))
     }
 
     /// Takes the messages the engine has not reached, oldest first.
-    pub(super) fn take(&self, session: SessionId) -> Vec<Steered> {
+    pub(crate) fn take(&self, session: SessionId) -> Vec<Steered> {
         let taken: VecDeque<Steered> = self.pending().remove(&session).unwrap_or_default();
         if !taken.is_empty() {
             self.applied_queue()
@@ -93,7 +93,7 @@ impl Steering {
     }
 
     /// The messages the engine reported as applied, oldest first.
-    pub(super) fn applied(&self, session: SessionId, count: usize) -> Vec<Steered> {
+    pub(crate) fn applied(&self, session: SessionId, count: usize) -> Vec<Steered> {
         let mut applied = self.applied_queue();
         let Some(queue) = applied.get_mut(&session) else {
             return Vec::new();
@@ -116,13 +116,13 @@ impl Steering {
 /// The engine commits what this returns, so the message lands in the history,
 /// in the request digest and in what the policies read, and it reaches the
 /// request that is already in flight instead of waiting for the next turn.
-pub(super) struct SteeringInterceptor {
+pub(crate) struct SteeringInterceptor {
     steering: Arc<Steering>,
 }
 
 impl SteeringInterceptor {
     /// Builds an interceptor that reads the given steering state.
-    pub(super) fn new(steering: Arc<Steering>) -> Self {
+    pub(crate) fn new(steering: Arc<Steering>) -> Self {
         Self { steering }
     }
 }

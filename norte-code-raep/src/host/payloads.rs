@@ -10,38 +10,38 @@ use super::*;
 
 /// The session-state payload.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct SessionStatePayload<'a> {
-    pub(super) status: SessionStateStatus,
+pub(crate) struct SessionStatePayload<'a> {
+    pub(crate) status: SessionStateStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) title: Option<&'a str>,
-    pub(super) history_summary: Vec<HistorySummaryItem>,
+    pub(crate) title: Option<&'a str>,
+    pub(crate) history_summary: Vec<HistorySummaryItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) imported_from: Option<&'a Value>,
+    pub(crate) imported_from: Option<&'a Value>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(super) enum SessionStateStatus {
+pub(crate) enum SessionStateStatus {
     Active,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct HistorySummaryItem {
-    pub(super) role: HistoryRole,
-    pub(super) kind: HistoryItemKind,
-    pub(super) content: String,
-    pub(super) turn_id: Option<String>,
-    pub(super) timestamp: i64,
-    pub(super) rewound: bool,
+pub(crate) struct HistorySummaryItem {
+    pub(crate) role: HistoryRole,
+    pub(crate) kind: HistoryItemKind,
+    pub(crate) content: String,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) timestamp: i64,
+    pub(crate) rewound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) truncated: Option<bool>,
+    pub(crate) truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) origin: Option<Value>,
+    pub(crate) origin: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum HistoryRole {
+pub(crate) enum HistoryRole {
     Tool,
     SystemEvent,
     User,
@@ -50,7 +50,7 @@ pub(super) enum HistoryRole {
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum HistoryItemKind {
+pub(crate) enum HistoryItemKind {
     Tool,
     SystemEvent,
     User,
@@ -61,18 +61,18 @@ pub(super) enum HistoryItemKind {
     Refusal,
 }
 
-pub(super) struct HistoryItemView {
-    pub(super) turn: Option<u64>,
-    pub(super) role: norte_code_wire::MessageRole,
-    pub(super) kind: norte_code_wire::ReplayedKind,
-    pub(super) text: String,
-    pub(super) timestamp: i64,
-    pub(super) rewound: bool,
-    pub(super) origin: Option<Value>,
-    pub(super) max_content_bytes: Option<usize>,
+pub(crate) struct HistoryItemView {
+    pub(crate) turn: Option<u64>,
+    pub(crate) role: norte_code_wire::MessageRole,
+    pub(crate) kind: norte_code_wire::ReplayedKind,
+    pub(crate) text: String,
+    pub(crate) timestamp: i64,
+    pub(crate) rewound: bool,
+    pub(crate) origin: Option<Value>,
+    pub(crate) max_content_bytes: Option<usize>,
 }
 
-pub(super) fn history_item_value(item: HistoryItemView) -> HistorySummaryItem {
+pub(crate) fn history_item_value(item: HistoryItemView) -> HistorySummaryItem {
     let role = match item.role {
         norte_code_wire::MessageRole::Tool => HistoryRole::Tool,
         norte_code_wire::MessageRole::System
@@ -115,174 +115,174 @@ pub(super) fn history_item_value(item: HistoryItemView) -> HistorySummaryItem {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct HistoryPagePayload {
-    pub(super) items: Vec<HistorySummaryItem>,
-    pub(super) has_more: bool,
+pub(crate) struct HistoryPagePayload {
+    pub(crate) items: Vec<HistorySummaryItem>,
+    pub(crate) has_more: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct HistoryRewoundPayload {
-    pub(super) to_turn_id: String,
-    pub(super) inclusive: bool,
-    pub(super) rewound_turn_ids: Vec<String>,
-    pub(super) side_effects: Vec<HistorySideEffect>,
-    pub(super) workspace_restored: bool,
+pub(crate) struct HistoryRewoundPayload {
+    pub(crate) to_turn_id: String,
+    pub(crate) inclusive: bool,
+    pub(crate) rewound_turn_ids: Vec<String>,
+    pub(crate) side_effects: Vec<HistorySideEffect>,
+    pub(crate) workspace_restored: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct HistorySideEffect {
-    pub(super) tool_call_id: String,
-    pub(super) tool_name: String,
-    pub(super) side_effects: raep_types::ToolSideEffects,
+pub(crate) struct HistorySideEffect {
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) side_effects: raep_types::ToolSideEffects,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct JobStatePayload<'a> {
-    pub(super) job_id: &'a str,
-    pub(super) status: JobStatus,
-    pub(super) output: &'a str,
-    pub(super) next_index: u64,
+pub(crate) struct JobStatePayload<'a> {
+    pub(crate) job_id: &'a str,
+    pub(crate) status: JobStatus,
+    pub(crate) output: &'a str,
+    pub(crate) next_index: u64,
 }
 
 // The status the host writes is the one the clients read: no second enum.
-pub(super) use norte_code_wire::JobStatus;
+pub(crate) use norte_code_wire::JobStatus;
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct JobListRequest {
-    pub(super) status: Option<Vec<JobStatus>>,
-    pub(super) limit: Option<u64>,
+pub(crate) struct JobListRequest {
+    pub(crate) status: Option<Vec<JobStatus>>,
+    pub(crate) limit: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub(super) struct JobListEntry {
-    pub(super) status: JobStatus,
+pub(crate) struct JobListEntry {
+    pub(crate) status: JobStatus,
     #[serde(flatten)]
-    pub(super) fields: BTreeMap<String, Value>,
+    pub(crate) fields: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct JobListResultPayload {
-    pub(super) jobs: Vec<JobListEntry>,
+pub(crate) struct JobListResultPayload {
+    pub(crate) jobs: Vec<JobListEntry>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ContextUpdatedPayload {
-    pub(super) pinned_turn_ids: Vec<String>,
+pub(crate) struct ContextUpdatedPayload {
+    pub(crate) pinned_turn_ids: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ExportReadyPayload<'a> {
-    pub(super) export_id: &'a str,
-    pub(super) download_url: String,
-    pub(super) bytes: usize,
-    pub(super) sha256: &'a str,
-    pub(super) expires_at: i64,
-    pub(super) sessions: u32,
-    pub(super) encrypted: bool,
-    pub(super) signed: bool,
+pub(crate) struct ExportReadyPayload<'a> {
+    pub(crate) export_id: &'a str,
+    pub(crate) download_url: String,
+    pub(crate) bytes: usize,
+    pub(crate) sha256: &'a str,
+    pub(crate) expires_at: i64,
+    pub(crate) sessions: u32,
+    pub(crate) encrypted: bool,
+    pub(crate) signed: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ImportAgentAvailability<'a> {
-    pub(super) agent_id: &'a str,
-    pub(super) version: &'a str,
-    pub(super) available: bool,
+pub(crate) struct ImportAgentAvailability<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) version: &'a str,
+    pub(crate) available: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum ImportSignatureStatus {
+pub(crate) enum ImportSignatureStatus {
     Absent,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ImportPreviewPayload<'a> {
-    pub(super) import_id: &'a str,
-    pub(super) bundle_version: &'a str,
-    pub(super) sessions: usize,
-    pub(super) signature: ImportSignatureStatus,
-    pub(super) agents: Vec<ImportAgentAvailability<'a>>,
-    pub(super) warnings: [&'static str; 2],
-    pub(super) expires_at: i64,
+pub(crate) struct ImportPreviewPayload<'a> {
+    pub(crate) import_id: &'a str,
+    pub(crate) bundle_version: &'a str,
+    pub(crate) sessions: usize,
+    pub(crate) signature: ImportSignatureStatus,
+    pub(crate) agents: Vec<ImportAgentAvailability<'a>>,
+    pub(crate) warnings: [&'static str; 2],
+    pub(crate) expires_at: i64,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ImportedFromPayload<'a> {
-    pub(super) exporter: &'a Option<Value>,
-    pub(super) session_id: &'a str,
-    pub(super) exported_at: u64,
+pub(crate) struct ImportedFromPayload<'a> {
+    pub(crate) exporter: &'a Option<Value>,
+    pub(crate) session_id: &'a str,
+    pub(crate) exported_at: u64,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ImportCommittedPayload<'a> {
-    pub(super) session_id: &'a str,
-    pub(super) id_map: BTreeMap<String, String>,
-    pub(super) warnings: [&'static str; 2],
+pub(crate) struct ImportCommittedPayload<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) id_map: BTreeMap<String, String>,
+    pub(crate) warnings: [&'static str; 2],
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct HistoryExportItem<'a> {
-    pub(super) role: ExportHistoryRole,
-    pub(super) content: &'a str,
+pub(crate) struct HistoryExportItem<'a> {
+    pub(crate) role: ExportHistoryRole,
+    pub(crate) content: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) turn_id: Option<String>,
-    pub(super) timestamp: i64,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) timestamp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) origin: Option<Value>,
+    pub(crate) origin: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum ExportHistoryRole {
+pub(crate) enum ExportHistoryRole {
     User,
     Assistant,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct BundleAgent<'a> {
-    pub(super) id: &'a str,
+pub(crate) struct BundleAgent<'a> {
+    pub(crate) id: &'a str,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct PortableSessionFile<'a> {
-    pub(super) agent: BundleAgent<'a>,
-    pub(super) title: &'a Option<String>,
-    pub(super) options: BTreeMap<String, Value>,
+pub(crate) struct PortableSessionFile<'a> {
+    pub(crate) agent: BundleAgent<'a>,
+    pub(crate) title: &'a Option<String>,
+    pub(crate) options: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct BundleExporter<'a> {
-    pub(super) server: &'a str,
+pub(crate) struct BundleExporter<'a> {
+    pub(crate) server: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum SessionClosedReason {
+pub(crate) enum SessionClosedReason {
     Client,
     Purged,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct SessionClosedPayload {
-    pub(super) reason: SessionClosedReason,
+pub(crate) struct SessionClosedPayload {
+    pub(crate) reason: SessionClosedReason,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct DelegatorStateChangedPayload<'a> {
-    pub(super) child_session_id: &'a str,
-    pub(super) suspended: bool,
-    pub(super) by: DelegatorActor,
-    pub(super) queued_messages: usize,
+pub(crate) struct DelegatorStateChangedPayload<'a> {
+    pub(crate) child_session_id: &'a str,
+    pub(crate) suspended: bool,
+    pub(crate) by: DelegatorActor,
+    pub(crate) queued_messages: usize,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum DelegatorActor {
+pub(crate) enum DelegatorActor {
     Client,
 }
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum OutputPartKind {
+pub(crate) enum OutputPartKind {
     Image,
     Document,
     Audio,
@@ -290,62 +290,62 @@ pub(super) enum OutputPartKind {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct OutputPartStartedPayload<'a> {
-    pub(super) part_id: &'a str,
-    pub(super) index: u32,
+pub(crate) struct OutputPartStartedPayload<'a> {
+    pub(crate) part_id: &'a str,
+    pub(crate) index: u32,
     #[serde(rename = "type")]
-    pub(super) kind: OutputPartKind,
-    pub(super) mime_type: &'a str,
-    pub(super) streamed: bool,
+    pub(crate) kind: OutputPartKind,
+    pub(crate) mime_type: &'a str,
+    pub(crate) streamed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) name: Option<&'a str>,
+    pub(crate) name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) alt: Option<&'a str>,
+    pub(crate) alt: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) duration_ms: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) width: Option<u32>,
+    pub(crate) width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) height: Option<u32>,
-    pub(super) bytes_expected: usize,
+    pub(crate) height: Option<u32>,
+    pub(crate) bytes_expected: usize,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) enum OutputPartStatus {
+pub(crate) enum OutputPartStatus {
     #[serde(rename = "OK")]
     Ok,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
-pub(super) enum OutputPartSource<'a> {
+pub(crate) enum OutputPartSource<'a> {
     Output { output_id: &'a str },
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct OutputPartFinishedPayload<'a> {
-    pub(super) part_id: &'a str,
-    pub(super) index: u32,
-    pub(super) status: OutputPartStatus,
-    pub(super) source: OutputPartSource<'a>,
-    pub(super) bytes: usize,
-    pub(super) sha256: &'a str,
+pub(crate) struct OutputPartFinishedPayload<'a> {
+    pub(crate) part_id: &'a str,
+    pub(crate) index: u32,
+    pub(crate) status: OutputPartStatus,
+    pub(crate) source: OutputPartSource<'a>,
+    pub(crate) bytes: usize,
+    pub(crate) sha256: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) transcript: Option<&'a str>,
+    pub(crate) transcript: Option<&'a str>,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct NorteCodeEventExtension<'a> {
-    pub(super) norte_code: &'a ServerEvent,
+pub(crate) struct NorteCodeEventExtension<'a> {
+    pub(crate) norte_code: &'a ServerEvent,
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(super) struct UserInputAcceptedPayload {
-    pub(super) turn_id: TurnId,
-    pub(super) origin: UserInputOrigin,
-    pub(super) content: Vec<AcceptedContentPart>,
+pub(crate) struct UserInputAcceptedPayload {
+    pub(crate) turn_id: TurnId,
+    pub(crate) origin: UserInputOrigin,
+    pub(crate) content: Vec<AcceptedContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) position: Option<u64>,
+    pub(crate) position: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) replaces_turn_id: Option<String>,
+    pub(crate) replaces_turn_id: Option<String>,
 }

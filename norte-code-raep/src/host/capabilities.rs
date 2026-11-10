@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 /// reads them as variants, not strings. Each serializes to the wire name
 /// the RAEP registry uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub(super) enum Capability {
+pub(crate) enum Capability {
     /// WebSocket transport.
     #[serde(rename = "transport.ws")]
     TransportWs,
@@ -48,7 +48,7 @@ pub(super) enum Capability {
 }
 
 /// Every capability this host advertises, in wire order.
-pub(super) fn advertised_capabilities(uploads: bool) -> Vec<Capability> {
+pub(crate) fn advertised_capabilities(uploads: bool) -> Vec<Capability> {
     let mut capabilities = vec![
         Capability::TransportWs,
         Capability::TransportSse,
@@ -67,7 +67,7 @@ pub(super) fn advertised_capabilities(uploads: bool) -> Vec<Capability> {
     capabilities
 }
 
-pub(super) fn negotiated_capabilities(
+pub(crate) fn negotiated_capabilities(
     uploads: bool,
     client: &raep_types::ClientCapabilities,
 ) -> Vec<Capability> {
@@ -89,116 +89,116 @@ pub(super) fn negotiated_capabilities(
 
 /// One agent version entry.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct AgentVersion<'a> {
-    pub(super) version: &'a str,
-    pub(super) created_at: i64,
-    pub(super) deprecated: bool,
+pub(crate) struct AgentVersion<'a> {
+    pub(crate) version: &'a str,
+    pub(crate) created_at: i64,
+    pub(crate) deprecated: bool,
 }
 
 /// An agent with its latest version.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct AgentDetail<'a> {
-    pub(super) agent: norte_code_wire::AgentSummary,
-    pub(super) latest_version: AgentVersion<'a>,
+pub(crate) struct AgentDetail<'a> {
+    pub(crate) agent: norte_code_wire::AgentSummary,
+    pub(crate) latest_version: AgentVersion<'a>,
 }
 
 /// An agent's version list.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct AgentVersions<'a> {
-    pub(super) versions: Vec<AgentVersion<'a>>,
+pub(crate) struct AgentVersions<'a> {
+    pub(crate) versions: Vec<AgentVersion<'a>>,
 }
 
 /// The protocol block in hello/info payloads.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ProtocolRef {
-    pub(super) name: &'static str,
-    pub(super) version: &'static str,
+pub(crate) struct ProtocolRef {
+    pub(crate) name: &'static str,
+    pub(crate) version: &'static str,
 }
 
 /// A provider/model reference.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ModelRef<'a> {
-    pub(super) provider: &'a str,
-    pub(super) model: &'a str,
+pub(crate) struct ModelRef<'a> {
+    pub(crate) provider: &'a str,
+    pub(crate) model: &'a str,
 }
 
 /// The limits block in hello/info payloads.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct LimitsRef {
-    pub(super) max_frame_bytes: u64,
-    pub(super) replay_buffer_events: usize,
-    pub(super) max_concurrent_jobs: usize,
-    pub(super) job_output_retention_s: u64,
-    pub(super) max_artifact_bytes: usize,
-    pub(super) max_upload_bytes: usize,
-    pub(super) max_inline_bytes: usize,
-    pub(super) max_output_part_bytes: usize,
-    pub(super) max_prompt_bytes: usize,
-    pub(super) max_parts: usize,
-    pub(super) max_queued_inputs: usize,
-    pub(super) max_export_bytes: usize,
-    pub(super) export_ttl_s: u64,
+pub(crate) struct LimitsRef {
+    pub(crate) max_frame_bytes: u64,
+    pub(crate) replay_buffer_events: usize,
+    pub(crate) max_concurrent_jobs: usize,
+    pub(crate) job_output_retention_s: u64,
+    pub(crate) max_artifact_bytes: usize,
+    pub(crate) max_upload_bytes: usize,
+    pub(crate) max_inline_bytes: usize,
+    pub(crate) max_output_part_bytes: usize,
+    pub(crate) max_prompt_bytes: usize,
+    pub(crate) max_parts: usize,
+    pub(crate) max_queued_inputs: usize,
+    pub(crate) max_export_bytes: usize,
+    pub(crate) export_ttl_s: u64,
 }
 
-pub(super) const DEFAULT_MAX_OUTPUT_PART_BYTES: usize = 10 * 1024 * 1024;
-pub(super) const MAX_MEDIA_DURATION_MS: u64 = 600_000;
+pub(crate) const DEFAULT_MAX_OUTPUT_PART_BYTES: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_MEDIA_DURATION_MS: u64 = 600_000;
 
 /// The hello handshake payload.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct HelloPayload<'a> {
-    pub(super) protocol: ProtocolRef,
-    pub(super) server_version: &'a str,
-    pub(super) wire_versions: Vec<&'static str>,
-    pub(super) capabilities: Vec<Capability>,
-    pub(super) extensions: Vec<&'a str>,
-    pub(super) limits: LimitsRef,
-    pub(super) heartbeat_s: u64,
-    pub(super) draining: bool,
-    pub(super) deprecations: Vec<Value>,
+pub(crate) struct HelloPayload<'a> {
+    pub(crate) protocol: ProtocolRef,
+    pub(crate) server_version: &'a str,
+    pub(crate) wire_versions: Vec<&'static str>,
+    pub(crate) capabilities: Vec<Capability>,
+    pub(crate) extensions: Vec<&'a str>,
+    pub(crate) limits: LimitsRef,
+    pub(crate) heartbeat_s: u64,
+    pub(crate) draining: bool,
+    pub(crate) deprecations: Vec<Value>,
 }
 
 /// The HTTP discovery payload.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct InfoPayload<'a> {
-    pub(super) protocol: ProtocolRef,
-    pub(super) server_version: &'a str,
-    pub(super) wire_versions: Vec<&'static str>,
-    pub(super) capabilities: Vec<Capability>,
-    pub(super) extensions: Vec<&'a str>,
-    pub(super) limits: LimitsRef,
-    pub(super) agents: Vec<String>,
-    pub(super) default_agent: &'a str,
-    pub(super) default_model: Value,
+pub(crate) struct InfoPayload<'a> {
+    pub(crate) protocol: ProtocolRef,
+    pub(crate) server_version: &'a str,
+    pub(crate) wire_versions: Vec<&'static str>,
+    pub(crate) capabilities: Vec<Capability>,
+    pub(crate) extensions: Vec<&'a str>,
+    pub(crate) limits: LimitsRef,
+    pub(crate) agents: Vec<String>,
+    pub(crate) default_agent: &'a str,
+    pub(crate) default_model: Value,
 }
 
 /// The readiness payload.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ReadinessPayload<'a> {
-    pub(super) status: ReadinessStatus,
-    pub(super) agent_id: &'a str,
-    pub(super) agents: usize,
-    pub(super) replay: bool,
-    pub(super) artifacts: bool,
-    pub(super) limits: ReadinessLimits,
+pub(crate) struct ReadinessPayload<'a> {
+    pub(crate) status: ReadinessStatus,
+    pub(crate) agent_id: &'a str,
+    pub(crate) agents: usize,
+    pub(crate) replay: bool,
+    pub(crate) artifacts: bool,
+    pub(crate) limits: ReadinessLimits,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum ReadinessStatus {
+pub(crate) enum ReadinessStatus {
     Ready,
 }
 
 /// The limits block in the readiness payload.
 #[derive(Debug, serde::Serialize)]
-pub(super) struct ReadinessLimits {
-    pub(super) max_connections: usize,
-    pub(super) command_timeout_ms: u64,
+pub(crate) struct ReadinessLimits {
+    pub(crate) max_connections: usize,
+    pub(crate) command_timeout_ms: u64,
 }
 /// The agent block inside a `SESSION_ATTACHED` payload.
 ///
 /// The effective agent for the session: the host's configured agent, with
 /// the provider/model reference of the session's spec when one exists.
-pub(super) fn session_agent_summary(
+pub(crate) fn session_agent_summary(
     service: &norte_code_agent::Service,
     id: &str,
     version: &str,
@@ -222,7 +222,7 @@ pub(super) fn session_agent_summary(
 }
 
 /// The wire's name for a modality, in the catalogue's spelling.
-pub(super) fn to_wire_modality(
+pub(crate) fn to_wire_modality(
     modality: norte::Modality,
 ) -> Option<norte_code_wire::OutputModality> {
     match modality {
@@ -235,7 +235,7 @@ pub(super) fn to_wire_modality(
     }
 }
 
-pub(super) fn agent_capabilities(
+pub(crate) fn agent_capabilities(
     spec: Option<&norte_code_agent::ModelSpec>,
     media_storage: bool,
 ) -> Option<norte_code_wire::AgentCapabilities> {
