@@ -5,9 +5,6 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
-
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
 use super::*;

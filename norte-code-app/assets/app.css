@@ -341,6 +341,10 @@ h3 { margin: 0; font-size: 0.98rem; }
 .composer-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .composer-left, .composer-right { display: flex; align-items: center; gap: 0.4rem; }
 .composer-left { position: relative; }
+/* The file input fills its own label, not the whole left group: with the
+   label unpositioned it covered the queue selector too, and clicking the
+   selector opened the file picker. */
+.composer-left .icon-button { position: relative; overflow: hidden; }
 .composer-toggle { padding: 0.3rem 0.6rem; border: 1px solid var(--color-border); border-radius: var(--radius-pill); background: transparent; color: var(--color-text-muted); font-size: 0.74rem; }
 .composer-toggle:hover { color: var(--color-accent-strong); }
 .composer-popover { position: absolute; bottom: calc(100% + 0.4rem); left: 0; z-index: 4; display: grid; width: max-content; min-width: 14rem; padding: 0.3rem; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: 0 0.5rem 1.5rem var(--color-shadow); }
