@@ -1,10 +1,10 @@
 //! Canonical RAEP payloads emitted by the `NorteCode` adapter.
 
 use norte_code_wire::payload::{
-    AgentChanged, BudgetNotice, ChildAwaitingInput, ChildSessionStarted, ChildSessionUpdated,
-    CompactionFinished, DelegatorStateChanged, JobProgress, JobStarted, JobsStopped,
-    QuestionAnswered, QuestionAsked, ReasoningDowngraded, SessionStats, SessionTodos, TokenChannel,
-    TokenDelta, ToolFinished, ToolOutput, ToolStarted, ToolStatus,
+    AgentChange, AgentChanged, BudgetNotice, ChildAwaitingInput, ChildSessionStarted,
+    ChildSessionUpdated, CompactionFinished, DelegatorStateChanged, JobProgress, JobStarted,
+    JobsStopped, QuestionAnswered, QuestionAsked, ReasoningDowngraded, SessionStats, SessionTodos,
+    TokenChannel, TokenDelta, ToolFinished, ToolOutput, ToolStarted, ToolStatus,
 };
 use norte_code_wire::{CatalogKind, ServiceDataKind};
 use norte_code_wire::{Delta, JobInfo};
@@ -30,20 +30,6 @@ pub(crate) fn payload<T: Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("typed RAEP payload is serializable")
 }
 
-/// One job in a job list frame.
-#[derive(Debug, Serialize)]
-struct JobEntryPayload {
-    job_id: String,
-    command: String,
-    status: norte_code_wire::JobStatus,
-}
-
-/// A job list frame.
-#[derive(Debug, Serialize)]
-struct JobListPayload {
-    jobs: Vec<JobEntryPayload>,
-}
-
 /// How a turn ended, in the canonical payload's spelling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,17 +48,6 @@ struct TurnStateChangedPayload {
     committed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-}
-
-/// What kind of agent change a canonical payload describes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum AgentChange {
-    ModelChanged,
-    ModelQueued,
-    ReasoningDowngraded,
-    CatalogUpdated,
-    SkillsUpdated,
 }
 
 /// The `details` of a `reasoning_downgraded` change.

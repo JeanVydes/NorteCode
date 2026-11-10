@@ -621,6 +621,9 @@ pub struct JobEntry {
     /// Where it stands.
     #[serde(default)]
     pub status: crate::JobStatus,
+    /// Its exit code, when its runner reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// A `JOB_LIST` payload.
@@ -629,4 +632,21 @@ pub struct JobList {
     /// The session's jobs, in the host's order.
     #[serde(default)]
     pub jobs: Vec<JobEntry>,
+}
+
+/// What kind of agent change a canonical payload describes.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentChange {
+    /// The session moved to another model.
+    #[default]
+    ModelChanged,
+    /// A model change is waiting for the next turn.
+    ModelQueued,
+    /// The requested reasoning setting was lowered.
+    ReasoningDowngraded,
+    /// The catalogue was reloaded.
+    CatalogUpdated,
+    /// The skills were rescanned.
+    SkillsUpdated,
 }

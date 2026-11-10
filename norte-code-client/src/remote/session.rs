@@ -156,7 +156,7 @@ impl AgentClient for RemoteClient {
             {
                 return Ok(SessionSummary {
                     session_id: key.as_str().to_owned(),
-                    title: None,
+                    ..SessionSummary::default()
                 });
             }
         }

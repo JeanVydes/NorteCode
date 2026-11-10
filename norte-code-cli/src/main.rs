@@ -698,7 +698,7 @@ async fn remote_session(client: &dyn AgentClient, key: &str) -> Result<SessionIn
         .await
         .map_err(|error| error.to_string())?
         .into_iter()
-        .map(norte_code_client::SessionSummary::into_session_info)
+        .map(norte_code_client::into_session_info)
         .collect::<Vec<_>>();
     if let Some(session) = sessions
         .iter()

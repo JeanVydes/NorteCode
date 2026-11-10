@@ -16,10 +16,12 @@ mod payloads;
 mod plugin_manager;
 
 pub use commands::AgentCommand;
+pub use host::replay::{FileReplayStore, ReplayStore, SqliteReplayStore};
 pub use host::stores::{
-    ArtifactRef, ArtifactStore, BlobArtifactStore, FilePinStore, FileReplayStore,
-    IdempotencyRecord, MemoryUploadIndex, PinStore, ReplayStore, SqliteReplayStore,
-    SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
+    ArtifactRef, ArtifactStore, BlobArtifactStore, FilePinStore, IdempotencyRecord, PinStore,
+};
+pub use host::uploads::{
+    MemoryUploadIndex, SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
 };
 pub use host::{HostConfig, HostError, NorteCodeRaepHost};
 pub use http::router;

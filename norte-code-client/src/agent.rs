@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use norte_code_wire::QueueMode;
 use norte_code_wire::{ClientRequest, ServerEvent};
+
+pub use norte_code_wire::SessionSummary;
 use std::pin::Pin;
 
 use crate::error::ClientError;
@@ -104,29 +106,17 @@ pub trait AgentClient: Send + Sync {
     ) -> Result<EventStream, ClientError>;
 }
 
-/// A session summary as the RAEP management resource returns it.
-#[derive(Clone, Debug, serde::Deserialize)]
-pub struct SessionSummary {
-    /// The session identifier.
-    pub session_id: String,
-    /// Its label, when it has one.
-    #[serde(default)]
-    pub title: Option<String>,
-}
-
-impl SessionSummary {
-    /// Converts the summary into the protocol's session info shape.
-    #[must_use]
-    pub fn into_session_info(self) -> norte_code_wire::SessionInfo {
-        norte_code_wire::SessionInfo {
-            session: norte_code_wire::SessionKey::new(self.session_id),
-            title: self.title,
-            provider: None,
-            model: None,
-            created_at: None,
-            phase: norte_code_wire::Phase::Idle,
-            reasoning: None,
-            parent: None,
-        }
+/// Converts a session summary into the protocol's session info shape.
+#[must_use]
+pub fn into_session_info(summary: SessionSummary) -> norte_code_wire::SessionInfo {
+    norte_code_wire::SessionInfo {
+        session: norte_code_wire::SessionKey::new(summary.session_id),
+        title: summary.title,
+        provider: None,
+        model: None,
+        created_at: None,
+        phase: norte_code_wire::Phase::Idle,
+        reasoning: None,
+        parent: None,
     }
 }

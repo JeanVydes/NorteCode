@@ -156,14 +156,15 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                     } else {
                         job.script.clone()
                     };
-                    JobEntryPayload {
+                    norte_code_wire::JobEntry {
                         job_id: job.id.clone(),
                         command,
                         status: crate::host::job_status(job),
+                        exit_code: job.exit_code,
                     }
                 })
                 .collect::<Vec<_>>();
-            Some(payload(JobListPayload { jobs }))
+            Some(payload(norte_code_wire::JobList { jobs }))
         }
         ServerEventKind::MessageReplayed {
             index,
