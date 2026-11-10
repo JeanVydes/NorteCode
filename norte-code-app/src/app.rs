@@ -69,7 +69,7 @@ pub fn App() -> Element {
     // The sidebar is a recency list and says which sessions are working, and
     // both change without this page doing anything: another client, a child
     // session, a background job. There is no push channel for the list, so it
-    // is polled — but only while the tab is visible and the setting is on, and
+    // is polled, but only while the tab is visible and the setting is on, and
     // on a slow cadence: the stream already tells this page everything about
     // the session it has open.
     use_effect(move || {
@@ -104,7 +104,7 @@ pub fn App() -> Element {
                         // The conversation stays mounted while another page is
                         // shown. Unmounting it closes the session's event
                         // stream, and coming back reopened it and reloaded the
-                        // history — which threw away whatever was streaming
+                        // history, which threw away whatever was streaming
                         // and made the page "start loading the conversation
                         // again" on every tab switch.
                         div { class: if page == Page::Chat { "page-body" } else { "page-body page-hidden" },

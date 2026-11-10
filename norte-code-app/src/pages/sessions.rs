@@ -316,8 +316,8 @@ fn delete(context: AppContext, session_id: String) {
 
 fn agent_label(agent: &norte_code_wire::AgentSummary) -> String {
     let provider_model = match (&agent.provider, &agent.model) {
-        (Some(provider), Some(model)) => format!(" — {} / {}", provider.id, model.id),
-        (Some(provider), None) => format!(" — {}", provider.id),
+        (Some(provider), Some(model)) => format!(", {} / {}", provider.id, model.id),
+        (Some(provider), None) => format!(", {}", provider.id),
         _ => String::new(),
     };
     format!("{}{provider_model}", agent.id)

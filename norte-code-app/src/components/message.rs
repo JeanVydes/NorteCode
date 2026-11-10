@@ -184,7 +184,7 @@ fn ToolRow(item: ConversationItem) -> Element {
 ///
 /// The replay text is `name {pretty json}`, and the arguments are pretty
 /// printed, so the JSON spans lines and starts with a brace rather than the
-/// arguments name — the old split on the first space left the raw document as
+/// arguments name, the old split on the first space left the raw document as
 /// the "path". The name is the first token; everything after it is the
 /// argument document.
 fn historical(item: &ConversationItem) -> Option<ToolActivity> {
@@ -209,7 +209,7 @@ fn historical(item: &ConversationItem) -> Option<ToolActivity> {
 ///
 /// The name is everything before the first brace; when there is no brace the
 /// call carries no arguments and the whole line is the name. The summary is
-/// the most telling scalar in the document — the file, the command, the query —
+/// the most telling scalar in the document, the file, the command, the query -
 /// so the row reads `shell · cargo test · 1.2s` instead of a wall of JSON.
 #[derive(Debug, PartialEq, Eq)]
 struct ReplayedCall {

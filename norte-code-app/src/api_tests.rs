@@ -1,4 +1,6 @@
-use super::{ApiClient, NorteCodeCommand, NorteCodeRequest};
+use norte_code_wire::{ClientRequest, ClientRequestKind, SessionKey};
+
+use super::ApiClient;
 use serde_json::json;
 
 #[test]
@@ -42,10 +44,10 @@ fn session_resource_url_encodes_the_server_supplied_id_as_one_segment() {
 
 #[test]
 fn session_model_request_matches_the_host_extension_wire() {
-    let request = NorteCodeRequest {
+    let request = ClientRequest {
         request_id: 7,
-        kind: NorteCodeCommand::SetModel {
-            session: "session-1".to_owned(),
+        kind: ClientRequestKind::SetModel {
+            session: SessionKey::new("session-1"),
             provider: "provider-1".to_owned(),
             model: "model-1".to_owned(),
         },
@@ -67,8 +69,8 @@ fn session_model_request_matches_the_host_extension_wire() {
 
 #[test]
 fn answer_requests_use_the_host_supported_command_name() {
-    let answer = serde_json::to_value(NorteCodeCommand::AnswerQuestion {
-        session: "session-1".to_owned(),
+    let answer = serde_json::to_value(ClientRequestKind::AnswerQuestion {
+        session: SessionKey::new("session-1"),
         question: "question-1".to_owned(),
         answer: "continue".to_owned(),
     })

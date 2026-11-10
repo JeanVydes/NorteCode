@@ -9,7 +9,7 @@ pub fn OverviewPage() -> Element {
     let session_count = context.sessions.read().len();
     let agent_count = context.agents.read().len();
     let request_count = context.telemetry.read().as_ref().map_or_else(
-        || "—".to_owned(),
+        || "-".to_owned(),
         |report| report.summary.requests.to_string(),
     );
     rsx! {

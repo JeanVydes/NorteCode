@@ -15,7 +15,7 @@ fn token_counts_read_in_k_m_b() {
 #[test]
 fn a_parked_question_is_not_a_running_turn() {
     // Nothing is being produced until someone answers, so Stop has
-    // nothing to stop — the card offers Cancel instead.
+    // nothing to stop, the card offers Cancel instead.
     assert!(!ChatState::AwaitingAnswer.has_running_turn());
     assert_eq!(
         ChatState::AwaitingAnswer.label(),

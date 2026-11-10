@@ -110,7 +110,7 @@ pub struct PluginInfo {
 }
 
 /// One MCP server visible to the service.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpInfo {
     /// Configuration name.
@@ -126,7 +126,7 @@ pub struct McpInfo {
 }
 
 /// An MCP server that could not be started.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpFailure {
     /// Configuration name.
@@ -435,7 +435,7 @@ pub struct PlanInfo {
 }
 
 /// One installed Agent Skill, as a client sees it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillInfo {
     /// The validated name, equal to its directory name.
