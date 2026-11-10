@@ -7204,7 +7204,7 @@ async fn history_preserves_turn_boundaries_in_storage() {
         .into_iter()
         .find(|stored| stored.key == key.to_string())
         .expect("stored session");
-    let boundaries: Vec<super::sessions::TurnBoundary> =
+    let boundaries: Vec<super::session_record::TurnBoundary> =
         serde_json::from_value(stored.stats["turn_boundaries"].clone())
             .expect("decode persisted boundaries");
     assert_eq!(boundaries.len(), 2);
@@ -8750,7 +8750,7 @@ async fn service_with_child_session() -> (Arc<Service>, SessionKey, SessionKey) 
         .expect("child settings");
     let child = service
         .create_session_child(
-            super::sessions::ChildSessionMetadata {
+            super::session_record::ChildSessionMetadata {
                 parent: parent.clone(),
                 tool_call_id: "call-1".to_owned(),
                 task_summary: "test task".to_owned(),
