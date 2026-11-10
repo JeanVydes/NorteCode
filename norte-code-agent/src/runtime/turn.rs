@@ -142,6 +142,12 @@ impl Harness {
                 Phase::AwaitingTool => {
                     // Even a cancelled turn must settle every committed call.
                     self.run_tools(session, sender, cancellation).await?;
+                    // A tool that ended because the turn was cancelled is not
+                    // a result to reason about: asking the provider what to do
+                    // next would start a request no one wants.
+                    if cancellation.is_cancelled() {
+                        return Ok(last);
+                    }
                     stopped = self
                         .consult_with_history(
                             session,
