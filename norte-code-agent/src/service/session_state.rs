@@ -1,13 +1,13 @@
-//! One of the service's domains, as `impl Service` blocks.
-//!
-//! Child modules see the service's private fields, so a domain owns its
-//! behaviour here while the state stays in one place.
+//! The reads and writes of one session's state.
 
 use std::sync::PoisonError;
 
-use norte_code_wire::ContextUsage;
-use norte_code_wire::{Reasoning, SessionKey};
+use norte_code_wire::{
+    ContextUsage, Phase as ProtocolPhase, Reasoning, ReasoningScope, SessionKey,
+};
 
+use super::EventStream;
+use super::session_record::TurnBoundary;
 use crate::provider::ModelSpec;
 
 #[allow(clippy::wildcard_imports)]
@@ -94,5 +94,181 @@ impl Service {
         self.lock_sessions()
             .get(session)
             .is_some_and(|record| self.jobs.any_running(record.id))
+    }
+
+    /// Consumes the pending overrides this turn started with, without removing
+    /// entries a concurrent `SetReasoning` or `Steer` appended after the turn
+    /// read them.
+    pub(super) fn clear_pending(
+        &self,
+        key: &SessionKey,
+        pending_reasoning: Option<&Reasoning>,
+        pending_steers: &[Steered],
+    ) {
+        let mut sessions = self.lock_sessions();
+        let Some(record) = sessions.get_mut(key) else {
+            return;
+        };
+        if let Some(pending) = pending_reasoning
+            && record.pending_reasoning.as_ref() == Some(pending)
+        {
+            record.pending_reasoning = None;
+        }
+        if !pending_steers.is_empty() && record.pending_steers.starts_with(pending_steers) {
+            record.pending_steers.drain(..pending_steers.len());
+        }
+    }
+
+    /// Drops the durable copy of the steering messages the engine applied.
+    ///
+    /// The messages are named, so the copy that goes is the one that was
+    /// applied and not a message that arrived after it.
+    pub(super) async fn clear_applied_steers(&self, key: &SessionKey, applied: &[Steered]) {
+        if applied.is_empty() {
+            return;
+        }
+        {
+            let mut sessions = self.lock_sessions();
+            let Some(record) = sessions.get_mut(key) else {
+                return;
+            };
+            record.pending_steers.retain(|steered| {
+                !applied
+                    .iter()
+                    .any(|done| done.id == steered.id && done.text == steered.text)
+            });
+        }
+        if let Err(error) = self.persist(key).await {
+            tracing::warn!(%error, "could not store the applied steering messages");
+        }
+    }
+
+    /// The usage counters of a session.
+    pub(super) fn stats(&self, key: &SessionKey, turn: u64) -> Stats {
+        self.lock_sessions().get(key).map_or(
+            Stats {
+                turn,
+                billed: 0,
+                requests: 0,
+                cost: 0.0,
+                unpriced: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                context_used: 0,
+                pending: std::collections::VecDeque::new(),
+            },
+            |record| Stats {
+                turn,
+                billed: record.billed,
+                requests: record.requests,
+                cost: record.cost,
+                unpriced: record.unpriced,
+                input_tokens: record.input_tokens,
+                output_tokens: record.output_tokens,
+                cache_read_tokens: record.cache_read_tokens,
+                cache_write_tokens: record.cache_write_tokens,
+                context_used: record.context_used,
+                pending: std::collections::VecDeque::new(),
+            },
+        )
+    }
+
+    /// Writes the usage counters back.
+    pub(super) async fn store_stats(&self, key: &SessionKey, stats: &Stats) {
+        if let Some(record) = self.lock_sessions().get_mut(key) {
+            record.billed = stats.billed;
+            record.requests = stats.requests;
+            record.cost = stats.cost;
+            record.unpriced = stats.unpriced;
+            record.input_tokens = stats.input_tokens;
+            record.output_tokens = stats.output_tokens;
+            // The cache counters are the session's, like the token totals, and
+            // live in the same record. They were the two the record never took
+            // back, so a resumed session reported a cache share over only the
+            // requests it had made since the restart: the footer showed 2.5%
+            // for a session whose prompts had almost all been served cached.
+            record.cache_read_tokens = stats.cache_read_tokens;
+            record.cache_write_tokens = stats.cache_write_tokens;
+            // The context is what the last request carried, not what the
+            // session spent: a long conversation is sent whole every time.
+            record.context_used = stats.context_used;
+        }
+        if let Err(error) = self.persist(key).await {
+            tracing::warn!(session = %key, %error, "could not persist session counters");
+        }
+    }
+
+    /// Persists the graph head reached by a terminal turn.
+    pub(super) async fn record_turn_boundary(
+        &self,
+        key: &SessionKey,
+        turn: u64,
+    ) -> Result<(), ServiceError> {
+        let session_id = self
+            .lock_sessions()
+            .get(key)
+            .map(|record| record.id)
+            .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        let session = self.store.load(session_id).await?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            record
+                .turn_boundaries
+                .retain(|boundary| boundary.turn != turn);
+            record.turn_boundaries.push(TurnBoundary {
+                turn,
+                session: session_id,
+                head: session.head,
+            });
+            record.turn_boundaries.sort_by_key(|boundary| boundary.turn);
+            record.last_turn = record.last_turn.max(turn);
+        }
+        self.persist(key).await
+    }
+
+    /// Records the phase the session is in.
+    pub(super) async fn set_phase(&self, key: &SessionKey, phase: ProtocolPhase) {
+        if let Some(record) = self.lock_sessions().get_mut(key) {
+            record.phase = phase;
+        }
+        if let Err(error) = self.persist(key).await {
+            tracing::warn!(session = %key, %error, "could not persist session phase");
+        }
+    }
+
+    /// Sets the reasoning override of the session or of its next turn.
+    pub(super) async fn set_reasoning(
+        &self,
+        _request_id: u64,
+        key: SessionKey,
+        scope: ReasoningScope,
+        reasoning: Reasoning,
+    ) -> Result<EventStream, ServiceError> {
+        let (_, spec, _) = self.require_record(&key)?;
+        let spec = spec.ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+        // Validate at the point the setting is chosen, not on the next turn:
+        // an effort the selected model does not declare is never downgraded.
+        super::resolve_reasoning(
+            Some(&reasoning),
+            &self.config().reasoning.default,
+            &spec.capabilities.reasoning,
+        )?;
+        {
+            let mut sessions = self.lock_sessions();
+            let record = sessions
+                .get_mut(&key)
+                .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
+            match scope {
+                ReasoningScope::Session => record.reasoning = Some(reasoning),
+                ReasoningScope::Message => record.pending_reasoning = Some(reasoning),
+            }
+        }
+        self.persist(&key).await?;
+        Ok(Box::pin(futures_util::stream::empty()))
     }
 }

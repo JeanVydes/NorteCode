@@ -21,11 +21,6 @@ impl Steered {
     pub(crate) fn new(id: String, text: String) -> Self {
         Self { id, text }
     }
-
-    /// The same message under another name.
-    pub(crate) fn with_id(self, id: String) -> Self {
-        Self { id, ..self }
-    }
 }
 
 impl<'de> Deserialize<'de> for Steered {

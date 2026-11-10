@@ -377,9 +377,9 @@ fn emit_child_update(
 fn persist_child_terminal(service: &Arc<Service>, child: &SessionKey, failed: bool) {
     if let Some(record) = service.lock_sessions().get_mut(child) {
         record.child_terminal = Some(if failed {
-            super::sessions::ChildTerminalState::Failed
+            super::session_record::ChildTerminalState::Failed
         } else {
-            super::sessions::ChildTerminalState::Stopped
+            super::session_record::ChildTerminalState::Stopped
         });
     }
     let service = Arc::clone(service);

@@ -32,8 +32,13 @@ mod prompt;
 mod questions;
 mod sandbox;
 mod screenshots;
+mod session_children;
+mod session_export;
+mod session_lifecycle;
+mod session_record;
+mod session_rewind;
 mod session_state;
-mod sessions;
+mod session_stats;
 mod skill_catalog;
 mod skills;
 mod steering;
@@ -81,7 +86,7 @@ use crate::telemetry::{Telemetry, TelemetryLayer, TelemetryObserver};
 use crate::{DEFAULT_SUBAGENT_SYSTEM_PROMPT, ServiceError};
 
 use self::screenshots::{ScreenshotInterceptor, Screenshots};
-use self::sessions::{ChildSessionMetadata, SessionRecord};
+use self::session_record::{ChildSessionMetadata, SessionRecord};
 use self::steering::{Steered, Steering, SteeringInterceptor};
 use self::subagents::{
     MAX_DELEGATION_DEPTH, SubagentOutcome, SubagentRequest, SubagentRunner, SubagentTool,
