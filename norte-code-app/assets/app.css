@@ -247,7 +247,7 @@ h3 { margin: 0; font-size: 0.98rem; }
 /* The transcript is the scroll container. Before this it grew with the page
    and the view stayed put: new text printed below the fold, so a reader at the
    bottom never saw the answer arrive. */
-.transcript { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; padding: 0.25rem 0.15rem 0.75rem; }
+.transcript { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0.25rem 0.15rem 0.75rem; }
 .transcript-activity { display: flex; align-items: center; gap: 0.45rem; padding: 0.55rem 0.25rem 0.75rem; color: var(--color-text-muted); font-size: 0.8rem; }
 .transcript-note { max-width: 46rem; padding: 0.35rem 0.65rem; border-left: 2px solid var(--color-border); color: var(--color-text-muted); font-size: 0.76rem; }
 .composer-chip { max-width: 11rem; min-height: 1.9rem; padding: 0.2rem 0.45rem; border: 1px solid var(--color-border); border-radius: var(--radius-pill); background: transparent; color: var(--color-text-muted); font-size: 0.72rem; }

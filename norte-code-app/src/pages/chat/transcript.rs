@@ -129,7 +129,10 @@ pub(super) fn transcript(
 ) -> Element {
     let context = *context;
     let busy = chat_state.is_busy();
-    let stoppable = chat_state.has_running_turn() && context.active_turn_id.read().is_some();
+    // A turn parked on a question is open and cancellable even though the
+    // page is not claiming to work.
+    let stoppable = (chat_state.has_running_turn() || chat_state == ChatState::AwaitingAnswer)
+        && (context.active_turn_id.read().is_some() || context.streaming_turn_id.read().is_some());
     let awaiting_answer = !questions.is_empty();
     // The transcript is its own scroll container: the composer and the
     // header stay put, and the log follows the answer as it prints.

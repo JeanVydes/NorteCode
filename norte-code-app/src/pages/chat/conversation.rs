@@ -290,6 +290,10 @@ pub(super) fn apply(context: AppContext, frame: &raep_types::Envelope<serde_json
                 context.set_page_error(Some(message.clone()));
             }
             context.complete_turn(turn_id.as_deref());
+            // The turn is over, so any question it parked on is gone: a stop
+            // or a failure leaves no one to answer.
+            context.set_pending_questions(Vec::new());
+            context.set_active_turn_id(None);
             // A queued message becomes this session's next turn; the page
             // keeps showing "working" for it rather than falling back to Idle
             // until the queue is empty.
