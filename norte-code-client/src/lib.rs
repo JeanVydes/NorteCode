@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub(crate) mod agent;
+pub mod api;
 pub(crate) mod canonical;
 pub(crate) mod decode;
 pub(crate) mod error;
@@ -24,6 +25,10 @@ pub(crate) mod remote;
 pub(crate) mod sse;
 
 pub use agent::{AgentClient, EventStream, SessionSummary, into_session_info};
+pub use api::{
+    AgentModelRef, AgentOverride, ApiError, CommandResponse, CreateSessionRequest, Endpoint,
+    RemoteError, RenameSessionRequest, RestClient, TelemetryQuery, now_millis,
+};
 pub use decode::{DecodedEvent, decode_frame, history_items};
 pub use error::ClientError;
 #[cfg(feature = "native")]

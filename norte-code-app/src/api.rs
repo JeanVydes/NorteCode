@@ -6,7 +6,6 @@ use raep_types::{ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameTy
 use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use thiserror::Error;
 
 /// Which model a session starts on, as `SessionCreate` accepts it.
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,17 +61,7 @@ pub struct ApiClient {
     bearer_token: Option<String>,
 }
 
-#[derive(Debug, Error)]
-pub enum ApiError {
-    #[error("Invalid server URL: {0}")]
-    InvalidUrl(String),
-    #[error("Request failed: {0}")]
-    Request(String),
-    #[error("Server returned HTTP {0}")]
-    HttpStatus(u16),
-    #[error("Invalid response: {0}")]
-    InvalidResponse(String),
-}
+pub use norte_code_client::{ApiError, now_millis};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ServerInfo {
@@ -653,32 +642,6 @@ impl ApiClient {
 fn decode_payload<T: DeserializeOwned>(payload: &Value) -> Result<T, ApiError> {
     serde_json::from_value(payload.clone())
         .map_err(|error| ApiError::InvalidResponse(error.to_string()))
-}
-
-pub(crate) fn now_millis() -> Result<i64, ApiError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let timestamp = js_sys::Date::now();
-        if !timestamp.is_finite() {
-            return Err(ApiError::InvalidResponse(
-                "The browser clock returned an invalid timestamp.".to_owned(),
-            ));
-        }
-        timestamp.round().to_string().parse().map_err(|error| {
-            ApiError::InvalidResponse(format!("Could not read the browser clock: {error}"))
-        })
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| ApiError::InvalidResponse(error.to_string()))
-            .and_then(|duration| {
-                i64::try_from(duration.as_millis())
-                    .map_err(|error| ApiError::InvalidResponse(error.to_string()))
-            })
-    }
 }
 
 #[cfg(test)]
