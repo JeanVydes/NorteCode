@@ -33,6 +33,10 @@ use super::delegator::SharedChildren;
 use super::detach::DetachRegistry;
 use super::jobs::JobRegistry;
 use super::steering::{Steered, Steering};
+use super::subagent_views::{
+    AcceptedMessage, ChildResult, ChildStateView, ChildStatus, DelegatorAnswer, HandoffAccepted,
+    HeldMessage, InspectView, JobView, ListedChild, ListedChildren, WaitView,
+};
 
 /// How deep delegation may nest (RFC 8.2.4). A child at this depth cannot
 /// spawn; the error names the limit, which is `BUDGET_EXCEEDED`-flavoured
@@ -657,20 +661,41 @@ pub(super) fn child_state_label(phase: norte_code_wire::Phase, running: bool) ->
     }
 }
 
+/// The answer to `ask_delegator`, which carries the delegation answer.
+fn answer_of(text: String) -> String {
+    answer(&DelegatorAnswer {
+        answered: true,
+        answer: text,
+        answered_by: "parent",
+    })
+}
+
+/// Serializes one tool answer.
+///
+/// A closed struct cannot fail to serialize; a `Null` here would mean the
+/// payload stopped matching its own type, which the compiler already rules out.
+fn answer<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_owned())
+}
+
 pub(super) fn child_result(outcome: &SubagentOutcome) -> serde_json::Value {
     let summary: String = outcome.text.chars().take(2048).collect();
-    let mut result = serde_json::json!({
-        "status": if outcome.is_error { "failed" } else { "completed" },
-        "summary": summary,
-        "summary_truncated": outcome.text.chars().count() > 2048,
-    });
-    if let Some(valid) = outcome.output_schema_valid {
-        result["output_schema_valid"] = serde_json::Value::Bool(valid);
-        if valid && let Ok(output) = serde_json::from_str(&outcome.text) {
-            result["output"] = output;
-        }
-    }
-    result
+    let output = outcome
+        .output_schema_valid
+        .filter(|valid| *valid)
+        .and_then(|_| serde_json::from_str(&outcome.text).ok());
+    serde_json::to_value(ChildResult {
+        status: if outcome.is_error {
+            "failed"
+        } else {
+            "completed"
+        },
+        summary,
+        summary_truncated: outcome.text.chars().count() > 2048,
+        output_schema_valid: outcome.output_schema_valid,
+        output,
+    })
+    .unwrap_or(serde_json::Value::Null)
 }
 
 /// Whether a JSON Schema validates `output` (RFC 8.2.6).
@@ -1101,31 +1126,23 @@ impl FnExecutor<InspectArgs, ToolOutput> for InspectAgent {
                     .get(&child)
                     .and_then(|record| record.title.clone())
                     .unwrap_or_default();
-                Ok(ToolOutput::text(
-                    serde_json::json!({
-                        "view": "status",
-                        "child_session_id": child.as_str(),
-                        "status": {
-                            "state": state,
-                            "title": title,
-                            "delegator_suspended": registered.suspended,
-                        },
-                    })
-                    .to_string(),
-                ))
+                Ok(ToolOutput::text(answer(&InspectView::Status {
+                    child_session_id: child.as_str(),
+                    status: ChildStatus {
+                        state,
+                        title,
+                        delegator_suspended: registered.suspended,
+                    },
+                })))
             }
             "transcript" => Ok(inspect_transcript(&service, &child, &args).await),
             "jobs" => Ok(inspect_jobs(&service, &child, &args)),
-            "events" => Ok(ToolOutput::text(
-                serde_json::json!({
-                    "view": "events",
-                    "child_session_id": child.as_str(),
-                    "items": [],
-                    "truncated": false,
-                    "note": "the event view reads the RAEP replay window, which the service does not expose to the model yet",
-                })
-                .to_string(),
-            )),
+            "events" => Ok(ToolOutput::text(answer(&InspectView::Events {
+                child_session_id: child.as_str(),
+                items: Vec::new(),
+                truncated: false,
+                note: "the event view reads the RAEP replay window, which the service does not expose to the model yet",
+            }))),
             other => Ok(ToolOutput::error(format!(
                 "inspect_agent: unknown view `{other}`; use status, transcript, events or jobs"
             ))),
@@ -1164,15 +1181,11 @@ async fn inspect_transcript(
             format!("{:?}: {}", message.role, clip(&text, 400))
         })
         .collect();
-    ToolOutput::text(
-        serde_json::json!({
-            "view": "transcript",
-            "child_session_id": child.as_str(),
-            "items": items,
-            "truncated": history.len() > from.saturating_add(items.len()),
-        })
-        .to_string(),
-    )
+    ToolOutput::text(answer(&InspectView::Transcript {
+        child_session_id: child.as_str(),
+        truncated: history.len() > from.saturating_add(items.len()),
+        items,
+    }))
 }
 
 fn inspect_jobs(service: &Service, child: &SessionKey, args: &InspectArgs) -> ToolOutput {
@@ -1182,25 +1195,19 @@ fn inspect_jobs(service: &Service, child: &SessionKey, args: &InspectArgs) -> To
     };
     let jobs = service.jobs.list(Some(nid));
     let limit = args.limit.unwrap_or(20).clamp(1, 100);
-    let items: Vec<serde_json::Value> = jobs
+    let jobs = jobs
         .iter()
         .take(limit)
-        .map(|job| {
-            serde_json::json!({
-                "job_id": job.id,
-                "command": job.label,
-                "status": job.state.label(),
-            })
+        .map(|job| JobView {
+            job_id: &job.id,
+            command: &job.label,
+            status: job.state.label(),
         })
         .collect();
-    ToolOutput::text(
-        serde_json::json!({
-            "view": "jobs",
-            "child_session_id": child.as_str(),
-            "jobs": items,
-        })
-        .to_string(),
-    )
+    ToolOutput::text(answer(&InspectView::Jobs {
+        child_session_id: child.as_str(),
+        jobs,
+    }))
 }
 
 /// `message_agent` (RFC 8.2.8): send a message to a child session.
@@ -1242,15 +1249,12 @@ impl MessageAgent {
         }
         if registered.suspended {
             return match service.hold_delegator_message(&child, text).await {
-                Ok(held) => ToolOutput::text(
-                    serde_json::json!({
-                        "accepted": true,
-                        "delivery": delivery,
-                        "held": true,
-                        "held_count": held,
-                    })
-                    .to_string(),
-                ),
+                Ok(held) => ToolOutput::text(answer(&HeldMessage {
+                    accepted: true,
+                    delivery,
+                    held: true,
+                    held_count: held,
+                })),
                 Err(error) => ToolOutput::error(error.to_string()),
             };
         }
@@ -1270,15 +1274,12 @@ impl MessageAgent {
                     format!("Message from delegator:\n{text}"),
                 ),
             );
-            return ToolOutput::text(
-                serde_json::json!({
-                    "accepted": true,
-                    "delivery": "steer",
-                    "child_state": "RUNNING",
-                    "held": false,
-                })
-                .to_string(),
-            );
+            return ToolOutput::text(answer(&AcceptedMessage {
+                accepted: true,
+                delivery: "steer",
+                child_state: "RUNNING",
+                held: false,
+            }));
         }
         let Some(start_worker) = self.children.queue_message(
             &parent_key,
@@ -1305,15 +1306,12 @@ impl MessageAgent {
                 message,
             );
         }
-        ToolOutput::text(
-            serde_json::json!({
-                "accepted": true,
-                "delivery": delivery,
-                "child_state": "RUNNING",
-                "held": false,
-            })
-            .to_string(),
-        )
+        ToolOutput::text(answer(&AcceptedMessage {
+            accepted: true,
+            delivery,
+            child_state: "RUNNING",
+            held: false,
+        }))
     }
 
     /// Turns the tool into a declaration the core registry accepts.
@@ -1481,16 +1479,10 @@ impl FnExecutor<StopArgs, ToolOutput> for StopAgent {
             )));
         }
         if registered.is_terminal() {
-            return Ok(ToolOutput::text(
-                serde_json::json!({
-                    "child_session_id": child.as_str(),
-                    "state": registered_child_state(
-                        &registered,
-                        phase_of(&service, &child),
-                    ),
-                })
-                .to_string(),
-            ));
+            return Ok(ToolOutput::text(answer(&ChildStateView {
+                child_session_id: child.as_str(),
+                state: registered_child_state(&registered, phase_of(&service, &child)),
+            })));
         }
         let timeout = std::time::Duration::from_secs(args.timeout_s.unwrap_or(30).min(600));
         self.children.clear_pending_messages(&parent_key, &child);
@@ -1540,13 +1532,10 @@ impl FnExecutor<StopArgs, ToolOutput> for StopAgent {
             ChildState::Stopped,
             args.reason.as_deref().unwrap_or("state_change"),
         );
-        Ok(ToolOutput::text(
-            serde_json::json!({
-                "child_session_id": child.as_str(),
-                "state": "STOPPED",
-            })
-            .to_string(),
-        ))
+        Ok(ToolOutput::text(answer(&ChildStateView {
+            child_session_id: child.as_str(),
+            state: "STOPPED",
+        })))
     }
 }
 
@@ -1670,14 +1659,11 @@ impl FnExecutor<WaitArgs, ToolOutput> for WaitAgent {
         let state = final_child
             .as_ref()
             .map_or("IDLE", |child| registered_child_state(child, phase));
-        Ok(ToolOutput::text(
-            serde_json::json!({
-                "child_session_id": child.as_str(),
-                "state": state,
-                "timed_out": timed_out,
-            })
-            .to_string(),
-        ))
+        Ok(ToolOutput::text(answer(&WaitView {
+            child_session_id: child.as_str(),
+            state,
+            timed_out,
+        })))
     }
 }
 
@@ -1726,7 +1712,7 @@ impl FnExecutor<ListArgs, ToolOutput> for ListAgents {
             return Ok(ToolOutput::error("list_agents: parent session is unknown"));
         };
         let limit = args.limit.unwrap_or(100).clamp(1, 100);
-        let mut items: Vec<serde_json::Value> = Vec::new();
+        let mut items: Vec<ListedChild> = Vec::new();
         for child in self.children.of(&parent_key) {
             let phase = phase_of(&service, &child.child);
             let state = registered_child_state(&child, phase);
@@ -1735,18 +1721,18 @@ impl FnExecutor<ListArgs, ToolOutput> for ListAgents {
             {
                 continue;
             }
-            items.push(serde_json::json!({
-                "child_session_id": child.child.as_str(),
-                "state": state,
-                "tool_call_id": child.tool_call_id,
-            }));
+            items.push(ListedChild {
+                child_session_id: child.child.as_str().to_owned(),
+                state: state.to_owned(),
+                tool_call_id: child.tool_call_id.clone(),
+            });
             if items.len() >= limit {
                 break;
             }
         }
-        Ok(ToolOutput::text(
-            serde_json::json!({ "children": items }).to_string(),
-        ))
+        Ok(ToolOutput::text(answer(&ListedChildren {
+            children: items,
+        })))
     }
 }
 
@@ -1853,14 +1839,7 @@ impl FnExecutor<AskDelegatorArgs, ToolOutput> for AskDelegator {
             .ask(context, args.question, options, multiple)
             .await
         {
-            Ok(answer) => Ok(ToolOutput::text(
-                serde_json::json!({
-                    "answered": true,
-                    "answer": answer,
-                    "answered_by": "parent",
-                })
-                .to_string(),
-            )),
+            Ok(answer) => Ok(ToolOutput::text(answer_of(answer))),
             Err(error) => Ok(ToolOutput::error(format!("DELEGATOR_TIMEOUT: {error}"))),
         }
     }
@@ -1920,13 +1899,10 @@ impl FnExecutor<HandoffArgs, ToolOutput> for HandoffAgent {
             .map(|spec| spec.model)
             .unwrap_or_default();
         if args.agent_id == current || args.agent_id.is_empty() {
-            return Ok(ToolOutput::text(
-                serde_json::json!({
-                    "accepted": true,
-                    "takes_effect": "turn_end",
-                })
-                .to_string(),
-            ));
+            return Ok(ToolOutput::text(answer(&HandoffAccepted {
+                accepted: true,
+                takes_effect: "turn_end",
+            })));
         }
         let _ = &args.carry_context;
         Ok(ToolOutput::error(format!(
