@@ -21,9 +21,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use norte::{CallId, Cancellation, FnExecutor, SessionId, ToolContext, ToolOutput};
-use norte_code_wire::{ChildState, MessageRole, ReplayedKind, SessionKey};
+use norte_code_wire::{ChildState, SessionKey};
 use norte_code_wire::{ServerEvent, ServerEventKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -695,246 +694,20 @@ pub(super) fn child_result(outcome: &SubagentOutcome) -> serde_json::Value {
     .unwrap_or(serde_json::Value::Null)
 }
 
-/// Whether a JSON Schema validates `output` (RFC 8.2.6).
-///
-/// The schema is trusted input from the model, not from a file: a schema
-/// that does not compile is not an invalid output, it is an invalid ask,
-/// and the tool says so rather than marking the child failed. Validation
-/// is a tiny subset: `type`, `required`, `properties`, `items`, `enum` -
-/// enough for the schemas the registry carries, without a new dependency.
-pub(super) fn validate_output_schema(schema: &serde_json::Value, output: &str) -> bool {
-    let value = serde_json::from_str::<serde_json::Value>(output)
-        .unwrap_or(serde_json::Value::String(output.to_owned()));
-    schema_valid(schema, &value)
-}
-
-fn schema_valid(schema: &serde_json::Value, value: &serde_json::Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return true;
-    };
-    if let Some(kind) = object.get("type").and_then(serde_json::Value::as_str) {
-        let ok = match kind {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            _ => true,
-        };
-        if !ok {
-            return false;
-        }
-    }
-    if let Some(values) = object.get("enum").and_then(serde_json::Value::as_array)
-        && !values.iter().any(|candidate| candidate == value)
-    {
-        return false;
-    }
-    if let Some(required) = object.get("required").and_then(serde_json::Value::as_array)
-        && let Some(fields) = value.as_object()
-    {
-        for field in required {
-            let Some(name) = field.as_str() else {
-                continue;
-            };
-            if !fields.contains_key(name) {
-                return false;
-            }
-        }
-    }
-    if let Some(properties) = object
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-        && let Some(fields) = value.as_object()
-    {
-        for (name, subschema) in properties {
-            if let Some(field) = fields.get(name)
-                && !schema_valid(subschema, field)
-            {
-                return false;
-            }
-        }
-    }
-    if let Some(items) = object.get("items")
-        && let Some(list) = value.as_array()
-    {
-        for item in list {
-            if !schema_valid(items, item) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Clips `text` to `max` words, for a summary the stream carries.
-fn clip(text: &str, max: usize) -> String {
-    let clipped: String = text.chars().take(max).collect();
-    if text.chars().count() > max {
-        format!("{clipped}…")
-    } else {
-        clipped
-    }
-}
-
 mod args;
+mod state;
 mod tools;
+mod validation;
 
 pub(super) use args::*;
+pub(super) use state::{
+    child_key, parent_key, phase_of, registered_child_state, run_session_message, service_of,
+};
 pub(super) use tools::{
     ApproveChildCall, AskDelegator, HandoffAgent, InspectAgent, ListAgents, MessageAgent,
     StopAgent, WaitAgent,
 };
-
-fn parent_key(service: &Service, parent: SessionId) -> Option<SessionKey> {
-    let sessions = service.lock_sessions();
-    sessions
-        .iter()
-        .find(|(_, record)| record.id == parent)
-        .map(|(key, _)| key.clone())
-}
-
-/// The child `id` as a `SessionKey`, or an error naming the bad id.
-fn child_key(id: &str) -> Result<SessionKey, String> {
-    if id.trim().is_empty() {
-        Err("child_session_id is required".to_owned())
-    } else {
-        Ok(SessionKey::new(id.to_owned()))
-    }
-}
-
-/// The phase of a session, for `inspect_agent`'s `status` view.
-fn phase_of(service: &Service, child: &SessionKey) -> Option<norte_code_wire::Phase> {
-    service
-        .lock_sessions()
-        .get(child)
-        .map(|record| record.phase)
-}
-
-fn registered_child_state(
-    child: &super::delegator::Child,
-    phase: Option<norte_code_wire::Phase>,
-) -> &'static str {
-    if child.is_terminal() {
-        return if child.is_failed() {
-            "FAILED"
-        } else {
-            "STOPPED"
-        };
-    }
-    if child.is_finished() {
-        return "IDLE";
-    }
-    phase.map_or("RUNNING", |phase| child_state_label(phase, true))
-}
-
-/// The service behind a delegating tool, when one is installed.
-fn service_of(slot: &Arc<RwLock<Option<Arc<Service>>>>) -> Option<Arc<Service>> {
-    slot.read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
-pub(super) async fn run_session_message(
-    service: &Arc<Service>,
-    child: &SessionKey,
-    text: String,
-    cancel: Option<&Cancellation>,
-) -> SubagentOutcome {
-    let request_id = service.next_auto_request_id();
-    let mut stream = match service
-        .start_turn(
-            request_id,
-            Some(child.clone()),
-            Some(text),
-            Vec::new(),
-            None,
-            None,
-            false,
-        )
-        .await
-    {
-        Ok(stream) => stream,
-        Err(error) => {
-            return SubagentOutcome {
-                text: error.to_string(),
-                is_error: true,
-                child: Some(child.clone()),
-                output_schema_valid: None,
-            };
-        }
-    };
-    if let Some(parent) = service
-        .lock_sessions()
-        .get(child)
-        .and_then(|record| record.parent_client.clone())
-    {
-        service.children.set_running(&parent, child);
-    }
-    let mut failed = false;
-    let mut cancellation_requested = false;
-    let cancel_wait: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> =
-        match cancel {
-            Some(cancel) => Box::pin(cancel.cancelled()),
-            None => Box::pin(std::future::pending()),
-        };
-    tokio::pin!(cancel_wait);
-    loop {
-        enum Next {
-            Event(Box<ServerEvent>),
-            End,
-            Cancel,
-        }
-        let next = tokio::select! {
-            event = stream.next() => match event {
-                Some(event) => Next::Event(Box::new(event)),
-                None => Next::End,
-            },
-            () = &mut cancel_wait, if !cancellation_requested => Next::Cancel,
-        };
-        match next {
-            Next::Event(event) => {
-                failed |= matches!(event.kind, ServerEventKind::Error { .. });
-            }
-            Next::End => break,
-            Next::Cancel => {
-                cancellation_requested = true;
-                service.cancel_turn(child);
-            }
-        }
-    }
-    let text = match service.session_history(child).await {
-        Ok(history) => history
-            .into_iter()
-            .rev()
-            .find_map(|(role, kind, text)| {
-                (role == MessageRole::Assistant && kind == ReplayedKind::Text).then_some(text)
-            })
-            .unwrap_or_default(),
-        Err(error) => {
-            return SubagentOutcome {
-                text: format!("could not read child history: {error}"),
-                is_error: true,
-                child: Some(child.clone()),
-                output_schema_valid: None,
-            };
-        }
-    };
-    SubagentOutcome {
-        is_error: failed || (!cancellation_requested && text.is_empty()),
-        text: if text.is_empty() && cancellation_requested {
-            "child turn cancelled".to_owned()
-        } else if text.is_empty() {
-            "child turn finished without an assistant message".to_owned()
-        } else {
-            text
-        },
-        child: Some(child.clone()),
-        output_schema_valid: None,
-    }
-}
+pub(super) use validation::{clip, validate_output_schema};
 
 fn schedule_child_turn(
     service: Arc<Service>,
