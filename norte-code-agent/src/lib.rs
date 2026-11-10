@@ -18,6 +18,7 @@ pub use provider::{ModelFactory, ModelSpec, VendorModels};
 pub use service::{
     EventStream, PromptSize, RuleScope, Service, ToolStatus, effective_reasoning, model_list,
 };
+pub use service::{PlanError, ReasoningError};
 
 /// The default system prompt for the built-in host.
 ///

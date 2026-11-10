@@ -57,6 +57,69 @@ impl Plan {
 
 /// Parses a complete plan document or a front matter-only prefix.
 ///
+/// A plan document that could not be read or understood.
+#[derive(Debug, thiserror::Error)]
+pub enum PlanError {
+    /// The document does not start with YAML front matter.
+    #[error("missing YAML front matter")]
+    MissingFrontMatter,
+    /// The front matter is never closed.
+    #[error("unterminated YAML front matter")]
+    UnterminatedFrontMatter,
+    /// The front matter names no status.
+    #[error("front matter has no `status`")]
+    MissingStatus,
+    /// The status is not one this build knows.
+    #[error("unknown plan status `{0}`")]
+    UnknownStatus(String),
+    /// A timestamp field is not RFC 3339.
+    #[error("invalid `{key}` timestamp: {source}")]
+    Timestamp {
+        /// The field.
+        key: &'static str,
+        /// The parse failure.
+        #[source]
+        source: chrono::ParseError,
+    },
+    /// A text field is neither a JSON string nor plain text.
+    #[error("invalid `{key}` value: {source}")]
+    Value {
+        /// The field.
+        key: &'static str,
+        /// The parse failure.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The revision is not a number.
+    #[error("invalid `revision`: {source}")]
+    Revision {
+        /// The parse failure.
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    /// The bytes are not UTF-8.
+    #[error("plan is not valid UTF-8")]
+    NotUtf8(#[source] std::str::Utf8Error),
+    /// A plan file could not be read.
+    #[error("could not read {}: {source}", path.display())]
+    Read {
+        /// The file.
+        path: std::path::PathBuf,
+        /// The operating system error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A plan file holds invalid front matter.
+    #[error("invalid Markdown plan {}: {source}", path.display())]
+    Invalid {
+        /// The file.
+        path: std::path::PathBuf,
+        /// The parse failure.
+        #[source]
+        source: Box<PlanError>,
+    },
+}
+
 /// The closing delimiter is recognized as its own line. This keeps Markdown
 /// horizontal rules in the body from being mistaken for the front matter
 /// boundary, and lets callers parse a bounded prefix for list views.
@@ -65,10 +128,10 @@ impl Plan {
 ///
 /// Returns an error when the document has no valid front matter, status, or
 /// recognized metadata value.
-pub fn parse_plan(id: &str, contents: &str) -> Result<Plan, String> {
+pub fn parse_plan(id: &str, contents: &str) -> Result<Plan, PlanError> {
     let rest = contents
         .strip_prefix("---\n")
-        .ok_or_else(|| "missing YAML front matter".to_owned())?;
+        .ok_or(PlanError::MissingFrontMatter)?;
     let mut metadata_end = None;
     let mut body_start = None;
     let mut offset = 0;
@@ -82,7 +145,7 @@ pub fn parse_plan(id: &str, contents: &str) -> Result<Plan, String> {
         offset += line.len();
     }
     let (Some(metadata_end), Some(body_start)) = (metadata_end, body_start) else {
-        return Err("unterminated YAML front matter".to_owned());
+        return Err(PlanError::UnterminatedFrontMatter);
     };
     let metadata = rest.get(..metadata_end).unwrap_or_default();
     let content = rest
@@ -94,34 +157,34 @@ pub fn parse_plan(id: &str, contents: &str) -> Result<Plan, String> {
             .lines()
             .find_map(|line| line.strip_prefix(&format!("{key}: ")))
     };
-    let status = match value("status").ok_or_else(|| "front matter has no `status`".to_owned())? {
+    let status = match value("status").ok_or(PlanError::MissingStatus)? {
         "active" => PlanStatus::Active,
         "pending" => PlanStatus::Pending,
         "canceled" => PlanStatus::Canceled,
-        other => return Err(format!("unknown plan status `{other}`")),
+        other => return Err(PlanError::UnknownStatus(other.to_owned())),
     };
-    let optional_datetime = |key: &str| -> Result<Option<DateTime<Utc>>, String> {
+    let optional_datetime = |key: &'static str| -> Result<Option<DateTime<Utc>>, PlanError> {
         value(key)
             .map(|raw| {
                 DateTime::parse_from_rfc3339(raw)
                     .map(|timestamp| timestamp.with_timezone(&Utc))
-                    .map_err(|error| format!("invalid `{key}` timestamp: {error}"))
+                    .map_err(|source| PlanError::Timestamp { key, source })
             })
             .transpose()
     };
-    let optional_string = |key: &str| -> Result<Option<String>, String> {
+    let optional_string = |key: &'static str| -> Result<Option<String>, PlanError> {
         value(key)
             .map(|raw| {
                 serde_json::from_str(raw)
                     .or_else(|_| Ok::<_, serde_json::Error>(raw.to_owned()))
-                    .map_err(|error| format!("invalid `{key}` value: {error}"))
+                    .map_err(|source| PlanError::Value { key, source })
             })
             .transpose()
     };
     let revision = value("revision")
         .map(|raw| {
             raw.parse::<u32>()
-                .map_err(|error| format!("invalid `revision`: {error}"))
+                .map_err(|source| PlanError::Revision { source })
         })
         .transpose()?
         .unwrap_or(0);
@@ -144,8 +207,8 @@ pub fn parse_plan(id: &str, contents: &str) -> Result<Plan, String> {
 ///
 /// Returns an error when the bytes are not UTF-8 or the front matter is
 /// invalid or incomplete.
-pub fn parse_plan_header(id: &str, bytes: &[u8]) -> Result<Plan, String> {
-    let contents = std::str::from_utf8(bytes).map_err(|_| "plan is not valid UTF-8".to_owned())?;
+pub fn parse_plan_header(id: &str, bytes: &[u8]) -> Result<Plan, PlanError> {
+    let contents = std::str::from_utf8(bytes).map_err(PlanError::NotUtf8)?;
     parse_plan(id, contents)
 }
 
@@ -155,18 +218,26 @@ pub fn parse_plan_header(id: &str, bytes: &[u8]) -> Result<Plan, String> {
 ///
 /// Returns an error when the file cannot be opened/read, is not UTF-8, or
 /// contains invalid or incomplete front matter.
-pub async fn read_plan_header(path: impl AsRef<Path>, id: &str) -> Result<Plan, String> {
+pub async fn read_plan_header(path: impl AsRef<Path>, id: &str) -> Result<Plan, PlanError> {
     let path = path.as_ref();
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        .map_err(|source| PlanError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut bytes = Vec::new();
     file.take(MAX_PLAN_HEADER_BYTES)
         .read_to_end(&mut bytes)
         .await
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    parse_plan_header(id, &bytes)
-        .map_err(|error| format!("invalid Markdown plan {}: {error}", path.display()))
+        .map_err(|source| PlanError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    parse_plan_header(id, &bytes).map_err(|source| PlanError::Invalid {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })
 }
 
 #[cfg(test)]

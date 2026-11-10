@@ -114,7 +114,7 @@ pub fn effective_reasoning(
     let setting = if let Some(setting) = requested {
         setting.clone()
     } else {
-        let configured = parse_configured_reasoning(configured).map_err(ServiceError::Reasoning)?;
+        let configured = parse_configured_reasoning(configured)?;
         // The implicit default is medium: it leaves room for a useful answer
         // without asking every model for its most expensive effort. When a
         // model does not declare medium, prefer the closest effort below it
@@ -161,10 +161,64 @@ fn implicit_effort(capabilities: &ReasoningCapability) -> Option<ReasoningEffort
     .find(|effort| capabilities.efforts.contains(effort))
 }
 
+/// A reasoning setting that cannot be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ReasoningError {
+    /// A budget is not a positive integer.
+    #[error("a reasoning budget must be a positive integer")]
+    Budget,
+    /// An effort object carries no effort.
+    #[error("`reasoning.effort` must be a string")]
+    Effort,
+    /// The settings object names no recognised form.
+    #[error("expected `auto`, `off`, an effort object or a budget object")]
+    Shape,
+    /// The value is not a string, number or object.
+    #[error("expected a string, a number or an object")]
+    Value,
+    /// The setting names something this build does not know.
+    #[error("unknown reasoning setting `{0}`; use `auto`, `off` an effort or a budget")]
+    Unknown(String),
+    /// The model does not allow turning reasoning off.
+    #[error("the model does not allow turning reasoning off")]
+    CannotDisable,
+    /// The model has no reasoning at all.
+    #[error("the model does not support reasoning; omit the setting or use `auto`")]
+    Unsupported,
+    /// The effort is not one this build knows.
+    #[error("unknown effort `{effort}`; the model supports {supported}")]
+    UnknownEffort {
+        /// The effort that was asked for.
+        effort: String,
+        /// The efforts the model supports.
+        supported: String,
+    },
+    /// The model does not accept a token budget.
+    #[error("the model does not accept a reasoning token budget")]
+    UnsupportedBudget,
+    /// A budget of zero cannot be applied.
+    #[error("the reasoning budget must be at least one token")]
+    EmptyBudget,
+    /// The budget is above the model's ceiling.
+    #[error("the model accepts at most {max} reasoning tokens")]
+    BudgetTooLarge {
+        /// The ceiling.
+        max: u32,
+    },
+    /// The model does not offer that effort.
+    #[error("the model does not support effort `{effort}`; it supports {supported}")]
+    UnavailableEffort {
+        /// The effort that was asked for.
+        effort: &'static str,
+        /// The efforts the model supports.
+        supported: String,
+    },
+}
+
 /// Parses `reasoning.default` from the config.
 pub(super) fn parse_configured_reasoning(
     value: &serde_json::Value,
-) -> Result<ProtocolReasoning, String> {
+) -> Result<ProtocolReasoning, ReasoningError> {
     match value {
         serde_json::Value::Null => Ok(ProtocolReasoning::Automatic),
         serde_json::Value::String(text) => parse_reasoning_name(text),
@@ -173,7 +227,7 @@ pub(super) fn parse_configured_reasoning(
                 .as_u64()
                 .and_then(|value| u32::try_from(value).ok())
                 .filter(|value| *value > 0)
-                .ok_or_else(|| "a reasoning budget must be a positive integer".to_owned())?;
+                .ok_or(ReasoningError::Budget)?;
             Ok(ProtocolReasoning::Budget { tokens })
         }
         serde_json::Value::Object(map) => {
@@ -185,7 +239,7 @@ pub(super) fn parse_configured_reasoning(
                         let effort = map
                             .get("effort")
                             .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| "`reasoning.effort` must be a string".to_owned())?;
+                            .ok_or(ReasoningError::Effort)?;
                         return parse_reasoning_name(effort);
                     }
                     "budget" => {
@@ -194,15 +248,11 @@ pub(super) fn parse_configured_reasoning(
                             .and_then(serde_json::Value::as_u64)
                             .and_then(|value| u32::try_from(value).ok())
                             .filter(|value| *value > 0)
-                            .ok_or_else(|| {
-                                "`reasoning.tokens` must be a positive integer".to_owned()
-                            })?;
+                            .ok_or(ReasoningError::Budget)?;
                         return Ok(ProtocolReasoning::Budget { tokens });
                     }
                     other => {
-                        return Err(format!(
-                            "unknown reasoning setting `{other}`; use `auto`, `off`, an effort or a budget"
-                        ));
+                        return Err(ReasoningError::Unknown(other.to_string()));
                     }
                 }
             }
@@ -211,20 +261,20 @@ pub(super) fn parse_configured_reasoning(
                     .as_u64()
                     .and_then(|value| u32::try_from(value).ok())
                     .filter(|value| *value > 0)
-                    .ok_or_else(|| "`reasoning.budget` must be a positive integer".to_owned())?;
+                    .ok_or(ReasoningError::Budget)?;
                 return Ok(ProtocolReasoning::Budget { tokens });
             }
             if let Some(effort) = map.get("effort").and_then(serde_json::Value::as_str) {
                 return parse_reasoning_name(effort);
             }
-            Err("expected `auto`, `off`, an effort object or a budget object".to_owned())
+            Err(ReasoningError::Shape)
         }
-        _ => Err("expected a string, a number or an object".to_owned()),
+        _ => Err(ReasoningError::Value),
     }
 }
 
 /// Parses `auto`, `off` or one of Norte's effort names.
-fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
+fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, ReasoningError> {
     let normalized = text.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "auto" | "automatic" => Ok(ProtocolReasoning::Automatic),
@@ -233,11 +283,7 @@ fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
             .map(|effort| ProtocolReasoning::Effort {
                 effort: effort_name(effort).to_owned(),
             })
-            .ok_or_else(|| {
-                format!(
-                    "unknown reasoning setting `{text}`; use `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`"
-                )
-            }),
+            .ok_or_else(|| ReasoningError::Unknown(text.to_owned())),
     }
 }
 
@@ -263,51 +309,41 @@ fn validate_reasoning(
         ProtocolReasoning::Automatic => Ok(ReasoningRequest::Automatic),
         ProtocolReasoning::Disabled => {
             if capabilities.supported && !capabilities.can_disable {
-                return Err(ServiceError::Reasoning(
-                    "the model does not allow turning reasoning off".to_owned(),
-                ));
+                return Err(ReasoningError::CannotDisable.into());
             }
             Ok(ReasoningRequest::Disabled)
         }
         ProtocolReasoning::Effort { effort } => {
             if !capabilities.supported {
-                return Err(ServiceError::Reasoning(
-                    "the model does not support reasoning; omit the setting or use `auto`"
-                        .to_owned(),
-                ));
+                return Err(ReasoningError::Unsupported.into());
             }
             let Some(effort) = parse_reasoning_effort(effort) else {
-                return Err(ServiceError::Reasoning(format!(
-                    "unknown effort `{effort}`; the model supports {}",
-                    effort_choices(capabilities)
-                )));
+                return Err(ReasoningError::UnknownEffort {
+                    effort: effort.clone(),
+                    supported: effort_choices(capabilities),
+                }
+                .into());
             };
             if !capabilities.efforts.contains(&effort) {
-                return Err(ServiceError::Reasoning(format!(
-                    "the model does not support effort `{}`; it supports {}",
-                    effort_name(effort),
-                    effort_choices(capabilities)
-                )));
+                return Err(ReasoningError::UnavailableEffort {
+                    effort: effort_name(effort),
+                    supported: effort_choices(capabilities),
+                }
+                .into());
             }
             Ok(ReasoningRequest::Effort(effort))
         }
         ProtocolReasoning::Budget { tokens } => {
             if !capabilities.supported || !capabilities.supports_budget {
-                return Err(ServiceError::Reasoning(
-                    "the model does not accept a reasoning token budget".to_owned(),
-                ));
+                return Err(ReasoningError::UnsupportedBudget.into());
             }
             if *tokens == 0 {
-                return Err(ServiceError::Reasoning(
-                    "the reasoning budget must be at least one token".to_owned(),
-                ));
+                return Err(ReasoningError::EmptyBudget.into());
             }
             if let Some(max) = capabilities.max_budget
                 && *tokens > max
             {
-                return Err(ServiceError::Reasoning(format!(
-                    "the model accepts at most {max} reasoning tokens"
-                )));
+                return Err(ReasoningError::BudgetTooLarge { max }.into());
             }
             Ok(ReasoningRequest::Budget(*tokens))
         }

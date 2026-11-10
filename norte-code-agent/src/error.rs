@@ -51,10 +51,10 @@ pub enum ServiceError {
     Budget(String),
     /// A reasoning setting is malformed or unsupported by the model.
     #[error("reasoning: {0}")]
-    Reasoning(String),
+    Reasoning(#[from] crate::ReasoningError),
     /// Plan state could not be read or written.
     #[error("plan: {0}")]
-    Plan(String),
+    Plan(#[from] crate::PlanError),
     /// An approval rule could not be read or written.
     #[error("approval: {0}")]
     Approval(String),
