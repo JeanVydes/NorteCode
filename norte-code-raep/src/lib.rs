@@ -16,11 +16,12 @@ mod payloads;
 mod plugin_manager;
 
 pub use commands::AgentCommand;
-pub use host::{
-    ArtifactRef, ArtifactStore, BlobArtifactStore, FilePinStore, FileReplayStore, HostConfig,
-    HostError, IdempotencyRecord, MemoryUploadIndex, NorteCodeRaepHost, PinStore, ReplayStore,
-    SqliteReplayStore, SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
+pub use host::stores::{
+    ArtifactRef, ArtifactStore, BlobArtifactStore, FilePinStore, FileReplayStore,
+    IdempotencyRecord, MemoryUploadIndex, PinStore, ReplayStore, SqliteReplayStore,
+    SqliteUploadIndex, UploadIndex, UploadReceipt, UploadRecord,
 };
+pub use host::{HostConfig, HostError, NorteCodeRaepHost};
 pub use http::router;
 
 /// Extensions owned by the `NorteCode` server.
