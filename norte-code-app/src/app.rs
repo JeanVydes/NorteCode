@@ -34,6 +34,7 @@ pub fn App() -> Element {
         chat_state: use_signal(|| ChatState::Idle),
         active_turn_id: use_signal(|| None),
         streaming_turn_id: use_signal(|| None),
+        stream_segment: use_signal(|| 0),
         conversation_epoch: use_signal(|| 0u64),
         queue_mode: use_signal(|| QueueMode::Queue),
         children: use_signal(Vec::new),

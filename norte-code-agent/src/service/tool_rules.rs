@@ -3,7 +3,6 @@
 //! Child modules see the service's private fields, so a domain owns its
 //! behaviour here while the state stays in one place.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 
 use norte::{AnyFunction, ToolArgs, ToolDeclaration, ToolRegistry};
@@ -18,6 +17,8 @@ use norte_tools::{
 use norte_code_wire::SessionKey;
 
 use crate::ServiceError;
+
+use self::environment::ToolEnvironment;
 
 use self::screenshots::publishing_tool;
 use self::subagents::{SubagentRunner, SubagentTool};
@@ -113,6 +114,67 @@ impl Service {
             })
             .unwrap_or_else(|| self.configured_disabled_tools())
     }
+}
+
+/// Rebuilds a declaration with the environment note appended.
+///
+/// The declaration's description is a `&'static str`, and a registry is built
+/// per session, so the composed text is built once per process and shared:
+/// leaking one string per build would be a leak per turn.
+fn with_environment_note<A>(
+    declaration: ToolDeclaration<A>,
+    environment: &ToolEnvironment,
+) -> ToolDeclaration<A>
+where
+    A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
+{
+    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    let description = SHELL.get_or_init(|| {
+        Box::leak(format!("{}\n\n{}", declaration.description, environment.note()).into_boxed_str())
+    });
+    ToolDeclaration {
+        description,
+        ..declaration
+    }
+}
+
+/// Rebuilds the browser declaration, naming the display it needs.
+///
+/// The tool drives a browser that is already running, so the host has to say
+/// where that browser draws: a session with no display opens no window, and a
+/// model that is not told that keeps asking for a screenshot it cannot take.
+fn with_browser_environment<A>(
+    declaration: ToolDeclaration<A>,
+    environment: &ToolEnvironment,
+) -> ToolDeclaration<A>
+where
+    A: ToolArgs + serde::de::DeserializeOwned + std::fmt::Debug + 'static,
+{
+    static BROWSER: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    let session = environment.display().map_or_else(
+        || {
+            "This host has no graphical session: a browser must be started with \
+             `--remote-debugging-port=9222` by whoever runs the server, and no window is \
+             drawn here. If the CDP endpoint is not answering, say so instead of retrying."
+                .to_owned()
+        },
+        |display| {
+            format!(
+                "This host draws on `{display}`. The tool drives a browser that is already \
+                 running with `--remote-debugging-port=9222`; it does not start one."
+            )
+        },
+    );
+    let description = BROWSER.get_or_init(|| {
+        Box::leak(format!("{}\n\n{session}", declaration.description).into_boxed_str())
+    });
+    ToolDeclaration {
+        description,
+        ..declaration
+    }
+}
+
+impl Service {
     /// The shell, and the manager for the jobs it can leave behind.
     ///
     /// One shell with one set of limits: the sandbox, the secrets, the output
@@ -123,10 +185,8 @@ impl Service {
         tools: &mut ToolRegistry,
         disabled: &[String],
     ) -> Result<(), ServiceError> {
-        let mut env = BTreeMap::new();
-        if let Ok(path) = std::env::var("PATH") {
-            env.insert("PATH".to_owned(), path);
-        }
+        let environment = ToolEnvironment::from_process();
+        let env = environment.variables();
         // Detached jobs are bounded too: RAEP requires every job to have a
         // runtime ceiling, and a requested zero falls back to the executor's
         // default timeout rather than creating an unbounded process.
@@ -162,7 +222,9 @@ impl Service {
         // request's `detach` field, so there is nothing here to keep in step:
         // the sandbox, the secrets, the output bounds and the limits are one
         // set, and the flag is the only thing that differs.
-        let command = build(limits);
+        // The shell clears the environment, so what a command may rely on has
+        // to be in the text the model reads, not in this process.
+        let command = with_environment_note(build(limits), &environment);
         let command = ShellCalls::declaration_with_limits(
             command,
             limits,
@@ -262,7 +324,10 @@ impl Service {
         // carries text only on the chat completions wire. The wrapper reads the
         // capture out before the model sees the answer, and the interceptor
         // below attaches it.
-        let browser = BrowserTool::new().into_declaration();
+        let browser = with_browser_environment(
+            BrowserTool::new().into_declaration(),
+            &ToolEnvironment::from_process(),
+        );
         let browser = if self.config().tools.screenshots.enabled {
             publishing_tool(
                 browser,

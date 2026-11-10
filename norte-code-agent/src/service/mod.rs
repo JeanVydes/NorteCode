@@ -17,6 +17,7 @@ mod delegator;
 mod detach;
 mod dispatch;
 mod effects;
+mod environment;
 mod job_control;
 mod jobs;
 mod locks;

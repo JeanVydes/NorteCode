@@ -29,6 +29,9 @@ pub struct AppContext {
     /// from `active_turn_id` so a cancelled turn still has its id for the
     /// server to look up.
     pub streaming_turn_id: Signal<Option<String>>,
+    /// Bumped every time a tool call starts, so the text that follows it opens
+    /// a new bubble instead of appending to the answer before the call.
+    pub stream_segment: Signal<u64>,
     /// Bumped whenever the conversation page must open a fresh stream, for
     /// example after a rewind or when the user opens another session.
     pub conversation_epoch: Signal<u64>,
@@ -293,6 +296,24 @@ impl AppContext {
     pub fn set_active_turn_id(self, value: Option<TurnId>) {
         let mut signal = self.active_turn_id;
         signal.set(value);
+    }
+
+    /// Advances the stream past a tool round.
+    pub fn advance_stream_segment(self) {
+        let mut segment = self.stream_segment;
+        let next = *segment.read() + 1;
+        segment.set(next);
+    }
+
+    /// The segment the current answer is in.
+    pub fn current_stream_segment(self) -> u64 {
+        *self.stream_segment.read()
+    }
+
+    /// Starts a new turn's stream at its first segment.
+    pub fn reset_stream_segment(self) {
+        let mut segment = self.stream_segment;
+        segment.set(0);
     }
 
     pub fn set_streaming_turn_id(self, value: Option<String>) {

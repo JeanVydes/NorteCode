@@ -132,6 +132,7 @@ pub(super) fn apply(context: AppContext, frame: norte_code_client::DecodedEvent)
             }
             context.set_streaming_turn_id(Some(turn_id.clone()));
             context.set_active_turn_id(raep_types::TurnId::new(turn_id).ok());
+            context.reset_stream_segment();
             context.set_chat_state(ChatState::Thinking);
         }
         DecodedFrame::Ignored => {}
@@ -160,8 +161,9 @@ pub(super) fn apply(context: AppContext, frame: norte_code_client::DecodedEvent)
             // mid-answer when it starts a new part, and keying by it split a
             // single answer into several.
             let key = format!(
-                "stream:{}:{}",
+                "stream:{}:{}:{}",
                 turn_id.as_deref().unwrap_or("pending"),
+                context.current_stream_segment(),
                 if kind == HistoryKind::Assistant {
                     "text"
                 } else {
@@ -225,6 +227,7 @@ pub(super) fn apply(context: AppContext, frame: norte_code_client::DecodedEvent)
                     usage: None,
                 });
             });
+            context.advance_stream_segment();
             context.set_chat_state(ChatState::RunningTool);
         }
         DecodedFrame::ToolOutput { call_id, delta, .. } => {

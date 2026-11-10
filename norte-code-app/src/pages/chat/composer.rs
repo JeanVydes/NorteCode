@@ -530,7 +530,7 @@ mod reconcile_tests {
 
     fn stream_bubble(turn: &str, content: &str, created_at: i64) -> ConversationItem {
         ConversationItem {
-            id: format!("stream:{turn}:text"),
+            id: format!("stream:{turn}:0:text"),
             turn_id: Some(turn.to_owned()),
             role: HistoryRole::Assistant,
             kind: HistoryKind::Assistant,

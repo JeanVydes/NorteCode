@@ -3,6 +3,20 @@ use super::{
     fold_usage, human_count, todos_from_history,
 };
 
+fn assistant_with_id(id: &str, content: &str) -> ConversationItem {
+    ConversationItem {
+        id: id.to_owned(),
+        turn_id: Some("t".to_owned()),
+        role: HistoryRole::Assistant,
+        kind: HistoryKind::Assistant,
+        content: content.to_owned(),
+        created_at: 0,
+        delivery: MessageDelivery::Sent,
+        tool: None,
+        usage: None,
+    }
+}
+
 fn assistant(turn_id: &str, content: &str) -> ConversationItem {
     ConversationItem {
         id: format!("stream:{turn_id}:text"),
@@ -110,5 +124,35 @@ fn restores_the_latest_valid_todo_call() {
             content: "current".to_owned(),
             status: TodoStatus::InProgress,
         }]
+    );
+}
+
+#[test]
+fn a_message_after_a_tool_round_is_its_own_bubble() {
+    // The page keys an answer by its stream segment, so the text before a tool
+    // call and the text after it are two rows: appending both to one bubble is
+    // what put every message before every call in the transcript.
+    let mut items = Vec::new();
+    let before = assistant_with_id("stream:t:0:text", "let me look");
+    let call = ConversationItem {
+        id: "tool:1".to_owned(),
+        turn_id: Some("t".to_owned()),
+        role: HistoryRole::Tool,
+        kind: HistoryKind::ToolCall,
+        content: String::new(),
+        created_at: 1,
+        delivery: MessageDelivery::Sent,
+        tool: None,
+        usage: None,
+    };
+    let after = assistant_with_id("stream:t:1:text", "done");
+    items.extend([before, call, after]);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["stream:t:0:text", "tool:1", "stream:t:1:text"],
+        "each run of text is its own row, in arrival order"
     );
 }
