@@ -172,17 +172,11 @@ pub(super) struct HostState {
     pub(super) session_create_keys: HashMap<String, String>,
     pub(super) session_create_order: VecDeque<String>,
     pub(super) client_capabilities: HashMap<String, raep_types::ClientCapabilities>,
-    pub(super) pending_output: HashMap<String, Vec<raep_types::Modality>>,
-    pub(super) turn_output: HashMap<(String, u64), Vec<raep_types::Modality>>,
-    pub(super) pending_turn_ids: HashMap<String, VecDeque<TurnId>>,
-    pub(super) turn_aliases: HashMap<(String, u64), TurnId>,
-    pub(super) turn_alias_order: VecDeque<(String, u64)>,
-    pub(super) active_turns: HashMap<String, TurnId>,
-    pub(super) turn_reservations: HashMap<String, TurnId>,
+    /// Everything about the turns themselves: running, queued and named.
+    pub(super) turns: super::turn_book::TurnBook,
     pub(super) turn_request_fingerprints: HashMap<(String, TurnId), String>,
     pub(super) turn_request_frames: HashMap<(String, TurnId), Envelope<Value>>,
     pub(super) turn_request_order: VecDeque<(String, TurnId)>,
-    pub(super) queued_turns: HashMap<String, VecDeque<QueuedTurn>>,
     /// Pinned turns per session (RFC 18.5). Held in-memory; the service
     /// has no pin table yet, so pins do not survive a restart.
     pub(super) pinned_turns: HashMap<String, Vec<String>>,

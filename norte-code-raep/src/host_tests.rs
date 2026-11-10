@@ -3,7 +3,7 @@ use norte_code_wire::ServerEvent;
 use raep_types::{SessionAttach, TurnId};
 
 use raep_types::FrameId;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use axum::{body::Body, http::Request};
 use tower::ServiceExt;
@@ -471,14 +471,10 @@ async fn service_turn_events_keep_the_client_turn_id() {
     let queued_turn_id = TurnId::new("queued_turn").expect("queued turn id");
     {
         let mut state = host.state.lock().await;
-        state
-            .pending_turn_ids
-            .entry("session".to_owned())
-            .or_default()
-            .push_back(client_turn_id.clone());
-        state.queued_turns.insert(
-            "session".to_owned(),
-            VecDeque::from([QueuedTurn {
+        state.turns.pending_push("session", client_turn_id.clone());
+        state.turns.enqueue(
+            "session",
+            QueuedTurn {
                 turn_id: queued_turn_id.clone(),
                 text: "queued prompt".to_owned(),
                 attachments: Vec::new(),
@@ -488,7 +484,8 @@ async fn service_turn_events_keep_the_client_turn_id() {
                 output: vec![raep_types::Modality::Text],
                 response_format: None,
                 replaces_turn_id: None,
-            }]),
+            },
+            false,
         );
     }
     let session = SessionKey::new("session");
@@ -607,10 +604,11 @@ async fn user_inputs_require_turn_ids_and_queue_with_a_bounded_position() {
         Err(HostError::InvalidFrame(message)) if message.contains("turn_id")
     ));
 
-    host.state.lock().await.active_turns.insert(
-        session_id.clone(),
-        TurnId::new("active_turn").expect("turn id"),
-    );
+    host.state
+        .lock()
+        .await
+        .turns
+        .activate(&session_id, TurnId::new("active_turn").expect("turn id"));
     let mut queued = Envelope::new(
         standard(StandardFrameType::UserInput),
         json!({"prompt": "queued input", "queue_policy": "queue"}),

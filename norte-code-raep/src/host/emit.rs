@@ -99,9 +99,8 @@ impl NorteCodeRaepHost {
                 .map_err(|error| HostError::InvalidFrame(error.to_string()))?;
             let state = self.state.lock().await;
             frame.turn_id = state
-                .turn_aliases
-                .get(&(session_id.to_owned(), turn))
-                .cloned()
+                .turns
+                .alias(session_id, turn)
                 .or(Some(numeric_turn_id));
         }
         if let Some(turn_id) = turn_id_override {
@@ -156,21 +155,7 @@ impl NorteCodeRaepHost {
         state
             .turn_request_order
             .retain(|candidate| candidate != &key);
-        if state.turn_reservations.get(session_id) == Some(turn_id) {
-            state.turn_reservations.remove(session_id);
-            state.pending_output.remove(session_id);
-        }
-        if let Some(pending) = state.pending_turn_ids.get_mut(session_id) {
-            pending.retain(|pending_turn| pending_turn != turn_id);
-            if pending.is_empty() {
-                state.pending_turn_ids.remove(session_id);
-            }
-        }
-        if let Some(queue) = state.queued_turns.get_mut(session_id) {
-            queue.retain(|queued| &queued.turn_id != turn_id);
-            if queue.is_empty() {
-                state.queued_turns.remove(session_id);
-            }
-        }
+        state.turns.release(session_id, turn_id);
+        state.turns.remove_queued(session_id, turn_id);
     }
 }

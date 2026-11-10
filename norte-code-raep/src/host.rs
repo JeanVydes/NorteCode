@@ -28,6 +28,7 @@ pub(crate) mod payloads;
 pub(crate) mod replay;
 mod sessions;
 pub(crate) mod stores;
+mod turn_book;
 mod turns;
 pub(crate) mod uploads;
 

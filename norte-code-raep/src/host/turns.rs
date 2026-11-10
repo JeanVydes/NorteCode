@@ -7,7 +7,7 @@ use norte_code_wire::{
 };
 use raep_types::{AttachMode, Envelope, FrameType, StandardFrameType, TurnId, WIRE_VERSION};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[allow(unused_imports)]
@@ -594,15 +594,11 @@ impl NorteCodeRaepHost {
                     .into_iter()
                     .collect());
             }
-            let occupied = state.active_turns.contains_key(&frame.session_id)
-                || state.turn_reservations.contains_key(&frame.session_id);
+            let occupied = state.turns.is_occupied(&frame.session_id);
             if occupied && queue_mode == norte_code_wire::QueueMode::Reject {
                 return Err(HostError::SessionBusy);
             }
-            let queued = state
-                .queued_turns
-                .get(&frame.session_id)
-                .map_or(0, VecDeque::len);
+            let queued = state.turns.queue_len(&frame.session_id);
             if occupied && queued >= self.config.max_queued_inputs {
                 return Err(HostError::SessionBusy);
             }
@@ -617,34 +613,22 @@ impl NorteCodeRaepHost {
                 }
             }
             if occupied {
-                let queue = state
-                    .queued_turns
-                    .entry(frame.session_id.clone())
-                    .or_default();
-                if queue_mode == norte_code_wire::QueueMode::Interrupt {
-                    queue.push_front(queued_turn.clone());
-                    Some(1)
-                } else {
-                    queue.push_back(queued_turn.clone());
-                    Some(u64::try_from(queue.len()).unwrap_or(u64::MAX))
-                }
+                Some(state.turns.enqueue(
+                    &frame.session_id,
+                    queued_turn.clone(),
+                    queue_mode == norte_code_wire::QueueMode::Interrupt,
+                ))
             } else {
-                state
-                    .turn_reservations
-                    .insert(frame.session_id.clone(), turn_id.clone());
-                state
-                    .pending_turn_ids
-                    .entry(frame.session_id.clone())
-                    .or_default()
-                    .push_back(turn_id.clone());
+                state.turns.reserve(&frame.session_id, turn_id.clone());
+                state.turns.pending_push(&frame.session_id, turn_id.clone());
                 if queued_turn
                     .output
                     .iter()
                     .any(|modality| !matches!(modality, raep_types::Modality::Text))
                 {
                     state
-                        .pending_output
-                        .insert(frame.session_id.clone(), queued_turn.output.clone());
+                        .turns
+                        .set_pending_output(&frame.session_id, queued_turn.output.clone());
                 }
                 None
             }
@@ -753,9 +737,7 @@ impl NorteCodeRaepHost {
                         .await
                 {
                     let mut state = self.state.lock().await;
-                    if let Some(queue) = state.queued_turns.get_mut(&frame.session_id) {
-                        queue.retain(|queued| queued.turn_id != turn_id);
-                    }
+                    state.turns.remove_queued(&frame.session_id, &turn_id);
                     drop(state);
                     self.remove_turn_request(&frame.session_id, &turn_id).await;
                     return Err(error);
@@ -787,9 +769,7 @@ impl NorteCodeRaepHost {
                 Ok(events) => output.extend(events),
                 Err(error) => {
                     let mut state = self.state.lock().await;
-                    state.pending_output.remove(&frame.session_id);
-                    state.pending_turn_ids.remove(&frame.session_id);
-                    state.turn_reservations.remove(&frame.session_id);
+                    state.turns.release(&frame.session_id, &turn_id);
                     drop(state);
                     self.remove_turn_request(&frame.session_id, &turn_id).await;
                     return Err(error);
@@ -813,34 +793,24 @@ impl NorteCodeRaepHost {
         })?;
         let (active_turn, cancelled_queued_turn) = {
             let mut state = self.state.lock().await;
-            let active_turn = state.active_turns.get(&frame.session_id).cloned();
+            let active_turn = state.turns.active(&frame.session_id);
             // A turn that is running but has not produced its first event yet
-            // lives only in the reservation: the host reserved it when the
-            // input was accepted and learned nothing since. Treating that as
-            // "turn not active" refused the only cancel the client could send,
-            // and left the session with a reservation nothing could clear.
-            let reserved = state.turn_reservations.get(&frame.session_id).cloned();
+            // is only reserved: the host reserved it when the input was
+            // accepted and learned nothing since. Treating that as "turn not
+            // active" refused the only cancel the client could send, and left
+            // the session with a reservation nothing could clear.
+            let reserved = state.turns.reserved(&frame.session_id);
             if active_turn.as_ref() == Some(requested_turn)
                 || (active_turn.is_none() && reserved.as_ref() == Some(requested_turn))
             {
                 (Some(requested_turn.clone()), false)
             } else {
-                let Some(queue) = state.queued_turns.get_mut(&frame.session_id) else {
+                if !state.turns.remove_queued(&frame.session_id, requested_turn) {
                     return Err(HostError::TurnNotActive);
-                };
-                let Some(position) = queue
-                    .iter()
-                    .position(|queued| &queued.turn_id == requested_turn)
-                else {
-                    return Err(HostError::TurnNotActive);
-                };
-                queue.remove(position);
-                if queue.is_empty() {
-                    state.queued_turns.remove(&frame.session_id);
                 }
-                if let Some(pending) = state.pending_turn_ids.get_mut(&frame.session_id) {
-                    pending.retain(|turn_id| turn_id != requested_turn);
-                }
+                state
+                    .turns
+                    .pending_retain(&frame.session_id, requested_turn);
                 (active_turn, true)
             }
         };
@@ -912,19 +882,7 @@ impl NorteCodeRaepHost {
     ) -> Vec<Envelope<Value>> {
         {
             let mut state = self.state.lock().await;
-            if state.active_turns.get(session_id) == Some(turn_id) {
-                state.active_turns.remove(session_id);
-            }
-            if state.turn_reservations.get(session_id) == Some(turn_id) {
-                state.turn_reservations.remove(session_id);
-                state.pending_output.remove(session_id);
-            }
-            if let Some(pending) = state.pending_turn_ids.get_mut(session_id) {
-                pending.retain(|pending_turn| pending_turn != turn_id);
-                if pending.is_empty() {
-                    state.pending_turn_ids.remove(session_id);
-                }
-            }
+            state.turns.release(session_id, turn_id);
         }
         self.remove_turn_request(session_id, turn_id).await;
         Vec::new()
@@ -1033,42 +991,23 @@ impl NorteCodeRaepHost {
                 .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
             if let ServerEventKind::TurnStarted { turn } = &event.kind {
                 let mut state = self.state.lock().await;
-                let client_turn_id = state
-                    .pending_turn_ids
-                    .get_mut(&event_session)
-                    .and_then(VecDeque::pop_front)
-                    .unwrap_or_else(|| {
+                let client_turn_id =
+                    state.turns.take_pending(&event_session).unwrap_or_else(|| {
                         TurnId::new(turn.to_string()).expect("numeric turn id is valid")
                     });
-                state
-                    .turn_aliases
-                    .insert((event_session.clone(), *turn), client_turn_id.clone());
-                state
-                    .turn_alias_order
-                    .push_back((event_session.clone(), *turn));
-                while state.turn_alias_order.len() > self.config.idempotency_capacity {
-                    if let Some(oldest) = state.turn_alias_order.pop_front() {
-                        state.turn_aliases.remove(&oldest);
-                    }
+                state.turns.set_alias(
+                    &event_session,
+                    *turn,
+                    client_turn_id.clone(),
+                    self.config.idempotency_capacity,
+                );
+                state.turns.activate(&event_session, client_turn_id);
+                if let Some(requested) = state.turns.take_pending_output(&event_session) {
+                    state
+                        .turns
+                        .set_turn_output(&event_session, *turn, requested);
                 }
-                state
-                    .active_turns
-                    .insert(event_session.clone(), client_turn_id);
-                state.turn_reservations.remove(&event_session);
                 drop(state);
-                let requested = self
-                    .state
-                    .lock()
-                    .await
-                    .pending_output
-                    .remove(&event_session);
-                if let Some(requested) = requested {
-                    self.state
-                        .lock()
-                        .await
-                        .turn_output
-                        .insert((event_session.clone(), *turn), requested);
-                }
             }
             if let ServerEventKind::Delta {
                 delta: Delta::Media { .. },
@@ -1082,8 +1021,8 @@ impl NorteCodeRaepHost {
                     .state
                     .lock()
                     .await
-                    .turn_output
-                    .get(&(event_session.clone(), *turn))
+                    .turns
+                    .turn_output(&event_session, *turn)
                     .cloned()
                     .unwrap_or_default();
                 if requested.contains(&raep_modality_for_media(media.kind)) {
@@ -1105,13 +1044,7 @@ impl NorteCodeRaepHost {
                 _ => None,
             };
             if let Some((turn, state)) = tool_state_change {
-                let turn_id = self
-                    .state
-                    .lock()
-                    .await
-                    .turn_aliases
-                    .get(&(event_session.clone(), turn))
-                    .cloned();
+                let turn_id = self.state.lock().await.turns.alias(&event_session, turn);
                 if let Some(turn_id) = turn_id {
                     output.push(
                         self.emit_with_turn_id(
@@ -1133,16 +1066,10 @@ impl NorteCodeRaepHost {
                 ServerEventKind::TurnFinished { turn, .. } => (Some(*turn), None),
                 ServerEventKind::TurnStopped { .. } => {
                     let state = self.state.lock().await;
-                    let client_turn_id = state.active_turns.get(&event_session).cloned();
-                    let service_turn_id = client_turn_id.as_ref().and_then(|client_turn_id| {
-                        state
-                            .turn_aliases
-                            .iter()
-                            .find(|((session, _), alias)| {
-                                session == &event_session && *alias == client_turn_id
-                            })
-                            .map(|((_, turn), _)| *turn)
-                    });
+                    let client_turn_id = state.turns.active(&event_session);
+                    let service_turn_id = client_turn_id
+                        .as_ref()
+                        .and_then(|client| state.turns.service_turn(&event_session, client));
                     (service_turn_id, client_turn_id)
                 }
                 _ => (None, None),
@@ -1154,14 +1081,13 @@ impl NorteCodeRaepHost {
             if let Some(turn) = finished_tool_turn {
                 let turn_id = {
                     let state = self.state.lock().await;
-                    let alias = state
-                        .turn_aliases
-                        .get(&(event_session.clone(), turn))
-                        .cloned();
                     // A stopped turn has already been released: announcing
                     // that the provider is being called again would promise a
                     // request that is not coming.
-                    alias.filter(|id| state.active_turns.get(&event_session) == Some(id))
+                    state
+                        .turns
+                        .alias(&event_session, turn)
+                        .filter(|id| state.turns.is_active(&event_session, id))
                 };
                 if let Some(turn_id) = turn_id {
                     output.push(
@@ -1184,49 +1110,35 @@ impl NorteCodeRaepHost {
                 {
                     let mut state = self.state.lock().await;
                     if let Some(turn) = finished_turn {
-                        state.turn_output.remove(&(event_session.clone(), turn));
+                        state.turns.remove_turn_output(&event_session, turn);
                     }
-                    state.active_turns.remove(&event_session);
-                    state.turn_reservations.remove(&event_session);
+                    state.turns.clear_running(&event_session);
                 }
                 if let Some(next) = self.reserve_next_queued_turn(&event_session).await {
                     output.extend(self.start_queued_turn(&event_session, next).await?);
                 }
             }
         }
-        self.state.lock().await.pending_output.remove(session_id);
+        self.state
+            .lock()
+            .await
+            .turns
+            .clear_pending_output(session_id);
         Ok(output)
     }
     pub(crate) async fn reserve_next_queued_turn(&self, session_id: &str) -> Option<QueuedTurn> {
         let mut state = self.state.lock().await;
-        let next = state
-            .queued_turns
-            .get_mut(session_id)
-            .and_then(VecDeque::pop_front);
-        if state
-            .queued_turns
-            .get(session_id)
-            .is_some_and(VecDeque::is_empty)
-        {
-            state.queued_turns.remove(session_id);
-        }
-        let next = next?;
-        state
-            .turn_reservations
-            .insert(session_id.to_owned(), next.turn_id.clone());
-        state
-            .pending_turn_ids
-            .entry(session_id.to_owned())
-            .or_default()
-            .push_back(next.turn_id.clone());
+        let next = state.turns.dequeue(session_id)?;
+        state.turns.reserve(session_id, next.turn_id.clone());
+        state.turns.pending_push(session_id, next.turn_id.clone());
         if next
             .output
             .iter()
             .any(|modality| !matches!(modality, raep_types::Modality::Text))
         {
             state
-                .pending_output
-                .insert(session_id.to_owned(), next.output.clone());
+                .turns
+                .set_pending_output(session_id, next.output.clone());
         }
         Some(next)
     }
@@ -1263,9 +1175,7 @@ impl NorteCodeRaepHost {
                 let message = error.to_string();
                 {
                     let mut state = self.state.lock().await;
-                    state.turn_reservations.remove(session_id);
-                    state.pending_turn_ids.remove(session_id);
-                    state.pending_output.remove(session_id);
+                    state.turns.release(session_id, &turn.turn_id);
                 }
                 let terminal = self
                     .emit_with_turn_id(
