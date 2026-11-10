@@ -370,6 +370,23 @@ pub enum HistoryKind {
     Refusal,
 }
 
+impl HistoryKind {
+    /// Reads the wire's spelling of a history kind.
+    #[must_use]
+    pub fn from_wire(kind: &str) -> Self {
+        match kind {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "reasoning" => Self::Reasoning,
+            "tool_call" => Self::ToolCall,
+            "tool_result" => Self::ToolResult,
+            "refusal" => Self::Refusal,
+            "tool" => Self::Tool,
+            _ => Self::SystemEvent,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ChatState {
     #[default]

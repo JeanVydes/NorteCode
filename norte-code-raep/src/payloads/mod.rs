@@ -34,6 +34,10 @@ pub(crate) fn payload<T: Serialize>(value: T) -> Value {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CanonicalTurnState {
+    Queued,
+    CallingProvider,
+    ExecutingTool,
+    AwaitingApproval,
     Finished,
     Stopped,
 }
@@ -395,8 +399,8 @@ enum CanonicalEvent<'a> {
     CostNotReported { requests: u64 },
     /// Steering input was accepted.
     UserInputAccepted {
-        ids: &'a Vec<String>,
-        messages: &'a Vec<String>,
+        ids: Vec<String>,
+        messages: Vec<String>,
     },
     /// Agent configuration changed.
     AgentChanged {

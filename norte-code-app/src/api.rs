@@ -1,4 +1,4 @@
-use crate::domain::{Capability, ConversationItem, HistoryKind, HistoryRole, MessageDelivery};
+use crate::domain::{Capability, ConversationItem, MessageDelivery};
 use norte_code_wire::CanonicalEvent;
 use norte_code_wire::{CatalogModelInfo, CatalogProviderInfo};
 use raep_types::TurnId;
@@ -289,22 +289,6 @@ struct HistoryGetRequest {
     before_turn_id: Option<String>,
     limit: u64,
     include_rewound: bool,
-}
-
-#[derive(Deserialize)]
-struct HistoryPage {
-    #[serde(default)]
-    items: Vec<HistoryItem>,
-}
-
-#[derive(Deserialize)]
-struct HistoryItem {
-    role: HistoryRole,
-    kind: HistoryKind,
-    content: String,
-    #[serde(default)]
-    turn_id: Option<String>,
-    timestamp: i64,
 }
 
 /// The payload of a frame that carries none.

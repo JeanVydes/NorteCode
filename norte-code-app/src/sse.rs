@@ -1,56 +1,4 @@
 use crate::api::ApiError;
-use raep_types::Envelope;
-use serde_json::Value;
-
-#[derive(Default)]
-struct SseDecoder {
-    buffer: Vec<u8>,
-}
-
-impl SseDecoder {
-    fn push(&mut self, chunk: &[u8]) {
-        self.buffer.extend_from_slice(chunk);
-    }
-
-    fn next_data(&mut self) -> Result<Option<String>, ApiError> {
-        loop {
-            let Some((end, delimiter_len)) = self.next_boundary() else {
-                return Ok(None);
-            };
-            let event: Vec<u8> = self.buffer.drain(..end).collect();
-            self.buffer.drain(..delimiter_len);
-            let event = std::str::from_utf8(&event)
-                .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
-            let data = event
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(|line| line.strip_prefix(' ').unwrap_or(line))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !data.is_empty() {
-                return Ok(Some(data));
-            }
-        }
-    }
-
-    fn next_boundary(&self) -> Option<(usize, usize)> {
-        let lf = self
-            .buffer
-            .windows(2)
-            .position(|window| window == b"\n\n")
-            .map(|index| (index, 2));
-        let crlf = self
-            .buffer
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .map(|index| (index, 4));
-        match (lf, crlf) {
-            (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
-            (Some(boundary), None) | (None, Some(boundary)) => Some(boundary),
-            (None, None) => None,
-        }
-    }
-}
 
 pub(crate) struct SessionEventStream {
     #[cfg(target_arch = "wasm32")]
@@ -59,7 +7,10 @@ pub(crate) struct SessionEventStream {
     abort: web_sys::AbortController,
     #[cfg(not(target_arch = "wasm32"))]
     response: reqwest::Response,
-    decoder: SseDecoder,
+    /// Bytes received but not yet forming a complete SSE block.
+    buffer: Vec<u8>,
+    /// Events decoded from the last chunk, in wire order.
+    pending: std::collections::VecDeque<norte_code_client::DecodedEvent>,
 }
 
 impl SessionEventStream {
@@ -121,7 +72,8 @@ impl SessionEventStream {
         Ok(Self {
             reader,
             abort,
-            decoder: SseDecoder::default(),
+            buffer: Vec::new(),
+            pending: std::collections::VecDeque::new(),
         })
     }
 
@@ -151,11 +103,14 @@ impl SessionEventStream {
         }
         Ok(Self {
             response,
-            decoder: SseDecoder::default(),
+            buffer: Vec::new(),
+            pending: std::collections::VecDeque::new(),
         })
     }
 
-    pub(crate) async fn next(&mut self) -> Result<Option<Envelope<Value>>, ApiError> {
+    pub(crate) async fn next(
+        &mut self,
+    ) -> Result<Option<norte_code_client::DecodedEvent>, ApiError> {
         #[cfg(target_arch = "wasm32")]
         use js_sys::{Reflect, Uint8Array};
         #[cfg(target_arch = "wasm32")]
@@ -164,11 +119,11 @@ impl SessionEventStream {
         use wasm_bindgen_futures::JsFuture;
 
         loop {
-            if let Some(data) = self.decoder.next_data()? {
-                let frame = serde_json::from_str(&data)
-                    .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
-                return Ok(Some(frame));
+            if let Some(decoded) = self.pending.pop_front() {
+                return Ok(Some(decoded));
             }
+            self.pending
+                .extend(norte_code_client::take_sse_events(&mut self.buffer));
 
             #[cfg(target_arch = "wasm32")]
             {
@@ -192,7 +147,7 @@ impl SessionEventStream {
                     .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
                 let mut bytes = vec![0; length];
                 chunk.copy_to(&mut bytes);
-                self.decoder.push(&bytes);
+                self.buffer.extend_from_slice(&bytes);
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -204,7 +159,7 @@ impl SessionEventStream {
                 else {
                     return Ok(None);
                 };
-                self.decoder.push(&chunk);
+                self.buffer.extend_from_slice(&chunk);
             }
         }
     }
@@ -221,7 +176,3 @@ impl Drop for SessionEventStream {
 fn js_error(error: &wasm_bindgen::JsValue) -> ApiError {
     ApiError::Request(error.as_string().unwrap_or_else(|| format!("{error:?}")))
 }
-
-#[cfg(test)]
-#[path = "sse_tests.rs"]
-mod tests;

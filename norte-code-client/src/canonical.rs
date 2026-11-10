@@ -274,6 +274,23 @@ pub(crate) struct CanonicalToolCallFinished {
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct CanonicalOutputPartFinished {
     pub(crate) turn: u64,
+    pub(crate) part_id: String,
+    pub(crate) index: u32,
+    pub(crate) modality: norte_code_wire::OutputModality,
+    #[serde(default)]
+    pub(crate) bytes: u64,
+    #[serde(default)]
+    pub(crate) sha256: String,
+    #[serde(default)]
+    pub(crate) blob: Option<String>,
+    #[serde(default)]
+    pub(crate) error: Option<String>,
+}
+
+/// A canonical `request_completed` payload.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CanonicalRequestCompleted {
+    pub(crate) turn: u64,
     pub(crate) index: u64,
     pub(crate) usage: norte_code_wire::Usage,
     #[serde(default)]
