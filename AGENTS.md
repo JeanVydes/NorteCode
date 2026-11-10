@@ -37,7 +37,8 @@ Rules that follow from this:
 
 - A type that crosses a process boundary lives in `norte-code-wire`, and only there. No crate re-exports it and no crate defines a second copy. Import `norte_code_wire::...` directly.
 - `norte-code-protocol` must stay client-agnostic: no slash-command parsing, no presentation, no plugin command surface. Those live in `norte-code-plugin-host`.
-- A client never decodes RAEP payloads on its own. It uses `norte-code-client`, so there is one decoder and one SSE reader, and a wire change cannot half-land.
+- A client never decodes RAEP payloads or spells a URL on its own. It uses `norte-code-client`: one decoder, one SSE reader and one `Endpoint` catalog, so a wire change cannot half-land and a path cannot be built twice.
+- A shape that crosses the wire lives in `norte-code-wire`. `norte-code-client` binds those shapes to methods and paths; it does not redefine them.
 - Anything that needs a socket, a database, a clock or a filesystem does not belong in `norte-code-wire`.
 - When moving a type, move its pure methods too. A method that needs the engine becomes an extension trait in the engine-side crate.
 - A payload that the host serializes and a client deserializes is one struct with both derives, not two mirror definitions.

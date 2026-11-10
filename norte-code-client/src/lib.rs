@@ -26,8 +26,10 @@ pub(crate) mod sse;
 
 pub use agent::{AgentClient, EventStream, SessionSummary, into_session_info};
 pub use api::{
-    AgentModelRef, AgentOverride, ApiError, CommandResponse, CreateSessionRequest, Endpoint,
-    RemoteError, RenameSessionRequest, RestClient, TelemetryQuery, now_millis,
+    AgentModelRef, AgentOverride, ApiError, CLIENT_NAME, CatalogDetail, CommandResponse,
+    CostReport, CreateSessionRequest, Endpoint, HealthStatus, Liveness, McpCatalog, PluginChange,
+    PluginSummary, ProtocolInfo, Readiness, ReadinessLimits, RemoteError, RenameSessionRequest,
+    RestClient, ServerInfo, ServerLimits, SkillCatalog, TelemetryQuery, ToolRule, now_millis,
 };
 pub use decode::{DecodedEvent, decode_frame, history_items};
 pub use error::ClientError;

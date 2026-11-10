@@ -134,7 +134,7 @@ fn create(
         let created = match override_pair {
             Some((provider, model)) => {
                 client
-                    .create_session_with_model(
+                    .create_session(
                         &agent_id,
                         (!title.is_empty()).then_some(title.as_str()),
                         Some((provider.as_str(), model.as_str())),
@@ -143,7 +143,11 @@ fn create(
             }
             None => {
                 client
-                    .create_session(&agent_id, (!title.is_empty()).then_some(title.as_str()))
+                    .create_session(
+                        &agent_id,
+                        (!title.is_empty()).then_some(title.as_str()),
+                        None,
+                    )
                     .await
             }
         };

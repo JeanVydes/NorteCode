@@ -69,8 +69,9 @@ pub fn ChatPage() -> Element {
     let queue_mode = *context.queue_mode.read();
     let streaming = context.streaming_turn_id.read().clone();
     let uploads_supported = context.server_info.read().as_ref().is_some_and(|info| {
-        info.capabilities
-            .contains(&crate::domain::Capability::Uploads)
+        info.capabilities.iter().any(|capability| {
+            crate::domain::Capability::from_wire(capability) == crate::domain::Capability::Uploads
+        })
     });
     let attachment_accept = selected_agent(&context)
         .as_ref()

@@ -1,22 +1,26 @@
-//! One group of endpoints the client exposes.
+use norte_code_wire::{CanonicalEvent, ClientRequestKind};
 
-#[allow(unused_imports)]
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::shared::{decode_payload, find_event};
+use super::types::{PluginChange, PluginChangedResponse, PluginListResponse, PluginSummary};
+use super::{ApiError, RestClient};
 
-impl ApiClient {
+impl RestClient {
+    /// The installed plugins.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or an answer the shape does not describe.
     pub async fn plugins(&self) -> Result<Vec<PluginSummary>, ApiError> {
-        let response = self
-            .norte_code_command(None, ClientRequestKind::ListPlugins)
-            .await?;
-        let payload = response
-            .events
-            .iter()
-            .find(|frame| CanonicalEvent::PluginList.matches(&frame.payload))
-            .ok_or_else(|| ApiError::InvalidResponse("Plugin list was not returned.".to_owned()))?;
-        Ok(decode_payload::<PluginListResponse>(&payload.payload)?.plugins)
+        let response = self.command(None, ClientRequestKind::ListPlugins).await?;
+        let payload = find_event(&response, CanonicalEvent::PluginList)?;
+        Ok(decode_payload::<PluginListResponse>(&payload)?.plugins)
     }
 
+    /// Installs a plugin from a repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or the reason the host refused.
     pub async fn install_plugin(
         &self,
         url: &str,
@@ -31,6 +35,11 @@ impl ApiClient {
         .await
     }
 
+    /// Updates one plugin, or all of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or the reason the host refused.
     pub async fn update_plugin(&self, name: Option<&str>) -> Result<PluginChange, ApiError> {
         self.plugin_change(ClientRequestKind::UpdatePlugins {
             name: name.map(str::to_owned),
@@ -38,6 +47,11 @@ impl ApiClient {
         .await
     }
 
+    /// Removes a plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or the reason the host refused.
     pub async fn remove_plugin(&self, name: &str) -> Result<PluginChange, ApiError> {
         self.plugin_change(ClientRequestKind::RemovePlugin {
             name: name.to_owned(),
@@ -45,6 +59,11 @@ impl ApiClient {
         .await
     }
 
+    /// Enables or disables a plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or the reason the host refused.
     pub async fn set_plugin_enabled(
         &self,
         name: &str,
@@ -58,15 +77,9 @@ impl ApiClient {
     }
 
     async fn plugin_change(&self, command: ClientRequestKind) -> Result<PluginChange, ApiError> {
-        let response = self.norte_code_command(None, command).await?;
-        let payload = response
-            .events
-            .iter()
-            .find(|frame| CanonicalEvent::PluginChanged.matches(&frame.payload))
-            .ok_or_else(|| {
-                ApiError::InvalidResponse("Plugin operation result was not returned.".to_owned())
-            })?;
-        let change = decode_payload::<PluginChangedResponse>(&payload.payload)?;
+        let response = self.command(None, command).await?;
+        let payload = find_event(&response, CanonicalEvent::PluginChanged)?;
+        let change: PluginChangedResponse = decode_payload(&payload)?;
         Ok(PluginChange {
             operation: change.operation,
             name: change.name,

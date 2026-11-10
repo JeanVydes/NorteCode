@@ -669,3 +669,71 @@ pub struct UploadReceipt {
     #[serde(default)]
     pub expires_at: i64,
 }
+
+/// One part of a `USER_INPUT`'s content.
+#[derive(Clone, Debug, Serialize)]
+pub struct UserInputPart {
+    /// What it is.
+    #[serde(rename = "type")]
+    pub kind: InputPartKind,
+    /// The text, for a text part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Where the bytes are, for an uploaded part.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<UploadSource>,
+    /// The MIME type, when the part names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// What a content part carries.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputPartKind {
+    /// Text.
+    Text,
+    /// An image.
+    Image,
+    /// A document.
+    Document,
+    /// An audio recording.
+    Audio,
+    /// A video.
+    Video,
+}
+
+/// Where an uploaded part's bytes live.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum UploadSource {
+    /// An upload the host already stores.
+    Upload {
+        /// The upload id.
+        upload_id: String,
+    },
+}
+
+impl UserInputPart {
+    /// A text part, used when a prompt travels with attachments.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            kind: InputPartKind::Text,
+            text: Some(text.into()),
+            source: None,
+            mime_type: None,
+        }
+    }
+
+    /// A part backed by an upload.
+    #[must_use]
+    pub fn upload(kind: InputPartKind, upload_id: String, mime_type: String) -> Self {
+        Self {
+            kind,
+            text: None,
+            source: Some(UploadSource::Upload { upload_id }),
+            mime_type: Some(mime_type),
+        }
+    }
+}

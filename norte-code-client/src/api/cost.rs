@@ -1,24 +1,21 @@
-//! One group of endpoints the client exposes.
+use norte_code_wire::{CanonicalEvent, ClientRequestKind, SessionKey};
 
-#[allow(unused_imports)]
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::shared::decode_payload;
+use super::types::{CostNotReportedResponse, CostReport, CostUpdatedResponse};
+use super::{ApiError, RestClient};
 
-impl ApiClient {
-    pub async fn telemetry(&self, session_id: Option<&str>) -> Result<TelemetryReport, ApiError> {
-        let mut url = self.resource_url("raep/v1/telemetry")?;
-        if let Some(session_id) = session_id {
-            url.query_pairs_mut().append_pair("session", session_id);
-        }
-        self.send_json(self.http.get(url)).await
-    }
-
-    pub async fn cost_report(&self, session_id: Option<&str>) -> Result<CostReport, ApiError> {
+impl RestClient {
+    /// The provider-reported cost totals.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or an answer the shape does not describe.
+    pub async fn cost_report(&self, session: Option<&str>) -> Result<CostReport, ApiError> {
         let response = self
-            .norte_code_command(
-                session_id,
+            .command(
+                session,
                 ClientRequestKind::CostReport {
-                    session: session_id.map(SessionKey::new),
+                    session: session.map(SessionKey::new),
                 },
             )
             .await?;

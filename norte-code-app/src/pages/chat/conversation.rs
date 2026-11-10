@@ -14,9 +14,8 @@ pub(super) async fn run_conversation(context: AppContext, request: ConversationR
         if !still_selected(&context, &request.session_id) {
             return;
         }
-        let opened = api
-            .open_session_events(&request.session_id, &request.agent_id)
-            .await;
+        let opened =
+            crate::api::open_session_events(&api, &request.session_id, &request.agent_id).await;
         match opened {
             Ok(stream) => {
                 attempt = 0;
@@ -75,6 +74,7 @@ pub(super) async fn load_history(context: &AppContext, api: &ApiClient, session_
     let request = context.next_history_request();
     match api.history(session_id).await {
         Ok(items) => {
+            let items = crate::api::conversation_history(&items);
             // A slower, older reply must not overwrite a newer one: the older
             // one predates the answer that is already on screen.
             if !context.is_latest_history_request(request) {
