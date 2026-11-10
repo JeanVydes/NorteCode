@@ -1,6 +1,6 @@
 //! One domain of the RAEP host, as `impl NorteCodeRaepHost` blocks.
 
-use crate::payloads::{canonical_event_payload, payload, standard_event_payload};
+use crate::payloads::{canonical_event_payload, standard_event_payload};
 use norte_code_wire::ServerEvent;
 use raep_types::{Envelope, FrameType, StandardFrameType, TurnId};
 use serde_json::Value;
@@ -42,11 +42,10 @@ impl NorteCodeRaepHost {
         let job_id = job_id_for_event(&event.kind);
         let event_payload = standard_event_payload(&event.kind)
             .unwrap_or_else(|| canonical_event_payload(&event.kind));
-        self.emit_with_extension(
+        self.emit_with_turn(
             &session_id,
             kind,
             event_payload,
-            Some(payload(NorteCodeEventExtension { norte_code: &event })),
             turn_id_for_event(&event.kind),
             job_id.as_deref(),
             turn_id_override,
@@ -59,7 +58,7 @@ impl NorteCodeRaepHost {
         kind: StandardFrameType,
         payload: Value,
     ) -> Result<Envelope<Value>, HostError> {
-        self.emit_with_extension(session_id, standard(kind), payload, None, None, None, None)
+        self.emit_with_turn(session_id, standard(kind), payload, None, None, None)
             .await
     }
     pub(crate) async fn emit_with_turn_id(
@@ -75,19 +74,17 @@ impl NorteCodeRaepHost {
         self.emit_frame(session_id, frame).await
     }
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn emit_with_extension(
+    pub(crate) async fn emit_with_turn(
         &self,
         session_id: &str,
         kind: FrameType,
         payload: Value,
-        ext: Option<Value>,
         turn_id: Option<u64>,
         job_id: Option<&str>,
         turn_id_override: Option<TurnId>,
     ) -> Result<Envelope<Value>, HostError> {
         let mut frame = Envelope::new(kind, payload, now_millis());
         frame.session_id = session_id.to_owned();
-        frame.ext = ext;
         if let Some(job) = job_id {
             frame.job_id = Some(
                 raep_types::JobId::new(job.to_owned())

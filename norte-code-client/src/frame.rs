@@ -160,6 +160,8 @@ pub(crate) enum FrameKind {
     JobProgressDelta,
     JobFinished,
     JobListResult,
+    ChildSessionStarted,
+    ChildSessionUpdated,
     Error,
     Other,
 }
@@ -180,6 +182,8 @@ impl FrameKind {
             StandardFrameType::JobProgressDelta => Self::JobProgressDelta,
             StandardFrameType::JobFinished => Self::JobFinished,
             StandardFrameType::JobListResult => Self::JobListResult,
+            StandardFrameType::ChildSessionStarted => Self::ChildSessionStarted,
+            StandardFrameType::ChildSessionUpdated => Self::ChildSessionUpdated,
             StandardFrameType::Error => Self::Error,
             _ => Self::Other,
         }
@@ -253,16 +257,6 @@ pub(crate) struct ErrorPayload {
     pub(crate) message: String,
 }
 
-/// The extension's `TurnFinished` fields, which the canonical turn payload
-/// does not carry.
-#[derive(Clone, Debug, serde::Deserialize)]
-pub(crate) struct ExtensionTurnFinished {
-    #[serde(default)]
-    pub(crate) phase: Option<norte_code_wire::Phase>,
-    #[serde(default)]
-    pub(crate) committed: Option<bool>,
-}
-
 /// A typed view of one raw frame: the envelope fields the decoder needs,
 /// read once from the typed `Envelope`, instead of string lookups scattered
 /// through the match.
@@ -276,7 +270,6 @@ pub(crate) struct FrameView {
     pub(crate) session: Option<norte_code_wire::SessionKey>,
     pub(crate) turn: u64,
     pub(crate) job_id: Option<String>,
-    pub(crate) extension_turn_finished: Option<ExtensionTurnFinished>,
 }
 
 impl FrameView {
@@ -292,20 +285,12 @@ impl FrameView {
             .as_ref()
             .and_then(|id| id.as_str().parse::<u64>().ok())
             .unwrap_or(0);
-        let extension_turn_finished = frame
-            .ext
-            .as_ref()
-            .and_then(|ext| ext.get("norte_code"))
-            .and_then(|event| event.get("kind"))
-            .and_then(|kind| kind.get("TurnFinished"))
-            .and_then(|finished| serde_json::from_value(finished.clone()).ok());
         Self {
             frame_type,
             payload: Some(frame.payload.clone()),
             session,
             turn,
             job_id: frame.job_id.as_ref().map(ToString::to_string),
-            extension_turn_finished,
         }
     }
 }

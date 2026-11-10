@@ -554,7 +554,7 @@ impl NorteCodeRaepHost {
         let name = media.metadata.extension.get("name").and_then(Value::as_str);
         let alt = media.metadata.extension.get("alt").and_then(Value::as_str);
         let started = self
-            .emit_with_extension(
+            .emit_with_turn(
                 session_id,
                 standard(StandardFrameType::OutputPartStarted),
                 payload(OutputPartStartedPayload {
@@ -570,14 +570,13 @@ impl NorteCodeRaepHost {
                     height: media.metadata.height,
                     bytes_expected: bytes.len(),
                 }),
-                None,
                 Some(turn),
                 None,
                 None,
             )
             .await?;
         let finished = self
-            .emit_with_extension(
+            .emit_with_turn(
                 session_id,
                 standard(StandardFrameType::OutputPartFinished),
                 payload(OutputPartFinishedPayload {
@@ -591,7 +590,6 @@ impl NorteCodeRaepHost {
                     sha256: &sha256,
                     transcript: media.metadata.transcript.as_deref(),
                 }),
-                None,
                 Some(turn),
                 None,
                 None,
