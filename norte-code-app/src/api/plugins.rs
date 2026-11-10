@@ -7,7 +7,7 @@ use super::*;
 impl ApiClient {
     pub async fn plugins(&self) -> Result<Vec<PluginSummary>, ApiError> {
         let response = self
-            .norte_code_command("unused", ClientRequestKind::ListPlugins)
+            .norte_code_command(None, ClientRequestKind::ListPlugins)
             .await?;
         let payload = response
             .events
@@ -58,7 +58,7 @@ impl ApiClient {
     }
 
     async fn plugin_change(&self, command: ClientRequestKind) -> Result<PluginChange, ApiError> {
-        let response = self.norte_code_command("unused", command).await?;
+        let response = self.norte_code_command(None, command).await?;
         let payload = response
             .events
             .iter()

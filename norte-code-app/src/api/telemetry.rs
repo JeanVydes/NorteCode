@@ -16,7 +16,7 @@ impl ApiClient {
     pub async fn cost_report(&self, session_id: Option<&str>) -> Result<CostReport, ApiError> {
         let response = self
             .norte_code_command(
-                session_id.unwrap_or("unused"),
+                session_id,
                 ClientRequestKind::CostReport {
                     session: session_id.map(SessionKey::new),
                 },

@@ -256,6 +256,11 @@ fn load_telemetry(
     mut page: Signal<usize>,
 ) {
     let context = *context;
+    if *context.connection.read() != crate::domain::ConnectionState::Connected {
+        // Nothing to ask a host that is not connected yet; the fetch would
+        // wait out the browser's connection timeout and look like a slow page.
+        return;
+    }
     let session_id = if selected_only {
         let Some(session) = context.selected_session.read().clone() else {
             context.set_page_error(Some("Choose a session first.".to_owned()));

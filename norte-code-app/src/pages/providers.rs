@@ -99,9 +99,24 @@ pub fn ProvidersPage() -> Element {
                                 .filter(|key| !key.is_empty())
                                 .map(str::to_owned)
                                 .collect::<Vec<_>>();
-                            if id.is_empty() || api.is_empty() {
+                            if id.is_empty() {
+                                context.set_page_error(Some("A provider needs an id.".to_owned()));
+                                return;
+                            }
+                            if detail
+                                .read()
+                                .providers
+                                .iter()
+                                .any(|provider| provider.provider_id == id)
+                            {
+                                context.set_page_error(Some(format!(
+                                    "A provider `{id}` already exists."
+                                )));
+                                return;
+                            }
+                            if !valid_api_url(&api) {
                                 context.set_page_error(Some(
-                                    "A provider needs an id and a base URL.".to_owned(),
+                                    "The base URL must be a full http or https URL.".to_owned(),
                                 ));
                                 return;
                             }
@@ -175,6 +190,14 @@ pub fn ProvidersPage() -> Element {
                             let name = new_model_name.read().trim().to_owned();
                             if id.is_empty() {
                                 context.set_page_error(Some("A model needs an id.".to_owned()));
+                                return;
+                            }
+                            if detail.read().models.iter().any(|model| {
+                                model.provider == provider_id && model.model == id
+                            }) {
+                                context.set_page_error(Some(format!(
+                                    "`{id}` is already listed for {provider_id}."
+                                )));
                                 return;
                             }
                             let entry = Model {
@@ -375,6 +398,12 @@ fn reload(context: &AppContext, mut detail: Signal<CatalogDetail>, mut loading: 
         }
         loading.set(false);
     });
+}
+
+/// Whether a form value is a full http(s) URL with a host.
+fn valid_api_url(value: &str) -> bool {
+    reqwest::Url::parse(value.trim())
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
 fn save_provider(

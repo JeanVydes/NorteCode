@@ -169,6 +169,10 @@ pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
             "/raep/v1/sessions/{session_id}/commands",
             post(commands).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
         )
+        .route(
+            "/raep/v1/commands",
+            post(agent_commands).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
         .route("/raep/v1/quota", get(quota))
         .layer(RequestBodyTimeoutLayer::new(limits.command_timeout))
         .layer(TraceLayer::new_for_http())
@@ -1332,12 +1336,45 @@ async fn commands(
         )
             .into_response();
     }
-    match tokio::time::timeout(
+    let result = tokio::time::timeout(
         host.command_timeout(),
         host.handle_as(frame, Some(&principal)),
     )
-    .await
-    {
+    .await;
+    command_reply(result, request_id, request_session_id)
+}
+
+/// Handles a command that is not scoped to a session.
+///
+/// Catalogue writes, plugin operations, skills and MCP listing belong to the
+/// agent, and a client used to reach them through a placeholder session id
+/// that existed nowhere. This route takes the frame as it is: a kind that does
+/// need a session answers with the service's own error.
+async fn agent_commands(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Json(frame): Json<Envelope<Value>>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let request_id = frame.id.clone();
+    let request_session_id = frame.session_id.clone();
+    let result = tokio::time::timeout(
+        host.command_timeout(),
+        host.handle_as(frame, Some(&principal)),
+    )
+    .await;
+    command_reply(result, request_id, request_session_id)
+}
+
+fn command_reply(
+    result: Result<Result<Vec<Envelope<Value>>, HostError>, tokio::time::error::Elapsed>,
+    request_id: raep_types::FrameId,
+    request_session_id: String,
+) -> Response {
+    match result {
         Ok(Ok(events)) => (
             StatusCode::ACCEPTED,
             Json(payload(CommandResponsePayload {

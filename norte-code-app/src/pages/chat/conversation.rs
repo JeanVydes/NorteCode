@@ -385,34 +385,14 @@ pub(super) fn apply(context: AppContext, frame: &raep_types::Envelope<serde_json
             from_turn_id,
             new_session_id,
         } => {
-            // The fork's frames land on the fork's own stream, which this page
-            // is not reading; `fork_from` switches session from the HTTP reply.
-            // Seeing it here means another client forked this session, add it
-            // to the list so it is there when the person looks.
-            if let Some(new_id) = new_session_id.filter(|id| !id.is_empty()) {
-                let title = from
-                    .and_then(|from| {
-                        context
-                            .sessions
-                            .read()
-                            .iter()
-                            .find(|entry| entry.session_id == from)
-                            .and_then(|entry| entry.title.clone())
-                    })
-                    .map(|title| format!("{title} (fork)"));
-                let turn = from_turn_id.map(|turn| format!("Forked at {turn}"));
-                context.update_sessions(|sessions| {
-                    if !sessions.iter().any(|entry| entry.session_id == new_id) {
-                        sessions.insert(
-                            0,
-                            norte_code_wire::SessionSummary {
-                                session_id: new_id,
-                                title: title.clone().or(turn),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                });
+            // The fork's own stream is the one that carries it to `fork_from`,
+            // which switches session from the HTTP reply. Seeing it here means
+            // another client forked this session: read the list back from the
+            // host instead of inserting a summary built from the frame, which
+            // showed a session the host might not have stored yet.
+            let _ = (from, from_turn_id);
+            if new_session_id.as_deref().is_some_and(|id| !id.is_empty()) {
+                refresh_sessions(&context);
             }
         }
         DecodedFrame::Rewound {

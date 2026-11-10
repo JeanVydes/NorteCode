@@ -10,14 +10,14 @@ impl ApiClient {
     }
 
     pub async fn refresh_skills(&self) -> Result<SkillCatalog, ApiError> {
-        self.norte_code_command("unused", ClientRequestKind::RefreshSkills)
+        self.norte_code_command(None, ClientRequestKind::RefreshSkills)
             .await?;
         self.read_skills().await
     }
 
     async fn read_skills(&self) -> Result<SkillCatalog, ApiError> {
         let response = self
-            .norte_code_command("unused", ClientRequestKind::ListSkills)
+            .norte_code_command(None, ClientRequestKind::ListSkills)
             .await?;
         let payload = response
             .events
@@ -35,7 +35,7 @@ impl ApiClient {
 
     pub async fn tool_rules(&self) -> Result<Vec<ToolRule>, ApiError> {
         let response = self
-            .norte_code_command("unused", ClientRequestKind::ListTools { session: None })
+            .norte_code_command(None, ClientRequestKind::ListTools { session: None })
             .await?;
         let payload = response
             .events
@@ -47,7 +47,7 @@ impl ApiClient {
 
     pub async fn set_tool_allowed(&self, tool: &str, allow: bool) -> Result<(), ApiError> {
         self.norte_code_command(
-            "unused",
+            None,
             ClientRequestKind::SetApprovalRule {
                 session: None,
                 tool: tool.to_owned(),
@@ -61,7 +61,7 @@ impl ApiClient {
 
     pub async fn forget_tool_rule(&self, tool: &str) -> Result<(), ApiError> {
         self.norte_code_command(
-            "unused",
+            None,
             ClientRequestKind::ForgetApprovalRule {
                 session: None,
                 tool: tool.to_owned(),

@@ -399,7 +399,7 @@ impl ApiClient {
         model: &str,
     ) -> Result<(), ApiError> {
         self.norte_code_command(
-            session_id,
+            Some(session_id),
             ClientRequestKind::SetModel {
                 session: SessionKey::new(session_id),
                 provider: provider.to_owned(),
@@ -412,7 +412,7 @@ impl ApiClient {
 
     async fn norte_code_command(
         &self,
-        session_id: &str,
+        session_id: Option<&str>,
         kind: ClientRequestKind,
     ) -> Result<CommandResponse, ApiError> {
         let request = ClientRequest {
@@ -420,13 +420,13 @@ impl ApiClient {
                 .map_err(|error| ApiError::InvalidResponse(error.to_string()))?,
             kind,
         };
-        let response = self
-            .post_frame(
-                session_id,
-                FrameType::Extension("norte_code.command".to_owned()),
-                &request,
-            )
-            .await?;
+        let kind = FrameType::Extension("norte_code.command".to_owned());
+        let response = match session_id {
+            Some(session_id) => self.post_frame(session_id, kind, &request).await?,
+            // Catalogue writes, plugins, skills and MCP belong to the agent,
+            // and the host serves them without inventing a session id.
+            None => self.post_agent_frame(kind, &request).await?,
+        };
         if response.accepted {
             Ok(response)
         } else {
@@ -586,6 +586,20 @@ impl ApiClient {
             .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
         let mut frame = Envelope::new(kind, payload, now_millis()?);
         frame.session_id = session_id.to_owned();
+        self.send_json(self.auth(self.http.post(url).json(&frame)))
+            .await
+    }
+
+    /// Posts one frame to the agent's command endpoint.
+    async fn post_agent_frame<P: Serialize>(
+        &self,
+        kind: FrameType,
+        payload: &P,
+    ) -> Result<CommandResponse, ApiError> {
+        let url = self.resource_url("raep/v1/commands")?;
+        let payload = serde_json::to_value(payload)
+            .map_err(|error| ApiError::InvalidResponse(error.to_string()))?;
+        let frame = Envelope::new(kind, payload, now_millis()?);
         self.send_json(self.auth(self.http.post(url).json(&frame)))
             .await
     }
