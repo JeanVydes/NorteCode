@@ -308,6 +308,27 @@ fn drains_sse_blocks_in_order_and_reaches_past_the_terminal() {
 }
 
 #[test]
+fn reads_a_standard_frame_by_its_wire_type() {
+    // The envelope spells the frame kind `type`; a reader that looks for
+    // `kind` treats every standard frame as an unknown canonical one and
+    // drops it, which is how an answer streamed into nothing while the
+    // usage footer still arrived.
+    let mut buffer = Vec::from(
+        "event: TOKEN_DELTA\ndata: {\"version\":\"1.0\",\"session_id\":\"s\",\"timestamp\":1,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"hi\",\"index\":0}}\n\n"
+            .as_bytes(),
+    );
+    let events = take_sse_events(&mut buffer);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].event.kind,
+        norte_code_wire::ServerEventKind::Delta {
+            delta: norte_code_wire::Delta::Text { ref text, .. },
+            ..
+        } if text == "hi"
+    ));
+}
+
+#[test]
 fn keeps_a_multibyte_character_split_across_chunks() {
     let text = "data: {\"session_id\":\"s\",\"payload\":{\"event\":\"session_created\",\"title\":\"café\"}}\n\n";
     let bytes = text.as_bytes();
