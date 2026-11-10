@@ -33,7 +33,7 @@ use ratatui::widgets::{Clear, Paragraph, Widget as _};
 use crate::render::HalftoneConfig;
 use crate::style::{ALTERNATE, GREEN, PRIMARY, Style, YELLOW};
 use crate::terminal::Draw;
-use norte_code_protocol::SessionKey;
+use norte_code_wire::SessionKey;
 
 /// One row of a panel.
 ///

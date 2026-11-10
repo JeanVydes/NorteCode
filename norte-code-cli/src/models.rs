@@ -46,19 +46,19 @@ pub(crate) async fn list_models(config: &Config, args: &ModelsArgs) -> Result<u8
 /// Fetches the server-owned catalogue.
 pub(crate) async fn remote_model_list(client: &dyn AgentClient) -> Result<Vec<ModelInfo>, String> {
     let mut stream = client
-        .submit(norte_code_protocol::ClientRequest {
+        .submit(norte_code_wire::ClientRequest {
             request_id: 0,
-            kind: norte_code_protocol::ClientRequestKind::ListModels,
+            kind: norte_code_wire::ClientRequestKind::ListModels,
         })
         .await
         .map_err(|error| error.to_string())?;
     let mut models = Vec::new();
     while let Some(event) = stream.next().await {
         match event.kind {
-            norte_code_protocol::ServerEventKind::ModelList { models: listed } => {
+            norte_code_wire::ServerEventKind::ModelList { models: listed } => {
                 models.extend(listed);
             }
-            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            norte_code_wire::ServerEventKind::Error { message, .. } => return Err(message),
             _ => {}
         }
     }

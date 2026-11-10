@@ -7,11 +7,12 @@ use crate::commands::{RequestSummary, bucket_label, percentile, telemetry_table}
 use crate::preview::{PreviewLine, argument_preview};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use norte_code_protocol::catalog::WireSchema;
 use norte_code_protocol::config::{BudgetConfig, Config};
 use norte_code_protocol::costs::CostSummary;
-use norte_code_protocol::sqlite::{RequestRecord, RequestStatus, StoredSession};
-use norte_code_protocol::{Budget, BudgetAction, BudgetUnit};
+use norte_code_protocol::sqlite::RequestStatus;
+use norte_code_protocol::sqlite::{RequestRecord, StoredSession};
+use norte_code_wire::catalog::WireSchema;
+use norte_code_wire::{Budget, BudgetAction, BudgetUnit};
 
 fn stored_session(key: &str) -> StoredSession {
     StoredSession {
@@ -21,7 +22,7 @@ fn stored_session(key: &str) -> StoredSession {
         provider: "saved-provider".to_owned(),
         model: "saved-model".to_owned(),
         created_at: Utc::now(),
-        phase: norte_code_protocol::Phase::Idle,
+        phase: norte_code_wire::Phase::Idle,
         stats: serde_json::Value::Null,
         denied_tools: Vec::new(),
         allowed_tools: Vec::new(),
@@ -289,17 +290,17 @@ fn the_default_prompt_asks_for_the_todo_tool() {
 fn reasoning_names_are_parsed_and_unknown_ones_are_rejected() {
     assert_eq!(
         parse_reasoning_setting("off").expect("off"),
-        norte_code_protocol::Reasoning::Disabled
+        norte_code_wire::Reasoning::Disabled
     );
     assert_eq!(
         parse_reasoning_setting("xhigh").expect("xhigh"),
-        norte_code_protocol::Reasoning::Effort {
+        norte_code_wire::Reasoning::Effort {
             effort: "xhigh".to_owned()
         }
     );
     assert_eq!(
         parse_reasoning_setting("max").expect("max"),
-        norte_code_protocol::Reasoning::Effort {
+        norte_code_wire::Reasoning::Effort {
             effort: "max".to_owned()
         }
     );

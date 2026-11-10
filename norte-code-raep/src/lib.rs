@@ -26,7 +26,7 @@ pub use http::router;
 /// Extensions owned by the `NorteCode` server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NorteCodeExtension {
-    /// Carries a complete `NorteCode` [`norte_code_protocol::ClientRequest`].
+    /// Carries a complete `NorteCode` [`norte_code_wire::ClientRequest`].
     Command,
     /// Carries service telemetry.
     Telemetry,

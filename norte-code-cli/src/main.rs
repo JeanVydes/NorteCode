@@ -38,7 +38,7 @@ use commands::{apply_extensions, duration_label, run};
 use input::{InteractiveInput, Pinned};
 use interaction::{drive_turns, headless_messages, interactive_loop, refresh_effort};
 use models::{ModelChoice, list_models, remote_model_list, resolve_remote_spec, session_choice};
-use norte_code_protocol::QueueMode;
+use norte_code_wire::QueueMode;
 use preview::{clip_text, compact_json};
 use render::{
     Format, HostFacts, Renderer, Verbosity, cache_percent_label, human_tokens, parse_budget_action,
@@ -83,14 +83,15 @@ use norte::{
     ToolKind,
 };
 use norte_code_client::{AgentClient, EventStream, RemoteClient};
-use norte_code_protocol::ModelInfo as ModelSpec;
-use norte_code_protocol::catalog::{Catalog, WireSchema};
+use norte_code_protocol::catalog::Catalog;
 use norte_code_protocol::config::{Config, DiffStyle};
 use norte_code_protocol::costs::{CostSummary, by_day, by_session, by_turn, summarize};
 use norte_code_protocol::skills::{SkillRegistry, discovery_roots};
 #[cfg(test)]
 use norte_code_protocol::sqlite::StoredSession;
-use norte_code_protocol::{
+use norte_code_wire::ModelInfo as ModelSpec;
+use norte_code_wire::catalog::WireSchema;
+use norte_code_wire::{
     Budget, BudgetAction, BudgetScope, BudgetUnit, ClientRequest, ClientRequestKind, Delta,
     ErrorCode, JobInfo, MessageRole, ModelInfo, OutputStream, Phase, Reasoning, ReasoningInfo,
     ReasoningScope, ServerEvent, ServerEventKind, SessionInfo, SessionKey,
@@ -839,7 +840,7 @@ pub(crate) async fn new_session(
         )
         .map_err(|error| error.clone())?
     } else {
-        norte_code_protocol::Reasoning::Automatic
+        norte_code_wire::Reasoning::Automatic
     };
     if let Some(limit) = args.budget
         && (!limit.is_finite() || limit <= 0.0)
@@ -1206,7 +1207,7 @@ async fn resume_session(
         effective_reasoning(None, &config.reasoning.default, &spec.reasoning)
             .map_err(|error| error.clone())?
     } else {
-        norte_code_protocol::Reasoning::Automatic
+        norte_code_wire::Reasoning::Automatic
     };
     let style = if args.jsonl {
         Style::plain()

@@ -88,12 +88,12 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, String> {
 async fn mcp_command(config: &Config, args: &McpArgs) -> Result<u8, String> {
     let client = crate::remote_client(config)?;
     let kind = match &args.command {
-        McpCommand::List => norte_code_protocol::ClientRequestKind::ListMcp,
-        McpCommand::Enable { name } => norte_code_protocol::ClientRequestKind::SetMcpActive {
+        McpCommand::List => norte_code_wire::ClientRequestKind::ListMcp,
+        McpCommand::Enable { name } => norte_code_wire::ClientRequestKind::SetMcpActive {
             name: name.clone(),
             active: true,
         },
-        McpCommand::Disable { name } => norte_code_protocol::ClientRequestKind::SetMcpActive {
+        McpCommand::Disable { name } => norte_code_wire::ClientRequestKind::SetMcpActive {
             name: name.clone(),
             active: false,
         },
@@ -102,7 +102,7 @@ async fn mcp_command(config: &Config, args: &McpArgs) -> Result<u8, String> {
         }
     };
     let mut stream = client
-        .submit(norte_code_protocol::ClientRequest {
+        .submit(norte_code_wire::ClientRequest {
             request_id: 0,
             kind,
         })
@@ -110,7 +110,7 @@ async fn mcp_command(config: &Config, args: &McpArgs) -> Result<u8, String> {
         .map_err(|error| error.to_string())?;
     while let Some(event) = stream.next().await {
         match event.kind {
-            norte_code_protocol::ServerEventKind::McpList { servers, failures } => {
+            norte_code_wire::ServerEventKind::McpList { servers, failures } => {
                 for server in servers {
                     println!(
                         "{}\t{}\t{}",
@@ -124,7 +124,7 @@ async fn mcp_command(config: &Config, args: &McpArgs) -> Result<u8, String> {
                 }
                 return Ok(0);
             }
-            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            norte_code_wire::ServerEventKind::Error { message, .. } => return Err(message),
             _ => {}
         }
     }
@@ -739,35 +739,31 @@ fn plugins_command(args: &PluginsArgs) -> u8 {
 async fn plugins_command(config: &Config, args: &PluginsArgs) -> Result<u8, String> {
     let client = crate::remote_client(config)?;
     let kind = match &args.command {
-        PluginsCommand::List => norte_code_protocol::ClientRequestKind::ListPlugins,
+        PluginsCommand::List => norte_code_wire::ClientRequestKind::ListPlugins,
         PluginsCommand::Add { url, package, all } => {
-            norte_code_protocol::ClientRequestKind::InstallPlugin {
+            norte_code_wire::ClientRequestKind::InstallPlugin {
                 url: url.clone(),
                 package: package.clone(),
                 all: *all,
             }
         }
         PluginsCommand::Rm { name } => {
-            norte_code_protocol::ClientRequestKind::RemovePlugin { name: name.clone() }
+            norte_code_wire::ClientRequestKind::RemovePlugin { name: name.clone() }
         }
-        PluginsCommand::Enable { name } => {
-            norte_code_protocol::ClientRequestKind::SetPluginEnabled {
-                name: name.clone(),
-                enabled: true,
-            }
-        }
-        PluginsCommand::Disable { name } => {
-            norte_code_protocol::ClientRequestKind::SetPluginEnabled {
-                name: name.clone(),
-                enabled: false,
-            }
-        }
+        PluginsCommand::Enable { name } => norte_code_wire::ClientRequestKind::SetPluginEnabled {
+            name: name.clone(),
+            enabled: true,
+        },
+        PluginsCommand::Disable { name } => norte_code_wire::ClientRequestKind::SetPluginEnabled {
+            name: name.clone(),
+            enabled: false,
+        },
         PluginsCommand::Update { name } => {
-            norte_code_protocol::ClientRequestKind::UpdatePlugins { name: name.clone() }
+            norte_code_wire::ClientRequestKind::UpdatePlugins { name: name.clone() }
         }
     };
     let mut events = client
-        .submit(norte_code_protocol::ClientRequest {
+        .submit(norte_code_wire::ClientRequest {
             request_id: 1,
             kind,
         })
@@ -775,7 +771,7 @@ async fn plugins_command(config: &Config, args: &PluginsArgs) -> Result<u8, Stri
         .map_err(|error| error.to_string())?;
     while let Some(event) = events.next().await {
         match event.kind {
-            norte_code_protocol::ServerEventKind::PluginList { plugins } => {
+            norte_code_wire::ServerEventKind::PluginList { plugins } => {
                 for plugin in plugins {
                     println!(
                         "{}\t{}",
@@ -788,10 +784,10 @@ async fn plugins_command(config: &Config, args: &PluginsArgs) -> Result<u8, Stri
                     );
                 }
             }
-            norte_code_protocol::ServerEventKind::PluginChanged { operation, name } => {
+            norte_code_wire::ServerEventKind::PluginChanged { operation, name } => {
                 println!("plugin {name} {operation}");
             }
-            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            norte_code_wire::ServerEventKind::Error { message, .. } => return Err(message),
             _ => {}
         }
     }
@@ -1355,18 +1351,24 @@ async fn remote_request_records(
 ) -> Result<Vec<RequestRecord>, String> {
     let client = crate::remote_client(config)?;
     let mut stream = client
-        .submit(norte_code_protocol::ClientRequest {
+        .submit(norte_code_wire::ClientRequest {
             request_id: 0,
-            kind: norte_code_protocol::ClientRequestKind::ListTelemetry {
-                session: session.map(norte_code_protocol::SessionKey::new),
+            kind: norte_code_wire::ClientRequestKind::ListTelemetry {
+                session: session.map(norte_code_wire::SessionKey::new),
             },
         })
         .await
         .map_err(|error| error.to_string())?;
     while let Some(event) = stream.next().await {
         match event.kind {
-            norte_code_protocol::ServerEventKind::Telemetry { records } => return Ok(records),
-            norte_code_protocol::ServerEventKind::Error { message, .. } => return Err(message),
+            norte_code_wire::ServerEventKind::Telemetry { records } => {
+                return records
+                    .into_iter()
+                    .map(RequestRecord::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("telemetry record is unreadable: {error}"));
+            }
+            norte_code_wire::ServerEventKind::Error { message, .. } => return Err(message),
             _ => {}
         }
     }

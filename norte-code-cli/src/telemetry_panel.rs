@@ -26,7 +26,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
-use norte_code_protocol::sqlite::{RequestRecord, RequestStatus};
+use norte_code_protocol::sqlite::RequestRecord;
+use norte_code_protocol::sqlite::RequestStatus;
 
 /// The window the panel totals over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use norte::BlobId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -50,12 +49,14 @@ pub struct Attachment {
     /// The path to a local file, for in-process clients.
     #[serde(default)]
     pub path: String,
-    /// A content-addressed blob already stored by the host.
+    /// A content-addressed blob already stored by the host, as its lowercase
+    /// hex digest.
     ///
-    /// When present, the service uses this reference directly and does not
-    /// read `path`. This is the remote-client form used by RAEP uploads.
+    /// It is the string the wire carries and not the server's parsed id: this
+    /// crate is the shapes, and putting a parser here would be a parser every
+    /// client has to agree with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blob: Option<BlobId>,
+    pub blob: Option<String>,
     /// The media type, as `type/subtype`.
     pub mime: String,
     /// What the client called it, for a person reading the transcript.
@@ -88,6 +89,12 @@ pub struct SessionInfo {
     pub created_at: Option<String>,
     /// Where it currently is.
     pub phase: Phase,
+    /// The session-wide reasoning override, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    /// The client key of the parent, when this session is a subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionKey>,
 }
 
 /// Metadata for one plugin managed by the remote host.
@@ -155,10 +162,11 @@ pub enum TodoStatus {
 /// The wire's own name for the two streams Norte carries, plus a fallback for
 /// a stream a future Norte build may add: a stream this build does not know
 /// is reported rather than dropped or panicked on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputStream {
     /// Standard output.
+    #[default]
     Stdout,
     /// Standard error.
     Stderr,
@@ -224,6 +232,10 @@ impl fmt::Display for CompactionReason {
 /// free of Norte types and of the catalogue's, so the mapping between them
 /// happens in one place rather than a string crossing the wire and being parsed
 /// again at the other end.
+///
+/// `File` is the wire's name for a document, which is what a PDF is; what a
+/// turn may produce is [`OutputModality`](crate::wire::OutputModality), whose
+/// document variant is spelled `document`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Modality {
@@ -237,6 +249,37 @@ pub enum Modality {
     Video,
     /// A document, which is what a PDF is.
     File,
+}
+
+/// One provider as the editor shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogProviderInfo {
+    /// The provider id.
+    pub provider_id: String,
+    /// The display name.
+    pub name: String,
+    /// The base URL of its preferred wire.
+    pub api: Option<String>,
+    /// Whether it lives in `providers.json`. A plugin's provider does not, and
+    /// editing one here would be lost on the next start.
+    pub from_file: bool,
+    /// Whether any of its models is in use by a session.
+    pub model_count: usize,
+}
+
+/// One model as the editor shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogModelInfo {
+    /// The provider id.
+    pub provider: String,
+    /// The model id.
+    pub model: String,
+    /// The display name.
+    pub name: String,
+    /// Whether it lives in `models.json`.
+    pub from_file: bool,
 }
 
 /// One model the catalogue knows, flattened for a picker.
@@ -373,6 +416,24 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+/// One plan of a session, as the app lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanInfo {
+    /// Stable plan identifier, also the Markdown filename.
+    pub id: String,
+    /// The plan text.
+    pub content: String,
+    /// Where the plan stands.
+    pub status: crate::PlanStatus,
+    /// Its title from the front matter, when it has one.
+    pub title: Option<String>,
+    /// Revisions after the initial proposal.
+    pub revision: u32,
+    /// The model that proposed it, when recorded.
+    pub model: Option<String>,
+}
+
 /// One installed Agent Skill, as a client sees it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,6 +467,7 @@ pub struct ReasoningInfo {
 /// Where a session currently is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Phase {
     /// Nothing in flight.
     Idle,
@@ -415,12 +477,101 @@ pub enum Phase {
     AwaitingTool,
 }
 
+impl Phase {
+    /// Whether nothing is in flight.
+    #[must_use]
+    pub const fn is_idle(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
 impl fmt::Display for Phase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Idle => "idle",
             Self::Streaming => "streaming",
             Self::AwaitingTool => "awaiting_tool",
+        })
+    }
+}
+
+/// Where a delegated child session stands.
+///
+/// It travels on the wire and is read by clients that show a subagent list, so
+/// it is a closed set here rather than a string each producer spells: a typo in
+/// `"RUNNING"` used to be a child that silently read as `Stopped`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ChildState {
+    /// Started, with no turn in flight.
+    #[default]
+    Idle,
+    /// A turn is running.
+    Running,
+    /// Parked on an approval.
+    AwaitingApproval,
+    /// It ended in failure.
+    Failed,
+    /// It stopped without failing.
+    Stopped,
+}
+
+impl ChildState {
+    /// Whether nothing more will happen in this child.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Failed | Self::Stopped)
+    }
+
+    /// The word a list shows.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::AwaitingApproval => "waiting",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// Whether it is doing something now.
+    #[must_use]
+    pub const fn is_working(self) -> bool {
+        matches!(self, Self::Running | Self::AwaitingApproval)
+    }
+}
+
+impl fmt::Display for ChildState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Idle => "IDLE",
+            Self::Running => "RUNNING",
+            Self::AwaitingApproval => "AWAITING_APPROVAL",
+            Self::Failed => "FAILED",
+            Self::Stopped => "STOPPED",
+        })
+    }
+}
+
+/// Why a child's state changed, on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildStateReason {
+    /// Its turn finished.
+    TurnFinished,
+    /// A turn failed.
+    TurnFailed,
+    /// It was stopped on request.
+    StateChange,
+}
+
+impl fmt::Display for ChildStateReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::TurnFinished => "turn_finished",
+            Self::TurnFailed => "turn_failed",
+            Self::StateChange => "state_change",
         })
     }
 }
@@ -491,10 +642,13 @@ pub struct Usage {
 }
 
 /// What a budget limits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetUnit {
     /// US dollars, provider-reported.
+    #[default]
     Usd,
     /// Tokens, provider-reported.
     Tokens,
@@ -588,4 +742,162 @@ pub enum ErrorCode {
     Internal,
     /// The feature is not implemented yet.
     Unsupported,
+}
+
+#[cfg(test)]
+mod child_state_tests {
+    use super::{ChildState, ChildStateReason};
+
+    #[test]
+    fn a_child_state_spells_the_wire_name_in_every_direction() {
+        for (state, wire) in [
+            (ChildState::Idle, "\"IDLE\""),
+            (ChildState::Running, "\"RUNNING\""),
+            (ChildState::AwaitingApproval, "\"AWAITING_APPROVAL\""),
+            (ChildState::Failed, "\"FAILED\""),
+            (ChildState::Stopped, "\"STOPPED\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).expect("serializable"), wire);
+            let decoded: ChildState = serde_json::from_str(wire).expect("deserializable");
+            assert_eq!(decoded, state);
+            assert_eq!(state.to_string(), wire.trim_matches('"'));
+        }
+    }
+
+    #[test]
+    fn a_state_this_build_does_not_know_fails_instead_of_guessing() {
+        // The closed set is the point: an unknown word is a build that is out
+        // of date, not a child that stopped.
+        assert!(serde_json::from_str::<ChildState>("\"PAUSED\"").is_err());
+    }
+
+    #[test]
+    fn only_failed_and_stopped_are_terminal() {
+        assert!(ChildState::Failed.is_terminal());
+        assert!(ChildState::Stopped.is_terminal());
+        assert!(!ChildState::Idle.is_terminal());
+        assert!(!ChildState::Running.is_terminal());
+        assert!(!ChildState::AwaitingApproval.is_terminal());
+    }
+
+    #[test]
+    fn a_reason_keeps_its_wire_spelling() {
+        let reason = serde_json::to_string(&ChildStateReason::TurnFinished).expect("serializable");
+        assert_eq!(reason, "\"turn_finished\"");
+    }
+}
+
+/// The kind of media a message carries or a model produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    /// An image.
+    Image,
+    /// Recorded audio.
+    Audio,
+    /// Recorded video.
+    Video,
+    /// A document, such as a PDF.
+    Document,
+}
+
+/// Where a media part's bytes live.
+///
+/// Adjacently tagged, as the engine writes it: `tag = "source"` alone cannot
+/// hold a variant whose payload is a string or the bytes themselves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "source", content = "value")]
+pub enum MediaSource {
+    /// Bytes held in the blob store, as their lowercase hex digest.
+    Blob(String),
+    /// A URL the provider fetches itself.
+    Url(String),
+    /// A file the provider already holds.
+    ProviderFile(ProviderFileRef),
+    /// The bytes themselves, base64 in JSON.
+    #[serde(with = "bytes_base64")]
+    Inline(Vec<u8>),
+}
+
+/// A file a provider holds, so its bytes need not travel again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderFileRef {
+    /// The provider that holds the file.
+    pub provider: String,
+    /// The provider's id for the file.
+    pub file_id: String,
+    /// When the reference stops being usable, in RFC 3339, where it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Durable fallback for the bytes, so an expired reference can be revived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+}
+
+/// Descriptive fields a media part may carry. Every one is optional.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaMetadata {
+    /// Length in milliseconds, for audio and video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Pixel width, for images and video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Pixel height, for images and video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// A transcript the provider produced for audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    /// Anything else the provider sent, under its own key.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extension: std::collections::BTreeMap<String, Value>,
+}
+
+impl MediaPart {
+    /// The bytes, when they travel inline.
+    #[must_use]
+    pub fn inline_bytes(&self) -> &[u8] {
+        match &self.source {
+            MediaSource::Inline(bytes) => bytes,
+            MediaSource::Blob(_) | MediaSource::Url(_) | MediaSource::ProviderFile(_) => &[],
+        }
+    }
+}
+
+/// One piece of media in a message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaPart {
+    /// The kind of media.
+    pub kind: MediaKind,
+    /// Where the bytes live.
+    pub source: MediaSource,
+    /// The media type, as `type/subtype`.
+    pub mime: String,
+    /// The descriptive fields.
+    #[serde(default)]
+    pub metadata: MediaMetadata,
+}
+
+/// Base64 in JSON, the encoding the engine writes inline media with.
+mod bytes_base64 {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(serde::de::Error::custom)
+    }
 }

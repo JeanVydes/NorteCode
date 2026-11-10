@@ -26,10 +26,12 @@ use norte::{
     ReasoningRequest, SessionId, ToolContext, Usage,
 };
 use norte_code_protocol::InMemoryStore;
-use norte_code_protocol::catalog::WireSchema;
-use norte_code_protocol::config::{ApiKey, BudgetConfig, CompactionTrigger, RetryConfig};
-use norte_code_protocol::sqlite::{RequestStatus, SqliteStore};
-use norte_code_protocol::{
+use norte_code_protocol::config::CompactionTrigger;
+use norte_code_protocol::config::{ApiKey, BudgetConfig, RetryConfig};
+use norte_code_protocol::sqlite::RequestStatus;
+use norte_code_protocol::sqlite::SqliteStore;
+use norte_code_wire::catalog::WireSchema;
+use norte_code_wire::{
     Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, CompactionReason, Delta,
     ErrorCode, QueueMode, Reasoning as ProtocolReasoning, ReasoningScope,
 };
@@ -162,7 +164,7 @@ impl Model for StallingModel {
 }
 
 fn catalog() -> Arc<Catalog> {
-    let providers: norte_code_protocol::catalog::Providers = serde_json::from_str(
+    let providers: norte_code_wire::catalog::Providers = serde_json::from_str(
         r#"{
             "providers": {
                 "test": {
@@ -176,7 +178,7 @@ fn catalog() -> Arc<Catalog> {
         }"#,
     )
     .expect("providers");
-    let models: norte_code_protocol::catalog::Models = serde_json::from_str(
+    let models: norte_code_wire::catalog::Models = serde_json::from_str(
         r#"{
             "models": [
                 {
@@ -215,7 +217,7 @@ fn spec(model: &str) -> ModelSpec {
         model: model.to_owned(),
         endpoint: "https://example.invalid/v1".to_owned(),
         api_key: ApiKey::new("test"),
-        schema: norte_code_protocol::catalog::WireSchema::OpenAI,
+        schema: norte_code_wire::catalog::WireSchema::OpenAI,
         auth: None,
         capabilities: norte_code_protocol::catalog::capabilities(entry, WireSchema::OpenAI),
         headers: std::collections::BTreeMap::new(),
@@ -444,6 +446,8 @@ async fn a_session_reports_the_context_the_last_request_carried() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -466,6 +470,8 @@ async fn a_session_reports_the_context_the_last_request_carried() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -508,6 +514,8 @@ async fn a_reload_reaches_an_open_sessions_spec() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -597,7 +605,7 @@ async fn persistent_scripted_service(
 async fn drain(
     service: &Arc<Service>,
     kind: ClientRequestKind,
-) -> Vec<norte_code_protocol::ServerEvent> {
+) -> Vec<norte_code_wire::ServerEvent> {
     service
         .submit(ClientRequest {
             request_id: 7,
@@ -621,6 +629,8 @@ async fn concurrent_messages_on_one_session_are_serialized() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -633,6 +643,8 @@ async fn concurrent_messages_on_one_session_are_serialized() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -676,6 +688,8 @@ async fn a_turn_streams_text_and_commits() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -732,6 +746,8 @@ async fn a_finished_job_can_start_a_turn_without_a_new_message() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -765,6 +781,8 @@ async fn job_turn_reservation_is_reported_for_the_owning_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -809,6 +827,8 @@ async fn job_result_is_persisted_with_the_turn_that_received_it() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -829,7 +849,7 @@ async fn job_result_is_persisted_with_the_turn_that_received_it() {
         session_id,
         Arc::clone(&service.steering),
         steered,
-        norte_code_protocol::JobInfo {
+        norte_code_wire::JobInfo {
             id: "job-1".to_owned(),
             label: "build".to_owned(),
             script: "build".to_owned(),
@@ -898,6 +918,8 @@ async fn job_auto_turn_event_includes_the_started_turn_id() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -908,7 +930,7 @@ async fn job_auto_turn_event_includes_the_started_turn_id() {
         .find_map(|event| event.session.clone())
         .expect("turn has a session");
     let session_id = service.require_record(&key).expect("session").0;
-    let job = norte_code_protocol::JobInfo {
+    let job = norte_code_wire::JobInfo {
         id: "job-auto".to_owned(),
         label: "build".to_owned(),
         script: "build".to_owned(),
@@ -950,7 +972,7 @@ async fn job_auto_turn_event_includes_the_started_turn_id() {
 
 #[test]
 fn job_turn_policy_selects_terminal_results() {
-    let completed = norte_code_protocol::JobInfo {
+    let completed = norte_code_wire::JobInfo {
         id: "job-1".to_owned(),
         label: "build".to_owned(),
         script: "build".to_owned(),
@@ -962,52 +984,52 @@ fn job_turn_policy_selects_terminal_results() {
         dropped: false,
         output_bytes_total: 0,
     };
-    let failed = norte_code_protocol::JobInfo {
+    let failed = norte_code_wire::JobInfo {
         exit_code: Some(2),
         ..completed.clone()
     };
-    let running = norte_code_protocol::JobInfo {
+    let running = norte_code_wire::JobInfo {
         state: JobState::Running,
         exit_code: None,
         ..completed.clone()
     };
-    let timed_out = norte_code_protocol::JobInfo {
+    let timed_out = norte_code_wire::JobInfo {
         timed_out: true,
         exit_code: None,
         ..completed.clone()
     };
-    let killed = norte_code_protocol::JobInfo {
+    let killed = norte_code_wire::JobInfo {
         state: JobState::Cancelled,
         exit_code: None,
         ..completed.clone()
     };
 
     assert!(super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::Always,
+        norte_code_wire::JobTurnPolicy::Always,
         &completed
     ));
     assert!(!super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::OnFailure,
+        norte_code_wire::JobTurnPolicy::OnFailure,
         &completed
     ));
     assert!(super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::OnFailure,
+        norte_code_wire::JobTurnPolicy::OnFailure,
         &failed
     ));
     assert!(super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::OnFailure,
+        norte_code_wire::JobTurnPolicy::OnFailure,
         &timed_out
     ));
     assert!(super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::OnFailure,
+        norte_code_wire::JobTurnPolicy::OnFailure,
         &killed
     ));
     assert!(!super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::Always,
+        norte_code_wire::JobTurnPolicy::Always,
         &running
     ));
     assert!(!super::job_policy_allows_turn(
-        norte_code_protocol::JobTurnPolicy::Never,
+        norte_code_wire::JobTurnPolicy::Never,
         &failed
     ));
 }
@@ -1023,6 +1045,8 @@ async fn auto_turn_does_nothing_when_disabled() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -1053,6 +1077,8 @@ async fn an_existing_auto_turn_blocks_a_duplicate() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -1177,6 +1203,8 @@ mod streaming_regressions {
                     attachments: Vec::new(),
                     budget: None,
                     reasoning: None,
+                    output: Vec::new(),
+                    response_format: None,
                     metadata: None,
                     replay: false,
                 },
@@ -1272,6 +1300,8 @@ mod streaming_regressions {
                         attachments: Vec::new(),
                         budget: None,
                         reasoning: None,
+                        output: Vec::new(),
+                        response_format: None,
                         metadata: None,
                         replay: false,
                     },
@@ -1474,6 +1504,8 @@ async fn a_transient_failure_retries_the_same_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -1577,6 +1609,8 @@ async fn cancelling_a_turn_stops_a_running_command() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -1640,6 +1674,8 @@ async fn cancelling_a_turn_before_its_first_token_stops_it() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -1718,6 +1754,8 @@ async fn cancelling_immediately_after_a_message_stops_the_turn() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -1784,6 +1822,8 @@ async fn retries_report_increasing_attempts_and_backoff() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -1841,6 +1881,8 @@ async fn a_permanent_failure_is_not_retried() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -1971,7 +2013,7 @@ async fn a_resume_sends_the_task_list_the_session_last_had() {
     assert_eq!(todos[0].content, "first");
     assert_eq!(
         todos[1].status,
-        norte_code_protocol::TodoStatus::InProgress,
+        norte_code_wire::TodoStatus::InProgress,
         "the status comes across, not just the text"
     );
     assert_eq!(todos[2].content, "third");
@@ -2099,6 +2141,8 @@ async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -2202,7 +2246,7 @@ async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
         "settling the phase must not drop the conversation"
     );
     let (_, _, phase) = reopened.require_record(&key).expect("record");
-    assert_eq!(phase, norte_code_protocol::Phase::Idle);
+    assert_eq!(phase, norte_code_wire::Phase::Idle);
 }
 
 /// A model that answers with one text turn, for the tests that care about the
@@ -2465,6 +2509,8 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -2488,6 +2534,8 @@ async fn a_fork_copies_the_history_under_a_new_engine_session() {
             from_turn_id: None,
             inclusive: None,
             carry_usage: None,
+            agent_id: None,
+            include: None,
         },
     )
     .await;
@@ -2532,6 +2580,8 @@ async fn a_fork_can_include_or_exclude_a_named_terminal_turn() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -2547,6 +2597,8 @@ async fn a_fork_can_include_or_exclude_a_named_terminal_turn() {
             from_turn_id: Some("turn_1".to_owned()),
             inclusive: Some(true),
             carry_usage: Some(false),
+            agent_id: None,
+            include: None,
         },
     )
     .await;
@@ -2586,6 +2638,8 @@ async fn a_fork_can_include_or_exclude_a_named_terminal_turn() {
             from_turn_id: Some("1".to_owned()),
             inclusive: Some(false),
             carry_usage: Some(false),
+            agent_id: None,
+            include: None,
         },
     )
     .await;
@@ -2628,6 +2682,8 @@ async fn rewind_keeps_removed_text_history_readable_without_model_context() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -2668,6 +2724,8 @@ async fn rewind_keeps_removed_text_history_readable_without_model_context() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -2737,6 +2795,8 @@ async fn two_sessions_run_turns_concurrently() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -2752,6 +2812,8 @@ async fn two_sessions_run_turns_concurrently() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -3225,6 +3287,8 @@ async fn set_reasoning_applies_to_the_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3268,6 +3332,8 @@ async fn a_message_reasoning_override_is_used_once() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -3355,6 +3421,8 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3385,6 +3453,8 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3410,6 +3480,8 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3493,6 +3565,8 @@ async fn a_queued_model_that_cannot_be_honoured_does_not_break_the_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3557,6 +3631,8 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3578,6 +3654,8 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3599,6 +3677,8 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3706,6 +3786,8 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3745,7 +3827,7 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
         ServerEventKind::TurnFinished { phase, .. } => Some(*phase),
         _ => None,
     });
-    assert_eq!(finished, Some(norte_code_protocol::Phase::Idle));
+    assert_eq!(finished, Some(norte_code_wire::Phase::Idle));
 }
 
 #[tokio::test]
@@ -3788,6 +3870,8 @@ async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -3802,7 +3886,7 @@ async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
             ServerEventKind::TurnFinished { phase, .. } => Some(*phase),
             _ => None,
         }),
-        Some(norte_code_protocol::Phase::Idle),
+        Some(norte_code_wire::Phase::Idle),
         "{events:#?}"
     );
     let (nid, _, _) = service.require_record(&key).expect("record");
@@ -3894,6 +3978,8 @@ async fn the_budget_stops_the_next_request_every_time() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -3971,6 +4057,8 @@ async fn reasoning_and_steering_survive_a_restart() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4096,6 +4184,8 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4144,6 +4234,8 @@ async fn automatic_compaction_creates_a_new_north_session_at_the_threshold() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4215,6 +4307,8 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4253,10 +4347,7 @@ async fn eager_compaction_restarts_a_tool_turn_at_a_safe_point() {
     let (compacted, north) = finished.expect("compaction finished");
     assert!(compacted);
     assert_eq!(text, "done");
-    assert_eq!(
-        turn_finished,
-        Some((norte_code_protocol::Phase::Idle, true))
-    );
+    assert_eq!(turn_finished, Some((norte_code_wire::Phase::Idle, true)));
     let north = north.expect("new session id");
     let stored = store
         .sessions()
@@ -4305,6 +4396,8 @@ async fn a_failed_eager_summary_stops_at_the_safe_point() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4367,6 +4460,8 @@ async fn manual_compaction_links_the_new_session_and_keeps_the_old_one() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4452,6 +4547,8 @@ async fn a_failed_summary_leaves_the_session_unchanged() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4539,6 +4636,8 @@ async fn the_request_table_records_usage_latency_and_metadata() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4715,6 +4814,8 @@ async fn a_reconstructed_request_carries_its_tools_and_timing() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4796,6 +4897,8 @@ async fn two_tools_in_one_answer_produce_one_request_summary() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4860,6 +4963,8 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4874,6 +4979,8 @@ async fn the_cost_ledger_records_every_request_with_reported_or_missing_cost() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4933,6 +5040,8 @@ async fn a_session_budget_stops_the_next_request() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -4946,8 +5055,8 @@ async fn a_session_budget_stops_the_next_request() {
     assert!(events.iter().any(|event| matches!(
         event.kind,
         ServerEventKind::BudgetExceeded {
-            scope: norte_code_protocol::BudgetScope::Session,
-            action: norte_code_protocol::BudgetAction::Stop,
+            scope: norte_code_wire::BudgetScope::Session,
+            action: norte_code_wire::BudgetAction::Stop,
             ..
         }
     )));
@@ -4966,7 +5075,7 @@ async fn a_session_budget_stops_the_next_request() {
             budget: Budget {
                 unit: BudgetUnit::Requests,
                 limit: 10.0,
-                action: norte_code_protocol::BudgetAction::Stop,
+                action: norte_code_wire::BudgetAction::Stop,
             },
         },
     )
@@ -5025,6 +5134,8 @@ async fn vendor_extensions_reach_the_model_request() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5060,6 +5171,8 @@ async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5074,7 +5187,7 @@ async fn a_usd_budget_is_refused_when_the_provider_does_not_report_cost() {
                 budget: Budget {
                     unit: BudgetUnit::Usd,
                     limit: 1.0,
-                    action: norte_code_protocol::BudgetAction::Stop,
+                    action: norte_code_wire::BudgetAction::Stop,
                 },
             },
         })
@@ -5134,6 +5247,8 @@ async fn an_edit_snapshots_the_source_before_it_runs() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5217,6 +5332,8 @@ async fn a_global_allow_skips_the_approval_prompt() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5268,6 +5385,8 @@ async fn a_global_deny_refuses_without_asking() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5333,6 +5452,8 @@ async fn a_session_deny_refuses_only_the_session_it_names() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5357,6 +5478,8 @@ async fn a_session_deny_refuses_only_the_session_it_names() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5422,6 +5545,8 @@ async fn session_rules_persist_and_allow_revokes_a_deny() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5519,6 +5644,8 @@ async fn forgetting_a_session_rule_clears_memory_and_the_record() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5594,7 +5721,7 @@ async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
         ClientRequestKind::SendMessage {
             session: Some(key),
             text: "what is in this picture?".to_owned(),
-            attachments: vec![norte_code_protocol::Attachment {
+            attachments: vec![norte_code_wire::Attachment {
                 path: photo.display().to_string(),
                 blob: None,
                 mime: "image/png".to_owned(),
@@ -5604,6 +5731,8 @@ async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
             }],
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5657,7 +5786,7 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
         ClientRequestKind::SendMessage {
             session: Some(key.clone()),
             text: "what is in this picture?".to_owned(),
-            attachments: vec![norte_code_protocol::Attachment {
+            attachments: vec![norte_code_wire::Attachment {
                 path: photo.display().to_string(),
                 blob: None,
                 mime: "image/png".to_owned(),
@@ -5667,6 +5796,8 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
             }],
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5707,6 +5838,8 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -5951,6 +6084,8 @@ async fn ask_user_parks_the_turn_until_the_client_answers() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6041,6 +6176,8 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6143,6 +6280,8 @@ async fn an_unknown_session_is_an_error() {
                 attachments: Vec::new(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -6224,6 +6363,8 @@ async fn a_write_that_started_before_a_crash_is_not_repeated() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6298,6 +6439,8 @@ async fn a_pending_question_survives_a_restart() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6441,6 +6584,8 @@ async fn a_read_through_an_escaping_symlink_is_denied_by_the_engine() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6494,6 +6639,8 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6509,6 +6656,8 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: true,
         },
@@ -6531,6 +6680,8 @@ async fn a_message_to_an_existing_session_replays_it_when_asked() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6570,6 +6721,8 @@ async fn a_resume_reports_the_usage_the_session_already_spent() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6648,6 +6801,8 @@ async fn a_resume_after_a_compaction_still_replays_the_earlier_turns() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6706,6 +6861,8 @@ async fn a_resume_replays_the_recent_messages() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -6749,12 +6906,12 @@ async fn a_resume_replays_the_recent_messages() {
         .await
         .expect("full session history");
     assert!(history.iter().any(|(role, kind, text)| {
-        *role == norte_code_protocol::MessageRole::User
-            && *kind == norte_code_protocol::ReplayedKind::Text
+        *role == norte_code_wire::MessageRole::User
+            && *kind == norte_code_wire::ReplayedKind::Text
             && text == "hi"
     }));
     assert!(history.iter().any(|(role, _, text)| {
-        *role == norte_code_protocol::MessageRole::Assistant && text == "hello there"
+        *role == norte_code_wire::MessageRole::Assistant && text == "hello there"
     }));
 
     // A normal message must not repeat history: only the resume shows it.
@@ -6766,6 +6923,8 @@ async fn a_resume_replays_the_recent_messages() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -7199,7 +7358,7 @@ fn assert_detached_job_events(events: &[ServerEventKind]) {
     assert!(!progress.is_empty(), "the job emitted progress: {events:?}");
     assert!(
         progress.iter().all(|(job_id, _, stream)| {
-            job_id.as_str() == "job-1" && **stream == norte_code_protocol::OutputStream::Stdout
+            job_id.as_str() == "job-1" && **stream == norte_code_wire::OutputStream::Stdout
         }),
         "job output keeps its id and stream: {progress:?}"
     );
@@ -7785,6 +7944,8 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -7802,6 +7963,8 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -8096,6 +8259,8 @@ async fn a_resumed_session_sends_the_effort_it_was_left_on() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -8227,6 +8392,8 @@ async fn a_session_whose_tools_were_taken_away_still_runs_its_turns() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -8274,6 +8441,8 @@ async fn the_request_summary_follows_the_answer_it_describes() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -8378,6 +8547,8 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
             attachments: Vec::new(),
             budget: None,
             reasoning: None,
+            output: Vec::new(),
+            response_format: None,
             metadata: None,
             replay: false,
         },
@@ -8705,4 +8876,161 @@ async fn child_registry_restores_persisted_delegation_state() {
     assert!(restored.suspended);
     assert_eq!(restored.held, ["held"]);
     assert_eq!(restored.tool_call_id, "call-1");
+}
+
+/// A plugin's catalogue is as real as the files': a pair only the plugin
+/// offers is resolved, and an empty file catalogue is not a hard stop.
+#[tokio::test]
+async fn a_plugin_offered_model_resolves_without_the_files() {
+    let plugin_providers: norte_code_wire::catalog::Providers = serde_json::from_str(
+        r#"{
+            "providers": {
+                "plugin": {
+                    "name": "Plugin",
+                    "environment_keys": ["PATH"],
+                    "wires": [
+                        {"api": "https://plugin.invalid/v1", "schema": "openai"}
+                    ]
+                }
+            }
+        }"#,
+    )
+    .expect("plugin providers");
+    let plugin_models: norte_code_wire::catalog::Models = serde_json::from_str(
+        r#"{
+            "models": [
+                {
+                    "id": "injected",
+                    "provider_id": "plugin",
+                    "name": "Injected",
+                    "supported_params": ["tools"],
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                    "limit": {"context": 4000, "output": 400}
+                }
+            ]
+        }"#,
+    )
+    .expect("plugin models");
+
+    let empty = Arc::new(Catalog::default());
+    let service = Arc::new(
+        Service::new(
+            config(),
+            empty,
+            None,
+            Arc::new(ScriptedFactory {
+                model: Arc::new(ScriptedModel::new(ModelRef::new(
+                    ProviderId::new("test").expect("provider"),
+                    ModelId::new("scripted").expect("model"),
+                ))),
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.set_plugin_catalogue(plugin_providers, plugin_models);
+
+    let key = service.create_session(None).await.expect("session");
+    let events = drain(
+        &service,
+        ClientRequestKind::SetModel {
+            session: key,
+            provider: "plugin".to_owned(),
+            model: "injected".to_owned(),
+        },
+    )
+    .await;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            ServerEventKind::ModelChanged { provider, model }
+                if provider == "plugin" && model == "injected"
+        )),
+        "a plugin-provided model must resolve: {events:?}"
+    );
+}
+
+/// With no provider from either source, the error says what to do and does
+/// not blame a file the plugin could have replaced.
+#[tokio::test]
+async fn an_empty_catalogue_names_the_setup_step() {
+    let service = Arc::new(
+        Service::new(
+            config(),
+            Arc::new(Catalog::default()),
+            None,
+            Arc::new(ScriptedFactory {
+                model: Arc::new(ScriptedModel::new(ModelRef::new(
+                    ProviderId::new("test").expect("provider"),
+                    ModelId::new("scripted").expect("model"),
+                ))),
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let error = service
+        .default_spec_for_test("missing", "whatever")
+        .expect_err("no provider");
+    let text = error.to_string();
+    assert!(text.contains("providers.json"), "{text}");
+    assert!(text.contains("plugin"), "{text}");
+}
+
+/// A rewind that removes a turn containing a tool call proceeds instead of
+/// refusing forever: no tool declares its side effects yet, so the old rule
+/// blocked every rewind that crossed a call and nothing was ever reported.
+#[tokio::test]
+async fn a_rewind_that_crosses_a_tool_call_succeeds() {
+    let (service, _) = scripted_service(spec("scripted"), &["answer one", "answer two"]);
+    let created = drain(&service, ClientRequestKind::CreateSession { title: None }).await;
+    let key = created[0].session.clone().expect("session");
+    for text in ["first", "second"] {
+        drain(
+            &service,
+            ClientRequestKind::SendMessage {
+                session: Some(key.clone()),
+                text: text.to_owned(),
+                attachments: Vec::new(),
+                budget: None,
+                reasoning: None,
+                output: Vec::new(),
+                response_format: None,
+                metadata: None,
+                replay: false,
+            },
+        )
+        .await;
+    }
+
+    // Archive a tool call in the removed range, the way a real turn records
+    // one, and confirm the rewind is allowed to run over it.
+    {
+        let mut sessions = service.lock_sessions();
+        let record = sessions.get_mut(&key).expect("record");
+        record.rewound_history.push((
+            1,
+            norte_code_wire::MessageRole::Tool,
+            norte_code_wire::ReplayedKind::ToolCall,
+            "shell {\"command\":\"echo hi\"}".to_owned(),
+            0,
+        ));
+    }
+
+    let rewound = service
+        .rewind_session(&key, "turn_1", true, false, false)
+        .await
+        .expect("a tool call must not block the rewind");
+    assert_eq!(rewound, ["turn_1", "turn_2"]);
+
+    let calls = service.rewound_tool_calls(&key, &rewound);
+    assert!(
+        calls.iter().any(|call| call.tool_name == "shell"),
+        "the removed tool call is reported: {calls:?}"
+    );
 }

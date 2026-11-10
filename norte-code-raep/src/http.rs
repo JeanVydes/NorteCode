@@ -74,12 +74,8 @@ struct SessionListPayload {
     next_cursor: Value,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ChildSessionPayload {
-    session_id: String,
-    title: Option<String>,
-    state: norte_code_agent::service::ChildSessionState,
-}
+// The child list is the shared shape, not a second struct with the same fields.
+use norte_code_wire::ChildSessionSummary as ChildSessionPayload;
 
 #[derive(Debug, serde::Serialize)]
 struct ChildSessionListPayload {
@@ -369,6 +365,7 @@ async fn list_child_sessions(
                     session_id: child.session.to_string(),
                     title: child.title,
                     state: child.state,
+                    ..ChildSessionPayload::default()
                 })
                 .collect(),
         }))
@@ -1298,17 +1295,26 @@ async fn commands(
     }
     let request_id = frame.id.clone();
     let request_session_id = frame.session_id.clone();
-    if matches!(
-        &frame.kind,
-        FrameType::Extension(name) if name == crate::NorteCodeExtension::Command.as_str()
-    ) && serde_json::from_value::<norte_code_protocol::ClientRequest>(frame.payload.clone())
-        .is_ok_and(|request| {
-            matches!(
-                request.kind,
-                norte_code_protocol::ClientRequestKind::SendMessage { .. }
-            )
-        })
-    {
+    // A message starts a turn, and a turn can outlive the request that started
+    // it: a turn parked on `ask_user` does not end until a person answers, so
+    // waiting for it to finish made the client's own request time out while
+    // the turn was running perfectly well. `USER_INPUT` and `SEND_MESSAGE` are
+    // answered the moment the input is accepted; everything after that arrives
+    // on the event stream, which is where the client is already listening.
+    let starts_a_turn = match &frame.kind {
+        FrameType::Standard(StandardFrameType::UserInput) => true,
+        FrameType::Extension(name) if name == crate::NorteCodeExtension::Command.as_str() => {
+            serde_json::from_value::<norte_code_wire::ClientRequest>(frame.payload.clone())
+                .is_ok_and(|request| {
+                    matches!(
+                        request.kind,
+                        norte_code_wire::ClientRequestKind::SendMessage { .. }
+                    )
+                })
+        }
+        _ => false,
+    };
+    if starts_a_turn {
         let host_for_turn = Arc::clone(&host);
         let principal_for_turn = principal.clone();
         tokio::spawn(async move {
@@ -1507,7 +1513,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use norte_code_agent::Service;
-    use norte_code_protocol::{ClientRequest, ClientRequestKind, InMemoryStore};
+    use norte_code_protocol::InMemoryStore;
+    use norte_code_wire::{ClientRequest, ClientRequestKind};
     use raep_types::{Envelope, FrameType, StandardFrameType};
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -1789,7 +1796,7 @@ mod tests {
         assert_eq!(result["id_map"][source_id.clone()], imported_id);
         assert_eq!(
             service
-                .session_usage_total(&norte_code_protocol::SessionKey::new(imported_id))
+                .session_usage_total(&norte_code_wire::SessionKey::new(imported_id))
                 .expect("carried usage"),
             json!({
                 "input_tokens": 11,

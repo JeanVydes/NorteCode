@@ -20,6 +20,7 @@ chrono = { workspace = true }
 futures-util = { workspace = true }
 norte-code-agent = { path = "../norte-code-agent" }
 norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-wire = { path = "../norte-code-wire" }
 norte-code-plugin-host = { path = "../norte-code-plugin-host" }
 norte = { workspace = true }
 raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }

@@ -18,13 +18,15 @@ use norte::{
     FinishReason, MediaKind, MediaPart, MediaSource, Message, MessageStatus, MimeType, Part,
     ReasoningRequest, Role, SessionId, Usage,
 };
-use norte_code_protocol::costs::{BudgetBook, BudgetNotice, CostRecord};
-use norte_code_protocol::{
+use norte_code_protocol::costs::BudgetNotice;
+use norte_code_protocol::costs::{BudgetBook, CostRecord};
+use norte_code_wire::{
     Attachment, Budget, ErrorCode, MessageRole, Reasoning as ProtocolReasoning, ReplayedKind,
     ServerEvent, ServerEventKind, SessionKey,
 };
 
-use norte_code_protocol::sqlite::{RequestStatus, SessionDirectory};
+use norte_code_protocol::sqlite::RequestStatus;
+use norte_code_protocol::sqlite::SessionDirectory;
 
 use crate::provider::ModelSpec;
 
@@ -63,6 +65,7 @@ struct TurnContext<'a> {
     stats: &'a mut Stats,
     tx: &'a mpsc::Sender<ServerEvent>,
     gate: Option<&'a CompactionGate>,
+    output_schema_valid: Option<bool>,
 }
 
 impl Service {
@@ -275,6 +278,7 @@ impl Service {
                             turn,
                             phase,
                             committed: false,
+                            output_schema_valid: None,
                         },
                     ),
                 ]));
@@ -397,7 +401,7 @@ impl Service {
                                 break;
                             }
                             q_service
-                                .set_phase(&q_key, norte_code_protocol::Phase::AwaitingTool)
+                                .set_phase(&q_key, norte_code_wire::Phase::AwaitingTool)
                                 .await;
                         }
                     }
@@ -444,13 +448,78 @@ impl Service {
             let mut running_turn = turn_builder.cancellation(cancellation.clone()).start();
 
             let mut interrupted = false;
+            let mut cancelled_without_close = false;
             let mut failure: Option<String> = None;
             let mut failure_code = None;
             let mut tool_results: Option<HashMap<String, ToolResultText>> = None;
 
-            while let Some(event) = running_turn.next().await {
+            // The engine reports the turn's own events, and a cancel has to be
+            // able to stop waiting on them. A tool that is parked — an
+            // `ask_user` nobody answered — leaves the engine with no event to
+            // give and no terminal event coming, so waiting on `next()` alone
+            // kept the session busy for good. The cancel therefore races the
+            // next event, and when the engine does not close the turn itself
+            // within a grace period the turn is closed here.
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    event = running_turn.next() => event,
+                    () = cancellation.cancelled() => {
+                        if let Ok(event) = tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            running_turn.next(),
+                        )
+                        .await
+                        {
+                            event
+                        } else {
+                            cancelled_without_close = true;
+                            None
+                        }
+                    }
+                };
+                let Some(event) = event else { break };
                 if is_compaction_abort(&event) {
                     failure = Some(COMPACTION_SAFE_POINT.to_owned());
+                }
+                // A call that finished after the cancel is the engine's last
+                // word: report it, then end the turn, because the engine no
+                // longer owns it and will send nothing more.
+                if cancellation.is_cancelled()
+                    && matches!(event, EngineEvent::ToolCallFinished { .. })
+                {
+                    let _ = self
+                        .handle(
+                            &mut TurnContext {
+                                engine: &engine,
+                                request_id,
+                                key,
+                                nid: current_nid,
+                                stats: &mut stats,
+                                tx,
+                                gate: gate.as_deref(),
+                                output_schema_valid: None,
+                            },
+                            &event,
+                            &mut tool_results,
+                        )
+                        .await;
+                    self.finish_turn(
+                        &mut TurnContext {
+                            engine: &engine,
+                            request_id,
+                            key,
+                            nid: current_nid,
+                            stats: &mut stats,
+                            tx,
+                            gate: gate.as_deref(),
+                            output_schema_valid: None,
+                        },
+                        norte_code_wire::Phase::Idle,
+                        false,
+                    )
+                    .await;
+                    return Ok(());
                 }
                 if matches!(event, EngineEvent::GenerationCommitted { .. })
                     && !self
@@ -463,6 +532,7 @@ impl Service {
                                 stats: &mut stats,
                                 tx,
                                 gate: gate.as_deref(),
+                                output_schema_valid: None,
                             },
                             false,
                         )
@@ -482,6 +552,7 @@ impl Service {
                                 stats: &mut stats,
                                 tx,
                                 gate: gate.as_deref(),
+                                output_schema_valid: None,
                             },
                             &event,
                             &mut tool_results,
@@ -491,6 +562,29 @@ impl Service {
                     cancellation.cancel();
                     return Ok(());
                 }
+                if cancelled_without_close {
+                    break;
+                }
+            }
+            // A turn the engine abandoned mid-call still has to end, or the
+            // session can never be used again.
+            if cancelled_without_close {
+                self.finish_turn(
+                    &mut TurnContext {
+                        engine: &engine,
+                        request_id,
+                        key,
+                        nid: current_nid,
+                        stats: &mut stats,
+                        tx,
+                        gate: gate.as_deref(),
+                        output_schema_valid: None,
+                    },
+                    norte_code_wire::Phase::Idle,
+                    false,
+                )
+                .await;
+                return Ok(());
             }
             let outcome = running_turn.finish().await;
             if let Ok(result) = &outcome {
@@ -516,8 +610,9 @@ impl Service {
                         stats: &mut stats,
                         tx,
                         gate: gate.as_deref(),
+                        output_schema_valid: None,
                     },
-                    norte_code_protocol::Phase::Idle,
+                    norte_code_wire::Phase::Idle,
                     false,
                 )
                 .await;
@@ -534,6 +629,7 @@ impl Service {
                         stats: &mut stats,
                         tx,
                         gate: gate.as_deref(),
+                        output_schema_valid: None,
                     },
                     true,
                 )
@@ -572,8 +668,9 @@ impl Service {
                                 stats: &mut stats,
                                 tx,
                                 gate: gate.as_deref(),
+                                output_schema_valid: None,
                             },
-                            norte_code_protocol::Phase::Idle,
+                            norte_code_wire::Phase::Idle,
                             false,
                         )
                         .await;
@@ -599,8 +696,9 @@ impl Service {
                                 stats: &mut stats,
                                 tx,
                                 gate: gate.as_deref(),
+                                output_schema_valid: None,
                             },
-                            norte_code_protocol::Phase::Idle,
+                            norte_code_wire::Phase::Idle,
                             false,
                         )
                         .await;
@@ -656,7 +754,7 @@ impl Service {
                     let phase = engine
                         .session(current_nid)
                         .await
-                        .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
+                        .map_or(norte_code_wire::Phase::Idle, |s| to_phase(s.phase));
                     self.finish_turn(
                         &mut TurnContext {
                             engine: &engine,
@@ -666,6 +764,7 @@ impl Service {
                             stats: &mut stats,
                             tx,
                             gate: gate.as_deref(),
+                            output_schema_valid: None,
                         },
                         phase,
                         false,
@@ -705,7 +804,7 @@ impl Service {
                     let settled = outcome.session.phase == crate::runtime::Phase::Streaming
                         && self.settle_streaming_to_idle(current_nid).await;
                     let phase = if settled {
-                        norte_code_protocol::Phase::Idle
+                        norte_code_wire::Phase::Idle
                     } else {
                         to_phase(outcome.session.phase)
                     };
@@ -718,6 +817,7 @@ impl Service {
                             stats: &mut stats,
                             tx,
                             gate: gate.as_deref(),
+                            output_schema_valid: None,
                         },
                         phase,
                         outcome.message.is_some(),
@@ -789,7 +889,7 @@ impl Service {
                     let phase = engine
                         .session(current_nid)
                         .await
-                        .map_or(norte_code_protocol::Phase::Idle, |s| to_phase(s.phase));
+                        .map_or(norte_code_wire::Phase::Idle, |s| to_phase(s.phase));
                     emit(
                         tx,
                         ServerEvent::error(request_id, Some(key.clone()), code, message),
@@ -819,6 +919,7 @@ impl Service {
                             stats: &mut stats,
                             tx,
                             gate: gate.as_deref(),
+                            output_schema_valid: None,
                         },
                         phase,
                         false,
@@ -900,7 +1001,7 @@ impl Service {
     async fn finish_turn(
         &self,
         ctx: &mut TurnContext<'_>,
-        phase: norte_code_protocol::Phase,
+        phase: norte_code_wire::Phase,
         committed: bool,
     ) -> bool {
         self.clear_active_turn(ctx.key, ctx.stats.turn);
@@ -919,6 +1020,7 @@ impl Service {
                     turn: ctx.stats.turn,
                     phase,
                     committed,
+                    output_schema_valid: ctx.output_schema_valid,
                 },
             ),
         )
@@ -954,10 +1056,12 @@ impl Service {
                 index,
                 part: Part::Media(media),
                 ..
-            } => Some(ServerEventKind::MediaPartCompleted {
-                turn: stats.turn,
-                index: *index,
-                media: media.clone(),
+            } => super::media_wire::media_part(media).map(|media| {
+                ServerEventKind::MediaPartCompleted {
+                    turn: stats.turn,
+                    index: *index,
+                    media,
+                }
             }),
             // A tool that streams reports as it reads. It rides the same
             // channel as the call's own events, so the client sees the output
@@ -1042,6 +1146,29 @@ impl Service {
                 // A detached call is an error and not a failure, and only the
                 // result knows which: its structured form says `code: detached`.
                 let detached = recorded.as_ref().is_some_and(is_detached);
+                // The task list is the model's, written through `todo`, and a
+                // client that only hears about it on the next replay shows it
+                // late — after the person switches sessions and comes back.
+                // Sending the list with the call that changed it puts it on
+                // screen at the moment the model writes it.
+                if tool.as_str() == "todo" {
+                    let todos = self.todo.list(Some(nid));
+                    if !todos.is_empty()
+                        && !emit(
+                            tx,
+                            ServerEvent::new(
+                                request_id,
+                                Some(key.clone()),
+                                ServerEventKind::SessionTodos {
+                                    todos: todos.iter().map(from_todo_item).collect(),
+                                },
+                            ),
+                        )
+                        .await
+                    {
+                        return false;
+                    }
+                }
                 Some(ServerEventKind::ToolFinished {
                     turn: stats.turn,
                     call_id: call_id.to_string(),
@@ -1206,6 +1333,8 @@ impl Service {
                     tokens_per_second: metrics.tokens_per_second,
                     cache_hit: metrics.cache_hit,
                     tools: metrics.tools,
+                    provider: (!telemetry.provider.is_empty()).then(|| telemetry.provider.clone()),
+                    model: (!telemetry.model.is_empty()).then(|| telemetry.model.clone()),
                 },
             );
             if !emit(tx, event).await {
@@ -1582,15 +1711,29 @@ impl Service {
 const REPLAY_MESSAGES: usize = 100;
 
 /// A task as the tool's own state holds it, from the wire's copy.
-fn to_todo_item(info: &norte_code_protocol::TodoInfo) -> norte_code_protocol::tools::TodoItem {
-    use norte_code_protocol::TodoStatus as Wire;
+fn to_todo_item(info: &norte_code_wire::TodoInfo) -> norte_code_protocol::tools::TodoItem {
     use norte_code_protocol::tools::TodoStatus as Stored;
+    use norte_code_wire::TodoStatus as Wire;
     norte_code_protocol::tools::TodoItem {
         content: info.content.clone(),
         status: match info.status {
             Wire::Pending => Stored::Pending,
             Wire::InProgress => Stored::InProgress,
             Wire::Completed => Stored::Completed,
+        },
+    }
+}
+
+/// A task as the wire reports it, from the tool state's own copy.
+fn from_todo_item(item: &norte_code_protocol::tools::TodoItem) -> norte_code_wire::TodoInfo {
+    use norte_code_protocol::tools::TodoStatus as Stored;
+    use norte_code_wire::TodoStatus as Wire;
+    norte_code_wire::TodoInfo {
+        content: item.content.clone(),
+        status: match item.status {
+            Stored::Pending => Wire::Pending,
+            Stored::InProgress => Wire::InProgress,
+            Stored::Completed => Wire::Completed,
         },
     }
 }
@@ -1602,8 +1745,8 @@ fn to_todo_item(info: &norte_code_protocol::TodoInfo) -> norte_code_protocol::to
 /// back. The newest call wins — the model sends the complete list every time —
 /// and a call whose arguments do not parse is skipped rather than guessed at,
 /// which is what the tool would do.
-fn restored_todos(history: &[Message]) -> Vec<norte_code_protocol::TodoInfo> {
-    use norte_code_protocol::{TodoInfo, TodoStatus};
+fn restored_todos(history: &[Message]) -> Vec<norte_code_wire::TodoInfo> {
+    use norte_code_wire::{TodoInfo, TodoStatus};
     let mut latest = Vec::new();
     for message in history {
         for call in message.tool_calls() {
@@ -1729,7 +1872,11 @@ impl Service {
     ) -> std::result::Result<Option<MediaPart>, String> {
         let mime = MimeType::new(attachment.mime.clone())
             .map_err(|_| format!("attachment: `{}` is not a media type", attachment.mime))?;
-        let id = if let Some(id) = attachment.blob {
+        // The wire carries the digest as text; the store speaks its parsed id.
+        let id = if let Some(hex) = &attachment.blob {
+            let id = hex
+                .parse::<norte::BlobId>()
+                .map_err(|_| format!("attachment: `{hex}` is not a blob id"))?;
             if !self
                 .blobs
                 .contains(id)
@@ -1823,8 +1970,8 @@ fn is_detached(output: &norte::ToolOutput) -> bool {
 
 /// The text of a message for the replay: each text, reasoning, tool call and
 /// tool result part on its own line, so a tool turn still reads.
-fn replay_text(message: &Message) -> Vec<(norte_code_protocol::ReplayedKind, String)> {
-    use norte_code_protocol::ReplayedKind;
+fn replay_text(message: &Message) -> Vec<(norte_code_wire::ReplayedKind, String)> {
+    use norte_code_wire::ReplayedKind;
     let mut out: Vec<(ReplayedKind, String)> = Vec::new();
     for part in &message.parts {
         match part {

@@ -73,9 +73,9 @@ use norte::tool::{
     ToolSpec,
 };
 pub use norte_code_protocol::Session;
-pub use norte_code_protocol::SessionPhase as Phase;
 pub use norte_code_protocol::Store;
 pub use norte_code_protocol::{Node, NodeKind};
+pub use norte_code_wire::Phase;
 
 /// The turn-level policy that is not a layer: what a turn inherits and the
 /// bounds the engine enforces.

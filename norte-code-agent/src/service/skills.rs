@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use norte_code_protocol::ServerEventKind;
 use norte_code_protocol::catalog::Catalog;
 use norte_code_protocol::config::Config;
 use norte_code_protocol::skills::SkillRegistry;
+use norte_code_wire::ServerEventKind;
 
 use super::mapping::single;
 use super::{EventStream, Service};
@@ -55,7 +55,7 @@ impl Service {
         let mut warnings = Vec::new();
         let mut infos = Vec::new();
         for skill in skills.skills() {
-            infos.push(norte_code_protocol::SkillInfo {
+            infos.push(norte_code_wire::SkillInfo {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
                 root: skill.root.display().to_string(),

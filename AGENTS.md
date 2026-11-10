@@ -1,194 +1,151 @@
 # AGENTS.md
 
-Conventions for anyone — human or agent — working on Norte Code. Read this before
-touching anything.
+Rules for any AI agent working in this repository. Rust is the primary language, but every rule applies to any language unless stated otherwise. When a rule conflicts with a quick hack, the rule wins.
 
-## What this repository is
+## 1. Architecture and file structure
 
-Norte Code is a host on top of the Norte agent engine. Norte lives in its own
-repository and is consumed as a git dependency: never vendor or fork it here. A
-change that belongs to Norte is made there — with its own tests, guide and commit
-— and picked up here by bumping the dependency. The API we build on is Norte's
-guide (`guide/src`) and its source (`norte-core`, `norte-tools`); when this file
-and that code disagree, the code is right.
+- No god files. A file has one responsibility and one reason to change.
+- No god structs, god traits or god modules. If a type owns unrelated concerns, split it.
+- Soft limits: a file above ~300 lines or a function above ~40 lines must be justified or split.
+- One public concept per file. Name the file after the main type it defines.
+- Organize by domain (feature or bounded context) first, by technical layer second.
+- Keep dependencies pointing in one direction. Domain code must not depend on infrastructure code (HTTP, DB, CLI, filesystem).
+- Prefer small modules with a narrow public surface. Everything is private by default, expose the minimum.
+- Do not create `utils`, `helpers`, `common` or `misc` dumping grounds. Name modules after what they do.
 
-## Git workflow
+### Crate layout
 
-- `dev` is the working branch. `main` is reserved for releases; do not develop
-  directly on it or create release-only work there.
-- Remote `origin` is `https://github.com/JeanVydes/NorteCode`.
-- Never force-push, and never rewrite history that has been pushed.
-- Commits are [Conventional Commits](https://www.conventionalcommits.org/) scoped
-  to the crate: `feat(catalog): read the catalogue from two files`. Types in use:
-  `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `build`, `ci`, `perf`.
-- One logical change per commit. Do not mix a refactor with a feature, and do not
-  commit `WIP` or `fix typo`. Fixup and autosquash only on local, unpushed commits.
-- Tag the end of a milestone `milestone-N` (annotated) and push it.
-- Do not open pull requests unless asked. No signatures, no agent attribution:
-  the work is the repository's, not the tool's.
-
-### The subject line
-
-At most **68 characters**, imperative, and it must stand on its own: it is what
-`git log --oneline` shows, and the body is one flag away from invisible. Do not
-pad to reach the limit — a shorter subject reads better than one that needs
-counting.
-
-Prefer the **why** when the *what* is already in the diff:
+Dependencies point one way only:
 
 ```
-fix(agent): replay a session's history when the client asks for it
+norte-code-wire        shapes only: serde derives, no socket, no runtime, no DB.
+                       Compiles to wasm. Owns every type that travels.
+  norte-code-protocol  the server's model: store, config, catalog, costs, plans,
+                       skills, tools. Imports wire, never re-exports it.
+  norte-code-client    transport-neutral client contract and RAEP HTTP adapter.
+  norte-code-agent     the agent loop and services.
+  norte-code-plugin-host  dynamic plugin ABI and the command registry plugins
+                       declare into. The only crate allowed to use `unsafe`.
+  norte-code-raep      the server process and HTTP host.
+  norte-code-cli       the terminal client.
+  norte-code-app       the Dioxus client; depends on wire and raep-types only.
 ```
 
-says more than *"add a replay flag to SendMessage"*, which restates the diff.
-`update`, `improve` and `refactor` name nothing, and a subject that names nothing
-is not a subject.
+Rules that follow from this:
 
-### The body
+- A type that crosses a process boundary lives in `norte-code-wire`, and only there. No crate re-exports it and no crate defines a second copy. Import `norte_code_wire::...` directly.
+- `norte-code-protocol` must stay client-agnostic: no slash-command parsing, no CLI presentation, no plugin command surface. Those live in the CLI or in `norte-code-plugin-host`.
+- Anything that needs a socket, a database, a clock or a filesystem does not belong in `norte-code-wire`.
+- When moving a type, move its pure methods too. A method that needs the engine becomes an extension trait in the engine-side crate.
+- A payload that the host serializes and a client deserializes is one struct with both derives, not two mirror definitions.
 
-The body explains **why the change exists**, not what the diff contains.
+## 2. Types and data modeling
 
-- **Problem before solution.** What was broken or impossible, and what the
-  alternatives were.
-- **Do not call a change obvious, trivial, small or clear.** It is obvious now;
-  it was not before, or there would be no commit.
-- **A change that removes a tradeoff names it.** *"Slower but simpler"* or
-  *"duplicates code to remove the coupling"* is what a reader needs a year from
-  now.
-- **Name the road not taken.** Moving the runtime to its own crate, adding a
-  transport, letting a call detach: the commit is where the reason belongs, not a
-  document that will lag behind it.
-- **A change that adds something says how to reach it and how to turn it off**:
-  the flag, the config key, the command.
-- **Say how it was verified**, with the command — see
-  [Running commands](#running-commands):
+### No opaque strings
+- Never pass meaningful data around as a raw `String` or `&str`. Wrap it in a newtype: `UserId`, `Email`, `ApiKey`, `FilePath`, `Url`.
+- Validate on construction (`TryFrom`, `FromStr`, or a `new` returning `Result`) so that an invalid value cannot exist.
+- Identifiers of different entities must be different types. `UserId` and `OrderId` are never interchangeable.
 
-  ```
-  cargo fmt --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace
-  ```
+### Enums instead of strings
+- If a value belongs to a closed set (status, kind, mode, role, event type, error category), it is an `enum`, never a string or an integer constant.
+- Parse strings into enums at the boundary (`FromStr`, `serde`), and work with the enum everywhere inside.
+- Use `match` without a wildcard arm when possible, so adding a variant forces the compiler to flag every place that needs updating.
+- Booleans that represent states or modes should be enums. `Visibility::Public` is better than `is_public: bool`, and two or more booleans that interact should always become an enum.
 
-### Every commit compiles
+### Structs instead of dynamic data
+- Never use `json!`, `serde_json::Value`, `HashMap<String, _>` or `Map<String, Value>` to represent data whose shape is known. Define a struct and derive `Serialize` and `Deserialize`.
+- Request bodies, responses, config, events, messages and database rows are all typed structs.
+- Dynamic values are only acceptable when the shape is truly unknown at compile time (for example, proxying arbitrary payloads). Isolate them at the boundary and document why.
+- Use `#[serde(rename_all = "...")]` and `#[serde(tag = "...")]` on typed enums and structs instead of building keys by hand.
 
-Every commit must pass `cargo fmt --check`,
-`cargo clippy --workspace --all-targets --all-features -- -D warnings` and
-`cargo test --workspace`, so history stays bisectable. Tests ship with the
-feature.
+### General modeling rules
+- Make illegal states unrepresentable. Prefer types that cannot express an invalid combination over runtime checks.
+- Use `Option` and `Result` honestly. No sentinel values such as `""`, `-1` or `0` meaning "missing".
+- Avoid primitive obsession: units, durations, amounts and percentages get their own types (`Duration`, `Money`, `Percent`).
+- Prefer the builder or typestate pattern when a type has many optional fields or an ordered construction.
 
-- Update `CHANGELOG.md` (Keep a Changelog) in the commit that adds a
-  user-visible change.
-- Release builds publish tarballs for Unix targets and a ZIP for
-  `x86_64-pc-windows-msvc`; keep `scripts/install.sh` and
-  `.github/workflows/release.yml` in sync. `SHA256SUMS` detects corruption or
-  an incomplete download, but it is not a signature and does not authenticate
-  the release source.
-- Commit each finished, verified step. Larger or risky work goes on a
-  short-lived `feat/<name>` or `spike/<name>` branch cut from `dev`, merged with
-  `--no-ff` once the checks pass, then deleted. Small steps commit straight to
-  `dev`.
+## 3. Building strings and structured output
 
-## Hygiene
+- Do not scatter `format!`, string concatenation or `join` to construct paths, URLs, queries, commands, prompts, messages or identifiers.
+- If building something requires `format!`, move that logic into a dedicated factory, builder or formatter type (`UrlBuilder`, `QueryBuilder`, `CommandFactory`, `PromptRenderer`) with a typed API.
+- Implement `Display` on types that have a canonical text form, and use that instead of ad hoc formatting.
+- Never build SQL, JSON, HTML, shell commands or URLs by string interpolation. Use a query builder, serializer, template engine or `Command` API with typed arguments.
+- Log and error messages with simple interpolation are fine. This rule targets construction of data and protocol output.
 
-- `.gitignore` covers `target/`, secrets, `*.db`, caches, logs and editor files.
-- Never commit API keys, auth files, SQLite databases or catalogue caches. The
-  development keys live in a `.env` outside the tree; leave them there.
-- `Cargo.lock` **is** committed: this is an application.
-- Review `git diff --staged` before every commit, and never `git add -A` without
-  reading what it picked up: scratch files belong outside the tree. Run a secret
-  scan (`gitleaks` when available) before pushing.
+## 4. Abstraction and reuse
 
-## Running commands
+- Prefer abstraction over repetition. If the same shape, logic or constant appears a second time, extract it. At the third time it is mandatory.
+- Share types across modules and crates. Do not redefine the same struct, enum or constant in several places. Put shared types in a single owner module (or a `types`/`domain` crate) and import them.
+- Use traits and generics to express common behavior instead of copy-pasting similar implementations.
+- Use `From`, `TryFrom`, `AsRef` and `Into` for conversions instead of repeated manual mapping code.
+- Magic numbers and repeated literals become named constants, or better, typed configuration.
+- Abstraction must pay for itself. Do not introduce a trait with a single implementation and no foreseeable second one, and do not add layers "just in case".
 
-- **Never run a command that can wait on input.** A call that blocks on a TTY
-  hides the failure and stains the session. Reach the network with
-  `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/bin/true` and `SSH_ASKPASS=/bin/true`,
-  and give every build, test or network command an explicit timeout. Fail fast
-  and report the error; never retry a call that hung.
-- **Set `HOME` for anything that needs the user's git credentials.** A sandboxed
-  or detached process can start with `HOME` unset, and git then finds neither
-  `~/.gitconfig` nor the credential helper it names: the push fails with
-  `No anonymous write access` or `$HOME not set` even though the user is logged
-  in. `HOME=/home/<user> git push origin dev` is the fix — not a token.
-- **Push with the user's credentials.** If a push needs credentials, report the
-  exact error and stop. Never put a token in a remote URL, never write
-  credentials to disk, never prompt.
-- **Check the disk before a long build.** `cargo` writes gigabytes into
-  `target/`, and a full disk truncates a file mid-write: a formatter or compiler
-  that runs out of room leaves a half-written source file, which is worse than a
-  failed build. `df -h` first; prefer `cargo clean -p <crate>` or removing
-  `target/debug/incremental` over deleting source or caches you did not create.
+## 5. Tests
 
-## Code
+- Never put test modules in the same file as production code. No inline `#[cfg(test)] mod tests { ... }` blocks.
+- Unit tests live in separate files next to the code they cover (for example a sibling `foo_tests.rs` wired with `#[cfg(test)] #[path = "foo_tests.rs"] mod tests;`) or in the crate-level `tests/` directory for integration tests. A module tree uses `#[cfg(test)] mod tests;` pointing at `tests.rs` in the same directory, never an inline block.
+- Tests use the same typed structs and enums as production code. No hand-written JSON strings or stringly-typed fixtures when a struct exists.
+- Share fixtures and builders through a dedicated test support module instead of duplicating setup in each test.
+- Test names describe behavior: `rejects_expired_token`, not `test1`.
+- Every bug fix comes with a test that fails before the fix.
 
-- **An enum, always, when the set is closed.** A `String` that holds one of three
-  things is three bugs waiting: a typo compiles and runs, a `match` grows a
-  catch-all arm that swallows the value nobody meant, and nothing tells a reader
-  what the values are. Name the set, derive `Deserialize` on it, and let a bad
-  name fail where the file is read — with the file, the line and every name that
-  would have worked. The exceptions are a name a person chose (a session title,
-  a model id, a path) and a value whose set is genuinely open.
-- A `match` over an enum has no `_` arm when the enum is local: a variant added
-  later must be a compile error, not a silent fall into the default case. That is
-  the whole reason the enum exists.
-- `#![forbid(unsafe_code)]`; typed errors; no panics on external input, including
-  the catalogue and config files.
-- `missing_docs` is denied workspace-wide: document every public item. Existing
-  narrow `allow` attributes are exceptions being paid down, not a pattern for
-  new code; do not add broad file-level allows for missing docs, dead code or
-  unused imports.
-- Library crates never write to stdout; the CLI and TUI own output.
-- Prefer hermetically testable code. Tests use `norte-testing` (`ScriptedModel`,
-  `ProbeModel`, `RecordingObserver`) instead of the network; live-provider tests
-  are `#[ignore]`d and key-gated.
-- The protocol crate owns versioned serde wire types, but it currently depends
-  on Norte for catalog capability mapping and adjacent adapters. Keep Norte
-  engine types out of the wire structs and map between the two worlds in one
-  place; do not describe the protocol crate as engine-free until that
-  dependency is actually removed.
-- `tools.confinement.sandbox.enabled` defaults to `false`: the default is an
-  argument gate, not OS isolation, and the shell may reach outside the
-  workspace. The first-use guide must keep this limitation prominent.
-- `skills.allow_scripts` defaults to `false`; when enabled, `skill_script`
-  executes outside the command sandbox. Treat enabling it as an explicit trust
-  decision.
-- Installing a plugin clones and builds untrusted repository code, including
-  its `build.rs`, before loading the resulting shared library. Plugin
-  installation is arbitrary code execution by design and must remain explicit
-  in CLI help and documentation.
-- Anything that reaches a prompt is bounded **and says what it left out.** A
-  model cannot ask for what it cannot see, so a truncated list that hides the
-  truncation is worse than a short one.
+## 6. Comments
 
-## Providers and cost
+- Avoid excessive comments. Code should explain itself through clear names and types.
+- Comment only the non-obvious parts: invariants, tricky algorithms, non-trivial trade-offs, safety requirements (`// SAFETY:` for `unsafe`), external constraints.
+- Explain the why, never the what. If a comment restates the code, delete it.
+- Comments describe the present state of the code only. NEVER write comments about the past or about change history. Forbidden examples: "changed from X", "previously did Y", "refactored", "fixed bug", "removed old logic", "no longer", "legacy", "temporary workaround until...", "new implementation". Version history belongs in git.
+- Do not leave commented-out code. Delete it.
+- Keep comments short, ideally one line. No banners, separators or decorative blocks.
+- Use doc comments (`///`) for the public API only, and keep them concise and accurate.
+- TODO comments are allowed only if they describe a concrete pending task in the present tense and reference an issue when one exists.
 
-- The catalogue is two files a person owns, beside the configuration:
-  `providers.json` (who serves models, over which wires) and `models.json` (a
-  flat list, each model naming its provider). **Nothing is fetched, cached or
-  bundled.** A file that is missing is written empty — an empty catalogue, never
-  a snapshot — and the error that follows names the file to fill in. A file
-  that is there is never written over, and a plugin that builds the same two
-  shapes hands them to `Catalog::new`.
-- A provider has `wires`, each a base URL plus the schema it speaks. The three
-  schemas are `openai` (chat completions, the shape every compatible vendor
-  speaks), `anthropic` and `google`. `--wire` picks one; the preferred order is
-  OpenAI, then Anthropic, then Google. The Responses API is deliberately
-  unreachable — this host speaks the shape the three share.
-- A wire's credential header follows from its schema and from nothing else. A
-  configuration that could change it could only make the request wrong.
-- The catalogue is the sole authority on a model. The configuration does not
-  override a model's limits, modalities or reasoning.
-- A provider and a model are two values and never one string. A model id may
-  carry slashes of its own — NVIDIA names its models `vendor/model` — so a
-  joined `provider/model` label has to be split on a slash that may not be
-  there. Carry the pair apart everywhere it is carried: two config keys, two
-  columns, two fields on the wire. Joining is for a person to read — the
-  footer's model name, the `models` listing — and a label is never parsed back.
-- Provider-reported cost only. Never derive a price from a list price; the
-  catalogue may carry `pricing` for reference and it is never a source of cost.
-- OpenAI, Anthropic, Gemini and OpenRouter (OpenAI-compatible chat) are the v1
-  providers. Keys come from the environment first, named by the provider's
-  `environment_keys`; then `secrets.json` beside the configuration, written with
-  mode 0600. `/model` and `/models` prompt for a missing key in a masked box and
-  save it. Keys are held in the client's redacted `ApiKey` type, and never reach
-  a model event, a log or a child process.
-- The command tool clears the environment: pass only what is needed, and register
-  every configured key with `with_secrets` so it is redacted.
+## 7. Style and writing rules
+
+- Never use em dashes anywhere: code, comments, docs, commit messages, or responses. Use a comma, colon, parentheses or a period instead.
+- Never use emojis in any context: code, comments, logs, error messages, docs, commits, or responses.
+- Use plain ASCII punctuation in code and comments.
+- Names are descriptive and consistent with the domain vocabulary. Avoid abbreviations unless they are universal (`id`, `url`, `http`).
+- Follow the language's idiomatic conventions and formatter (`rustfmt`, `clippy` with warnings denied).
+
+## 8. Error handling
+
+- Use typed errors, not strings. Define error enums (for example with `thiserror`) with one variant per failure cause.
+- Never return `Result<_, String>` or `Box<dyn Error>` from library code. Reserve `anyhow` for application entry points.
+- No `unwrap()`, `expect()` or `panic!` in production paths. They are allowed in tests and for provably impossible states, with a justification.
+- Add context when propagating errors, and keep the original source attached.
+- Handle errors at the layer that can act on them. Do not swallow errors silently.
+
+## 9. Rust specifics
+
+- Prefer borrowing over cloning. Do not `clone()` just to satisfy the borrow checker without understanding why.
+- Prefer iterators and combinators over manual index loops when they read clearly.
+- Use `impl Trait` and generics for static dispatch by default, `dyn Trait` only when runtime polymorphism is needed.
+- Derive standard traits (`Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`, `Default`) where they make sense, and implement them manually only when needed.
+- Mark types `#[non_exhaustive]` only on public API enums and structs that are expected to grow.
+- Keep `unsafe` out unless strictly required. Wrap it in a small, safe, documented abstraction.
+- Keep `Cargo.toml` dependencies minimal. Do not add a crate for something the standard library already does.
+- Async code must not block the runtime. Use async-aware primitives and `spawn_blocking` when needed.
+
+## 10. Workflow for agents
+
+- Read the surrounding code and match existing conventions before writing new code.
+- Make the smallest change that solves the problem. Do not refactor unrelated code in the same change.
+- Before finishing, run formatter, linter and tests. Do not report success if any of them fail.
+- Do not invent APIs, crates or fields. Verify they exist.
+- When a request conflicts with these rules, follow the rules and mention the conflict briefly instead of silently breaking them.
+- Keep commit messages short, imperative and in the present tense, with no emojis and no em dashes.
+
+## Quick checklist
+
+Before submitting, verify that the change has:
+
+- No god files, god structs or god modules
+- No raw strings where a newtype or enum belongs
+- No `json!` or `Value` where a struct belongs
+- No scattered `format!` building data, a factory or builder instead
+- No inline test modules in production files
+- No duplicated types or logic, shared abstractions instead
+- No excessive comments, none about the past, none that restate code
+- No em dashes and no emojis

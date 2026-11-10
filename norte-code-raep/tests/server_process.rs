@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use norte_code_protocol::{ClientRequest, ClientRequestKind};
+use norte_code_wire::{ClientRequest, ClientRequestKind};
 use raep_types::{Envelope, FrameType};
 
 fn temp_root() -> PathBuf {
@@ -157,7 +157,7 @@ async fn server_process_serves_health_info_and_telemetry() {
         serde_json::to_value(ClientRequest {
             request_id: 2,
             kind: ClientRequestKind::ListTelemetry {
-                session: Some(norte_code_protocol::SessionKey::new(session.clone())),
+                session: Some(norte_code_wire::SessionKey::new(session.clone())),
             },
         })
         .expect("telemetry payload"),

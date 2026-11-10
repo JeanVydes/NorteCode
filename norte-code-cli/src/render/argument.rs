@@ -31,8 +31,8 @@ pub(crate) fn todo_items(arguments: Option<&serde_json::Value>) -> Option<Vec<To
 /// The service sends the list it read back from the session's own `todo` call,
 /// so this is a conversion and not a parse: the shape is already checked, and a
 /// value the tool would reject never reaches the wire.
-pub(crate) fn todo_item(info: &norte_code_protocol::TodoInfo) -> TodoItem {
-    use norte_code_protocol::TodoStatus as Wire;
+pub(crate) fn todo_item(info: &norte_code_wire::TodoInfo) -> TodoItem {
+    use norte_code_wire::TodoStatus as Wire;
     let status = match info.status {
         Wire::Pending => TodoStatus::Pending,
         Wire::InProgress => TodoStatus::InProgress,

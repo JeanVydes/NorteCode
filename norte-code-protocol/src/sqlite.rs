@@ -15,12 +15,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::Phase;
 use crate::costs::CostRecord;
 use crate::store::{Commit, Node, Session, Store};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use norte::{BlobId, BlobStore, CallId, Error, NodeId, Result, SessionId};
+use norte_code_wire::Phase;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1940,11 +1940,112 @@ impl SessionDirectory for SqliteStore {
     }
 }
 
+/// The transport shape of a stored request row.
+///
+/// The event that carries telemetry is on the wire, so it holds the wire's
+/// record; the store keeps this crate's row, with a parsed timestamp and a
+/// status the database can query. One conversion, in one place, keeps the two
+/// from drifting.
+impl From<&RequestRecord> for norte_code_wire::TelemetryRecord {
+    fn from(row: &RequestRecord) -> Self {
+        Self {
+            id: row.id.clone(),
+            session: row.session.clone(),
+            north_session: row.north_session.clone(),
+            turn: row.turn,
+            provider: row.provider.clone(),
+            model: row.model.clone(),
+            endpoint: row.endpoint.clone(),
+            started_at: row.started_at.to_rfc3339(),
+            duration_ms: row.duration_ms,
+            first_token_ms: row.first_token_ms,
+            last_token_ms: row.last_token_ms,
+            input_tokens: row.input_tokens,
+            output_tokens: row.output_tokens,
+            reasoning_tokens: row.reasoning_tokens,
+            cache_read_tokens: row.cache_read_tokens,
+            cache_write_tokens: row.cache_write_tokens,
+            estimated_input_tokens: row.estimated_input_tokens,
+            cache_hit: row.cache_hit,
+            tool_calls: row.tool_calls.clone(),
+            reasoning: row.reasoning.clone(),
+            sandbox: row.sandbox,
+            sandbox_network: row.sandbox_network,
+            params: row.params.clone(),
+            extensions: row.extensions.clone(),
+            metadata: row.metadata.clone(),
+            cost_usd: row.cost_usd,
+            finish_reason: row.finish_reason.clone(),
+            status: match row.status {
+                RequestStatus::Ok => norte_code_wire::RequestStatus::Ok,
+                RequestStatus::Error => norte_code_wire::RequestStatus::Error,
+                RequestStatus::Cancelled => norte_code_wire::RequestStatus::Cancelled,
+            },
+            error: row.error.clone(),
+            error_kind: row.error_kind.clone(),
+            retry_after_ms: row.retry_after_ms,
+        }
+    }
+}
+
+/// Reads a wire record back into the row a report summarizes.
+///
+/// # Errors
+///
+/// Returns the parse error when `started_at` is not RFC 3339: a report built
+/// on a guessed timestamp is worse than one that says the row is unreadable.
+impl TryFrom<norte_code_wire::TelemetryRecord> for RequestRecord {
+    type Error = chrono::ParseError;
+
+    fn try_from(
+        record: norte_code_wire::TelemetryRecord,
+    ) -> std::result::Result<Self, Self::Error> {
+        Ok(Self {
+            id: record.id,
+            session: record.session,
+            north_session: record.north_session,
+            turn: record.turn,
+            provider: record.provider,
+            model: record.model,
+            endpoint: record.endpoint,
+            started_at: chrono::DateTime::parse_from_rfc3339(&record.started_at)?
+                .with_timezone(&chrono::Utc),
+            duration_ms: record.duration_ms,
+            first_token_ms: record.first_token_ms,
+            last_token_ms: record.last_token_ms,
+            input_tokens: record.input_tokens,
+            output_tokens: record.output_tokens,
+            reasoning_tokens: record.reasoning_tokens,
+            cache_read_tokens: record.cache_read_tokens,
+            cache_write_tokens: record.cache_write_tokens,
+            estimated_input_tokens: record.estimated_input_tokens,
+            cache_hit: record.cache_hit,
+            tool_calls: record.tool_calls,
+            reasoning: record.reasoning,
+            sandbox: record.sandbox,
+            sandbox_network: record.sandbox_network,
+            params: record.params,
+            extensions: record.extensions,
+            metadata: record.metadata,
+            cost_usd: record.cost_usd,
+            finish_reason: record.finish_reason,
+            status: match record.status {
+                norte_code_wire::RequestStatus::Ok => RequestStatus::Ok,
+                norte_code_wire::RequestStatus::Error => RequestStatus::Error,
+                norte_code_wire::RequestStatus::Cancelled => RequestStatus::Cancelled,
+            },
+            error: record.error,
+            error_kind: record.error_kind,
+            retry_after_ms: record.retry_after_ms,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SessionPhase as NortePhase;
     use norte::{CallId, Message};
+    use norte_code_wire::Phase as NortePhase;
 
     #[tokio::test]
     async fn costs_round_trip_and_replace_by_request_index() {

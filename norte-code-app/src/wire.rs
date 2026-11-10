@@ -1,14 +1,6 @@
 use serde::Serialize;
 
 #[derive(Serialize)]
-pub struct UserInputRequest<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Vec<UserInputPart>>,
-}
-
-#[derive(Serialize)]
 pub struct UserInputPart {
     #[serde(rename = "type")]
     pub kind: InputPartKind,
@@ -37,6 +29,7 @@ pub enum UploadSource {
 }
 
 impl UserInputPart {
+    /// A text part, used when a prompt travels with attachments.
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             kind: InputPartKind::Text,
@@ -58,27 +51,22 @@ impl UserInputPart {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputPartKind, UserInputPart, UserInputRequest};
+    use super::{InputPartKind, UserInputPart};
 
     #[test]
     fn uploaded_media_uses_raep_content_part_shape() {
-        let request = UserInputRequest {
-            prompt: None,
-            content: Some(vec![UserInputPart::upload(
-                InputPartKind::Audio,
-                "upl_123".to_owned(),
-                "audio/wav".to_owned(),
-            )]),
-        };
+        let parts = vec![UserInputPart::upload(
+            InputPartKind::Audio,
+            "upl_123".to_owned(),
+            "audio/wav".to_owned(),
+        )];
         assert_eq!(
-            serde_json::to_value(request).expect("typed request serializes"),
-            serde_json::json!({
-                "content": [{
+            serde_json::to_value(parts).expect("typed parts serialize"),
+            serde_json::json!([{
                     "type": "audio",
                     "source": {"kind": "upload", "upload_id": "upl_123"},
                     "mime_type": "audio/wav"
-                }]
-            })
+            }])
         );
     }
 }

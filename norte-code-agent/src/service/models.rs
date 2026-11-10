@@ -7,8 +7,11 @@
 use std::sync::Arc;
 
 use norte::{Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind};
-use norte_code_protocol::catalog::{Catalog, load_catalog_files};
-use norte_code_protocol::{
+use norte_code_protocol::catalog::{
+    Catalog, load_catalog_files, load_catalog_raw, save_catalog_files,
+};
+use norte_code_wire::catalog::{Model, Provider};
+use norte_code_wire::{
     Modality, ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo, ServerEvent,
     ServerEventKind, SessionKey,
 };
@@ -73,20 +76,20 @@ pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
                 max_budget: capabilities.reasoning.max_budget,
             },
             deprecated: entry.model.status
-                == Some(norte_code_protocol::catalog::ModelStatus::Deprecated),
+                == Some(norte_code_wire::catalog::ModelStatus::Deprecated),
         });
     }
     models
 }
 
 /// The wire's name for a catalogue modality.
-fn modality_of(modality: norte_code_protocol::catalog::Modality) -> Modality {
+fn modality_of(modality: norte_code_wire::catalog::Modality) -> Modality {
     match modality {
-        norte_code_protocol::catalog::Modality::Text => Modality::Text,
-        norte_code_protocol::catalog::Modality::Image => Modality::Image,
-        norte_code_protocol::catalog::Modality::Audio => Modality::Audio,
-        norte_code_protocol::catalog::Modality::Video => Modality::Video,
-        norte_code_protocol::catalog::Modality::File => Modality::File,
+        norte_code_wire::catalog::Modality::Text => Modality::Text,
+        norte_code_wire::catalog::Modality::Image => Modality::Image,
+        norte_code_wire::catalog::Modality::Audio => Modality::Audio,
+        norte_code_wire::catalog::Modality::Video => Modality::Video,
+        norte_code_wire::catalog::Modality::File => Modality::File,
     }
 }
 
@@ -349,9 +352,178 @@ impl Service {
         )
     }
 
+    /// The catalogue with its origin, for the editor.
+    pub(super) fn catalog_detail_event(&self, request_id: u64) -> EventStream {
+        let catalog = self.catalog();
+        let (plugin_providers, plugin_models) = self.lock_plugin_catalogue().clone();
+        let file_providers: std::collections::BTreeSet<String> = load_catalog_raw()
+            .map(|(providers, _)| providers.providers.into_keys().collect())
+            .unwrap_or_default();
+        let file_models: std::collections::BTreeSet<(String, String)> = load_catalog_raw()
+            .map(|(_, models)| {
+                models
+                    .models
+                    .into_iter()
+                    .map(|model| (model.provider_id, model.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = (&plugin_providers, &plugin_models);
+
+        let providers = catalog
+            .provider_entries()
+            .iter()
+            .map(
+                |(provider_id, provider)| norte_code_wire::CatalogProviderInfo {
+                    provider_id: provider_id.clone(),
+                    name: if provider.name.is_empty() {
+                        provider_id.clone()
+                    } else {
+                        provider.name.clone()
+                    },
+                    api: provider.wires.first().map(|wire| wire.api.clone()),
+                    from_file: file_providers.contains(provider_id),
+                    model_count: catalog
+                        .model_entries()
+                        .iter()
+                        .filter(|model| &model.provider_id == provider_id)
+                        .count(),
+                },
+            )
+            .collect();
+        let models = catalog
+            .model_entries()
+            .iter()
+            .map(|model| norte_code_wire::CatalogModelInfo {
+                provider: model.provider_id.clone(),
+                model: model.id.clone(),
+                name: model.name.clone(),
+                from_file: file_models.contains(&(model.provider_id.clone(), model.id.clone())),
+            })
+            .collect();
+        single(
+            request_id,
+            None,
+            ServerEventKind::CatalogDetail { providers, models },
+        )
+    }
+
     /// Flattens the catalogue for a picker, applying the config overrides.
     pub(super) fn list_models(&self) -> Vec<ModelInfo> {
         model_list(&self.catalog())
+    }
+
+    /// Adds or replaces a provider in `providers.json`.
+    ///
+    /// A provider that a plugin injected is not in the file, so it is refused:
+    /// writing it here would either duplicate it or be overwritten on the next
+    /// start, and neither is what the person meant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the entry is not a well-formed
+    /// provider or the file cannot be written.
+    pub(super) fn upsert_provider(
+        &self,
+        request_id: u64,
+        provider_id: &str,
+        entry: serde_json::Value,
+    ) -> Result<EventStream, ServiceError> {
+        let provider: Provider = serde_json::from_value(entry)
+            .map_err(|error| ServiceError::History(format!("provider `{provider_id}`: {error}")))?;
+        if provider_id.trim().is_empty() {
+            return Err(ServiceError::History("a provider needs an id".to_owned()));
+        }
+        if provider.wires.is_empty() {
+            return Err(ServiceError::History(format!(
+                "provider `{provider_id}` needs at least one wire"
+            )));
+        }
+        let (mut providers, models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        providers.providers.insert(provider_id.to_owned(), provider);
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
+    }
+
+    /// Removes a provider and every model that names it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the provider is not in the file or
+    /// the file cannot be written.
+    pub(super) fn remove_provider(
+        &self,
+        request_id: u64,
+        provider_id: &str,
+    ) -> Result<EventStream, ServiceError> {
+        let (mut providers, mut models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        if providers.providers.remove(provider_id).is_none() {
+            return Err(ServiceError::History(format!(
+                "`{provider_id}` is not in providers.json; a plugin's providers are the \
+                 plugin's to remove"
+            )));
+        }
+        models
+            .models
+            .retain(|model| model.provider_id != provider_id);
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
+    }
+
+    /// Adds or replaces a model in `models.json`, keyed by provider and id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the entry is malformed or names a
+    /// provider the file does not have.
+    pub(super) fn upsert_model(
+        &self,
+        request_id: u64,
+        entry: serde_json::Value,
+    ) -> Result<EventStream, ServiceError> {
+        let model: Model = serde_json::from_value(entry)
+            .map_err(|error| ServiceError::History(format!("model: {error}")))?;
+        if model.id.trim().is_empty() {
+            return Err(ServiceError::History("a model needs an id".to_owned()));
+        }
+        let (providers, mut models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        if !providers.providers.contains_key(&model.provider_id) {
+            return Err(ServiceError::History(format!(
+                "`{}` is not in providers.json",
+                model.provider_id
+            )));
+        }
+        models.models.retain(|existing| {
+            !(existing.provider_id == model.provider_id && existing.id == model.id)
+        });
+        models.models.push(model);
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
+    }
+
+    /// Removes one model from `models.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the model is not in the file.
+    pub(super) fn remove_model(
+        &self,
+        request_id: u64,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<EventStream, ServiceError> {
+        let (providers, mut models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        let before = models.models.len();
+        models
+            .models
+            .retain(|model| !(model.provider_id == provider_id && model.id == model_id));
+        if models.models.len() == before {
+            return Err(ServiceError::History(format!(
+                "`{provider_id}/{model_id}` is not in models.json"
+            )));
+        }
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
     }
 
     /// Re-reads the two catalogue files.
@@ -366,7 +538,19 @@ impl Service {
     /// The catalogue already in memory is left alone in that case: a file being
     /// edited is not a reason to lose the models the session can already use.
     pub(super) fn reload_catalog(&self, request_id: u64) -> Result<EventStream, ServiceError> {
-        let mut catalog = load_catalog_files()?;
+        // The files are the source, and the plugin catalogue is folded over
+        // them: a plugin's providers and models are as real as a person's
+        // and must survive a reload instead of dropping out of the picker.
+        let mut catalog = match load_catalog_files() {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let (providers, models) = self.lock_plugin_catalogue().clone();
+                if providers.providers.is_empty() && models.models.is_empty() {
+                    return Err(error.into());
+                }
+                Catalog::default()
+            }
+        };
         let (providers, models) = self.lock_plugin_catalogue().clone();
         for skipped in catalog.extend(providers.providers, models.models) {
             tracing::warn!("skipping plugin catalogue entry during reload: {skipped}");
@@ -472,7 +656,7 @@ impl Service {
         spec: ModelSpec,
     ) -> Result<(), ServiceError> {
         let (nid, _, phase) = self.require_record(key)?;
-        if phase != norte_code_protocol::Phase::Idle {
+        if phase != norte_code_wire::Phase::Idle {
             return Err(ServiceError::Unsupported(
                 "switch the model at a turn boundary",
             ));

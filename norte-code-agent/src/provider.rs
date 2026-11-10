@@ -21,10 +21,11 @@ use norte::http::{AuthScheme, VendorProfile};
 use norte::openai::OpenAiChat;
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
+use norte_code_protocol::catalog::{Catalog, CatalogError};
 /// A `providers.json` entry's wire: a base URL and the schema it speaks.
-pub use norte_code_protocol::catalog::schema::Wire as CatalogWire;
-use norte_code_protocol::catalog::{
-    AuthKind, Catalog, CatalogError, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
+pub use norte_code_wire::catalog::Wire as CatalogWire;
+use norte_code_wire::catalog::{
+    AuthKind, Model as CatalogModel, Provider as CatalogProvider, WireSchema,
 };
 
 use norte_code_protocol::config::{ApiKey, Config};
@@ -132,6 +133,16 @@ impl ModelSpec {
         model_id: &str,
         schema: Option<WireSchema>,
     ) -> Result<Self, ServiceError> {
+        if catalog.providers().is_empty() {
+            // The catalogue files are a person's, not a download: an empty
+            // one is a setup step that has not been done. A catalogue plugin
+            // may still have fed the service an in-memory catalogue, in which
+            // case this branch is unreachable — the service tries that first.
+            return Err(ServiceError::Unsupported(
+                "no provider is configured. Add one to providers.json (or install a \
+                 catalogue plugin that offers one), then re-read the catalogue.",
+            ));
+        }
         let provider = catalog
             .provider(provider_id)
             .ok_or_else(|| ServiceError::UnknownProvider(provider_id.to_owned()))?;
@@ -268,7 +279,13 @@ fn profile(
     key: String,
     headers: &BTreeMap<String, String>,
 ) -> Result<VendorProfile, ServiceError> {
-    let profile = VendorProfile::new(provider, WireFamily::new(schema.family())?, endpoint)?;
+    let profile = VendorProfile::new(
+        provider,
+        WireFamily::new(norte_code_protocol::catalog::map::WireSchemaExt::family(
+            schema,
+        ))?,
+        endpoint,
+    )?;
     let profile = match auth.unwrap_or_else(|| AuthKind::for_schema(schema)) {
         AuthKind::Bearer => profile.with_auth(AuthScheme::bearer(key)),
         AuthKind::XApiKey => profile.with_auth(AuthScheme::header("x-api-key", key)),
@@ -326,9 +343,9 @@ mod tests {
             provider_id: provider_id.to_owned(),
             canonical_slug: format!("{provider_id}/{id}"),
             name: id.to_owned(),
-            modalities: norte_code_protocol::catalog::Modalities {
-                input: vec![norte_code_protocol::catalog::Modality::Text],
-                output: vec![norte_code_protocol::catalog::Modality::Text],
+            modalities: norte_code_wire::catalog::Modalities {
+                input: vec![norte_code_wire::catalog::Modality::Text],
+                output: vec![norte_code_wire::catalog::Modality::Text],
             },
             ..CatalogModel::default()
         }

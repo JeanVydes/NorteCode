@@ -10,7 +10,10 @@ authors.workspace = true
 
 [dependencies]
 libloading = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
 norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-wire = { path = "../norte-code-wire" }
 
 [lints]
 workspace = true

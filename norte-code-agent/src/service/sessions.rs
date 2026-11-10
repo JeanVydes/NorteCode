@@ -5,13 +5,13 @@
 //! machinery lives in the parent module; this one owns the state the turns
 //! read and write.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
 
 use norte_code_protocol::costs::BudgetBook;
-use norte_code_protocol::{
+use norte_code_wire::{
     Budget, Phase as ProtocolPhase, Reasoning, ReasoningScope, ServerEvent, ServerEventKind,
     SessionInfo, SessionKey,
 };
@@ -36,7 +36,12 @@ pub(super) struct TurnBoundary {
 }
 
 /// Persisted terminal result of a child delegation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// The two terminal states of the protocol's `ChildState`, with their wire
+/// spelling derived rather than written out in three places: the persistence
+/// layer, the loader and the reader all used to spell `"failed"` themselves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ChildTerminalState {
     /// The child ended with an unrecoverable error.
     Failed,
@@ -57,6 +62,7 @@ pub(super) struct ChildSessionMetadata {
 
 /// What the service remembers about a session.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(super) struct SessionRecord {
     pub(super) id: norte::SessionId,
     pub(super) title: Option<String>,
@@ -100,8 +106,8 @@ pub(super) struct SessionRecord {
     /// History items retained after their turns leave the active model context.
     pub(super) rewound_history: Vec<(
         u64,
-        norte_code_protocol::MessageRole,
-        norte_code_protocol::ReplayedKind,
+        norte_code_wire::MessageRole,
+        norte_code_wire::ReplayedKind,
         String,
         i64,
     )>,
@@ -142,6 +148,11 @@ pub(super) struct SessionRecord {
     pub(super) reasoning: Option<Reasoning>,
     /// A reasoning override for the next turn only.
     pub(super) pending_reasoning: Option<Reasoning>,
+    /// A budget override for the next turn only.
+    pub(super) pending_budget: Option<Budget>,
+    /// Turn ids pinned verbatim through compaction, in the wire's spelling
+    /// (`turn_2`). Persisted as `pinned_turn_ids` in the stored stats.
+    pub(super) pinned_turn_ids: HashSet<String>,
     /// Messages queued for the next turn boundary, in arrival order.
     pub(super) pending_steers: Vec<Steered>,
     /// The parent session this one was spawned from (`spawn_agent`).
@@ -231,16 +242,16 @@ fn record_from(
             .unwrap_or(0),
         reasoning: stat(stats, "reasoning"),
         pending_reasoning: stat(stats, "pending_reasoning"),
+        pending_budget: stat(stats, "pending_budget"),
+        pinned_turn_ids: stats
+            .get("pinned_turn_ids")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
         parent_client: stat(stats, "parent_client"),
         parent_tool_call_id: stat(stats, "parent_tool_call_id"),
         child_terminal: stats
             .get("child_state")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|state| match state {
-                "failed" => Some(ChildTerminalState::Failed),
-                "stopped" => Some(ChildTerminalState::Stopped),
-                _ => None,
-            })
+            .and_then(|state| serde_json::from_value::<ChildTerminalState>(state.clone()).ok())
             .or_else(|| {
                 stats
                     .get("child_terminal")
@@ -547,10 +558,7 @@ impl Service {
                 "disabled_tools": record.disabled_tools,
                 "parent_client": record.parent_client,
                 "parent_tool_call_id": record.parent_tool_call_id,
-                "child_state": record.child_terminal.map(|state| match state {
-                    ChildTerminalState::Failed => "failed",
-                    ChildTerminalState::Stopped => "stopped",
-                }),
+                "child_state": record.child_terminal,
                 "depth": record.depth,
                 "delegator_suspended": record.delegator_suspended,
                 "delegator_queue": record.delegator_queue,
@@ -639,22 +647,28 @@ impl Service {
         let current = self.store.load(session_id).await?;
         let (nodes, parent, boundaries, current_turn) =
             imported_history_nodes(session_id, current.head, items);
+        // The commit's head must be one of its own nodes. A bundle that
+        // carries no history has nothing to commit, and committing an empty
+        // node list with the session's existing head is rejected by the store
+        // — so an export without messages could never be imported back.
         let existing_messages = match current.head {
             Some(head) => self.store.ancestors(head).await?.len(),
             None => 0,
         };
         let billed = existing_messages.saturating_add(nodes.len());
-        self.store
-            .commit(crate::runtime::Commit {
-                session_id,
-                expected_version: Some(current.version),
-                nodes,
-                head: parent,
-                phase: crate::runtime::Phase::Idle,
-                turn: current.turn,
-                metadata: None,
-            })
-            .await?;
+        if !nodes.is_empty() {
+            self.store
+                .commit(crate::runtime::Commit {
+                    session_id,
+                    expected_version: Some(current.version),
+                    nodes,
+                    head: parent,
+                    phase: crate::runtime::Phase::Idle,
+                    turn: current.turn,
+                    metadata: None,
+                })
+                .await?;
+        }
         {
             let mut sessions = self.lock_sessions();
             let record = sessions
@@ -720,6 +734,35 @@ impl Service {
     ///
     /// Returns an error when the session is unknown or its directory record
     /// cannot be updated.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn export_session(
+        &self,
+        _request_id: u64,
+        _session: &SessionKey,
+        _include: Option<norte_code_wire::ExportInclude>,
+        _quiesce: Option<norte_code_wire::ExportQuiesce>,
+    ) -> Result<crate::EventStream, crate::ServiceError> {
+        Err(crate::ServiceError::Unsupported(
+            "session export not implemented",
+        ))
+    }
+
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn import_session(
+        &self,
+        _request_id: u64,
+        _bundle: serde_json::Value,
+        _decryption_jwk: Option<serde_json::Value>,
+    ) -> Result<crate::EventStream, crate::ServiceError> {
+        Err(crate::ServiceError::Unsupported(
+            "session import not implemented",
+        ))
+    }
+
+    /// Returns whether the imported session was activated.
+    ///
+    /// # Errors
+    /// Returns an error when the session is unknown.
     pub async fn activate_imported_session(&self, key: &SessionKey) -> Result<bool, ServiceError> {
         let was_suspended = {
             let mut sessions = self.lock_sessions();
@@ -736,6 +779,7 @@ impl Service {
         Ok(was_suspended)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn create_session_with_settings(
         &self,
         title: Option<String>,
@@ -772,11 +816,11 @@ impl Service {
                     model: model.clone(),
                     endpoint: String::new(),
                     api_key: norte_code_protocol::config::ApiKey::new(String::new()),
-                    schema: norte_code_protocol::catalog::WireSchema::OpenAI,
+                    schema: norte_code_wire::catalog::WireSchema::OpenAI,
                     auth: None,
                     capabilities: norte_code_protocol::catalog::capabilities(
-                        &norte_code_protocol::catalog::Model::default(),
-                        norte_code_protocol::catalog::WireSchema::OpenAI,
+                        &norte_code_wire::catalog::Model::default(),
+                        norte_code_wire::catalog::WireSchema::OpenAI,
                     ),
                     headers: std::collections::BTreeMap::new(),
                 })
@@ -846,6 +890,8 @@ impl Service {
             compaction_baseline: 0,
             reasoning: None,
             pending_reasoning: None,
+            pending_budget: None,
+            pinned_turn_ids: std::collections::HashSet::new(),
             pending_steers: Vec::new(),
             parent_client: None,
             parent_tool_call_id: None,
@@ -1051,6 +1097,8 @@ impl Service {
             compaction_baseline: 0,
             reasoning: None,
             pending_reasoning: None,
+            pending_budget: None,
+            pinned_turn_ids: std::collections::HashSet::new(),
             pending_steers: Vec::new(),
             parent_client: None,
             parent_tool_call_id: None,
@@ -1173,14 +1221,16 @@ impl Service {
                     .map(|turn| (turn, role, kind, text, timestamp))
             })
             .collect();
-        if archived
-            .iter()
-            .any(|(_, _, kind, _, _)| *kind == norte_code_protocol::ReplayedKind::ToolCall)
-        {
-            return Err(ServiceError::History(
-                "REWIND_BLOCKED: tool side-effect metadata is unavailable".to_owned(),
-            ));
-        }
+        // Tool calls in the removed turns are reported, not refused.
+        //
+        // Refusing forever was the old rule, on the theory that a tool's
+        // effects cannot be undone and the person should not silently lose
+        // them. But no tool declares its side effects yet, so the rule blocked
+        // every rewind that crossed a tool call and nothing recorded what was
+        // skipped. The rewind now proceeds and names the calls it removed; the
+        // host passes them back in `HISTORY_REWOUND.side_effects` so the reader
+        // sees what happened outside the conversation — a file written, a
+        // command run — and can undo it themselves.
         let kept_turn = boundaries
             .iter()
             .filter(|boundary| boundary.turn < to_turn || (!inclusive && boundary.turn == to_turn))
@@ -1245,6 +1295,41 @@ impl Service {
         }
         self.persist(key).await?;
         Ok(rewound_ids)
+    }
+
+    /// The tool calls that ran in the turns `turn_ids`, as `(tool_call_id,
+    /// tool_name, arguments)`.
+    ///
+    /// A rewind archives the text of the turns it removes; this answers which
+    /// tools ran there so the client can tell the person what happened outside
+    /// the conversation. Nothing here claims to know the effects themselves —
+    /// no tool declares them yet — only that the call happened.
+    #[must_use]
+    pub fn rewound_tool_calls(
+        &self,
+        key: &SessionKey,
+        turn_ids: &[String],
+    ) -> Vec<norte_code_wire::SideEffect> {
+        let sessions = self.lock_sessions();
+        let Some(record) = sessions.get(key) else {
+            return Vec::new();
+        };
+        record
+            .rewound_history
+            .iter()
+            .filter(|(turn, _, kind, _, _)| {
+                *kind == norte_code_wire::ReplayedKind::ToolCall
+                    && turn_ids.contains(&format!("turn_{turn}"))
+            })
+            .map(|(_, _, _, text, _)| {
+                let (name, arguments) = text.split_once(' ').unwrap_or((text.as_str(), ""));
+                norte_code_wire::SideEffect {
+                    tool_call_id: String::new(),
+                    tool_name: name.trim().to_owned(),
+                    side_effects: arguments.trim().to_owned(),
+                }
+            })
+            .collect()
     }
 
     /// Creates a child session for a subagent with frozen settings.
@@ -1400,6 +1485,50 @@ impl Service {
     }
 
     /// The sessions the client can see.
+    /// The sessions the store can still open.
+    ///
+    /// A record can outlive its stored session — a delete that removed the
+    /// row but not the in-memory record, or a database restored from an older
+    /// copy. Such a record lists fine and then fails on the first attach with
+    /// a store error naming an id nobody sent, which is a ghost the client
+    /// cannot clear. They are pruned here, once, and never listed again.
+    pub async fn list_live_sessions(&self) -> Vec<SessionInfo> {
+        let records = {
+            let sessions = self.lock_sessions();
+            sessions
+                .iter()
+                .map(|(key, record)| (key.clone(), record.id))
+                .collect::<Vec<_>>()
+        };
+        let mut dead = Vec::new();
+        for (key, id) in &records {
+            // Only a store that says the session does not exist proves the
+            // record is an orphan. Any other failure — a busy database, a
+            // decode problem — is a reason to keep the session, not to delete
+            // it.
+            if let Err(error) = self.store.load(*id).await
+                && error.to_string().contains("not found")
+            {
+                dead.push(key.clone());
+            }
+        }
+        if !dead.is_empty() {
+            {
+                let mut sessions = self.lock_sessions();
+                for key in &dead {
+                    sessions.remove(key);
+                }
+            }
+            for key in &dead {
+                tracing::warn!(session = %key, "dropped a session with no stored state");
+                if let Err(error) = self.directory.delete_session(key.as_str()).await {
+                    tracing::warn!(session = %key, %error, "could not drop the orphaned session row");
+                }
+            }
+        }
+        self.list_sessions()
+    }
+
     pub(super) fn list_sessions(&self) -> Vec<SessionInfo> {
         self.lock_sessions()
             .iter()
@@ -1410,6 +1539,8 @@ impl Service {
                 model: record.spec.as_ref().map(|s| s.model.clone()),
                 created_at: Some(record.created_at.to_rfc3339()),
                 phase: record.phase,
+                reasoning: record.reasoning.clone(),
+                parent: record.parent_client.clone(),
             })
             .collect()
     }
@@ -1550,9 +1681,9 @@ impl Service {
                         super::ChildSessionState::Stopped
                     }
                     None => match record.phase {
-                        ProtocolPhase::Idle => super::ChildSessionState::Idle,
-                        ProtocolPhase::Streaming => super::ChildSessionState::Streaming,
-                        ProtocolPhase::AwaitingTool => super::ChildSessionState::AwaitingTool,
+                        ProtocolPhase::Streaming => super::ChildSessionState::Running,
+                        ProtocolPhase::AwaitingTool => super::ChildSessionState::AwaitingApproval,
+                        ProtocolPhase::Idle | _ => super::ChildSessionState::Idle,
                     },
                 },
             })

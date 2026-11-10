@@ -1,8 +1,6 @@
 //! Shared Markdown plan metadata and parsing.
 
 use chrono::{DateTime, Utc};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 
@@ -14,18 +12,7 @@ use tokio::io::AsyncReadExt;
 /// parse rather than being read in full.
 pub const MAX_PLAN_HEADER_BYTES: u64 = 4096;
 
-/// The lifecycle state of one plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(rename_all = "snake_case")]
-pub enum PlanStatus {
-    /// The user approved this plan.
-    Active,
-    /// The plan is awaiting the user's decision.
-    Pending,
-    /// The user rejected or canceled this plan.
-    Canceled,
-}
+use norte_code_wire::PlanStatus;
 
 /// A plan saved as a Markdown file in its session directory.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -15,7 +15,7 @@ use norte::{
     StructuredOutputMode, ToolKind,
 };
 
-use super::schema::{
+use norte_code_wire::catalog::{
     Modality as DeclaredModality, Model, SupportedEffort, SupportedParams, WireSchema,
 };
 
@@ -25,13 +25,24 @@ use super::schema::{
 /// that renames it. `WireKind` was that second type: `Chat` was `OpenAI`,
 /// `Messages` was `Anthropic` and `GenerateContent` was `Google`, so every value
 /// had two names and a conversion between them that could only be a bug.
-impl WireSchema {
+pub trait WireSchemaExt {
     /// The Norte wire-family string.
     ///
     /// The crate that implements each wire owns the string, so it is read from
     /// there rather than written out here where it could drift from it.
     #[must_use]
-    pub fn family(self) -> &'static str {
+    fn family(self) -> &'static str;
+
+    /// How the wire's provider caches prompt prefixes.
+    ///
+    /// Anthropic's cache is explicit — the request marks the blocks it wants
+    /// cached — and the other two do it themselves from the prefix.
+    #[must_use]
+    fn cache_mode(self) -> CacheMode;
+}
+
+impl WireSchemaExt for WireSchema {
+    fn family(self) -> &'static str {
         match self {
             Self::OpenAI => norte::openai::WIRE_CHAT,
             Self::Anthropic => norte::anthropic::WIRE_MESSAGES,
@@ -39,12 +50,7 @@ impl WireSchema {
         }
     }
 
-    /// How the wire's provider caches prompt prefixes.
-    ///
-    /// Anthropic's cache is explicit — the request marks the blocks it wants
-    /// cached — and the other two do it themselves from the prefix.
-    #[must_use]
-    pub fn cache_mode(self) -> CacheMode {
+    fn cache_mode(self) -> CacheMode {
         match self {
             Self::Anthropic => CacheMode::Explicit,
             Self::OpenAI | Self::Google => CacheMode::Automatic,
@@ -212,7 +218,7 @@ pub fn effort_of(effort: SupportedEffort) -> Option<ReasoningEffort> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::schema::{Limit, Modalities, Reasoning as Declared};
+    use norte_code_wire::catalog::{Limit, Modalities, Reasoning as Declared};
 
     fn model() -> Model {
         Model {

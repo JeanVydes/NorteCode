@@ -7,11 +7,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use norte::{FnExecutor, Result, SessionId, ToolContext, ToolOutput};
-use norte_code_protocol::SessionKey;
-use norte_code_protocol::plans::{Plan, PlanStatus, parse_plan, read_plan_header};
+use norte_code_protocol::plans::{Plan, parse_plan, read_plan_header};
 use norte_code_protocol::sqlite::{SessionDirectory, StoredSession};
+use norte_code_wire::PlanStatus;
+use norte_code_wire::{ServerEventKind, SessionKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use super::mapping::single;
+use super::{EventStream, Service, ServiceError};
 
 /// Filesystem access to plans. Session records remain in the database; plans
 /// live separately so they can be opened and edited as Markdown.
@@ -26,6 +30,38 @@ impl std::fmt::Debug for PlanRepository {
         formatter
             .debug_struct("PlanRepository")
             .finish_non_exhaustive()
+    }
+}
+
+impl Service {
+    /// The session's plans, newest first.
+    pub(super) async fn list_plans_event(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+    ) -> std::result::Result<EventStream, ServiceError> {
+        let (nid, _, _) = self.require_record(&session)?;
+        let mut plans = self
+            .plans
+            .list(nid)
+            .await
+            .map_err(ServiceError::Plan)?
+            .into_iter()
+            .map(|(plan, _)| norte_code_wire::PlanInfo {
+                id: plan.id,
+                content: plan.content,
+                status: plan.status,
+                title: plan.title,
+                revision: plan.revision,
+                model: plan.model,
+            })
+            .collect::<Vec<_>>();
+        plans.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::PlanList { plans },
+        ))
     }
 }
 
@@ -598,8 +634,8 @@ async fn plan_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use norte_code_protocol::Phase;
     use norte_code_protocol::sqlite::{InMemoryDirectory, SessionDirectory};
+    use norte_code_wire::Phase;
 
     fn stored_session(session: SessionId, key: &str) -> StoredSession {
         StoredSession {

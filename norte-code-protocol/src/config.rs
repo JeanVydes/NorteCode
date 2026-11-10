@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::keys::KeyStore;
-use crate::{BudgetAction, BudgetUnit};
+use norte_code_wire::{BudgetAction, BudgetUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

@@ -4,9 +4,12 @@
 
 mod api;
 mod app;
+mod chat_client;
 mod components;
 mod domain;
+mod frames;
 mod pages;
+mod sse;
 mod state;
 mod theme;
 mod wire;

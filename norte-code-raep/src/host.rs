@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use norte_code_agent::Service;
-use norte_code_protocol::{
+use norte_code_wire::{
     ClientRequest, ClientRequestKind, Delta, ServerEvent, ServerEventKind, SessionKey,
 };
 use raep_types::{
@@ -47,6 +47,9 @@ enum Capability {
     /// Fetchable non-text model outputs.
     #[serde(rename = "output.parts")]
     OutputParts,
+    /// `USER_INPUT.response_format` with `json_schema` (RFC 12.6).
+    #[serde(rename = "structured_output")]
+    StructuredOutput,
     /// `NorteCode`'s text-only compaction and context pin subset.
     #[serde(rename = "X_NORTECODE_COMPACTION_BASIC")]
     NorteCodeCompactionBasic,
@@ -68,6 +71,7 @@ fn advertised_capabilities(uploads: bool) -> Vec<Capability> {
         Capability::TransportSse,
         Capability::Resume,
         Capability::History,
+        Capability::StructuredOutput,
         Capability::NorteCodeCompactionBasic,
         Capability::NorteCodeForkText,
         Capability::NorteCodeJobsBasic,
@@ -97,87 +101,9 @@ fn negotiated_capabilities(
         .collect()
 }
 
-/// The agent block inside a session or agent summary.
-#[derive(Debug, serde::Serialize)]
-struct AgentRef<'a> {
-    id: &'a str,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    version: &'a str,
-}
-
-/// A session summary as the management API returns it.
-#[derive(Debug, serde::Serialize)]
-struct SessionSummary<'a> {
-    session_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<&'a str>,
-    title_source: SessionTitleSource,
-    labels: BTreeMap<String, Value>,
-    pinned: bool,
-    archived: bool,
-    status: SessionSummaryStatus,
-    agent: AgentRef<'a>,
-    created_at: i64,
-    updated_at: i64,
-    last_activity_at: i64,
-    turn_count: u32,
-    has_pending: bool,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum SessionTitleSource {
-    User,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum SessionSummaryStatus {
-    Active,
-    Suspended,
-}
-
-/// An agent summary as the management API returns it.
-#[derive(Debug, serde::Serialize)]
-struct AgentSummary<'a> {
-    id: &'a str,
-    version: &'a str,
-    #[serde(skip_serializing_if = "Value::is_null")]
-    capabilities: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<AgentRef<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<AgentRef<'a>>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct AgentCapabilities {
-    input: Vec<raep_types::Modality>,
-    output: Vec<raep_types::Modality>,
-    limits: BTreeMap<AgentModality, AgentModalityLimits>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum AgentModality {
-    Text,
-    Image,
-    Document,
-    Audio,
-    Video,
-}
-
-#[derive(Debug, Default, serde::Serialize)]
-struct AgentModalityLimits {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    mime_types: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_bytes: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_items: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_duration_ms: Option<u64>,
-}
+// The session list is the shared shape: the host writes what the clients
+// decode, with no second struct and no strings leaked to give it a lifetime.
+use norte_code_wire::SessionTitleSource;
 
 /// One agent version entry.
 #[derive(Debug, serde::Serialize)]
@@ -190,7 +116,7 @@ struct AgentVersion<'a> {
 /// An agent with its latest version.
 #[derive(Debug, serde::Serialize)]
 struct AgentDetail<'a> {
-    agent: AgentSummary<'a>,
+    agent: norte_code_wire::AgentSummary,
     latest_version: AgentVersion<'a>,
 }
 
@@ -303,27 +229,6 @@ struct CanonicalServiceData {
     data: Value,
 }
 
-/// The telemetry report payload.
-#[derive(Debug, serde::Serialize)]
-struct TelemetryReport {
-    session: Option<String>,
-    records: Vec<norte_code_protocol::sqlite::RequestRecord>,
-    summary: TelemetrySummary,
-}
-
-/// The counters inside a telemetry report.
-#[derive(Debug, serde::Serialize)]
-struct TelemetrySummary {
-    requests: usize,
-    errors: u64,
-    cancelled: u64,
-    duration_ms: u64,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_read_tokens: u64,
-    cache_write_tokens: u64,
-}
-
 /// A replay descriptor in an attach payload.
 #[derive(Debug, serde::Serialize)]
 struct ReplayMeta {
@@ -336,7 +241,7 @@ struct ReplayMeta {
 
 /// The session-attached payload.
 #[derive(Debug, serde::Serialize)]
-struct SessionAttachedPayload<'a> {
+struct SessionAttachedPayload {
     created: bool,
     mode: AttachMode,
     last_seq: u64,
@@ -344,62 +249,53 @@ struct SessionAttachedPayload<'a> {
     negotiated_capabilities: Vec<Capability>,
     /// The non-secret summary of the effective agent (RFC 7). This host
     /// only runs one configured agent, so it is that agent.
-    agent: AgentSummary<'a>,
+    agent: norte_code_wire::AgentSummary,
 }
 
 /// The agent block inside a `SESSION_ATTACHED` payload.
 ///
 /// The effective agent for the session: the host's configured agent, with
 /// the provider/model reference of the session's spec when one exists.
-fn session_agent_summary<'a>(
+fn session_agent_summary(
     service: &norte_code_agent::Service,
-    id: &'a str,
-    version: &'a str,
+    id: &str,
+    version: &str,
     session: &SessionKey,
     media_storage: bool,
-) -> AgentSummary<'a> {
+) -> norte_code_wire::AgentSummary {
     let spec = service.session_spec(session);
-    AgentSummary {
-        id,
-        version,
+    norte_code_wire::AgentSummary {
+        id: id.to_owned(),
+        version: version.to_owned(),
         capabilities: agent_capabilities(spec.as_ref(), media_storage),
-        provider: spec.as_ref().map(|spec| AgentRef {
-            id: Box::leak(spec.provider.clone().into_boxed_str()) as &'static str,
-            version: "",
+        provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+            id: spec.provider.clone(),
+            version: String::new(),
         }),
-        model: spec.as_ref().map(|spec| AgentRef {
-            id: Box::leak(spec.model.clone().into_boxed_str()) as &'static str,
-            version: "",
+        model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+            id: spec.model.clone(),
+            version: String::new(),
         }),
     }
 }
 
-fn to_raep_modality(modality: norte::Modality) -> Option<raep_types::Modality> {
+/// The wire's name for a modality, in the catalogue's spelling.
+fn to_wire_modality(modality: norte::Modality) -> Option<norte_code_wire::OutputModality> {
     match modality {
-        norte::Modality::Text => Some(raep_types::Modality::Text),
-        norte::Modality::Image => Some(raep_types::Modality::Image),
-        norte::Modality::Document => Some(raep_types::Modality::Document),
-        norte::Modality::Audio => Some(raep_types::Modality::Audio),
-        norte::Modality::Video => Some(raep_types::Modality::Video),
+        norte::Modality::Text => Some(norte_code_wire::OutputModality::Text),
+        norte::Modality::Image => Some(norte_code_wire::OutputModality::Image),
+        norte::Modality::Document => Some(norte_code_wire::OutputModality::Document),
+        norte::Modality::Audio => Some(norte_code_wire::OutputModality::Audio),
+        norte::Modality::Video => Some(norte_code_wire::OutputModality::Video),
         _ => None,
     }
 }
 
-fn to_agent_modality(modality: norte::Modality) -> Option<AgentModality> {
-    match modality {
-        norte::Modality::Text => Some(AgentModality::Text),
-        norte::Modality::Image => Some(AgentModality::Image),
-        norte::Modality::Document => Some(AgentModality::Document),
-        norte::Modality::Audio => Some(AgentModality::Audio),
-        norte::Modality::Video => Some(AgentModality::Video),
-        _ => None,
-    }
-}
-
-fn agent_capabilities(spec: Option<&norte_code_agent::ModelSpec>, media_storage: bool) -> Value {
-    let Some(spec) = spec else {
-        return Value::Null;
-    };
+fn agent_capabilities(
+    spec: Option<&norte_code_agent::ModelSpec>,
+    media_storage: bool,
+) -> Option<norte_code_wire::AgentCapabilities> {
+    let spec = spec?;
     let input: Vec<_> = [
         norte::Modality::Text,
         norte::Modality::Image,
@@ -412,7 +308,7 @@ fn agent_capabilities(spec: Option<&norte_code_agent::ModelSpec>, media_storage:
         spec.capabilities.modalities.supports_input(*modality)
             && (media_storage || *modality == norte::Modality::Text)
     })
-    .filter_map(to_raep_modality)
+    .filter_map(to_wire_modality)
     .collect::<Vec<_>>();
     let output: Vec<_> = [
         norte::Modality::Text,
@@ -426,7 +322,7 @@ fn agent_capabilities(spec: Option<&norte_code_agent::ModelSpec>, media_storage:
         spec.capabilities.modalities.supports_output(*modality)
             && (media_storage || *modality == norte::Modality::Text)
     })
-    .filter_map(to_raep_modality)
+    .filter_map(to_wire_modality)
     .collect::<Vec<_>>();
     let mut limits = BTreeMap::new();
     for modality in [
@@ -442,7 +338,7 @@ fn agent_capabilities(spec: Option<&norte_code_agent::ModelSpec>, media_storage:
             && (media_storage || *modality == norte::Modality::Text)
     }) {
         let configured = spec.capabilities.modalities.limits(modality);
-        let mut modality_limits = AgentModalityLimits::default();
+        let mut modality_limits = norte_code_wire::AgentModalityLimits::default();
         if let Some(configured) = configured {
             if !configured.mime_types.is_empty() {
                 modality_limits.mime_types = configured
@@ -464,13 +360,13 @@ fn agent_capabilities(spec: Option<&norte_code_agent::ModelSpec>, media_storage:
         {
             continue;
         }
-        let Some(modality_key) = to_agent_modality(modality) else {
+        let Some(modality_key) = to_wire_modality(modality) else {
             continue;
         };
         limits.insert(modality_key, modality_limits);
     }
 
-    payload(AgentCapabilities {
+    Some(norte_code_wire::AgentCapabilities {
         input,
         output,
         limits,
@@ -532,8 +428,8 @@ enum HistoryItemKind {
 
 struct HistoryItemView {
     turn: Option<u64>,
-    role: norte_code_protocol::MessageRole,
-    kind: norte_code_protocol::ReplayedKind,
+    role: norte_code_wire::MessageRole,
+    kind: norte_code_wire::ReplayedKind,
     text: String,
     timestamp: i64,
     rewound: bool,
@@ -543,24 +439,24 @@ struct HistoryItemView {
 
 fn history_item_value(item: HistoryItemView) -> HistorySummaryItem {
     let role = match item.role {
-        norte_code_protocol::MessageRole::Tool => HistoryRole::Tool,
-        norte_code_protocol::MessageRole::System
-        | norte_code_protocol::MessageRole::Developer
-        | norte_code_protocol::MessageRole::Unknown => HistoryRole::SystemEvent,
-        norte_code_protocol::MessageRole::User => HistoryRole::User,
-        norte_code_protocol::MessageRole::Assistant => HistoryRole::Assistant,
+        norte_code_wire::MessageRole::Tool => HistoryRole::Tool,
+        norte_code_wire::MessageRole::System
+        | norte_code_wire::MessageRole::Developer
+        | norte_code_wire::MessageRole::Unknown => HistoryRole::SystemEvent,
+        norte_code_wire::MessageRole::User => HistoryRole::User,
+        norte_code_wire::MessageRole::Assistant => HistoryRole::Assistant,
     };
     let kind = match item.kind {
-        norte_code_protocol::ReplayedKind::Text => match role {
+        norte_code_wire::ReplayedKind::Text => match role {
             HistoryRole::Tool => HistoryItemKind::Tool,
             HistoryRole::SystemEvent => HistoryItemKind::SystemEvent,
             HistoryRole::User => HistoryItemKind::User,
             HistoryRole::Assistant => HistoryItemKind::Assistant,
         },
-        norte_code_protocol::ReplayedKind::Reasoning => HistoryItemKind::Reasoning,
-        norte_code_protocol::ReplayedKind::ToolCall => HistoryItemKind::ToolCall,
-        norte_code_protocol::ReplayedKind::ToolResult => HistoryItemKind::ToolResult,
-        norte_code_protocol::ReplayedKind::Refusal => HistoryItemKind::Refusal,
+        norte_code_wire::ReplayedKind::Reasoning => HistoryItemKind::Reasoning,
+        norte_code_wire::ReplayedKind::ToolCall => HistoryItemKind::ToolCall,
+        norte_code_wire::ReplayedKind::ToolResult => HistoryItemKind::ToolResult,
+        norte_code_wire::ReplayedKind::Refusal => HistoryItemKind::Refusal,
     };
     let (content, truncated) = if let Some(max) = item.max_content_bytes {
         let mut end = item.text.len().min(max);
@@ -613,30 +509,8 @@ struct JobStatePayload<'a> {
     next_index: u64,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct JobFinishedPayload<'a> {
-    status: JobStatus,
-    exit_code: Option<i32>,
-    signal: Option<&'a str>,
-    summary: &'a str,
-    output_snapshot: &'a str,
-    output_truncated: bool,
-    output_bytes_total: u64,
-    duration_ms: u64,
-    triggered_new_turn: bool,
-    new_turn_id: Option<&'a str>,
-    injected_into_turn_id: Option<&'a str>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(super) enum JobStatus {
-    Running,
-    Completed,
-    Failed,
-    Killed,
-    TimedOut,
-}
+// The status the host writes is the one the clients read: no second enum.
+pub(super) use norte_code_wire::JobStatus;
 
 #[derive(Debug, serde::Deserialize)]
 struct JobListRequest {
@@ -709,34 +583,6 @@ struct ImportCommittedPayload<'a> {
     session_id: &'a str,
     id_map: BTreeMap<String, String>,
     warnings: [&'static str; 2],
-}
-
-#[derive(Debug, serde::Serialize)]
-struct QuotaPeriod {
-    start: u64,
-    end: u64,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum QuotaDimensionName {
-    Sessions,
-    ReplayBufferEvents,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct QuotaDimension {
-    name: QuotaDimensionName,
-    limit: u64,
-    used: u64,
-    remaining: u64,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct QuotaPayload<'a> {
-    tenant: &'a str,
-    period: QuotaPeriod,
-    dimensions: [QuotaDimension; 2],
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -962,6 +808,21 @@ enum AssetSourceKind {
 /// `response_format` other than plain `text`. Both are still decoded here,
 /// so a client that sends them gets a clear rejection from
 /// [`validate_user_input`] instead of silently ignoring them.
+///
+/// **`replaces_turn_id`** (RFC 18.2): `SESSION_REWIND` to that turn with
+/// `inclusive: true` and `cancel_pending: false`, then run the new input as a
+/// new turn, in one step. `queue_policy` does not apply. The new envelope
+/// `turn_id` MUST be new, and the same preconditions and errors apply.
+/// Implemented in [`NorteCodeRaepHost::user_input`].
+///
+/// **`response_format`** (RFC 12.6): `{type: "text"}` (default) or
+/// `{type: "json_schema", schema, strict}`. `schema` is a JSON Schema
+/// (2020-12, at most 16 KiB, local `$ref` only). The capability is
+/// `structured_output` and the effective agent must list
+/// `structured_output` in `capabilities.features`; otherwise the input
+/// fails with `INVALID_FRAME` and `details.reason:
+/// response_format_unsupported`. Implemented in
+/// [`NorteCodeRaepHost::user_input`] and [`NorteCodeRaepHost::validate_user_input`].
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 struct AcceptedUserInput {
     /// Plain text input. Exactly one of `prompt` and `content` is required.
@@ -1009,6 +870,70 @@ enum ResponseFormatKind {
 struct AcceptedResponseFormat {
     #[serde(rename = "type")]
     kind: ResponseFormatKind,
+    /// JSON Schema 2020-12, at most 16 KiB, local `$ref` only. Only present for
+    /// `json_schema`.
+    #[serde(default)]
+    schema: Option<Value>,
+    /// Whether the turn fails when the answer does not validate, instead of
+    /// earning one correction message.
+    #[serde(default)]
+    strict: bool,
+}
+
+/// Validates the shape of a `response_format` value without touching the
+/// service. The capability check (`structured_output` in the effective
+/// agent's `capabilities.features`) happens in `user_input`, which has the
+/// service and the negotiated capabilities.
+/// Whether every `$ref` in `value` is a local JSON Pointer (`#...`).
+///
+/// The spec allows `$ref` only within the same schema; a reference to
+/// another document would need a resolver the host does not carry.
+fn refs_are_local(value: &Value) -> Result<(), HostError> {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref")
+                && !(reference.trim() == "#" || reference.trim().starts_with("#/"))
+            {
+                return Err(HostError::InvalidFrame(
+                    "response_format $ref must be local".to_owned(),
+                ));
+            }
+            for nested in map.values() {
+                refs_are_local(nested)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => {
+            for item in items {
+                refs_are_local(item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_response_format_shape(format: &AcceptedResponseFormat) -> Result<(), HostError> {
+    match format.kind {
+        ResponseFormatKind::Text => Ok(()),
+        ResponseFormatKind::JsonSchema => {
+            let Some(schema) = &format.schema else {
+                return Err(HostError::InvalidFrame(
+                    "response_format json_schema requires schema".to_owned(),
+                ));
+            };
+            let bytes = serde_json::to_vec(schema)?.len();
+            if bytes > 16 * 1024 {
+                return Err(HostError::InvalidFrame(
+                    "response_format schema exceeds 16 KiB".to_owned(),
+                ));
+            }
+            // Local `$ref` only: any `$ref` that is not a JSON Pointer into
+            // this same schema (`#...`) is rejected, matching the spec.
+            refs_are_local(schema)?;
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1025,6 +950,13 @@ struct HistoryGetRequest {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForkRequest {
+    /// The fork source, repeated from the envelope by clients that fill the
+    /// payload the way the spec's example does. The host reads the envelope's
+    /// `session_id`; the field is accepted so a client naming the session
+    /// twice is not rejected for it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    session_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -1033,6 +965,10 @@ struct ForkRequest {
     inclusive: Option<bool>,
     #[serde(default)]
     carry_usage: Option<bool>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    include: Option<norte_code_wire::ForkInclude>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1158,9 +1094,13 @@ struct SessionConfiguredPayload {
 
 /// Rejects the `UserInput` field values this host does not support.
 ///
-/// `replaces_turn_id` (rewind-and-re-run) is not implemented. Non-text output
-/// is accepted only when both the model and the attached client support it;
-/// `metadata` over 4 KiB violates the spec's bound for opaque caller metadata.
+/// `replaces_turn_id` is now implemented as an atomic rewind-and-re-run (RFC
+/// 18.2): `SESSION_REWIND` to that turn with `inclusive: true`,
+/// `cancel_pending: false`, then the new input as a new turn. `queue_policy`
+/// is ignored while `replaces_turn_id` is present. Non-text output is
+/// accepted only when both the model and the attached client support it;
+/// `metadata` over 4 KiB violates the spec's bound for opaque caller
+/// metadata.
 fn validate_user_input(input: &AcceptedUserInput) -> Result<(), HostError> {
     match (input.prompt.as_deref(), input.content.as_deref()) {
         (Some(prompt), None) if !prompt.trim().is_empty() => {
@@ -1185,16 +1125,21 @@ fn validate_user_input(input: &AcceptedUserInput) -> Result<(), HostError> {
         }
     }
     if let Some(id) = &input.replaces_turn_id {
-        return Err(HostError::InvalidFrame(format!(
-            "replaces_turn_id `{id}` is not supported by this host"
-        )));
+        // `replaces_turn_id` is implemented. It is a `SESSION_REWIND` +
+        // `USER_INPUT` in one step; the actual rewind happens in
+        // `NorteCodeRaepHost::user_input` before any queueing.
+        // No validation error here — see the comment above.
+        let _ = id;
     }
     if let Some(format) = &input.response_format
         && format.kind != ResponseFormatKind::Text
     {
-        return Err(HostError::InvalidFrame(
-            "response_format other than text is not supported by this host".to_owned(),
-        ));
+        // `response_format` other than text is supported only when the
+        // effective agent advertises `structured_output`. The host-side
+        // capability check happens in `user_input` (which has the service,
+        // the session spec, and the negotiated capabilities); here we only
+        // validate the shape.
+        validate_response_format_shape(format)?;
     }
     if let Some(output) = &input.output
         && (output.is_empty()
@@ -1373,13 +1318,12 @@ fn to_norte_modality(modality: &raep_types::Modality) -> norte::Modality {
     }
 }
 
-fn raep_modality_for_media(kind: norte::MediaKind) -> Option<raep_types::Modality> {
+fn raep_modality_for_media(kind: norte_code_wire::MediaKind) -> raep_types::Modality {
     match kind {
-        norte::MediaKind::Image => Some(raep_types::Modality::Image),
-        norte::MediaKind::Document => Some(raep_types::Modality::Document),
-        norte::MediaKind::Audio => Some(raep_types::Modality::Audio),
-        norte::MediaKind::Video => Some(raep_types::Modality::Video),
-        _ => None,
+        norte_code_wire::MediaKind::Image => raep_types::Modality::Image,
+        norte_code_wire::MediaKind::Document => raep_types::Modality::Document,
+        norte_code_wire::MediaKind::Audio => raep_types::Modality::Audio,
+        norte_code_wire::MediaKind::Video => raep_types::Modality::Video,
     }
 }
 
@@ -1390,9 +1334,9 @@ fn raep_modality_for_media(kind: norte::MediaKind) -> Option<raep_types::Modalit
 /// fails with `AGENT_OVERRIDE_DENIED`, so a client that sends a field this
 /// host cannot honour gets an error naming it rather than a silent no-op.
 type OverrideParts = (
-    Option<norte_code_protocol::Reasoning>,
+    Option<norte_code_wire::Reasoning>,
     Option<(String, String)>,
-    Option<norte_code_protocol::Budget>,
+    Option<norte_code_wire::Budget>,
 );
 
 fn decode_override(value: &Value) -> Result<OverrideParts, HostError> {
@@ -1448,11 +1392,11 @@ fn decode_override(value: &Value) -> Result<OverrideParts, HostError> {
 /// malformed value fails here, naming the field, instead of deep inside the
 /// service.
 fn validate_override(
-    reasoning: Option<&norte_code_protocol::Reasoning>,
+    reasoning: Option<&norte_code_wire::Reasoning>,
     model: Option<&(String, String)>,
-    budget: Option<&norte_code_protocol::Budget>,
+    budget: Option<&norte_code_wire::Budget>,
 ) -> Result<(), HostError> {
-    if let Some(norte_code_protocol::Reasoning::Effort { effort }) = reasoning
+    if let Some(norte_code_wire::Reasoning::Effort { effort }) = reasoning
         && effort.is_empty()
     {
         return Err(HostError::InvalidFrame(
@@ -1476,13 +1420,13 @@ fn validate_override(
     Ok(())
 }
 
-/// Decodes a `reasoning` override object into a [`norte_code_protocol::Reasoning`].
+/// Decodes a `reasoning` override object into a [`norte_code_wire::Reasoning`].
 ///
 /// The wire shape follows the `AgentSpec` fragment (RFC 7): `mode`
 /// (`off`/`auto`/`on`), `effort` (a name) and `budget_tokens`. `mode: on`
 /// without an effort maps to `Effort` with the service's default effort;
 /// `mode: auto` maps to `Automatic` and `mode: off` to `Disabled`.
-fn decode_reasoning_override(value: &Value) -> Result<norte_code_protocol::Reasoning, HostError> {
+fn decode_reasoning_override(value: &Value) -> Result<norte_code_wire::Reasoning, HostError> {
     let Some(fields) = value.as_object() else {
         return Err(HostError::InvalidFrame(
             "reasoning override must be an object".to_owned(),
@@ -1502,11 +1446,11 @@ fn decode_reasoning_override(value: &Value) -> Result<norte_code_protocol::Reaso
     let effort = fields.get("effort").and_then(Value::as_str);
     let budget_tokens = fields.get("budget_tokens").and_then(Value::as_u64);
     Ok(match mode {
-        "off" | "disabled" => norte_code_protocol::Reasoning::Disabled,
-        "auto" | "automatic" => norte_code_protocol::Reasoning::Automatic,
+        "off" | "disabled" => norte_code_wire::Reasoning::Disabled,
+        "auto" | "automatic" => norte_code_wire::Reasoning::Automatic,
         "on" => {
             if let Some(tokens) = budget_tokens {
-                norte_code_protocol::Reasoning::Budget {
+                norte_code_wire::Reasoning::Budget {
                     tokens: u32::try_from(tokens).map_err(|_| {
                         HostError::InvalidFrame(
                             "reasoning.budget_tokens is out of range".to_owned(),
@@ -1514,11 +1458,11 @@ fn decode_reasoning_override(value: &Value) -> Result<norte_code_protocol::Reaso
                     })?,
                 }
             } else if let Some(effort) = effort {
-                norte_code_protocol::Reasoning::Effort {
+                norte_code_wire::Reasoning::Effort {
                     effort: effort.to_owned(),
                 }
             } else {
-                norte_code_protocol::Reasoning::Effort {
+                norte_code_wire::Reasoning::Effort {
                     effort: "medium".to_owned(),
                 }
             }
@@ -1531,7 +1475,7 @@ fn decode_reasoning_override(value: &Value) -> Result<norte_code_protocol::Reaso
     })
 }
 
-/// Decodes a `budgets` override object into a [`norte_code_protocol::Budget`].
+/// Decodes a `budgets` override object into a [`norte_code_wire::Budget`].
 ///
 /// The wire shape follows the `AgentSpec` fragment: `max_turn_cost` /
 /// `max_session_cost` (with `currency`, default `USD`) and `max_turn_tokens`
@@ -1539,7 +1483,7 @@ fn decode_reasoning_override(value: &Value) -> Result<norte_code_protocol::Reaso
 /// budget semantics are a single per-session limit, so the first field
 /// present wins; a field this host does not map fails instead of being
 /// silently dropped.
-fn decode_budget_override(value: &Value) -> Result<norte_code_protocol::Budget, HostError> {
+fn decode_budget_override(value: &Value) -> Result<norte_code_wire::Budget, HostError> {
     let Some(fields) = value.as_object() else {
         return Err(HostError::InvalidFrame(
             "budget override must be an object".to_owned(),
@@ -1561,9 +1505,9 @@ fn decode_budget_override(value: &Value) -> Result<norte_code_protocol::Budget, 
         .and_then(Value::as_str)
         .unwrap_or("stop")
     {
-        "ask" => norte_code_protocol::BudgetAction::Ask,
-        "degrade" | "warn" => norte_code_protocol::BudgetAction::Warn,
-        _ => norte_code_protocol::BudgetAction::Stop,
+        "ask" => norte_code_wire::BudgetAction::Ask,
+        "degrade" | "warn" => norte_code_wire::BudgetAction::Warn,
+        _ => norte_code_wire::BudgetAction::Stop,
     };
     if let Some(cost) = fields
         .get("max_turn_cost")
@@ -1577,8 +1521,8 @@ fn decode_budget_override(value: &Value) -> Result<norte_code_protocol::Budget, 
                 .and_then(|v| u32::try_from(v).ok().map(f64::from))
         })
     {
-        return Ok(norte_code_protocol::Budget {
-            unit: norte_code_protocol::BudgetUnit::Usd,
+        return Ok(norte_code_wire::Budget {
+            unit: norte_code_wire::BudgetUnit::Usd,
             limit: cost,
             action,
         });
@@ -1588,8 +1532,8 @@ fn decode_budget_override(value: &Value) -> Result<norte_code_protocol::Budget, 
         .or_else(|| fields.get("max_session_tokens"))
         .and_then(Value::as_u64)
     {
-        return Ok(norte_code_protocol::Budget {
-            unit: norte_code_protocol::BudgetUnit::Tokens,
+        return Ok(norte_code_wire::Budget {
+            unit: norte_code_wire::BudgetUnit::Tokens,
             limit: f64::from(u32::try_from(tokens).unwrap_or(u32::MAX)),
             action,
         });
@@ -1633,12 +1577,12 @@ enum ConfigureApplyPolicy {
 #[serde(deny_unknown_fields)]
 struct SessionOptions {
     #[serde(default)]
-    job_turn_policy: Option<norte_code_protocol::JobTurnPolicy>,
+    job_turn_policy: Option<norte_code_wire::JobTurnPolicy>,
 }
 
 fn parse_job_turn_policy(
     options: Option<&Value>,
-) -> Result<Option<norte_code_protocol::JobTurnPolicy>, HostError> {
+) -> Result<Option<norte_code_wire::JobTurnPolicy>, HostError> {
     let Some(options) = options else {
         return Ok(None);
     };
@@ -2659,11 +2603,19 @@ struct HostState {
 struct QueuedTurn {
     turn_id: TurnId,
     text: String,
-    attachments: Vec<norte_code_protocol::Attachment>,
-    budget: Option<norte_code_protocol::Budget>,
-    reasoning: Option<norte_code_protocol::Reasoning>,
+    attachments: Vec<norte_code_wire::Attachment>,
+    budget: Option<norte_code_wire::Budget>,
+    reasoning: Option<norte_code_wire::Reasoning>,
     metadata: Option<Value>,
     output: Vec<raep_types::Modality>,
+    /// `USER_INPUT.response_format` (RFC 12.6), validated for shape in
+    /// `validate_user_input` and carried to the service as
+    /// `SendMessage.response_format`. `None` is `{type: "text"}`.
+    response_format: Option<norte_code_wire::ResponseFormat>,
+    /// `USER_INPUT.replaces_turn_id` (RFC 18.2): `SESSION_REWIND` to that
+    /// turn with `inclusive: true`, `cancel_pending: false`, then run this
+    /// input as a new turn, in one step. `queue_policy` does not apply.
+    replaces_turn_id: Option<String>,
 }
 
 struct CachedRequest {
@@ -2698,6 +2650,33 @@ pub struct NorteCodeRaepHost {
     upload_index: Option<Arc<dyn UploadIndex>>,
     pin_store: Option<Arc<dyn PinStore>>,
     connections: Arc<Semaphore>,
+}
+
+fn summarize_plugin_updates(
+    results: Vec<(String, Result<String, String>)>,
+) -> Result<String, String> {
+    let updated = results
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let failures = results
+        .into_iter()
+        .filter_map(|(plugin, result)| result.err().map(|error| format!("{plugin}: {error}")))
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return Ok(updated);
+    }
+    let successful = if updated.is_empty() {
+        String::new()
+    } else {
+        format!(" Updated successfully: {updated}.")
+    };
+    Err(format!(
+        "Plugin update failed: {}.{successful}",
+        failures.join("; ")
+    ))
 }
 
 impl NorteCodeRaepHost {
@@ -3368,9 +3347,20 @@ impl NorteCodeRaepHost {
             state.session_owners.clone()
         };
         let now = now_millis();
-        self.services
-            .values()
-            .flat_map(|service| service.sessions())
+        // Every agent has its own service over the same directory, so each of
+        // them lists every session: flat-mapping them showed one session twice
+        // — once per agent — and the sidebar carried a phantom copy of each.
+        // A session belongs to exactly one key, so it is listed once.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut live = Vec::new();
+        for service in self.services.values() {
+            for info in service.list_live_sessions().await {
+                if seen.insert(info.session.as_str().to_owned()) {
+                    live.push(info);
+                }
+            }
+        }
+        live.into_iter()
             .filter(|info| {
                 owners
                     .get(info.session.as_str())
@@ -3414,7 +3404,7 @@ impl NorteCodeRaepHost {
         Some(service.children_of(&SessionKey::new(parent_session_id)))
     }
 
-    fn session_summary_value(&self, info: &norte_code_protocol::SessionInfo, now: i64) -> Value {
+    fn session_summary_value(&self, info: &norte_code_wire::SessionInfo, now: i64) -> Value {
         let created_at = info
             .created_at
             .as_deref()
@@ -3432,9 +3422,13 @@ impl NorteCodeRaepHost {
             .map_or(self.config.agent_id.as_str(), |(agent_id, _)| {
                 agent_id.as_str()
             });
-        payload(SessionSummary {
-            session_id: info.session.as_str(),
-            title: info.title.as_deref(),
+        let spec = self
+            .services
+            .values()
+            .find_map(|service| service.session_spec(&info.session));
+        payload(norte_code_wire::SessionSummary {
+            session_id: info.session.as_str().to_owned(),
+            title: info.title.clone(),
             title_source: SessionTitleSource::User,
             labels: BTreeMap::new(),
             pinned: false,
@@ -3444,19 +3438,26 @@ impl NorteCodeRaepHost {
                 .values()
                 .any(|service| service.session_imported_suspended(&info.session))
             {
-                SessionSummaryStatus::Suspended
+                norte_code_wire::SessionStatus::Suspended
             } else {
-                SessionSummaryStatus::Active
+                norte_code_wire::SessionStatus::Active
             },
-            agent: AgentRef {
-                id: agent_id,
-                version: &self.config.server_version,
-            },
-            created_at,
-            updated_at: now,
-            last_activity_at: now,
-            turn_count: 0,
-            has_pending: false,
+            agent: Some(norte_code_wire::AgentRef {
+                id: agent_id.to_owned(),
+                version: self.config.server_version.clone(),
+            }),
+            model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+                id: spec.model.clone(),
+                version: String::new(),
+            }),
+            provider: spec.as_ref().map(|spec| spec.provider.clone()),
+            reasoning: info.reasoning.clone(),
+            parent_session_id: info.parent.as_ref().map(ToString::to_string),
+            created_at: Some(created_at),
+            updated_at: Some(now),
+            last_activity_at: Some(now),
+            turn_count: Some(0),
+            has_pending: Some(false),
         })
     }
 
@@ -3571,17 +3572,17 @@ impl NorteCodeRaepHost {
                     .services
                     .get(&id)
                     .and_then(|service| service.default_spec());
-                payload(AgentSummary {
-                    id: &id,
-                    version: &self.config.server_version,
+                payload(norte_code_wire::AgentSummary {
+                    id: id.clone(),
+                    version: self.config.server_version.clone(),
                     capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
-                    provider: spec.as_ref().map(|spec| AgentRef {
-                        id: &spec.provider,
-                        version: "",
+                    provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+                        id: spec.provider.clone(),
+                        version: String::new(),
                     }),
-                    model: spec.as_ref().map(|spec| AgentRef {
-                        id: &spec.model,
-                        version: "",
+                    model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+                        id: spec.model.clone(),
+                        version: String::new(),
                     }),
                 })
             })
@@ -3595,17 +3596,17 @@ impl NorteCodeRaepHost {
         let service = self.services.get(agent_id)?;
         let spec = service.default_spec();
         Some(payload(AgentDetail {
-            agent: AgentSummary {
-                id: agent_id,
-                version: &self.config.server_version,
+            agent: norte_code_wire::AgentSummary {
+                id: agent_id.to_owned(),
+                version: self.config.server_version.clone(),
                 capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
-                provider: spec.as_ref().map(|spec| AgentRef {
-                    id: &spec.provider,
-                    version: "",
+                provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+                    id: spec.provider.clone(),
+                    version: String::new(),
                 }),
-                model: spec.as_ref().map(|spec| AgentRef {
-                    id: &spec.model,
-                    version: "",
+                model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
+                    id: spec.model.clone(),
+                    version: String::new(),
                 }),
             },
             latest_version: AgentVersion {
@@ -3716,18 +3717,18 @@ impl NorteCodeRaepHost {
         };
         let session_limit = 100_u64;
         let frame_limit = self.config.replay_capacity as u64;
-        payload(QuotaPayload {
-            tenant: principal,
-            period: QuotaPeriod { start: 0, end: 0 },
-            dimensions: [
-                QuotaDimension {
-                    name: QuotaDimensionName::Sessions,
+        payload(norte_code_wire::QuotaReport {
+            tenant: principal.to_owned(),
+            period: norte_code_wire::QuotaPeriod { start: 0, end: 0 },
+            dimensions: vec![
+                norte_code_wire::QuotaDimension {
+                    name: norte_code_wire::QuotaDimensionName::Sessions,
                     limit: session_limit,
                     used: sessions,
                     remaining: session_limit.saturating_sub(sessions),
                 },
-                QuotaDimension {
-                    name: QuotaDimensionName::ReplayBufferEvents,
+                norte_code_wire::QuotaDimension {
+                    name: norte_code_wire::QuotaDimensionName::ReplayBufferEvents,
                     limit: frame_limit,
                     used: replay_frames,
                     remaining: frame_limit.saturating_sub(replay_frames),
@@ -3953,11 +3954,11 @@ impl NorteCodeRaepHost {
             }
         }
         let request_count = records.len();
-        Ok(payload(TelemetryReport {
+        Ok(payload(norte_code_wire::TelemetryReport {
             session: session.map(str::to_owned),
-            records,
-            summary: TelemetrySummary {
-                requests: request_count,
+            records: records.iter().map(Into::into).collect(),
+            summary: norte_code_wire::TelemetrySummary {
+                requests: u64::try_from(request_count).unwrap_or(u64::MAX),
                 errors,
                 cancelled,
                 duration_ms,
@@ -4247,7 +4248,7 @@ impl NorteCodeRaepHost {
                     &session_id,
                     ClientRequestKind::SetReasoning {
                         session: session.clone(),
-                        scope: norte_code_protocol::ReasoningScope::Session,
+                        scope: norte_code_wire::ReasoningScope::Session,
                         reasoning,
                     },
                 )
@@ -4360,18 +4361,32 @@ impl NorteCodeRaepHost {
                 .sessions()
                 .iter()
                 .any(|session| session.session.as_str() == session_id);
-        if !exists && attach.create_if_missing == Some(false) {
+        // A session this host cannot find is not created here, whatever
+        // `create_if_missing` says: the id was chosen by the client, and
+        // binding a fresh engine session to it would resurrect a deleted
+        // session — and fail later with a store error naming an internal id.
+        // A new session is made by attaching with an empty id, or by POSTing
+        // one; reusing an id that is gone is "not found".
+        if !exists {
             return Err(HostError::InvalidFrame("session not found".to_owned()));
         }
-        // This v1 host permits one attachment at a time. Takeover needs a
-        // connection identity so it can reliably displace the prior controller.
+        // One controller at a time. Attaching again on a session this host
+        // already considers attached is the reload case — the browser
+        // reopens the stream before the old connection's detach lands — so
+        // the new attachment takes over instead of leaving the client with a
+        // 409 and no way forward. A named `takeover: false` is still
+        // honoured as "do not displace anyone".
         let already_attached = self.state.lock().await.attached.contains(&session_id);
+        if already_attached && attach.takeover == Some(false) {
+            return Err(HostError::InvalidFrame(
+                "SESSION_BUSY: another client is already attached to this session".to_owned(),
+            ));
+        }
         if already_attached {
-            return Err(HostError::InvalidFrame(if attach.takeover == Some(true) {
-                "SESSION_BUSY: takeover is unavailable on this host; detach first".to_owned()
-            } else {
-                "SESSION_BUSY: another client is already attached to this session".to_owned()
-            }));
+            tracing::info!(
+                session = %session_id,
+                "taking over an existing attachment on re-attach"
+            );
         }
         // `agent_mismatch` (RFC 6): for an existing session, the requested
         // agent must equal the session's current agent.
@@ -4413,7 +4428,7 @@ impl NorteCodeRaepHost {
                         &session_id,
                         ClientRequestKind::SetReasoning {
                             session: session.clone(),
-                            scope: norte_code_protocol::ReasoningScope::Session,
+                            scope: norte_code_wire::ReasoningScope::Session,
                             reasoning,
                         },
                     )
@@ -4519,7 +4534,7 @@ impl NorteCodeRaepHost {
             .map_err(|error| HostError::Service(error.to_string()))?;
         if !service.set_job_turn_policy(
             &session_key,
-            job_turn_policy.unwrap_or(norte_code_protocol::JobTurnPolicy::Always),
+            job_turn_policy.unwrap_or(norte_code_wire::JobTurnPolicy::Always),
         ) {
             return Err(HostError::InvalidFrame(
                 "session not found while applying job_turn_policy".to_owned(),
@@ -4891,7 +4906,7 @@ impl NorteCodeRaepHost {
                     if source_kind == AssetSourceKind::Upload {
                         upload_ids.push(asset_id.to_owned());
                     }
-                    attachments.push(norte_code_protocol::Attachment {
+                    attachments.push(norte_code_wire::Attachment {
                         path: String::new(),
                         blob: Some(blob),
                         mime,
@@ -4908,10 +4923,18 @@ impl NorteCodeRaepHost {
                 ));
             }
         };
-        let queue_mode = match input.queue_policy.clone() {
-            Some(raep_types::QueuePolicy::Queue) => norte_code_protocol::QueueMode::Queue,
-            Some(raep_types::QueuePolicy::Interrupt) => norte_code_protocol::QueueMode::Interrupt,
-            Some(raep_types::QueuePolicy::Reject) | None => norte_code_protocol::QueueMode::Reject,
+        let queue_mode = if input.replaces_turn_id.is_some() {
+            // `queue_policy` does not apply while `replaces_turn_id` is
+            // present (RFC 18.2): the input is a rewind-and-re-run in one
+            // step, not a queued input. The rewind is applied below before
+            // any queueing decision, and the input then runs immediately.
+            norte_code_wire::QueueMode::Reject
+        } else {
+            match input.queue_policy.clone() {
+                Some(raep_types::QueuePolicy::Queue) => norte_code_wire::QueueMode::Queue,
+                Some(raep_types::QueuePolicy::Interrupt) => norte_code_wire::QueueMode::Interrupt,
+                Some(raep_types::QueuePolicy::Reject) | None => norte_code_wire::QueueMode::Reject,
+            }
         };
         // Per-turn `overrides` (RFC 12.4): translate the known fields onto
         // the turn's own reasoning/budget. Model changes are not a per-turn
@@ -4929,6 +4952,25 @@ impl NorteCodeRaepHost {
                 "model override is not supported on USER_INPUT; use SESSION_CONFIGURE".to_owned(),
             ));
         }
+        // `response_format` (RFC 12.6): carried to the service as
+        // `SendMessage.response_format`. See `validate_response_format_shape`
+        // for the shape validation and the capability check below.
+        let response_format = input
+            .response_format
+            .clone()
+            .map(|format| {
+                Ok::<_, HostError>(norte_code_wire::ResponseFormat {
+                    kind: match format.kind {
+                        ResponseFormatKind::Text => norte_code_wire::ResponseFormatType::Text,
+                        ResponseFormatKind::JsonSchema => {
+                            norte_code_wire::ResponseFormatType::JsonSchema
+                        }
+                    },
+                    schema: format.schema.clone(),
+                    strict: format.strict,
+                })
+            })
+            .transpose()?;
         let queued_turn = QueuedTurn {
             turn_id: turn_id.clone(),
             text,
@@ -4937,6 +4979,8 @@ impl NorteCodeRaepHost {
             reasoning: override_reasoning,
             metadata: input.metadata.clone(),
             output: requested_output,
+            response_format,
+            replaces_turn_id: input.replaces_turn_id.clone(),
         };
         let queued_position = {
             let mut state = self.state.lock().await;
@@ -4955,7 +4999,7 @@ impl NorteCodeRaepHost {
             }
             let occupied = state.active_turns.contains_key(&frame.session_id)
                 || state.turn_reservations.contains_key(&frame.session_id);
-            if occupied && queue_mode == norte_code_protocol::QueueMode::Reject {
+            if occupied && queue_mode == norte_code_wire::QueueMode::Reject {
                 return Err(HostError::SessionBusy);
             }
             let queued = state
@@ -4980,7 +5024,7 @@ impl NorteCodeRaepHost {
                     .queued_turns
                     .entry(frame.session_id.clone())
                     .or_default();
-                if queue_mode == norte_code_protocol::QueueMode::Interrupt {
+                if queue_mode == norte_code_wire::QueueMode::Interrupt {
                     queue.push_front(queued_turn.clone());
                     Some(1)
                 } else {
@@ -5008,6 +5052,49 @@ impl NorteCodeRaepHost {
                 None
             }
         };
+        // `replaces_turn_id` (RFC 18.2): `SESSION_REWIND` to that turn with
+        // `inclusive: true` and `cancel_pending: false`, then run the new
+        // input as a new turn, in one step. `queue_policy` does not apply
+        // (it is forced to `Reject` above), so this input always runs
+        // immediately and never occupies the queue. Every hook here runs
+        // before queuing: the rewind is a history mutation, and the input
+        // that follows it must see the rewound history.
+        let mut output_for_rewind: Option<Envelope<Value>> = None;
+        if let Some(ref replaces_turn_id) = queued_turn.replaces_turn_id {
+            let rewound_turn_ids = self
+                .service
+                .rewind_session(
+                    &SessionKey::new(frame.session_id.clone()),
+                    replaces_turn_id,
+                    true,
+                    false,
+                    false,
+                )
+                .await
+                .map_err(|error| HostError::Service(error.to_string()))?;
+            // The rewind removes `turns > replaces_turn_id` (inclusive) and
+            // keeps `turns < replaces_turn_id`. Those removals are the
+            // `rewound_turn_ids` the `HistoryRewound` payload reports.
+            // There is a side-effect dusting in the rewind's wash: nothing
+            // is dehydrated here — the service records no side-effect
+            // metadata for removed tool calls, so `side_effects` is empty
+            // and `workspace_restored` is false, matching the standalone
+            // `SESSION_REWIND` handler.
+            output_for_rewind = Some(
+                self.emit(
+                    &frame.session_id,
+                    StandardFrameType::HistoryRewound,
+                    payload(HistoryRewoundPayload {
+                        to_turn_id: replaces_turn_id.clone(),
+                        inclusive: true,
+                        rewound_turn_ids,
+                        side_effects: Vec::new(),
+                        workspace_restored: false,
+                    }),
+                )
+                .await?,
+            );
+        }
         if !upload_ids.is_empty()
             && let Some(index) = &self.upload_index
             && let Err(error) = index
@@ -5028,7 +5115,7 @@ impl NorteCodeRaepHost {
                     },
                     content: accepted_content,
                     position: queued_position,
-                    replaces_turn_id: None,
+                    replaces_turn_id: queued_turn.replaces_turn_id.clone(),
                 }),
                 turn_id.clone(),
             )
@@ -5041,7 +5128,11 @@ impl NorteCodeRaepHost {
             }
         };
         if queued_position.is_some() {
-            let mut output = vec![accepted];
+            let mut output = Vec::new();
+            if let Some(rewind_frame) = output_for_rewind {
+                output.push(rewind_frame);
+            }
+            output.push(accepted);
             output.push(
                 self.emit_with_turn_id(
                     &frame.session_id,
@@ -5053,7 +5144,7 @@ impl NorteCodeRaepHost {
                 )
                 .await?,
             );
-            if queue_mode == norte_code_protocol::QueueMode::Interrupt
+            if queue_mode == norte_code_wire::QueueMode::Interrupt
                 && let Err(error) = self
                     .submit_service(
                         &frame.session_id,
@@ -5082,12 +5173,18 @@ impl NorteCodeRaepHost {
                     attachments: queued_turn.attachments,
                     budget: queued_turn.budget,
                     reasoning: queued_turn.reasoning,
+                    output: Vec::new(),
+                    response_format: queued_turn.response_format,
                     metadata: queued_turn.metadata,
                     replay: false,
                 },
             )
             .await;
-        let mut output = vec![accepted];
+        let mut output = Vec::new();
+        if let Some(rewind_frame) = output_for_rewind {
+            output.push(rewind_frame);
+        }
+        output.push(accepted);
         match submission {
             Ok(events) => output.extend(events),
             Err(error) => {
@@ -5127,8 +5224,18 @@ impl NorteCodeRaepHost {
             .session_history_with_provenance(&SessionKey::new(frame.session_id.clone()))
             .await
             .map_err(|error| HostError::Service(error.to_string()))?;
+        // The system prompt is the agent's own preamble, not something either
+        // side said in the conversation: a client that draws it shows the
+        // person a wall of instructions before their first message. It stays
+        // in the engine's history; it just does not belong in a transcript.
         let mut history: Vec<_> = active
             .into_iter()
+            .filter(|(_, role, _, _, _, _)| {
+                !matches!(
+                    role,
+                    norte_code_wire::MessageRole::System | norte_code_wire::MessageRole::Developer
+                )
+            })
             .map(|(turn, role, kind, text, timestamp, origin)| {
                 ((turn, role, kind, text, timestamp), false, origin)
             })
@@ -5210,6 +5317,23 @@ impl NorteCodeRaepHost {
             )
             .await
             .map_err(|error| HostError::Service(error.to_string()))?;
+        let side_effects = self
+            .service
+            .rewound_tool_calls(
+                &SessionKey::new(frame.session_id.clone()),
+                &rewound_turn_ids,
+            )
+            .into_iter()
+            .map(|effect| HistorySideEffect {
+                tool_call_id: effect.tool_call_id,
+                tool_name: effect.tool_name,
+                // No tool declares its effects yet, and the honest reading of
+                // "we do not know" is the widest one: the call may have
+                // touched the workspace. The name and arguments travel with
+                // it so the reader can judge.
+                side_effects: raep_types::ToolSideEffects::Local,
+            })
+            .collect();
         Ok(vec![
             self.emit(
                 &frame.session_id,
@@ -5218,7 +5342,7 @@ impl NorteCodeRaepHost {
                     to_turn_id: request.to_turn_id,
                     inclusive: request.inclusive,
                     rewound_turn_ids,
-                    side_effects: Vec::new(),
+                    side_effects,
                     workspace_restored: false,
                 }),
             )
@@ -5409,6 +5533,8 @@ impl NorteCodeRaepHost {
                 from_turn_id: request.from_turn_id,
                 inclusive: request.inclusive,
                 carry_usage: request.carry_usage,
+                agent_id: request.agent_id,
+                include: request.include,
             },
         )
         .await
@@ -5532,7 +5658,7 @@ impl NorteCodeRaepHost {
             .into_iter()
             .find(|session| session.session.as_str() == session_id)
             .ok_or_else(|| HostError::InvalidFrame("session not found".to_owned()))?;
-        if session.phase != norte_code_protocol::Phase::Idle || service.has_running_jobs(&key) {
+        if session.phase != norte_code_wire::Phase::Idle || service.has_running_jobs(&key) {
             return Err(HostError::InvalidFrame(
                 "SESSION_BUSY: export requires an idle session with no running jobs".to_owned(),
             ));
@@ -5544,15 +5670,6 @@ impl NorteCodeRaepHost {
         {
             return Err(HostError::InvalidFrame(
                 "SESSION_EXPORT cannot preserve rewound history on this host".to_owned(),
-            ));
-        }
-        if !service
-            .session_history_is_plain_text(&key)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?
-        {
-            return Err(HostError::InvalidFrame(
-                "SESSION_EXPORT supports only plain-text message parts".to_owned(),
             ));
         }
         let session_agent_id = self
@@ -5759,8 +5876,16 @@ impl NorteCodeRaepHost {
         let (active_turn, cancelled_queued_turn) = {
             let mut state = self.state.lock().await;
             let active_turn = state.active_turns.get(&frame.session_id).cloned();
-            if active_turn.as_ref() == Some(requested_turn) {
-                (active_turn, false)
+            // A turn that is running but has not produced its first event yet
+            // lives only in the reservation: the host reserved it when the
+            // input was accepted and learned nothing since. Treating that as
+            // "turn not active" refused the only cancel the client could send,
+            // and left the session with a reservation nothing could clear.
+            let reserved = state.turn_reservations.get(&frame.session_id).cloned();
+            if active_turn.as_ref() == Some(requested_turn)
+                || (active_turn.is_none() && reserved.as_ref() == Some(requested_turn))
+            {
+                (Some(requested_turn.clone()), false)
             } else {
                 let Some(queue) = state.queued_turns.get_mut(&frame.session_id) else {
                     return Err(HostError::TurnNotActive);
@@ -5812,7 +5937,56 @@ impl NorteCodeRaepHost {
             .submit(request)
             .await
             .map_err(|error| HostError::Service(error.to_string()))?;
-        self.collect_service_events(&frame.session_id, events).await
+        let collected = self
+            .collect_service_events(&frame.session_id, events)
+            .await?;
+        // The service cancels the token, but an engine parked in a tool sends
+        // nothing, so the turn's reservation would stay and every later input
+        // would meet `SESSION_BUSY`. The cancel itself is the one place that
+        // knows the turn is over from the client's point of view.
+        let mut released = self.release_turn(&frame.session_id, requested_turn).await;
+        if collected.is_empty() {
+            released.push(
+                self.emit_with_turn_id(
+                    &frame.session_id,
+                    StandardFrameType::TurnStateChanged,
+                    payload(raep_types::TurnStateChanged {
+                        state: raep_types::TurnState::Cancelled,
+                        stop_reason: Some(raep_types::StopReason::Cancelled),
+                        usage: None,
+                        error: None,
+                    }),
+                    requested_turn.clone(),
+                )
+                .await?,
+            );
+        }
+        let mut output = collected;
+        output.append(&mut released);
+        Ok(output)
+    }
+
+    /// Drops the host's record of a running turn, answering the frames that
+    /// tell the client it ended.
+    async fn release_turn(&self, session_id: &str, turn_id: &TurnId) -> Vec<Envelope<Value>> {
+        {
+            let mut state = self.state.lock().await;
+            if state.active_turns.get(session_id) == Some(turn_id) {
+                state.active_turns.remove(session_id);
+            }
+            if state.turn_reservations.get(session_id) == Some(turn_id) {
+                state.turn_reservations.remove(session_id);
+                state.pending_output.remove(session_id);
+            }
+            if let Some(pending) = state.pending_turn_ids.get_mut(session_id) {
+                pending.retain(|pending_turn| pending_turn != turn_id);
+                if pending.is_empty() {
+                    state.pending_turn_ids.remove(session_id);
+                }
+            }
+        }
+        self.remove_turn_request(session_id, turn_id).await;
+        Vec::new()
     }
 
     async fn detach(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
@@ -5900,7 +6074,12 @@ impl NorteCodeRaepHost {
         let session_id = session_for_request(&request.kind)
             .map(std::string::ToString::to_string)
             .unwrap_or_default();
-        if !session_id.is_empty() {
+        // Reads that only look at what already happened (telemetry, cost,
+        // jobs, history) do not need a live attachment: the session exists or
+        // it does not, and a dashboard opening a session to read its usage
+        // would otherwise have to attach — and displace the stream a
+        // conversation page is already holding.
+        if !session_id.is_empty() && !is_read_only_request(&request.kind) {
             self.require_attached(&session_id).await?;
         }
         let service = if session_id.is_empty() {
@@ -5955,14 +6134,10 @@ impl NorteCodeRaepHost {
                 .await
                 .map_err(|error| HostError::Service(error.to_string()))?
                 .map_err(HostError::Service)?;
-                let name = result
-                    .into_iter()
-                    .filter_map(|(_, result)| result.ok())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let updated = summarize_plugin_updates(result).map_err(HostError::Service)?;
                 ServerEventKind::PluginChanged {
                     operation: "updated".to_owned(),
-                    name,
+                    name: updated,
                 }
             }
             ClientRequestKind::RemovePlugin { name } => {
@@ -6089,9 +6264,7 @@ impl NorteCodeRaepHost {
                     .get(&(event_session.clone(), *turn))
                     .cloned()
                     .unwrap_or_default();
-                if raep_modality_for_media(media.kind)
-                    .is_some_and(|modality| requested.contains(&modality))
-                {
+                if requested.contains(&raep_modality_for_media(media.kind)) {
                     output.extend(
                         self.emit_media_output(&event_session, *turn, *index, media)
                             .await?,
@@ -6238,6 +6411,11 @@ impl NorteCodeRaepHost {
         session_id: &str,
         turn: QueuedTurn,
     ) -> Result<Vec<Envelope<Value>>, HostError> {
+        // `replaces_turn_id` is a one-step rewind-and-re-run: the rewind has
+        // already happened when the input was accepted (see
+        // `NorteCodeRaepHost::user_input`), so by the time a queued turn runs
+        // there is nothing left to rewind. The queued turn simply carries the
+        // response format the client asked for.
         let stream = self
             .service
             .submit(ClientRequest {
@@ -6248,6 +6426,8 @@ impl NorteCodeRaepHost {
                     attachments: turn.attachments,
                     budget: turn.budget,
                     reasoning: turn.reasoning,
+                    output: Vec::new(),
+                    response_format: turn.response_format,
                     metadata: turn.metadata,
                     replay: false,
                 },
@@ -6292,18 +6472,15 @@ impl NorteCodeRaepHost {
 
     async fn load_generated_media(
         &self,
-        media: &norte::MediaPart,
+        media: &norte_code_wire::MediaPart,
     ) -> Result<(OutputPartKind, String, Vec<u8>), HostError> {
         let (kind, input_kind) = match media.kind {
-            norte::MediaKind::Image => (OutputPartKind::Image, AcceptedPartKind::Image),
-            norte::MediaKind::Document => (OutputPartKind::Document, AcceptedPartKind::Document),
-            norte::MediaKind::Audio => (OutputPartKind::Audio, AcceptedPartKind::Audio),
-            norte::MediaKind::Video => (OutputPartKind::Video, AcceptedPartKind::Video),
-            _ => {
-                return Err(HostError::Artifact(
-                    "the generated media kind is not supported by RAEP".to_owned(),
-                ));
+            norte_code_wire::MediaKind::Image => (OutputPartKind::Image, AcceptedPartKind::Image),
+            norte_code_wire::MediaKind::Document => {
+                (OutputPartKind::Document, AcceptedPartKind::Document)
             }
+            norte_code_wire::MediaKind::Audio => (OutputPartKind::Audio, AcceptedPartKind::Audio),
+            norte_code_wire::MediaKind::Video => (OutputPartKind::Video, AcceptedPartKind::Video),
         };
         let mime_type = media.mime.as_str();
         validate_media_mime(input_kind, mime_type).map_err(HostError::Artifact)?;
@@ -6312,24 +6489,19 @@ impl NorteCodeRaepHost {
             .as_ref()
             .ok_or_else(|| HostError::Artifact("output storage is disabled".to_owned()))?;
         let bytes = match &media.source {
-            norte::MediaSource::Inline(bytes) => bytes.clone(),
-            norte::MediaSource::Blob(id) => artifact_store.get(&id.to_string()).await?,
-            norte::MediaSource::ProviderFile(reference) => {
-                let blob = reference.blob.as_ref().ok_or_else(|| {
+            norte_code_wire::MediaSource::Inline(bytes) => bytes.clone(),
+            norte_code_wire::MediaSource::Blob(id) => artifact_store.get(id).await?,
+            norte_code_wire::MediaSource::ProviderFile(reference) => {
+                let blob = reference.blob.as_deref().ok_or_else(|| {
                     HostError::Artifact(
                         "generated provider file has no durable blob reference".to_owned(),
                     )
                 })?;
-                artifact_store.get(&blob.to_string()).await?
+                artifact_store.get(blob).await?
             }
-            norte::MediaSource::Url(_) => {
+            norte_code_wire::MediaSource::Url(_) => {
                 return Err(HostError::Artifact(
                     "generated media URL was not materialized into the blob store".to_owned(),
-                ));
-            }
-            _ => {
-                return Err(HostError::Artifact(
-                    "generated media source is not supported".to_owned(),
                 ));
             }
         };
@@ -6347,7 +6519,7 @@ impl NorteCodeRaepHost {
         session_id: &str,
         turn: u64,
         index: u32,
-        media: &norte::MediaPart,
+        media: &norte_code_wire::MediaPart,
     ) -> Result<Vec<Envelope<Value>>, HostError> {
         let (kind, mime_type, bytes) = self.load_generated_media(media).await?;
         let artifact_store = self
@@ -6678,6 +6850,7 @@ fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
         | ClientRequestKind::StopJobs { session, .. }
         | ClientRequestKind::DetachTurn { session }
         | ClientRequestKind::ListJobs { session }
+        | ClientRequestKind::ListPlans { session }
         | ClientRequestKind::Resume { session, .. }
         | ClientRequestKind::AnswerQuestion { session, .. }
         | ClientRequestKind::SetModel { session, .. }
@@ -6695,17 +6868,27 @@ fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
         | ClientRequestKind::ForgetApprovalRule {
             session: Some(session),
             ..
-        } => Some(session),
+        }
+        | ClientRequestKind::SessionCompact { session, .. }
+        | ClientRequestKind::ContextPin { session, .. }
+        | ClientRequestKind::SessionRewind { session, .. }
+        | ClientRequestKind::HistoryGet { session, .. }
+        | ClientRequestKind::SessionExport { session, .. } => Some(session),
         ClientRequestKind::SendMessage { session, .. }
         | ClientRequestKind::CostReport { session }
         | ClientRequestKind::ListTelemetry { session } => session.as_ref(),
         ClientRequestKind::CreateSession { .. }
         | ClientRequestKind::ListSessions
         | ClientRequestKind::ListModels
+        | ClientRequestKind::ListCatalog
         | ClientRequestKind::ListTools { session: None }
         | ClientRequestKind::SetApprovalRule { session: None, .. }
         | ClientRequestKind::ForgetApprovalRule { session: None, .. }
         | ClientRequestKind::RefreshCatalog
+        | ClientRequestKind::CatalogUpsertProvider { .. }
+        | ClientRequestKind::CatalogRemoveProvider { .. }
+        | ClientRequestKind::CatalogUpsertModel { .. }
+        | ClientRequestKind::CatalogRemoveModel { .. }
         | ClientRequestKind::ListSkills
         | ClientRequestKind::RefreshSkills
         | ClientRequestKind::ListPlugins
@@ -6715,8 +6898,19 @@ fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
         | ClientRequestKind::SetPluginEnabled { .. }
         | ClientRequestKind::ListMcp
         | ClientRequestKind::RefreshMcp
-        | ClientRequestKind::SetMcpActive { .. } => None,
+        | ClientRequestKind::SetMcpActive { .. }
+        | ClientRequestKind::SessionImport { .. } => None,
     }
+}
+
+/// Whether a command only reads state and can run without an attachment.
+fn is_read_only_request(kind: &ClientRequestKind) -> bool {
+    matches!(
+        kind,
+        ClientRequestKind::ListTelemetry { .. }
+            | ClientRequestKind::CostReport { .. }
+            | ClientRequestKind::ListJobs { .. }
+    )
 }
 
 fn is_plugin_request(kind: &ClientRequestKind) -> bool {
@@ -6754,22 +6948,22 @@ fn now_millis() -> i64 {
         })
 }
 
-pub(super) fn job_status(job: &norte_code_protocol::JobInfo) -> JobStatus {
+pub(super) fn job_status(job: &norte_code_wire::JobInfo) -> JobStatus {
     match job.state {
-        norte_code_protocol::JobState::Running => JobStatus::Running,
-        norte_code_protocol::JobState::Cancelled => JobStatus::Killed,
-        norte_code_protocol::JobState::Finished if job.timed_out => JobStatus::TimedOut,
-        norte_code_protocol::JobState::Finished
+        norte_code_wire::JobState::Running => JobStatus::Running,
+        norte_code_wire::JobState::Cancelled => JobStatus::Killed,
+        norte_code_wire::JobState::Finished if job.timed_out => JobStatus::TimedOut,
+        norte_code_wire::JobState::Finished
             if job.exit_code.is_some_and(|exit_code| exit_code != 0) =>
         {
             JobStatus::Failed
         }
-        norte_code_protocol::JobState::Finished => JobStatus::Completed,
+        norte_code_wire::JobState::Finished => JobStatus::Completed,
     }
 }
 
 fn job_output_from_index(
-    job: &norte_code_protocol::JobInfo,
+    job: &norte_code_wire::JobInfo,
     from_index: u64,
 ) -> Result<&str, HostError> {
     let retained_bytes = u64::try_from(job.output.len()).unwrap_or(u64::MAX);
@@ -6790,7 +6984,7 @@ fn job_output_from_index(
 }
 
 pub(super) fn job_finished_payload(
-    job: &norte_code_protocol::JobInfo,
+    job: &norte_code_wire::JobInfo,
     triggered_new_turn: bool,
     new_turn_id: Option<&str>,
     injected_into_turn_id: Option<&str>,
@@ -6803,18 +6997,19 @@ pub(super) fn job_finished_payload(
         })
         .unwrap_or(0);
     let output_snapshot = &job.output[start..];
-    payload(JobFinishedPayload {
+    payload(norte_code_wire::JobFinished {
+        job_id: Some(job.id.clone()),
         status: job_status(job),
         exit_code: job.exit_code,
         signal: None,
-        summary: &job.label,
-        output_snapshot,
+        summary: job.label.clone(),
+        output_snapshot: output_snapshot.to_owned(),
         output_truncated: job.dropped || start > 0,
         output_bytes_total: job.output_bytes_total,
         duration_ms: job.elapsed_ms,
         triggered_new_turn,
-        new_turn_id,
-        injected_into_turn_id,
+        new_turn_id: new_turn_id.map(str::to_owned),
+        injected_into_turn_id: injected_into_turn_id.map(str::to_owned),
     })
 }
 
@@ -6978,8 +7173,8 @@ fn validate_export_request(request: &ExportRequest) -> Result<(), HostError> {
 
 type PortableHistoryEntry = (
     Option<u64>,
-    norte_code_protocol::MessageRole,
-    norte_code_protocol::ReplayedKind,
+    norte_code_wire::MessageRole,
+    norte_code_wire::ReplayedKind,
     String,
     i64,
     Option<Value>,
@@ -6991,25 +7186,22 @@ fn serialize_plain_text_history(
 ) -> Result<Vec<u8>, HostError> {
     let mut bytes = Vec::new();
     for (turn, role, kind, content, timestamp, origin) in history {
+        // The bundle carries text, and a conversation is more than text: the
+        // model reasons, calls tools, and reads their results. Exporting only
+        // refused those, so any real session could not be exported at all.
+        // Each non-text part is written as the assistant text it already
+        // renders as (`name {json}` for a call), and tool output is dropped
+        // because it is reproducible from the call.
         let role = match (role, kind) {
-            (norte_code_protocol::MessageRole::User, norte_code_protocol::ReplayedKind::Text) => {
+            (norte_code_wire::MessageRole::User, norte_code_wire::ReplayedKind::Text) => {
                 ExportHistoryRole::User
             }
-            (
-                norte_code_protocol::MessageRole::Assistant,
-                norte_code_protocol::ReplayedKind::Text,
-            ) => ExportHistoryRole::Assistant,
-            (
-                norte_code_protocol::MessageRole::System
-                | norte_code_protocol::MessageRole::Developer
-                | norte_code_protocol::MessageRole::Unknown,
-                _,
-            ) => continue,
-            _ => {
-                return Err(HostError::InvalidFrame(
-                    "SESSION_EXPORT supports only user and assistant text history".to_owned(),
-                ));
-            }
+            (norte_code_wire::MessageRole::Assistant, _) => ExportHistoryRole::Assistant,
+            // A user row that is not text has no counterpart in the bundle's
+            // two roles; tool output is reproducible from the call; and the
+            // system prompt is not the conversation. All of them are dropped
+            // rather than failing the whole export.
+            _ => continue,
         };
         let item = HistoryExportItem {
             role,
@@ -7034,6 +7226,29 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+
+    #[test]
+    fn plugin_update_summary_reports_partial_failures() {
+        let result = summarize_plugin_updates(vec![
+            ("good".to_owned(), Ok("good".to_owned())),
+            ("bad".to_owned(), Err("build failed".to_owned())),
+        ]);
+
+        assert_eq!(
+            result,
+            Err("Plugin update failed: bad: build failed. Updated successfully: good.".to_owned())
+        );
+    }
+
+    #[test]
+    fn plugin_update_summary_reports_successes() {
+        let result = summarize_plugin_updates(vec![
+            ("one".to_owned(), Ok("one".to_owned())),
+            ("two".to_owned(), Ok("two".to_owned())),
+        ]);
+
+        assert_eq!(result, Ok("one, two".to_owned()));
+    }
 
     #[test]
     fn user_input_requires_exactly_one_nonempty_form() {
@@ -7184,11 +7399,12 @@ mod tests {
             .session_owners
             .insert("session-a".to_owned(), "alice".to_owned());
 
-        let media = norte::MediaPart::new(
-            norte::MediaKind::Audio,
-            norte::MediaSource::Inline(b"generated audio".to_vec()),
-            norte::MimeType::new("audio/wav").expect("mime"),
-        );
+        let media = norte_code_wire::MediaPart {
+            kind: norte_code_wire::MediaKind::Audio,
+            source: norte_code_wire::MediaSource::Inline(b"generated audio".to_vec()),
+            mime: "audio/wav".to_owned(),
+            metadata: norte_code_wire::MediaMetadata::default(),
+        };
         let events = host
             .emit_media_output("session-a", 7, 0, &media)
             .await
@@ -7256,11 +7472,12 @@ mod tests {
             .await
             .session_owners
             .insert("session-a".to_owned(), "alice".to_owned());
-        let media = norte::MediaPart::new(
-            norte::MediaKind::Audio,
-            norte::MediaSource::Inline(b"generated audio".to_vec()),
-            norte::MimeType::new("audio/wav").expect("mime"),
-        );
+        let media = norte_code_wire::MediaPart {
+            kind: norte_code_wire::MediaKind::Audio,
+            source: norte_code_wire::MediaSource::Inline(b"generated audio".to_vec()),
+            mime: "audio/wav".to_owned(),
+            metadata: norte_code_wire::MediaMetadata::default(),
+        };
         let events = host
             .emit_media_output("session-a", 7, 0, &media)
             .await
@@ -7308,13 +7525,13 @@ mod tests {
     }
 
     fn test_job_info(
-        state: norte_code_protocol::JobState,
+        state: norte_code_wire::JobState,
         exit_code: Option<i32>,
         timed_out: bool,
         output: &str,
         output_bytes_total: u64,
-    ) -> norte_code_protocol::JobInfo {
-        norte_code_protocol::JobInfo {
+    ) -> norte_code_wire::JobInfo {
+        norte_code_wire::JobInfo {
             id: "job-test".to_owned(),
             label: "test".to_owned(),
             script: "test".to_owned(),
@@ -7331,7 +7548,7 @@ mod tests {
     #[test]
     fn job_state_uses_registry_status_and_retained_output_cursor() {
         let failed = test_job_info(
-            norte_code_protocol::JobState::Finished,
+            norte_code_wire::JobState::Finished,
             Some(2),
             false,
             "output",
@@ -7348,7 +7565,7 @@ mod tests {
         ));
 
         let timed_out = test_job_info(
-            norte_code_protocol::JobState::Finished,
+            norte_code_wire::JobState::Finished,
             None,
             true,
             "output",
@@ -7365,8 +7582,8 @@ mod tests {
     fn history_items_keep_rewound_turn_identity() {
         let item = history_item_value(HistoryItemView {
             turn: Some(3),
-            role: norte_code_protocol::MessageRole::User,
-            kind: norte_code_protocol::ReplayedKind::Text,
+            role: norte_code_wire::MessageRole::User,
+            kind: norte_code_wire::ReplayedKind::Text,
             text: "old input".to_owned(),
             timestamp: 1,
             rewound: true,
@@ -7722,6 +7939,8 @@ mod tests {
                     reasoning: None,
                     metadata: None,
                     output: vec![raep_types::Modality::Text],
+                    response_format: None,
+                    replaces_turn_id: None,
                 }]),
             );
         }
@@ -8348,7 +8567,7 @@ mod tests {
             turn: 1,
             call_id: "job-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: norte_code_protocol::types::OutputStream::Stdout,
+            stream: norte_code_wire::OutputStream::Stdout,
             text: "hi".to_owned(),
             last: false,
         };
@@ -8382,7 +8601,7 @@ mod tests {
             tool_call_id: "call-1".to_owned(),
             command: "make".to_owned(),
             started_at: 1_700_000_000_000,
-            limits: norte_code_protocol::JobLimits {
+            limits: norte_code_wire::JobLimits {
                 timeout_s: Some(120),
                 max_output_bytes: Some(1_048_576),
             },
@@ -8395,7 +8614,7 @@ mod tests {
 
         let progress = ServerEventKind::JobProgressDelta {
             job_id: "job-1".to_owned(),
-            stream: norte_code_protocol::OutputStream::Stdout,
+            stream: norte_code_wire::OutputStream::Stdout,
             delta: "ok\n".to_owned(),
             index: 0,
         };
@@ -8407,11 +8626,11 @@ mod tests {
         assert_eq!(turn_id_for_event(&progress), None);
 
         let finished = ServerEventKind::JobFinished {
-            job: norte_code_protocol::JobInfo {
+            job: norte_code_wire::JobInfo {
                 id: "job-1".to_owned(),
                 label: "make".to_owned(),
                 script: "make".to_owned(),
-                state: norte_code_protocol::JobState::Finished,
+                state: norte_code_wire::JobState::Finished,
                 exit_code: Some(0),
                 timed_out: false,
                 elapsed_ms: 10,
@@ -8435,17 +8654,17 @@ mod tests {
         assert_eq!(
             parse_job_turn_policy(Some(&json!({"job_turn_policy": "always"})))
                 .expect("always policy"),
-            Some(norte_code_protocol::JobTurnPolicy::Always)
+            Some(norte_code_wire::JobTurnPolicy::Always)
         );
         assert_eq!(
             parse_job_turn_policy(Some(&json!({"job_turn_policy": "on_failure"})))
                 .expect("on_failure policy"),
-            Some(norte_code_protocol::JobTurnPolicy::OnFailure)
+            Some(norte_code_wire::JobTurnPolicy::OnFailure)
         );
         assert_eq!(
             parse_job_turn_policy(Some(&json!({"job_turn_policy": "never"})))
                 .expect("never policy"),
-            Some(norte_code_protocol::JobTurnPolicy::Never)
+            Some(norte_code_wire::JobTurnPolicy::Never)
         );
         assert!(
             parse_job_turn_policy(Some(&json!({"notify": true}))).is_err(),
