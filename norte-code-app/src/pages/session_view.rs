@@ -209,7 +209,7 @@ pub fn SessionSubagents() -> Element {
     let session_id = session.session_id.clone();
     // The host is the source of truth; the stream is the live view. Ask once
     // when the pane opens, then let `ChildSessionStarted/Updated` keep it
-    // current — a spawn shows up the moment it happens, not on a reload.
+    // current, a spawn shows up the moment it happens, not on a reload.
     use_effect(use_reactive((&session_id,), {
         move |(session_id,)| {
             spawn(async move {

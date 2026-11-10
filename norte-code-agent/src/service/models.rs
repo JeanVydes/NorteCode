@@ -427,10 +427,8 @@ impl Service {
         &self,
         request_id: u64,
         provider_id: &str,
-        entry: serde_json::Value,
+        provider: Provider,
     ) -> Result<EventStream, ServiceError> {
-        let provider: Provider = serde_json::from_value(entry)
-            .map_err(|error| ServiceError::History(format!("provider `{provider_id}`: {error}")))?;
         if provider_id.trim().is_empty() {
             return Err(ServiceError::History("a provider needs an id".to_owned()));
         }
@@ -479,10 +477,8 @@ impl Service {
     pub(super) fn upsert_model(
         &self,
         request_id: u64,
-        entry: serde_json::Value,
+        model: Model,
     ) -> Result<EventStream, ServiceError> {
-        let model: Model = serde_json::from_value(entry)
-            .map_err(|error| ServiceError::History(format!("model: {error}")))?;
         if model.id.trim().is_empty() {
             return Err(ServiceError::History("a model needs an id".to_owned()));
         }

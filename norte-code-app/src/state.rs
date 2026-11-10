@@ -55,8 +55,8 @@ pub struct AppContext {
     pub live_session_list: Signal<bool>,
     /// The newest history request, by number.
     ///
-    /// Two turn ends close together — a job's turn and the auto-turn that
-    /// follows it — start two history reads, and the replies come back in
+    /// Two turn ends close together, a job's turn and the auto-turn that
+    /// follows it, start two history reads, and the replies come back in
     /// whatever order the network gives them. Applying the older reply over
     /// the newer one dropped the answer the person just watched arrive; the
     /// text only came back on a reload. A reply applies only if it is still
@@ -179,7 +179,7 @@ impl AppContext {
     /// selection, and from the open conversation.
     ///
     /// Without this, a deleted session stayed selected in memory and every
-    /// later attempt to open it failed with the host's "not found" — the page
+    /// later attempt to open it failed with the host's "not found", the page
     /// looked broken until a reload cleared the id.
     pub fn forget_session(self, session_id: &str) {
         self.mark_session_deleted(session_id);
@@ -190,7 +190,7 @@ impl AppContext {
     /// the deletion.
     ///
     /// A list refresh that does not carry a session yet is not proof it is
-    /// gone — a poll reply can be older than the create that just landed — so
+    /// gone, a poll reply can be older than the create that just landed, so
     /// that path clears the selection and leaves the tombstone alone.
     pub fn forget_session_without_tombstone(self, session_id: &str) {
         self.update_sessions(|sessions| {
@@ -376,7 +376,7 @@ impl AppContext {
         *self.compacting.read()
     }
 
-    /// Adds a line to the transcript's own log — compaction, rewind and other
+    /// Adds a line to the transcript's own log, compaction, rewind and other
     /// events that are not a message from either side but explain what just
     /// happened to the conversation.
     pub fn push_system_note(self, text: String) {

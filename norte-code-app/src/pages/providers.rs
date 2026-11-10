@@ -2,40 +2,10 @@ use crate::api::{ApiClient, CatalogDetail};
 use crate::components::{EmptyState, PageHeader};
 use crate::state::AppContext;
 use dioxus::prelude::*;
+use norte_code_wire::catalog::{Model, Provider, Wire, WireSchema};
 use norte_code_wire::{CatalogModelInfo, CatalogProviderInfo};
-use serde::Serialize;
 
 /// A provider as the form writes it into `providers.json`.
-#[derive(Serialize)]
-struct ProviderDraft {
-    name: String,
-    environment_keys: Vec<String>,
-    wires: Vec<WireDraft>,
-}
-
-#[derive(Serialize)]
-struct WireDraft {
-    api: String,
-    schema: WireSchemaName,
-}
-
-/// The request schemas this host reaches. The enum is the closed set; the
-/// form offers the compatible one, which is what most gateways speak.
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum WireSchemaName {
-    Openai,
-}
-
-/// A model as the form writes it into `models.json`.
-#[derive(Serialize)]
-struct ModelDraft {
-    id: String,
-    provider_id: String,
-    canonical_slug: String,
-    name: String,
-}
-
 /// The catalogue lives in two files on the host; this page edits them.
 ///
 /// A provider a plugin injected is shown, marked and not editable: it is not
@@ -135,13 +105,15 @@ pub fn ProvidersPage() -> Element {
                                 ));
                                 return;
                             }
-                            let entry = ProviderDraft {
+                            let entry = Provider {
                                 name: if name.is_empty() { id.clone() } else { name },
                                 environment_keys,
-                                wires: vec![WireDraft {
+                                wires: vec![Wire {
                                     api,
-                                    schema: WireSchemaName::Openai,
+                                    schema: WireSchema::OpenAI,
+                                    auth: None,
                                 }],
+                                ..Provider::default()
                             };
                             save_provider(&context, detail, loading, id, entry);
                             adding_provider.set(false);
@@ -205,11 +177,12 @@ pub fn ProvidersPage() -> Element {
                                 context.set_page_error(Some("A model needs an id.".to_owned()));
                                 return;
                             }
-                            let entry = ModelDraft {
+                            let entry = Model {
                                 provider_id: provider_id.clone(),
                                 canonical_slug: id.clone(),
                                 name: if name.is_empty() { id.clone() } else { name },
                                 id,
+                                ..Model::default()
                             };
                             save_model(&context, detail, loading, entry);
                             model_form.set(None);
@@ -347,11 +320,12 @@ fn ProviderCard(
                                     return;
                                 }
                                 let name = model_name.read().trim().to_owned();
-                                let entry = ModelDraft {
+                                let entry = Model {
                                     provider_id: provider_id.clone(),
                                     canonical_slug: id.clone(),
                                     name: if name.is_empty() { id.clone() } else { name },
                                     id,
+                                    ..Model::default()
                                 };
                                 save_model(&context, detail, loading, entry);
                                 adding_model.set(false);
@@ -408,12 +382,8 @@ fn save_provider(
     detail: Signal<CatalogDetail>,
     loading: Signal<bool>,
     provider_id: String,
-    entry: ProviderDraft,
+    entry: Provider,
 ) {
-    let Ok(entry) = serde_json::to_value(entry) else {
-        context.set_page_error(Some("The provider could not be encoded.".to_owned()));
-        return;
-    };
     let context = *context;
     spawn(async move {
         let Some(client) = client(&context) else {
@@ -432,12 +402,8 @@ fn save_model(
     context: &AppContext,
     detail: Signal<CatalogDetail>,
     loading: Signal<bool>,
-    entry: ModelDraft,
+    entry: Model,
 ) {
-    let Ok(entry) = serde_json::to_value(entry) else {
-        context.set_page_error(Some("The model could not be encoded.".to_owned()));
-        return;
-    };
     let context = *context;
     spawn(async move {
         let Some(client) = client(&context) else {

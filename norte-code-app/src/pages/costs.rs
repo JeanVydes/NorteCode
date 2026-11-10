@@ -41,7 +41,7 @@ pub fn CostsPage() -> Element {
             MetricCard {
                 label: "Requests counted",
                 value: global.as_ref().map_or_else(
-                    || "—".to_owned(),
+                    || "-".to_owned(),
                     |report| report.requests.to_string(),
                 ),
                 note: "Provider requests in the ledger"
@@ -57,7 +57,7 @@ pub fn CostsPage() -> Element {
             MetricCard {
                 label: "Session requests",
                 value: session.as_ref().map_or_else(
-                    || "—".to_owned(),
+                    || "-".to_owned(),
                     |report| report.requests.to_string(),
                 ),
                 note: "Requests attributed to this session"

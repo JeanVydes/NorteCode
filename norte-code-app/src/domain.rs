@@ -385,7 +385,7 @@ pub enum ChatState {
     /// The session is compacting its history.
     Compacting,
     /// The model asked a question and the turn is parked until it is
-    /// answered. It is not idle — the turn is still open — and not working
+    /// answered. It is not idle, the turn is still open, and not working
     /// either: nothing will happen until a person replies.
     AwaitingAnswer,
     /// Another client holds the session. Nothing is retried: taking it back

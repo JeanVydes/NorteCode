@@ -3,7 +3,7 @@
 //!
 //! The RAEP server allows one attachment at a time, so the page opens the
 //! stream once when a session is selected (the stream *is* the attachment)
-//! and everything else — history, prompts, rewind, fork — rides the same
+//! and everything else, history, prompts, rewind, fork, rides the same
 //! attachment instead of attaching and detaching around each call.
 
 use crate::api::{ApiClient, ApiError};
@@ -467,7 +467,7 @@ pub fn history_item_to_conversation(item: &frames::HistoryItem, index: usize) ->
 /// What a running turn is doing, in the wire's own words.
 ///
 /// It used to be a second enum with the same four values, translated by a
-/// `match` at the one place that decoded it — two names for one state, which
+/// `match` at the one place that decoded it, two names for one state, which
 /// is how a new phase ends up handled in one and silently dropped in the other.
 pub use crate::frames::TurnStateName as TurnPhase;
 
@@ -575,7 +575,7 @@ pub enum DecodedFrame {
         options: Vec<String>,
         multiple: bool,
     },
-    /// A question was answered — by this client or another — so it is no
+    /// A question was answered, by this client or another, so it is no
     /// longer waiting.
     QuestionAnswered {
         id: String,

@@ -2,7 +2,7 @@ use crate::api::{ApiClient, McpCatalog, SkillCatalog, ToolRule};
 use crate::components::{EmptyState, PageHeader};
 use crate::state::AppContext;
 use dioxus::prelude::*;
-use serde_json::Value;
+use norte_code_wire::{McpInfo, SkillInfo};
 
 #[component]
 pub fn HostCapabilitiesPage() -> Element {
@@ -111,7 +111,7 @@ pub fn HostCapabilitiesPage() -> Element {
                     for failure in catalog.failures {
                         div { class: "notice notice-error", role: "alert",
                             strong { "MCP server failed" }
-                            pre { class: "output-box", "{pretty_json(&failure)}" }
+                            pre { class: "output-box", "{failure.reason}" }
                         }
                     }
                 }
@@ -177,11 +177,9 @@ pub fn HostCapabilitiesPage() -> Element {
 }
 
 #[component]
-fn SkillCard(skill: Value) -> Element {
-    let name = string_field(&skill, "name")
-        .or_else(|| string_field(&skill, "id"))
-        .unwrap_or_else(|| "Unnamed skill".to_owned());
-    let description = string_field(&skill, "description");
+fn SkillCard(skill: SkillInfo) -> Element {
+    let name = skill.name;
+    let description = (!skill.description.is_empty()).then_some(skill.description);
     rsx! {
         article { class: "panel catalog-provider",
             h3 { "{name}" }
@@ -193,16 +191,10 @@ fn SkillCard(skill: Value) -> Element {
 }
 
 #[component]
-fn McpCard(server: Value, busy: bool, on_toggle: EventHandler<(String, bool)>) -> Element {
-    let name = string_field(&server, "name");
-    let active = server
-        .get("active")
-        .and_then(Value::as_bool)
-        .or_else(|| server.get("enabled").and_then(Value::as_bool));
-    let tool_count = server
-        .get("tools")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+fn McpCard(server: McpInfo, busy: bool, on_toggle: EventHandler<(String, bool)>) -> Element {
+    let name = Some(server.name);
+    let active = Some(server.active);
+    let tool_count = server.tools.len();
     rsx! {
         article { class: "session-card",
             div { class: "session-card-head",
@@ -310,7 +302,7 @@ fn refresh_skills(
                 Ok(catalog) => skills.set(Some(catalog)),
                 Err(error) => push_error(errors, error.to_string()),
             },
-            Err(error) => push_error(errors, error),
+            Err(error) => push_error(errors, error.to_string()),
         }
         loading.set(false);
     });
@@ -336,7 +328,7 @@ fn refresh_mcp(
                 Ok(catalog) => mcp.set(Some(catalog)),
                 Err(error) => push_error(errors, error.to_string()),
             },
-            Err(error) => push_error(errors, error),
+            Err(error) => push_error(errors, error.to_string()),
         }
         loading.set(false);
     });
@@ -357,7 +349,7 @@ fn refresh_tools(
                 Ok(rules) => tools.set(Some(rules)),
                 Err(error) => push_error(errors, error.to_string()),
             },
-            Err(error) => push_error(errors, error),
+            Err(error) => push_error(errors, error.to_string()),
         }
         loading.set(false);
     });
@@ -375,7 +367,7 @@ fn set_mcp_active(
     let api = match active_api(context) {
         Ok(api) => api,
         Err(error) => {
-            push_error(errors, error);
+            push_error(errors, error.to_string());
             return;
         }
     };
@@ -402,7 +394,7 @@ fn set_tool_rule(
     let api = match active_api(context) {
         Ok(api) => api,
         Err(error) => {
-            push_error(errors, error);
+            push_error(errors, error.to_string());
             return;
         }
     };
@@ -422,11 +414,22 @@ fn set_tool_rule(
     });
 }
 
-fn active_api(context: &AppContext) -> Result<ApiClient, String> {
+/// Why a page cannot reach the host.
+#[derive(Debug, thiserror::Error)]
+enum ClientUnavailable {
+    /// No server profile has been selected.
+    #[error("Select a server profile first.")]
+    NoProfile,
+    /// The client could not be built from the profile.
+    #[error(transparent)]
+    Client(#[from] crate::api::ApiError),
+}
+
+fn active_api(context: &AppContext) -> Result<ApiClient, ClientUnavailable> {
     let profile = context
         .active_profile()
-        .ok_or_else(|| "Select a server profile first.".to_owned())?;
-    ApiClient::new(&profile.base_url, &profile.bearer_token).map_err(|error| error.to_string())
+        .ok_or(ClientUnavailable::NoProfile)?;
+    Ok(ApiClient::new(&profile.base_url, &profile.bearer_token)?)
 }
 
 fn push_error(mut errors: Signal<Vec<String>>, error: String) {
@@ -435,12 +438,4 @@ fn push_error(mut errors: Signal<Vec<String>>, error: String) {
             current.push(error);
         }
     });
-}
-
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn pretty_json(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }

@@ -463,7 +463,7 @@ pub enum ClientRequestKind {
         /// The provider id, the key it lives under in the file.
         provider_id: String,
         /// The entry to write under that key.
-        provider: serde_json::Value,
+        provider: crate::catalog::Provider,
     },
     /// Remove a provider and every model that names it.
     CatalogRemoveProvider {
@@ -473,7 +473,7 @@ pub enum ClientRequestKind {
     /// Add or replace a model in `models.json`, keyed by `provider_id` + `id`.
     CatalogUpsertModel {
         /// The entry to write.
-        model: serde_json::Value,
+        model: crate::catalog::Model,
     },
     /// Remove one model from `models.json`.
     CatalogRemoveModel {
