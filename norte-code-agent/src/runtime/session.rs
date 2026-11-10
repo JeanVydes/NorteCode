@@ -87,8 +87,8 @@ impl Harness {
     /// generating (FR-ENG-6).
     ///
     /// This is the array-to-graph bridge: a host that already holds a
-    /// conversation as an ordered `Vec<Message>` — a transcript it loaded,
-    /// imported from another system or built in memory — persists it verbatim
+    /// conversation as an ordered `Vec<Message>`: a transcript it loaded,
+    /// imported from another system or built in memory: persists it verbatim
     /// onto the current head. Nothing is sent to the model, so the next
     /// [`send`](Harness::send) sees the seeded prefix unchanged and the provider
     /// prompt cache keeps hitting (FR-RECON-2).

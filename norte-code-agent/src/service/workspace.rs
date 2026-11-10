@@ -6,7 +6,7 @@
 //! root, and refuses FIFOs, sockets and devices so a tool cannot block forever.
 //!
 //! It is a wrapper around the declaration rather than a rule the engine
-//! evaluates, because the tool's own arguments are typed here — the wrapper
+//! evaluates, because the tool's own arguments are typed here: the wrapper
 //! knows which field is a path, which is the thing a rule over raw JSON has to
 //! be told.
 

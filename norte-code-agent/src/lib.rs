@@ -13,14 +13,11 @@ pub mod runtime;
 pub mod service;
 pub mod telemetry;
 
-pub use client::InProcessClient;
 pub use error::ServiceError;
 pub use provider::{ModelFactory, ModelSpec, VendorModels};
 pub use service::{
     EventStream, PromptSize, RuleScope, Service, ToolStatus, effective_reasoning, model_list,
 };
-
-mod client;
 
 /// The default system prompt for the built-in host.
 ///

@@ -34,8 +34,8 @@ pub(super) const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 ///
 /// A host can have fifty skills installed and never use one of them, and their
 /// descriptions are written for a model to read, so they are long: the AWS set
-/// alone is nineteen thousand characters. Paying that on every request — every
-/// turn, every retry, every tool call — is a cost a session should choose, not
+/// alone is nineteen thousand characters. Paying that on every request: every
+/// turn, every retry, every tool call: is a cost a session should choose, not
 /// one it inherits from its directory layout.
 pub(super) const MAX_SKILLS_BLOCK_CHARS: usize = 4096;
 
@@ -83,8 +83,8 @@ pub(super) fn load_project_instructions(root: &Path) -> Option<ProjectInstructio
 /// The skills block: the names that are installed, so a model can ask for one.
 ///
 /// Only the names go in. A description says what a skill is for and when to
-/// reach for it, and being written for a model to read they are long — the AWS
-/// set alone is nineteen thousand characters — while `skill(action: list)` hands
+/// reach for it, and being written for a model to read they are long: the AWS
+/// set alone is nineteen thousand characters: while `skill(action: list)` hands
 /// the same descriptions back on demand. Paying for them on every request, to
 /// pick one out of a list the model most often does not need, is the cost this
 /// keeps off the prompt; what the prompt needs is that a model can tell a skill

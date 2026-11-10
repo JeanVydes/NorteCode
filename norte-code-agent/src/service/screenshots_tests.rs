@@ -245,7 +245,7 @@ fn the_interceptor_knows_whether_the_model_takes_an_image() {
     // The check that keeps a capture out of a text-only model's history. An
     // interceptor's messages are committed before the engine checks them
     // against the model, so injecting one it cannot take would fail every
-    // later turn — the way a refused attachment used to poison a session.
+    // later turn: the way a refused attachment used to poison a session.
     let screenshots = Arc::new(Screenshots::default());
     let text_only = Capabilities::builder().input(Modality::Text).build();
     let interceptor = ScreenshotInterceptor::new(Arc::clone(&screenshots), &text_only);

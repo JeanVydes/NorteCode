@@ -8,7 +8,7 @@
 //!
 //! The wire is chosen from the provider's own list: the schema a caller named,
 //! or the preferred one when nobody said. The endpoint always comes from the
-//! wire — a base URL a person owns — and every request goes through a
+//! wire: a base URL a person owns: and every request goes through a
 //! [`VendorProfile`], so there is one path for a vendor this build has never
 //! heard of and one for the three everyone knows.
 
@@ -47,14 +47,14 @@ pub struct ModelSpec {
     /// The schema the provider serves for this model.
     ///
     /// It is what the wire *is*: which adapter speaks it and whether the prompt
-    /// cache is explicit follow from it, and so does the credential header —
+    /// cache is explicit follow from it, and so does the credential header -
     /// unless the wire named one of its own, which is `auth`.
     pub schema: WireSchema,
     /// The credential header, when the wire named one its schema does not
     /// imply.
     ///
-    /// A gateway that serves another vendor's shape over its own credential —
-    /// an Anthropic Messages surface reached with `Authorization: Bearer` —
+    /// A gateway that serves another vendor's shape over its own credential -
+    /// an Anthropic Messages surface reached with `Authorization: Bearer` -
     /// says so on its wire, and the header here is that. `None` is the common
     /// case: the header follows from the schema.
     pub auth: Option<AuthKind>,
@@ -137,7 +137,7 @@ impl ModelSpec {
             // The catalogue files are a person's, not a download: an empty
             // one is a setup step that has not been done. A catalogue plugin
             // may still have fed the service an in-memory catalogue, in which
-            // case this branch is unreachable — the service tries that first.
+            // case this branch is unreachable: the service tries that first.
             return Err(ServiceError::Unsupported(
                 "no provider is configured. Add one to providers.json (or install a \
                  catalogue plugin that offers one), then re-read the catalogue.",
@@ -240,7 +240,7 @@ impl ModelFactory for VendorModels {
         // One path for every provider: the endpoint is the one its own entry
         // named, and the profile carries the credential header the schema
         // implies. There is no branch for a vendor this build has heard of,
-        // because knowing the vendor is not what makes the request work — the
+        // because knowing the vendor is not what makes the request work: the
         // wire is.
         let profile = profile(
             spec.schema,
@@ -269,7 +269,7 @@ fn with_headers(profile: VendorProfile, headers: &BTreeMap<String, String>) -> V
 /// The header follows from the schema, which is what a vendor that speaks its
 /// own shape expects; a wire that named one of its own overrides it, because a
 /// gateway may serve another vendor's body over its own credential. The wire is
-/// the only place that may say so — the configuration cannot, and a value it
+/// the only place that may say so: the configuration cannot, and a value it
 /// could set would only make the request wrong.
 fn profile(
     schema: WireSchema,

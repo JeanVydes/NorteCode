@@ -307,7 +307,7 @@ pub(super) fn error_code(error: &norte::Error) -> ErrorCode {
         // A capability the model lacks is the request's fault, not the
         // provider's: the wire was never reached, and retrying it would spend
         // the same refusal again. Reporting it as `Provider` read as a flaky
-        // vendor and hid the one thing worth acting on — the wrong model, or a
+        // vendor and hid the one thing worth acting on: the wrong model, or a
         // capability the host never declared.
         norte::Error::Capability { .. } => ErrorCode::Capability,
         norte::Error::InvalidInput(_) | norte::Error::InvalidId(_) => ErrorCode::InvalidRequest,

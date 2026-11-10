@@ -200,7 +200,7 @@ impl Service {
         // A session may be named by a prefix of its id: the footer shows eight
         // characters and a person types back what they can see. Resolve it once
         // here, at the one door every request comes through, so no handler has
-        // to know a name may be short — it is handed the canonical key or the
+        // to know a name may be short: it is handed the canonical key or the
         // error that says why it is not one.
         request.kind = self.canonical(request.kind)?;
         let request_id = request.request_id;

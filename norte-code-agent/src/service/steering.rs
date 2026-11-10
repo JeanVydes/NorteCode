@@ -135,7 +135,7 @@ impl TurnInterceptor for SteeringInterceptor {
 
     async fn intercept(&self, context: &InterceptionContext<'_>) -> Result<Interception> {
         // The engine asks about one call at `ToolCall`, and a message injected
-        // there is dropped — the queue it came from loses it. Waiting for the
+        // there is dropped: the queue it came from loses it. Waiting for the
         // request that follows is what a steering message does anyway.
         if matches!(context.point, ConsultationPoint::ToolCall { .. }) {
             return Ok(Interception::Continue);

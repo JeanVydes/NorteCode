@@ -18,7 +18,7 @@ pub const CONVERSATION_SCHEMA_VERSION: u16 = 1;
 /// A serializable, self-contained conversation: the session's durable identity
 /// and its ordered message history (FR-EXP-1).
 ///
-/// It carries no store-internal detail — node ids, versions and timestamps are
+/// It carries no store-internal detail: node ids, versions and timestamps are
 /// the store's bookkeeping, not conversation content (FR-GRAPH-4). This is the
 /// portable form of a chat: export it, keep or ship it as JSON, import it back
 /// elsewhere, and the next generation reproduces the exact same wire bytes.

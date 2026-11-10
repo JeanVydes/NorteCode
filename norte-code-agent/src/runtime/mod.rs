@@ -8,7 +8,7 @@ policies, the layers and the observers. This crate is one way to drive them:
 
 It is deliberately *a* harness and not *the* harness. Nothing in the core refers
 to it, nothing forces a host to use it, and a host that wants a different turn
-policy — a different loop, its own scheduling, a graph instead of a session —
+policy: a different loop, its own scheduling, a graph instead of a session -
 depends on `norte-core` alone and writes it. What the core owns is the contracts
 and the durable state; what this crate owns is one order of operations over them.
 
@@ -212,8 +212,8 @@ fn turn_metadata(session: &Session, effective: &TurnOptions) -> BTreeMap<String,
 ///
 /// A cancelled turn commits the assistant message it streamed so far, and that
 /// message may already carry tool calls. Leaving them unanswered breaks the
-/// invariant every wire and every replay depends on — a `tool_call` has its
-/// `tool_result` — and the store keeps the break forever: the next turn appends
+/// invariant every wire and every replay depends on: a `tool_call` has its
+/// `tool_result`: and the store keeps the break forever: the next turn appends
 /// below an open call, so the history is one no provider accepts, and a replay
 /// across models cannot repair it (the adapter refuses to drop a token while a
 /// result is pending). Answering them with a cancelled error keeps the graph
@@ -631,7 +631,7 @@ impl Continuation for Digesting<'_> {
 /// A running turn driven by a spawned task, with a streaming event channel.
 /// Fluent builder for an engine.
 ///
-/// Three ports are required — a [`Store`], a [`BlobStore`] and a [`Model`] — and
+/// Three ports are required: a [`Store`], a [`BlobStore`] and a [`Model`]: and
 /// [`build`](HarnessBuilder::build) fails with [`Error::InvalidInput`] naming the
 /// one that is missing. Everything else has a default: an empty tool registry,
 /// no policies, no layers, no observers and [`HarnessConfig::default`].

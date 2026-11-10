@@ -3515,7 +3515,6 @@ dependencies = [
  "futures-core",
  "futures-util",
  "norte",
- "norte-code-client",
  "norte-code-protocol",
  "norte-code-wire",
  "norte-mcp",

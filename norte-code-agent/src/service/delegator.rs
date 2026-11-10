@@ -1,7 +1,7 @@
 //! Delegation plumbing (RFC 8.2): the child registry and the parent's view.
 //!
 //! `spawn_agent` creates a child session and runs one turn on it; this module
-//! owns the *registry* of those children — who is whose child, whether a
+//! owns the *registry* of those children: who is whose child, whether a
 //! delegator is suspended, and which messages are held while it is. The tools
 //! themselves live in [`super::subagents`]; the service's session state lives
 //! in [`super::sessions`]. This module sits between them so the tools can ask
@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 
 /// How a child's run ended.
 ///
-/// The call site used to pass two booleans — `terminal` and `failed` — and the
+/// The call site used to pass two booleans: `terminal` and `failed`: and the
 /// registry decoded them into a third state. `(false, true)` was a failure that
 /// was not terminal, a combination nothing ever meant but nothing rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
