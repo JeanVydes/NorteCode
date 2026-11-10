@@ -1,7 +1,48 @@
 use super::{
-    ChatState, ConversationItem, HistoryKind, HistoryRole, MessageDelivery, TodoStatus,
-    human_count, todos_from_history,
+    ChatState, ConversationItem, HistoryKind, HistoryRole, MessageDelivery, TodoStatus, TurnUsage,
+    fold_usage, human_count, todos_from_history,
 };
+
+fn assistant(turn_id: &str, content: &str) -> ConversationItem {
+    ConversationItem {
+        id: format!("stream:{turn_id}:text"),
+        turn_id: Some(turn_id.to_owned()),
+        role: HistoryRole::Assistant,
+        kind: HistoryKind::Assistant,
+        content: content.to_owned(),
+        created_at: 0,
+        delivery: MessageDelivery::Sent,
+        tool: None,
+        usage: None,
+    }
+}
+
+#[test]
+fn usage_lands_on_the_answer_of_its_own_turn() {
+    // The footer was attached to whatever assistant row came last, which after
+    // a queued turn is the other turn's answer.
+    let mut items = vec![assistant("turn-a", "first"), assistant("turn-b", "second")];
+    let usage = TurnUsage {
+        cost_usd: Some(0.25),
+        ..TurnUsage::default()
+    };
+    fold_usage(&mut items, Some("turn-a".to_owned()), &usage, 0);
+    assert_eq!(items[0].usage.as_ref().and_then(|u| u.cost_usd), Some(0.25));
+    assert!(items[1].usage.is_none());
+}
+
+#[test]
+fn usage_without_an_answer_still_has_a_row() {
+    let mut items = Vec::new();
+    fold_usage(
+        &mut items,
+        Some("turn-a".to_owned()),
+        &TurnUsage::default(),
+        0,
+    );
+    assert_eq!(items.len(), 1);
+    assert!(items[0].usage.is_some());
+}
 
 #[test]
 fn token_counts_read_in_k_m_b() {
