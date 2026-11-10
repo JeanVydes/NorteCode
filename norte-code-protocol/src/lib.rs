@@ -15,23 +15,17 @@
 
 pub mod agent_commands;
 pub mod catalog;
-pub mod commands;
 pub mod config;
 pub mod costs;
 pub mod keys;
 pub mod plans;
-pub mod plugins;
 pub mod skills;
 pub mod sqlite;
 pub mod store;
 pub mod tools;
-pub mod types;
-pub mod wire;
 
-pub use agent_commands::{AgentCommand, QueueMode};
+pub use agent_commands::AgentCommand;
 pub use store::*;
-pub use types::*;
-pub use wire::*;
 
 /// The protocol revision. It is bumped when a type changes shape in a way an
 /// older client cannot read.
@@ -39,7 +33,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use norte_code_wire::*;
 
     #[test]
     fn a_request_round_trips() {
@@ -57,6 +51,8 @@ mod tests {
                 reasoning: Some(Reasoning::Effort {
                     effort: "high".to_owned(),
                 }),
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },

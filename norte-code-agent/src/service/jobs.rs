@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use norte::{CallId, Cancellation, SessionId};
-use norte_code_protocol::JobInfo;
+use norte_code_wire::JobInfo;
 
 /// How much of a job's output is kept for `manage_jobs` to read.
 ///
@@ -48,7 +48,7 @@ pub(super) struct JobStartError {
 /// It is the protocol's own enum and not a copy: the service writes it into
 /// every `JobInfo` it hands out, and a second type here would be a second
 /// spelling of the same three words — which is what the string was.
-pub(super) use norte_code_protocol::JobState;
+pub(super) use norte_code_wire::JobState;
 
 /// What a job looks like from outside.
 #[derive(Clone, Debug)]

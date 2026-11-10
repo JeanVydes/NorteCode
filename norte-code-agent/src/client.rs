@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use norte_code_client::{AgentClient, ClientError, EventStream, SessionSummary};
-use norte_code_protocol::{
-    ClientRequest, ClientRequestKind, QueueMode, ServerEventKind, SessionKey,
-};
+use norte_code_wire::QueueMode;
+use norte_code_wire::{ClientRequest, ClientRequestKind, ServerEventKind, SessionKey};
 
 use crate::Service;
 
@@ -141,7 +140,7 @@ impl AgentClient for InProcessClient {
         &self,
         session: &str,
         text: &str,
-        attachments: &[norte_code_protocol::Attachment],
+        attachments: &[norte_code_wire::Attachment],
     ) -> Result<EventStream, ClientError> {
         self.service
             .submit(ClientRequest {
@@ -152,6 +151,8 @@ impl AgentClient for InProcessClient {
                     attachments: attachments.to_vec(),
                     budget: None,
                     reasoning: None,
+                    output: Vec::new(),
+                    response_format: None,
                     metadata: None,
                     replay: false,
                 },
@@ -221,14 +222,14 @@ impl AgentClient for InProcessClient {
     async fn set_reasoning(
         &self,
         session: &str,
-        reasoning: norte_code_protocol::Reasoning,
+        reasoning: norte_code_wire::Reasoning,
     ) -> Result<EventStream, ClientError> {
         self.service
             .submit(ClientRequest {
                 request_id: 0,
                 kind: ClientRequestKind::SetReasoning {
                     session: SessionKey::new(session),
-                    scope: norte_code_protocol::ReasoningScope::Session,
+                    scope: norte_code_wire::ReasoningScope::Session,
                     reasoning,
                 },
             })
@@ -239,7 +240,7 @@ impl AgentClient for InProcessClient {
     async fn set_budget(
         &self,
         session: &str,
-        budget: norte_code_protocol::Budget,
+        budget: norte_code_wire::Budget,
     ) -> Result<EventStream, ClientError> {
         self.service
             .submit(ClientRequest {
@@ -277,6 +278,8 @@ impl AgentClient for InProcessClient {
                     from_turn_id: None,
                     inclusive: None,
                     carry_usage: None,
+                    agent_id: None,
+                    include: None,
                 },
             })
             .await

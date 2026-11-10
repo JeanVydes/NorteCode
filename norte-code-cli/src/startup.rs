@@ -25,7 +25,7 @@ use norte_code_client::AgentClient;
 use norte_code_protocol::config::Config;
 #[cfg(test)]
 use norte_code_protocol::sqlite::StoredSession;
-use norte_code_protocol::{Phase, SessionInfo, SessionKey};
+use norte_code_wire::{Phase, SessionInfo, SessionKey};
 use std::io::IsTerminal as _;
 use std::path::Path;
 
@@ -138,7 +138,10 @@ impl SessionRow {
         match self.phase {
             Phase::AwaitingTool => Some(SessionState::Waiting),
             Phase::Streaming => Some(SessionState::Interrupted),
-            Phase::Idle => None,
+            // A phase this build does not know is not treated as unfinished:
+            // guessing "interrupted" would offer to resume a turn that may be
+            // running.
+            Phase::Idle | _ => None,
         }
     }
 }

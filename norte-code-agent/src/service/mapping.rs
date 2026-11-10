@@ -15,7 +15,7 @@ use norte::{
 };
 use norte_code_protocol::config::{BudgetConfig, RetryConfig};
 use norte_code_protocol::costs::{BudgetBook, CostRecord};
-use norte_code_protocol::{
+use norte_code_wire::{
     Budget, BudgetUnit, Delta, ErrorCode, OutputStream, ServerEvent, ServerEventKind, SessionKey,
 };
 use tokio::sync::mpsc;
@@ -144,8 +144,8 @@ pub(super) fn shorten_tool_output(text: String) -> (String, bool) {
     (shortened, true)
 }
 
-pub(super) fn to_usage(usage: &Usage) -> norte_code_protocol::Usage {
-    norte_code_protocol::Usage {
+pub(super) fn to_usage(usage: &Usage) -> norte_code_wire::Usage {
+    norte_code_wire::Usage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         reasoning_tokens: usage.reasoning_tokens,
@@ -288,11 +288,11 @@ pub(super) async fn call_arguments(
         .map(|call| call.arguments.clone())
 }
 
-pub(super) fn to_phase(phase: crate::runtime::Phase) -> norte_code_protocol::Phase {
+pub(super) fn to_phase(phase: crate::runtime::Phase) -> norte_code_wire::Phase {
     match phase {
-        crate::runtime::Phase::Streaming => norte_code_protocol::Phase::Streaming,
-        crate::runtime::Phase::AwaitingTool => norte_code_protocol::Phase::AwaitingTool,
-        _ => norte_code_protocol::Phase::Idle,
+        crate::runtime::Phase::Streaming => norte_code_wire::Phase::Streaming,
+        crate::runtime::Phase::AwaitingTool => norte_code_wire::Phase::AwaitingTool,
+        _ => norte_code_wire::Phase::Idle,
     }
 }
 

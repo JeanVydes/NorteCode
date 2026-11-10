@@ -23,8 +23,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use norte::{CallId, Cancellation, FnExecutor, SessionId, ToolContext, ToolOutput};
-use norte_code_protocol::{MessageRole, ReplayedKind, SessionKey};
-use norte_code_protocol::{ServerEvent, ServerEventKind};
+use norte_code_wire::{ChildState, MessageRole, ReplayedKind, SessionKey};
+use norte_code_wire::{ServerEvent, ServerEventKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -329,16 +329,19 @@ fn emit_child_update(
         let next_message = children.finish_and_take_message(
             &parent_key,
             child,
-            outcome.is_error,
-            outcome.is_error,
+            if outcome.is_error {
+                super::delegator::RunEnd::Failed
+            } else {
+                super::delegator::RunEnd::Idle
+            },
         );
         let registered = children.get(&parent_key, child);
         let (state, reason) = match registered.as_ref() {
-            Some(child) if child.is_failed() => ("FAILED", "turn_failed"),
-            Some(child) if child.is_terminal() => ("STOPPED", "state_change"),
-            Some(child) if !child.is_finished() => ("RUNNING", "turn_finished"),
-            Some(_) => ("IDLE", "turn_finished"),
-            None => ("FAILED", "turn_failed"),
+            Some(child) if child.is_failed() => (ChildState::Failed, "turn_failed"),
+            Some(child) if child.is_terminal() => (ChildState::Stopped, "state_change"),
+            Some(child) if !child.is_finished() => (ChildState::Running, "turn_finished"),
+            Some(_) => (ChildState::Idle, "turn_finished"),
+            None => (ChildState::Failed, "turn_failed"),
         };
         if let Some(child) = registered.filter(super::delegator::Child::is_terminal) {
             persist_child_terminal(&service, &child.child, child.is_failed());
@@ -348,7 +351,7 @@ fn emit_child_update(
             Some(parent_key),
             ServerEventKind::ChildSessionUpdated {
                 child_session_id: child.as_str().to_owned(),
-                state: state.to_owned(),
+                state,
                 reason: reason.to_owned(),
                 result: Some(child_result(outcome)),
                 output_schema_valid: outcome.output_schema_valid,
@@ -388,7 +391,7 @@ fn emit_child_state(
     service_slot: &Arc<RwLock<Option<Arc<Service>>>>,
     parent: SessionId,
     child: &SessionKey,
-    state: &str,
+    state: ChildState,
     reason: &str,
 ) {
     if let Some(service) = service_of(service_slot)
@@ -399,7 +402,7 @@ fn emit_child_state(
             Some(parent_key),
             ServerEventKind::ChildSessionUpdated {
                 child_session_id: child.as_str().to_owned(),
-                state: state.to_owned(),
+                state,
                 reason: reason.to_owned(),
                 result: None,
                 output_schema_valid: None,
@@ -644,13 +647,13 @@ fn default_lifetime() -> String {
 }
 
 /// What a child is doing, as the model reads it (RFC 8.2.7, `child_status`).
-pub(super) fn child_state_label(phase: norte_code_protocol::Phase, running: bool) -> &'static str {
-    use norte_code_protocol::Phase;
+pub(super) fn child_state_label(phase: norte_code_wire::Phase, running: bool) -> &'static str {
+    use norte_code_wire::Phase;
     match phase {
-        Phase::Idle if running => "RUNNING",
-        Phase::Idle => "IDLE",
+        Phase::Idle | _ if running => "RUNNING",
         Phase::Streaming => "RUNNING",
         Phase::AwaitingTool => "AWAITING_APPROVAL",
+        Phase::Idle | _ => "IDLE",
     }
 }
 
@@ -903,7 +906,7 @@ fn child_key(id: &str) -> Result<SessionKey, String> {
 }
 
 /// The phase of a session, for `inspect_agent`'s `status` view.
-fn phase_of(service: &Service, child: &SessionKey) -> Option<norte_code_protocol::Phase> {
+fn phase_of(service: &Service, child: &SessionKey) -> Option<norte_code_wire::Phase> {
     service
         .lock_sessions()
         .get(child)
@@ -912,7 +915,7 @@ fn phase_of(service: &Service, child: &SessionKey) -> Option<norte_code_protocol
 
 fn registered_child_state(
     child: &super::delegator::Child,
-    phase: Option<norte_code_protocol::Phase>,
+    phase: Option<norte_code_wire::Phase>,
 ) -> &'static str {
     if child.is_terminal() {
         return if child.is_failed() {
@@ -1253,7 +1256,7 @@ impl MessageAgent {
         }
         let is_running = !registered.is_finished();
         if is_running && delivery == "steer" {
-            if phase_of(&service, &child) == Some(norte_code_protocol::Phase::AwaitingTool) {
+            if phase_of(&service, &child) == Some(norte_code_wire::Phase::AwaitingTool) {
                 return ToolOutput::error("CHILD_NOT_ACTIVE: child is waiting for a tool decision");
             }
             let nid = match service.require_record(&child) {
@@ -1395,7 +1398,13 @@ fn schedule_child_turn(
     if let Some(parent_key) = parent_key(&service, parent) {
         children.set_cancel(&parent_key, &child, Arc::clone(&cancel));
     }
-    emit_child_state(&service_slot, parent, &child, "RUNNING", "state_change");
+    emit_child_state(
+        &service_slot,
+        parent,
+        &child,
+        ChildState::Running,
+        "state_change",
+    );
     tokio::spawn(async move {
         let outcome = run_session_message(&service, &child, message, Some(&cancel)).await;
         emit_child_update(&children, &service_slot, parent, &outcome);
@@ -1528,7 +1537,7 @@ impl FnExecutor<StopArgs, ToolOutput> for StopAgent {
             &self.service,
             parent,
             &child,
-            "STOPPED",
+            ChildState::Stopped,
             args.reason.as_deref().unwrap_or("state_change"),
         );
         Ok(ToolOutput::text(
@@ -1538,6 +1547,24 @@ impl FnExecutor<StopArgs, ToolOutput> for StopAgent {
             })
             .to_string(),
         ))
+    }
+}
+
+/// What `wait_agent` waits for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitUntil {
+    /// The current turn ended, and the child can take another message.
+    Idle,
+    /// The child will not run again.
+    Finished,
+}
+
+impl WaitUntil {
+    fn reached(self, child: &super::delegator::Child) -> bool {
+        match self {
+            Self::Idle => child.is_finished(),
+            Self::Finished => child.is_terminal(),
+        }
     }
 }
 
@@ -1597,25 +1624,24 @@ impl FnExecutor<WaitArgs, ToolOutput> for WaitAgent {
                 args.child_session_id
             )));
         };
-        let until = args.until.as_deref().unwrap_or("idle");
-        if !matches!(until, "idle" | "finished") {
-            return Ok(ToolOutput::error(format!(
-                "wait_agent: unknown until `{until}`; use idle or finished"
-            )));
-        }
+        // The argument is the model's text, so it is validated here — once,
+        // into a value — and the two waits below ask the same question of it.
+        let until = match args.until.as_deref().unwrap_or("idle") {
+            "idle" => WaitUntil::Idle,
+            "finished" => WaitUntil::Finished,
+            other => {
+                return Ok(ToolOutput::error(format!(
+                    "wait_agent: unknown until `{other}`; use idle or finished"
+                )));
+            }
+        };
         let timeout = std::time::Duration::from_secs(args.timeout_s.unwrap_or(300).min(600));
         let deadline = tokio::time::Instant::now() + timeout;
         let changed = Arc::clone(&child_record.changed);
         let mut timed_out = false;
         loop {
             let current = self.children.get(&parent_key, &child);
-            let complete = current.is_some_and(|child| {
-                if until == "idle" {
-                    child.is_finished()
-                } else {
-                    child.is_terminal()
-                }
-            });
+            let complete = current.is_some_and(|child| until.reached(&child));
             if complete {
                 break;
             }
@@ -1623,13 +1649,7 @@ impl FnExecutor<WaitArgs, ToolOutput> for WaitAgent {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let current = self.children.get(&parent_key, &child);
-            let complete = current.is_some_and(|child| {
-                if until == "idle" {
-                    child.is_finished()
-                } else {
-                    child.is_terminal()
-                }
-            });
+            let complete = current.is_some_and(|child| until.reached(&child));
             if complete {
                 break;
             }

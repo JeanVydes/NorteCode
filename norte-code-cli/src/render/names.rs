@@ -167,9 +167,9 @@ pub(crate) fn effort_label(effort: ReasoningEffort) -> &'static str {
 /// vocabulary and not Rust's: `frequency_penalty` is what a person types in
 /// `models.json`, and the debug output has to read like the file it describes.
 pub(crate) fn supported_param_name(
-    param: norte_code_protocol::catalog::SupportedParams,
+    param: norte_code_wire::catalog::SupportedParams,
 ) -> &'static str {
-    use norte_code_protocol::catalog::SupportedParams as P;
+    use norte_code_wire::catalog::SupportedParams as P;
     match param {
         P::FrequencyPenalty => "frequency_penalty",
         P::IncludeReasoning => "include_reasoning",

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::input::{Pinned, TodoItem};
-use norte_code_protocol::QueueMode;
+use norte_code_wire::QueueMode;
 
 /// The ink a row of the transcript is written in.
 use crate::transcript::Ink;
@@ -1438,10 +1438,10 @@ impl Renderer {
         &mut self,
         index: u64,
         role: MessageRole,
-        kind: norte_code_protocol::ReplayedKind,
+        kind: norte_code_wire::ReplayedKind,
         text: &str,
     ) {
-        use norte_code_protocol::ReplayedKind as K;
+        use norte_code_wire::ReplayedKind as K;
         if !self.verbosity.at_least(Verbosity::Medium) || matches!(self.format, Format::Jsonl) {
             return;
         }

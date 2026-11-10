@@ -44,9 +44,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::SessionKey;
-use crate::catalog::{Model, Provider};
 use crate::commands::{CommandSpec, Invocation};
+use norte_code_wire::SessionKey;
+use norte_code_wire::catalog::{Model, Provider};
 
 /// The version of the plugin interface a plugin was built against.
 ///

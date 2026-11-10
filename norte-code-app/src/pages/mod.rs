@@ -1,17 +1,23 @@
 mod chat;
+mod costs;
 mod developer;
-mod jobs;
+mod host_capabilities;
 mod overview;
+mod plugins;
+mod providers;
+mod session_view;
 mod sessions;
 mod settings;
-mod subagents;
 mod telemetry;
 
 pub(crate) use chat::ChatPage;
+pub(crate) use costs::CostsPage;
 pub(crate) use developer::DeveloperPage;
-pub(crate) use jobs::JobsPage;
+pub(crate) use host_capabilities::HostCapabilitiesPage;
 pub(crate) use overview::OverviewPage;
+pub(crate) use plugins::PluginsPage;
+pub(crate) use providers::ProvidersPage;
+pub(crate) use session_view::{SessionHeader, SessionSubagents, SessionTab, SessionTelemetry};
 pub(crate) use sessions::SessionsPage;
 pub(crate) use settings::SettingsPage;
-pub(crate) use subagents::SubagentsPage;
 pub(crate) use telemetry::TelemetryPage;

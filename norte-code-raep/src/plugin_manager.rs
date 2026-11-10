@@ -646,7 +646,7 @@ pub(crate) fn installed_entries() -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn plugin_info() -> Vec<norte_code_protocol::PluginInfo> {
+pub(crate) fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
     installed_entries()
         .into_iter()
         .filter_map(|path| {
@@ -657,7 +657,7 @@ pub(crate) fn plugin_info() -> Vec<norte_code_protocol::PluginInfo> {
                 .to_str()?
                 .trim_end_matches(".disabled")
                 .to_owned();
-            Some(norte_code_protocol::PluginInfo {
+            Some(norte_code_wire::PluginInfo {
                 name,
                 enabled: !disabled,
                 loaded: false,

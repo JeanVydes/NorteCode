@@ -11,7 +11,7 @@ use crate::models::ModelChoice;
 use crate::remote_state::{ModelInfoExt, RemoteState, effective_reasoning};
 use futures_util::StreamExt;
 use norte_code_client::AgentClient;
-use norte_code_protocol::QueueMode;
+use norte_code_wire::QueueMode;
 
 use crate::prompt::{PromptInput, answer_if_asked, prompt_input};
 use crate::render::{
@@ -19,7 +19,7 @@ use crate::render::{
     reasoning_setting_label, report_mcp as render_mcp, report_prompt, report_reasoning,
     report_start, report_tools, scope_name, tools_panel, unit_name,
 };
-use norte_code_protocol::commands::Invocation;
+use norte_code_plugin_host::commands::Invocation;
 use norte_code_protocol::plans::read_plan_header;
 /// How often a running turn redraws, in ms.
 ///
@@ -39,8 +39,8 @@ const READER_TICK_MS: u64 = 60;
 /// The wire's own attachment, named apart from the editor's: they carry the
 /// same three fields today, and they are not the same type — one is what a
 /// keystroke produced and the other is what goes on the wire.
-use norte_code_protocol::Attachment as ProtocolAttachment;
-use norte_code_protocol::JobState;
+use norte_code_wire::Attachment as ProtocolAttachment;
+use norte_code_wire::JobState;
 
 /// A validated interactive command.
 ///
@@ -169,7 +169,7 @@ pub(crate) enum ChatCommand {
     /// It arrives parsed and not as text: the registry that completed it is the
     /// same one that parsed it, so a plugin's command is a command like any
     /// other and the plugin is handed what it declared.
-    Plugin(norte_code_protocol::commands::Invocation),
+    Plugin(norte_code_plugin_host::commands::Invocation),
 }
 
 /// What `/jobs` was asked to do.
@@ -487,7 +487,7 @@ pub(crate) fn candidates(
     text: &str,
     cursor: usize,
     names: &CompletionNames,
-) -> Vec<norte_code_protocol::commands::Candidate> {
+) -> Vec<norte_code_plugin_host::commands::Candidate> {
     let rows = crate::commands_registry::shared().candidates(text, cursor);
     if !rows.is_empty() {
         return rows;
@@ -507,7 +507,7 @@ fn catalogue_candidates(
     text: &str,
     cursor: usize,
     names: &CompletionNames,
-) -> Vec<norte_code_protocol::commands::Candidate> {
+) -> Vec<norte_code_plugin_host::commands::Candidate> {
     if cursor != text.len() {
         return Vec::new();
     }
@@ -532,7 +532,7 @@ fn catalogue_candidates(
     values
         .iter()
         .filter(|value| value.to_lowercase().starts_with(&prefix))
-        .map(|value| norte_code_protocol::commands::Candidate {
+        .map(|value| norte_code_plugin_host::commands::Candidate {
             text: value.clone(),
             // Skipping the characters already typed rather than slicing at a
             // byte offset: a name is not guaranteed to be ASCII, and a byte
@@ -818,7 +818,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::PluginsList => {
                     remote_plugin_command(
                         client,
-                        norte_code_protocol::ClientRequestKind::ListPlugins,
+                        norte_code_wire::ClientRequestKind::ListPlugins,
                         renderer,
                     )
                     .await;
@@ -827,7 +827,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::PluginsAdd { url, package, all } => {
                     remote_plugin_command(
                         client,
-                        norte_code_protocol::ClientRequestKind::InstallPlugin { url, package, all },
+                        norte_code_wire::ClientRequestKind::InstallPlugin { url, package, all },
                         renderer,
                     )
                     .await;
@@ -836,7 +836,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::PluginsUpdate { name } => {
                     remote_plugin_command(
                         client,
-                        norte_code_protocol::ClientRequestKind::UpdatePlugins { name },
+                        norte_code_wire::ClientRequestKind::UpdatePlugins { name },
                         renderer,
                     )
                     .await;
@@ -845,7 +845,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::PluginsEnable { name } => {
                     remote_plugin_command(
                         client,
-                        norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                        norte_code_wire::ClientRequestKind::SetPluginEnabled {
                             name,
                             enabled: true,
                         },
@@ -857,7 +857,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::PluginsDisable { name } => {
                     remote_plugin_command(
                         client,
-                        norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                        norte_code_wire::ClientRequestKind::SetPluginEnabled {
                             name,
                             enabled: false,
                         },
@@ -869,7 +869,7 @@ pub(crate) async fn interactive_loop(
                 ChatCommand::PluginsRm { name } => {
                     remote_plugin_command(
                         client,
-                        norte_code_protocol::ClientRequestKind::RemovePlugin { name },
+                        norte_code_wire::ClientRequestKind::RemovePlugin { name },
                         renderer,
                     )
                     .await;
@@ -1202,6 +1202,8 @@ pub(crate) async fn interactive_loop(
                         .collect(),
                     budget: message_budget.clone(),
                     reasoning: reasoning.clone(),
+                    output: Vec::new(),
+                    response_format: None,
                     metadata: None,
                     // The transcript is already on screen; replaying it would
                     // print the conversation twice.
@@ -1307,7 +1309,7 @@ fn provider_of(service: &RemoteState, session: &SessionKey) -> Option<String> {
 /// models, each actable and carrying the pair to set. The current provider and
 /// model are marked so a person can see what a selection would change.
 fn models_panel(
-    models: &[norte_code_protocol::ModelInfo],
+    models: &[norte_code_wire::ModelInfo],
     current_provider: Option<&str>,
     current_model: Option<&str>,
     expanded: Option<&str>,
@@ -1535,9 +1537,9 @@ async fn show_plans(session: Option<&SessionKey>, renderer: &mut Renderer) {
     for (path, plan) in listed {
         let id = &plan.id;
         let status = Some(match plan.status {
-            norte_code_protocol::plans::PlanStatus::Active => "active",
-            norte_code_protocol::plans::PlanStatus::Pending => "pending",
-            norte_code_protocol::plans::PlanStatus::Canceled => "canceled",
+            norte_code_wire::PlanStatus::Active => "active",
+            norte_code_wire::PlanStatus::Pending => "pending",
+            norte_code_wire::PlanStatus::Canceled => "canceled",
         });
         let title = plan.title.as_deref().unwrap_or(id);
         let (indicator, label) = match status {
@@ -1599,9 +1601,9 @@ async fn plan_paths(
 fn plan_file_status(contents: &str) -> Option<&str> {
     let plan = norte_code_protocol::plans::parse_plan("plan", contents).ok()?;
     Some(match plan.status {
-        norte_code_protocol::plans::PlanStatus::Active => "active",
-        norte_code_protocol::plans::PlanStatus::Pending => "pending",
-        norte_code_protocol::plans::PlanStatus::Canceled => "canceled",
+        norte_code_wire::PlanStatus::Active => "active",
+        norte_code_wire::PlanStatus::Pending => "pending",
+        norte_code_wire::PlanStatus::Canceled => "canceled",
     })
 }
 
@@ -1646,7 +1648,7 @@ async fn handle_export(
         use futures_util::StreamExt;
         let mut stream = events;
         while let Some(event) = stream.next().await {
-            if let norte_code_protocol::ServerEventKind::SessionExportReady { bundle: b, .. } =
+            if let norte_code_wire::ServerEventKind::SessionExportReady { bundle: b, .. } =
                 &event.kind
             {
                 bundle = b.clone();
@@ -1754,7 +1756,7 @@ async fn handle_live_command(
         ChatCommand::PluginsList => {
             remote_plugin_command(
                 client,
-                norte_code_protocol::ClientRequestKind::ListPlugins,
+                norte_code_wire::ClientRequestKind::ListPlugins,
                 renderer,
             )
             .await;
@@ -1763,7 +1765,7 @@ async fn handle_live_command(
         ChatCommand::PluginsAdd { url, package, all } => {
             remote_plugin_command(
                 client,
-                norte_code_protocol::ClientRequestKind::InstallPlugin { url, package, all },
+                norte_code_wire::ClientRequestKind::InstallPlugin { url, package, all },
                 renderer,
             )
             .await;
@@ -1772,7 +1774,7 @@ async fn handle_live_command(
         ChatCommand::PluginsUpdate { name } => {
             remote_plugin_command(
                 client,
-                norte_code_protocol::ClientRequestKind::UpdatePlugins { name },
+                norte_code_wire::ClientRequestKind::UpdatePlugins { name },
                 renderer,
             )
             .await;
@@ -1781,7 +1783,7 @@ async fn handle_live_command(
         ChatCommand::PluginsEnable { name } => {
             remote_plugin_command(
                 client,
-                norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                norte_code_wire::ClientRequestKind::SetPluginEnabled {
                     name,
                     enabled: true,
                 },
@@ -1793,7 +1795,7 @@ async fn handle_live_command(
         ChatCommand::PluginsDisable { name } => {
             remote_plugin_command(
                 client,
-                norte_code_protocol::ClientRequestKind::SetPluginEnabled {
+                norte_code_wire::ClientRequestKind::SetPluginEnabled {
                     name,
                     enabled: false,
                 },
@@ -1805,7 +1807,7 @@ async fn handle_live_command(
         ChatCommand::PluginsRm { name } => {
             remote_plugin_command(
                 client,
-                norte_code_protocol::ClientRequestKind::RemovePlugin { name },
+                norte_code_wire::ClientRequestKind::RemovePlugin { name },
                 renderer,
             )
             .await;
@@ -1999,12 +2001,12 @@ async fn report_tools_now(
 /// database — so it opens an empty panel and says so.
 async fn remote_plugin_command(
     client: &dyn AgentClient,
-    kind: norte_code_protocol::ClientRequestKind,
+    kind: norte_code_wire::ClientRequestKind,
     renderer: &mut Renderer,
 ) {
     let result = async {
         let mut events = client
-            .submit(norte_code_protocol::ClientRequest {
+            .submit(norte_code_wire::ClientRequest {
                 request_id: 0,
                 kind,
             })
@@ -2012,7 +2014,7 @@ async fn remote_plugin_command(
             .map_err(|error| error.to_string())?;
         while let Some(event) = events.next().await {
             match event.kind {
-                norte_code_protocol::ServerEventKind::PluginList { plugins } => {
+                norte_code_wire::ServerEventKind::PluginList { plugins } => {
                     let lines = plugins
                         .into_iter()
                         .map(|plugin| {
@@ -2033,10 +2035,10 @@ async fn remote_plugin_command(
                         renderer.open_modal("installed plugins".to_owned(), lines);
                     }
                 }
-                norte_code_protocol::ServerEventKind::PluginChanged { operation, name } => {
+                norte_code_wire::ServerEventKind::PluginChanged { operation, name } => {
                     renderer.notice(format!("plugin {name} {operation}"));
                 }
-                norte_code_protocol::ServerEventKind::Error { message, .. } => {
+                norte_code_wire::ServerEventKind::Error { message, .. } => {
                     return Err(message);
                 }
                 _ => {}
@@ -2169,7 +2171,7 @@ async fn apply_tool_action(
                     return None;
                 }
             };
-            return Some(norte_code_protocol::SessionKey::new(summary.session_id));
+            return Some(norte_code_wire::SessionKey::new(summary.session_id));
         }
         crate::modal::Action::ToggleSessionDay(day) => {
             if !renderer.session_days_expanded.remove(day) {
@@ -3025,7 +3027,7 @@ pub(crate) fn print_chat_help(renderer: &mut Renderer, style: Style) {
     let usages: Vec<String> = registry
         .commands()
         .iter()
-        .map(norte_code_protocol::commands::CommandSpec::usage)
+        .map(norte_code_plugin_host::commands::CommandSpec::usage)
         .collect();
     let width = usages.iter().map(String::len).max().unwrap_or(0);
     for (spec, usage) in registry.commands().iter().zip(&usages) {
@@ -3778,6 +3780,8 @@ pub(crate) async fn drive_turns(
                     .collect(),
                 budget: None,
                 reasoning: None,
+                output: Vec::new(),
+                response_format: None,
                 metadata: None,
                 replay: false,
             },
@@ -3839,6 +3843,8 @@ pub(crate) async fn headless_messages(
                     attachments: Vec::new(),
                     budget: None,
                     reasoning: None,
+                    output: Vec::new(),
+                    response_format: None,
                     metadata: None,
                     replay: false,
                 },

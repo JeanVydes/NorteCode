@@ -20,7 +20,8 @@ use norte::{
     Continuation, Layer, LayerContext, ModelRequest, ModelStream, ReasoningRequest, StreamEvent,
     Usage,
 };
-use norte_code_protocol::sqlite::{RequestRecord, RequestStatus};
+use norte_code_protocol::sqlite::RequestRecord;
+use norte_code_protocol::sqlite::RequestStatus;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -534,7 +535,7 @@ mod tests {
             provider: "test".to_owned(),
             model: "test".to_owned(),
             endpoint: "https://example.invalid/v1".to_owned(),
-            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
+            schema: norte_code_wire::catalog::WireSchema::OpenAI,
             auth: None,
             api_key: norte_code_protocol::config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),
@@ -592,7 +593,7 @@ mod tests {
             provider: "test".to_owned(),
             model: "test".to_owned(),
             endpoint: "https://example.invalid/v1".to_owned(),
-            schema: norte_code_protocol::catalog::WireSchema::OpenAI,
+            schema: norte_code_wire::catalog::WireSchema::OpenAI,
             auth: None,
             api_key: norte_code_protocol::config::ApiKey::new("test"),
             capabilities: norte::Capabilities::builder().build(),

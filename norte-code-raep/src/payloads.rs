@@ -1,6 +1,13 @@
 //! Canonical RAEP payloads emitted by the `NorteCode` adapter.
 
-use norte_code_protocol::{Delta, JobInfo, OutputStream, ServerEventKind, TodoInfo};
+use norte_code_wire::payload::{
+    AgentChanged, BudgetNotice, ChildAwaitingInput, ChildSessionStarted, ChildSessionUpdated,
+    CompactionFinished, DelegatorStateChanged, JobProgress, JobStarted, JobsStopped,
+    QuestionAnswered, QuestionAsked, ReasoningDowngraded, SessionStats, SessionTodos, TokenChannel,
+    TokenDelta, ToolFinished, ToolOutput, ToolStarted, ToolStatus,
+};
+use norte_code_wire::{CatalogKind, ServiceDataKind};
+use norte_code_wire::{Delta, JobInfo, ServerEventKind};
 use raep_types::{ErrorPayload, HistoryItem, HistoryPage, StopReason, TurnState, TurnStateChanged};
 use serde::Serialize;
 use serde_json::Value;
@@ -17,72 +24,6 @@ pub(crate) fn payload<T: Serialize>(value: T) -> Value {
     serde_json::to_value(value).expect("typed RAEP payload is serializable")
 }
 
-/// A token delta frame. RAEP has no struct for this, so the adapter owns one
-/// here and serializes it; the shape is the wire contract, not a literal.
-#[derive(Debug, Serialize)]
-struct TokenDeltaPayload {
-    delta: String,
-    index: u32,
-    channel: TokenChannel,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum TokenChannel {
-    Text,
-    Reasoning,
-}
-
-/// A tool call start frame.
-#[derive(Debug, Serialize)]
-struct ToolCallStartedPayload<'a> {
-    tool_call_id: &'a str,
-    tool_name: &'a str,
-    arguments: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<&'a str>,
-    requires_approval: bool,
-    executor: ToolExecutor,
-    attempt: u32,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ToolExecutor {
-    Server,
-}
-
-/// A tool call finish frame.
-#[derive(Debug, Serialize)]
-struct ToolCallFinishedPayload<'a> {
-    tool_call_id: &'a str,
-    tool_name: &'a str,
-    status: ToolCallStatus,
-    duration_ms: u64,
-    result_summary: String,
-    result_truncated: bool,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-enum ToolCallStatus {
-    #[serde(rename = "OK")]
-    Ok,
-    #[serde(rename = "ERROR")]
-    Error,
-    #[serde(rename = "CANCELLED")]
-    Cancelled,
-}
-
-/// A tool output delta frame.
-#[derive(Debug, Serialize)]
-struct ToolOutputDeltaPayload<'a> {
-    tool_call_id: &'a str,
-    tool_name: &'a str,
-    stream: &'a norte_code_protocol::types::OutputStream,
-    delta: &'a str,
-    index: u32,
-}
-
 /// One job in a job list frame.
 #[derive(Debug, Serialize)]
 struct JobEntryPayload {
@@ -95,25 +36,6 @@ struct JobEntryPayload {
 #[derive(Debug, Serialize)]
 struct JobListPayload {
     jobs: Vec<JobEntryPayload>,
-}
-
-/// A detached tool call became a job.
-#[derive(Debug, Serialize)]
-struct JobStartedPayload<'a> {
-    job_id: &'a str,
-    tool_call_id: &'a str,
-    command: &'a str,
-    detached: bool,
-    started_at: u64,
-    limits: &'a norte_code_protocol::JobLimits,
-}
-
-/// One output chunk from a detached job.
-#[derive(Debug, Serialize)]
-struct JobProgressDeltaPayload<'a> {
-    stream: &'a OutputStream,
-    delta: &'a str,
-    index: u64,
 }
 
 /// How a turn ended, in the canonical payload's spelling.
@@ -129,7 +51,7 @@ enum CanonicalTurnState {
 struct TurnStateChangedPayload {
     state: CanonicalTurnState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    phase: Option<norte_code_protocol::Phase>,
+    phase: Option<norte_code_wire::Phase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     committed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,35 +89,26 @@ struct SkillsUpdatedDetails {
     skills: usize,
 }
 
-/// What kind of catalogue a canonical payload carries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CatalogKind {
-    Models,
-    Skills,
+/// The `entries` of a `providers` catalogue: what can be edited and where
+/// each entry came from.
+#[derive(Debug, Serialize)]
+struct CatalogDetailPayload {
+    providers: Vec<norte_code_wire::CatalogProviderInfo>,
+    models: Vec<norte_code_wire::CatalogModelInfo>,
 }
 
 /// The `entries` of a `skills` catalogue.
 #[derive(Debug, Serialize)]
 struct SkillCatalogEntries {
-    skills: Vec<norte_code_protocol::SkillInfo>,
+    skills: Vec<norte_code_wire::SkillInfo>,
     warnings: Vec<String>,
-}
-
-/// What kind of service data a canonical payload carries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ServiceDataKind {
-    Telemetry,
-    ToolList,
-    McpList,
 }
 
 /// The `data` of an `mcp_list` service payload.
 #[derive(Debug, Serialize)]
 struct McpListData {
-    servers: Vec<norte_code_protocol::McpInfo>,
-    failures: Vec<norte_code_protocol::McpFailure>,
+    servers: Vec<norte_code_wire::McpInfo>,
+    failures: Vec<norte_code_wire::McpFailure>,
 }
 
 /// The `content` of a replayed history item.
@@ -265,71 +178,6 @@ struct UserInputAcceptedPayload<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct BudgetNoticePayload {
-    scope: RaepBudgetScope,
-    metric: RaepBudgetUnit,
-    used: f64,
-    limit: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action: Option<RaepBudgetAction>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum RaepBudgetScope {
-    Message,
-    Session,
-    #[serde(rename = "globaldaily")]
-    GlobalDaily,
-}
-
-impl From<norte_code_protocol::BudgetScope> for RaepBudgetScope {
-    fn from(value: norte_code_protocol::BudgetScope) -> Self {
-        match value {
-            norte_code_protocol::BudgetScope::Message => Self::Message,
-            norte_code_protocol::BudgetScope::Session => Self::Session,
-            norte_code_protocol::BudgetScope::GlobalDaily => Self::GlobalDaily,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum RaepBudgetUnit {
-    Usd,
-    Tokens,
-    Requests,
-}
-
-impl From<norte_code_protocol::BudgetUnit> for RaepBudgetUnit {
-    fn from(value: norte_code_protocol::BudgetUnit) -> Self {
-        match value {
-            norte_code_protocol::BudgetUnit::Usd => Self::Usd,
-            norte_code_protocol::BudgetUnit::Tokens => Self::Tokens,
-            norte_code_protocol::BudgetUnit::Requests => Self::Requests,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum RaepBudgetAction {
-    Warn,
-    Ask,
-    Stop,
-}
-
-impl From<norte_code_protocol::BudgetAction> for RaepBudgetAction {
-    fn from(value: norte_code_protocol::BudgetAction) -> Self {
-        match value {
-            norte_code_protocol::BudgetAction::Warn => Self::Warn,
-            norte_code_protocol::BudgetAction::Ask => Self::Ask,
-            norte_code_protocol::BudgetAction::Stop => Self::Stop,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
 struct RetryStartedPayload {
     turn_id: u64,
     attempt: u32,
@@ -341,19 +189,6 @@ struct RetryScheduledPayload<'a> {
     attempt: u32,
     delay_ms: u64,
     reason: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct CompactionFinishedPayload<'a> {
-    trigger: CompactionTrigger,
-    summary: &'a Option<String>,
-    error: &'a Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum CompactionTrigger {
-    Auto,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -368,90 +203,6 @@ enum CompactionState {
 enum ProviderRetryState {
     Scheduled,
     Started,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionStatsPayload {
-    input_tokens: u64,
-    output_tokens: u64,
-    cost_usd: f64,
-    requests: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct QuestionAskedPayload<'a> {
-    turn_id: u64,
-    question: &'a str,
-    prompt: &'a str,
-    options: &'a [String],
-    multiple: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct QuestionAnsweredPayload<'a> {
-    question: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionTodosPayload<'a> {
-    todos: &'a [TodoInfo],
-}
-
-#[derive(Debug, Serialize)]
-struct AgentReferencePayload<'a> {
-    id: &'a str,
-    version: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct AgentChangedPayload<'a> {
-    from_agent: AgentReferencePayload<'a>,
-    to_agent: AgentReferencePayload<'a>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReasoningDowngradedPayload<'a> {
-    from: &'a str,
-    to: &'a str,
-    reason: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct JobsStoppedPayload {
-    stopped: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ChildSessionStartedPayload<'a> {
-    child_session_id: &'a str,
-    agent_id: &'a str,
-    tool_call_id: &'a str,
-    lifetime: &'a str,
-    task_summary: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-struct ChildSessionUpdatedPayload<'a> {
-    child_session_id: &'a str,
-    state: &'a str,
-    reason: &'a str,
-    result: Option<&'a Value>,
-    output_schema_valid: Option<&'a bool>,
-}
-
-#[derive(Debug, Serialize)]
-struct DelegatorStateChangedPayload<'a> {
-    child_session_id: &'a str,
-    suspended: bool,
-    by: &'a Option<String>,
-    queued_messages: &'a Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-struct ChildAwaitingInputPayload<'a> {
-    child_session_id: &'a str,
-    question: &'a str,
-    prompt: &'a str,
 }
 
 /// Converts a `NorteCode` event into the stable payload understood by RAEP
@@ -594,6 +345,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             turn,
             phase,
             committed,
+            ..
         } => CanonicalEvent::TurnStateChanged {
             turn: Some(*turn),
             state: TurnStateChangedPayload {
@@ -623,7 +375,9 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             tokens_per_second,
             cache_hit,
             tools,
-        } => CanonicalEvent::OutputPartFinished {
+            provider,
+            model,
+        } => CanonicalEvent::RequestCompleted {
             turn: *turn,
             index: *index,
             usage: serde_json::to_value(usage).expect("usage is serializable"),
@@ -634,6 +388,8 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             tokens_per_second: *tokens_per_second,
             cache_hit: *cache_hit,
             tools,
+            provider: provider.clone(),
+            model: model.clone(),
         },
         ServerEventKind::Committed { turn, version } => CanonicalEvent::Committed {
             turn: *turn,
@@ -679,7 +435,7 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             limit,
         } => CanonicalEvent::BudgetWarning {
             scope: (*scope).into(),
-            unit: (*unit).into(),
+            unit: *unit,
             spent: *spent,
             limit: *limit,
         },
@@ -691,10 +447,10 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             action,
         } => CanonicalEvent::BudgetExceeded {
             scope: (*scope).into(),
-            unit: (*unit).into(),
+            unit: *unit,
             spent: *spent,
             limit: *limit,
-            action: (*action).into(),
+            action: *action,
         },
         ServerEventKind::BudgetChanged { budget } => CanonicalEvent::BudgetChanged {
             budget: budget.as_ref(),
@@ -764,6 +520,17 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
             provider: None,
             model: None,
             details: Some(payload(CatalogUpdatedDetails { models: *models })),
+        },
+        ServerEventKind::CatalogDetail { providers, models } => CanonicalEvent::AgentCatalog {
+            kind: CatalogKind::Providers,
+            entries: payload(CatalogDetailPayload {
+                providers: providers.clone(),
+                models: models.clone(),
+            }),
+        },
+        ServerEventKind::PlanList { plans } => CanonicalEvent::AgentCatalog {
+            kind: CatalogKind::Plans,
+            entries: serde_json::to_value(plans).expect("plan list is serializable"),
         },
         ServerEventKind::ModelList { models } => CanonicalEvent::AgentCatalog {
             kind: CatalogKind::Models,
@@ -880,6 +647,60 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
                 media,
             }
         }
+        ServerEventKind::HistoryPage { items, has_more } => CanonicalEvent::HistoryPage {
+            items: serde_json::to_value(items).expect("history items serializable"),
+            has_more: *has_more,
+        },
+        ServerEventKind::HistoryRewound {
+            to_turn_id,
+            inclusive,
+            rewound_turn_ids,
+            side_effects,
+            workspace_restored,
+        } => CanonicalEvent::HistoryRewound {
+            to_turn_id,
+            inclusive: *inclusive,
+            rewound_turn_ids: serde_json::to_value(rewound_turn_ids)
+                .expect("rewound turn ids serializable"),
+            side_effects: serde_json::to_value(side_effects).expect("side effects serializable"),
+            workspace_restored: *workspace_restored,
+        },
+        ServerEventKind::OutputPartStarted {
+            turn,
+            part_id,
+            index,
+            modality,
+            mime_type,
+            streamed,
+            bytes_expected,
+        } => CanonicalEvent::OutputPartStarted {
+            turn: *turn,
+            part_id,
+            index: *index,
+            modality: serde_json::to_value(modality).expect("modality serializable"),
+            mime_type: mime_type.clone(),
+            streamed: *streamed,
+            bytes_expected: *bytes_expected,
+        },
+        ServerEventKind::OutputPartFinished {
+            turn,
+            part_id,
+            index,
+            modality,
+            bytes,
+            sha256,
+            blob,
+            error,
+        } => CanonicalEvent::OutputPartFinished {
+            turn: *turn,
+            part_id,
+            index: *index,
+            modality: serde_json::to_value(modality).expect("modality serializable"),
+            bytes: *bytes,
+            sha256,
+            blob: blob.clone(),
+            error: error.clone(),
+        },
     };
     serde_json::to_value(payload).expect("canonical event is serializable")
 }
@@ -904,12 +725,12 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 Delta::Reasoning { index, text } => (text.clone(), *index, TokenChannel::Reasoning),
                 Delta::ToolArguments {
                     index, arguments, ..
-                } => (arguments.clone(), *index, TokenChannel::Text),
+                } => (arguments.clone(), *index, TokenChannel::ToolArguments),
                 Delta::Media { index, .. } => (String::new(), *index, TokenChannel::Text),
             };
-            Some(payload(TokenDeltaPayload {
+            Some(payload(TokenDelta {
                 delta: text,
-                index,
+                index: u64::from(index),
                 channel,
             }))
         }
@@ -925,13 +746,13 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
                 .and_then(|arguments| arguments.as_object())
                 .cloned()
                 .unwrap_or_default();
-            Some(payload(ToolCallStartedPayload {
-                tool_call_id: call_id,
-                tool_name: tool,
+            Some(payload(ToolStarted {
+                tool_call_id: call_id.clone(),
+                tool_name: tool.clone(),
                 arguments: Value::Object(arguments),
-                source: source.as_deref(),
+                source: source.clone(),
                 requires_approval: false,
-                executor: ToolExecutor::Server,
+                executor: norte_code_wire::ToolExecutor::Server,
                 attempt: 1,
             }))
         }
@@ -946,20 +767,14 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             duration_ms,
             ..
         } => {
-            let status = if *detached {
-                ToolCallStatus::Cancelled
-            } else if *is_error {
-                ToolCallStatus::Error
-            } else {
-                ToolCallStatus::Ok
-            };
+            let status = ToolStatus::from_outcome(*detached, *is_error);
             let summary = error.clone().or_else(|| output.clone()).unwrap_or_default();
-            Some(payload(ToolCallFinishedPayload {
-                tool_call_id: call_id,
-                tool_name: tool,
+            Some(payload(ToolFinished {
+                tool_call_id: call_id.clone(),
+                tool_name: tool.clone(),
                 status,
-                duration_ms: *duration_ms,
-                result_summary: summary,
+                duration_ms: Some(*duration_ms),
+                result_summary: Some(summary),
                 result_truncated: *truncated,
             }))
         }
@@ -969,11 +784,11 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             stream,
             text,
             ..
-        } => Some(payload(ToolOutputDeltaPayload {
-            tool_call_id: call_id,
-            tool_name: tool,
-            stream,
-            delta: text,
+        } => Some(payload(ToolOutput {
+            tool_call_id: call_id.clone(),
+            tool_name: tool.clone(),
+            stream: *stream,
+            delta: text.clone(),
             index: 0,
         })),
         ServerEventKind::JobStarted {
@@ -982,22 +797,22 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             command,
             started_at,
             limits,
-        } => Some(payload(JobStartedPayload {
-            job_id,
-            tool_call_id,
-            command,
+        } => Some(payload(JobStarted {
+            job_id: job_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            command: command.clone(),
             detached: true,
             started_at: *started_at,
-            limits,
+            limits: Some(limits.clone()),
         })),
         ServerEventKind::JobProgressDelta {
             stream,
             delta,
             index,
             ..
-        } => Some(payload(JobProgressDeltaPayload {
-            stream,
-            delta,
+        } => Some(payload(JobProgress {
+            stream: *stream,
+            delta: delta.clone(),
             index: *index,
         })),
         ServerEventKind::JobFinished {
@@ -1061,24 +876,24 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             text,
         } => {
             let role = match role {
-                norte_code_protocol::MessageRole::Tool => HistorySpeaker::Tool,
-                norte_code_protocol::MessageRole::System
-                | norte_code_protocol::MessageRole::Developer
-                | norte_code_protocol::MessageRole::Unknown => HistorySpeaker::SystemEvent,
-                norte_code_protocol::MessageRole::User => HistorySpeaker::User,
-                norte_code_protocol::MessageRole::Assistant => HistorySpeaker::Assistant,
+                norte_code_wire::MessageRole::Tool => HistorySpeaker::Tool,
+                norte_code_wire::MessageRole::System
+                | norte_code_wire::MessageRole::Developer
+                | norte_code_wire::MessageRole::Unknown => HistorySpeaker::SystemEvent,
+                norte_code_wire::MessageRole::User => HistorySpeaker::User,
+                norte_code_wire::MessageRole::Assistant => HistorySpeaker::Assistant,
             };
             let kind = match kind {
-                norte_code_protocol::ReplayedKind::Text => match role {
+                norte_code_wire::ReplayedKind::Text => match role {
                     HistorySpeaker::Tool => "tool",
                     HistorySpeaker::SystemEvent => "system_event",
                     HistorySpeaker::User => "user",
                     HistorySpeaker::Assistant => "assistant",
                 },
-                norte_code_protocol::ReplayedKind::Reasoning => "reasoning",
-                norte_code_protocol::ReplayedKind::ToolCall => "tool_call",
-                norte_code_protocol::ReplayedKind::ToolResult => "tool_result",
-                norte_code_protocol::ReplayedKind::Refusal => "refusal",
+                norte_code_wire::ReplayedKind::Reasoning => "reasoning",
+                norte_code_wire::ReplayedKind::ToolCall => "tool_call",
+                norte_code_wire::ReplayedKind::ToolResult => "tool_result",
+                norte_code_wire::ReplayedKind::Refusal => "refusal",
             };
             Some(payload(HistoryPage {
                 items: vec![HistoryItem {
@@ -1133,9 +948,9 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             unit,
             spent,
             limit,
-        } => Some(payload(BudgetNoticePayload {
+        } => Some(payload(BudgetNotice {
             scope: (*scope).into(),
-            metric: (*unit).into(),
+            metric: *unit,
             used: *spent,
             limit: *limit,
             action: None,
@@ -1146,12 +961,12 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             spent,
             limit,
             action,
-        } => Some(payload(BudgetNoticePayload {
+        } => Some(payload(BudgetNotice {
             scope: (*scope).into(),
-            metric: (*unit).into(),
+            metric: *unit,
             used: *spent,
             limit: *limit,
-            action: Some((*action).into()),
+            action: Some(*action),
         })),
         ServerEventKind::RetryStarted { turn, attempt } => Some(payload(RetryStartedPayload {
             turn_id: *turn,
@@ -1175,10 +990,11 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             ..
         } => {
             if *compacted {
-                Some(payload(CompactionFinishedPayload {
-                    trigger: CompactionTrigger::Auto,
-                    summary,
-                    error,
+                Some(payload(CompactionFinished {
+                    trigger: norte_code_wire::CompactionTrigger::Auto,
+                    summary: summary.clone(),
+                    error: error.clone(),
+                    compacted: Some(true),
                 }))
             } else {
                 None
@@ -1190,7 +1006,7 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             cost_usd,
             requests,
             ..
-        } => Some(payload(SessionStatsPayload {
+        } => Some(payload(SessionStats {
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
             cost_usd: *cost_usd,
@@ -1202,33 +1018,36 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             prompt,
             options,
             multiple,
-        } => Some(payload(QuestionAskedPayload {
+        } => Some(payload(QuestionAsked {
             turn_id: *turn,
-            question,
-            prompt,
-            options,
+            question: question.clone(),
+            prompt: prompt.clone(),
+            options: options.clone(),
             multiple: *multiple,
         })),
-        ServerEventKind::QuestionAnswered { question } => {
-            Some(payload(QuestionAnsweredPayload { question }))
-        }
-        ServerEventKind::SessionTodos { todos } => Some(payload(SessionTodosPayload { todos })),
+        ServerEventKind::QuestionAnswered { question } => Some(payload(QuestionAnswered {
+            question: question.clone(),
+        })),
+        ServerEventKind::SessionTodos { todos } => Some(payload(SessionTodos {
+            todos: todos.clone(),
+        })),
         ServerEventKind::ModelChanged { provider, model }
-        | ServerEventKind::ModelQueued { provider, model } => Some(payload(AgentChangedPayload {
-            from_agent: AgentReferencePayload {
-                id: "",
-                version: "",
-            },
-            to_agent: AgentReferencePayload {
-                id: provider,
-                version: model,
+        | ServerEventKind::ModelQueued { provider, model } => Some(payload(AgentChanged {
+            from_agent: norte_code_wire::AgentRef::default(),
+            to_agent: norte_code_wire::AgentRef {
+                id: provider.clone(),
+                version: model.clone(),
             },
         })),
         ServerEventKind::ReasoningDowngraded { from, to, reason } => {
-            Some(payload(ReasoningDowngradedPayload { from, to, reason }))
+            Some(payload(ReasoningDowngraded {
+                from: from.clone(),
+                to: to.clone(),
+                reason: reason.clone(),
+            }))
         }
         ServerEventKind::JobsStopped { stopped } => {
-            Some(payload(JobsStoppedPayload { stopped: *stopped }))
+            Some(payload(JobsStopped { stopped: *stopped }))
         }
         ServerEventKind::ChildSessionStarted {
             child_session_id,
@@ -1236,12 +1055,12 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             tool_call_id,
             lifetime,
             task_summary,
-        } => Some(payload(ChildSessionStartedPayload {
-            child_session_id,
-            agent_id,
-            tool_call_id,
-            lifetime,
-            task_summary,
+        } => Some(payload(ChildSessionStarted {
+            child_session_id: child_session_id.clone(),
+            agent_id: agent_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            lifetime: lifetime.clone(),
+            task_summary: task_summary.clone(),
         })),
         ServerEventKind::ChildSessionUpdated {
             child_session_id,
@@ -1249,32 +1068,32 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
             reason,
             result,
             output_schema_valid,
-        } => Some(payload(ChildSessionUpdatedPayload {
-            child_session_id,
-            state,
-            reason,
-            result: result.as_ref(),
-            output_schema_valid: output_schema_valid.as_ref(),
+        } => Some(payload(ChildSessionUpdated {
+            child_session_id: child_session_id.clone(),
+            state: *state,
+            reason: reason.clone(),
+            result: result.clone(),
+            output_schema_valid: *output_schema_valid,
         })),
         ServerEventKind::DelegatorStateChanged {
             child_session_id,
             delegator_suspended,
             by,
             queued_messages,
-        } => Some(payload(DelegatorStateChangedPayload {
-            child_session_id,
+        } => Some(payload(DelegatorStateChanged {
+            child_session_id: child_session_id.clone(),
             suspended: *delegator_suspended,
-            by,
-            queued_messages,
+            by: by.clone(),
+            queued_messages: *queued_messages,
         })),
         ServerEventKind::ChildAwaitingInput {
             child_session_id,
             question,
             prompt,
-        } => Some(payload(ChildAwaitingInputPayload {
-            child_session_id,
-            question,
-            prompt,
+        } => Some(payload(ChildAwaitingInput {
+            child_session_id: child_session_id.clone(),
+            question: question.clone(),
+            prompt: prompt.clone(),
         })),
         _ => None,
     }
@@ -1317,12 +1136,14 @@ enum CanonicalEvent<'a> {
     /// A replayed history message.
     HistoryMessage {
         index: u64,
-        role: norte_code_protocol::MessageRole,
-        kind: norte_code_protocol::ReplayedKind,
+        role: norte_code_wire::MessageRole,
+        kind: norte_code_wire::ReplayedKind,
         text: &'a str,
     },
     /// The current session todos.
-    SessionTodos { todos: &'a Vec<TodoInfo> },
+    SessionTodos {
+        todos: &'a Vec<norte_code_wire::TodoInfo>,
+    },
     /// A tool call began.
     ToolCallStarted {
         turn: u64,
@@ -1366,7 +1187,7 @@ enum CanonicalEvent<'a> {
         tool_call_id: &'a str,
         command: &'a str,
         started_at: u64,
-        limits: &'a norte_code_protocol::JobLimits,
+        limits: &'a norte_code_wire::JobLimits,
     },
     /// A detached job wrote a chunk of output.
     DetachedJobProgress {
@@ -1400,7 +1221,13 @@ enum CanonicalEvent<'a> {
         state: TurnStateChangedPayload,
     },
     /// Provider usage and cost for one output part.
-    OutputPartFinished {
+    /// One model request finished: what it cost and how fast it ran.
+    ///
+    /// The name is Norte Code's own (`request_completed`): RAEP has no
+    /// standard frame for provider metrics, and reusing
+    /// `output_part_finished` made a client mistake a usage row for a media
+    /// part.
+    RequestCompleted {
         turn: u64,
         index: u64,
         usage: Value,
@@ -1411,12 +1238,16 @@ enum CanonicalEvent<'a> {
         tokens_per_second: Option<f64>,
         cache_hit: bool,
         tools: &'a Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Generated media collected by Norte Code for the RAEP output store.
     MediaPartCompleted {
         turn: u64,
         index: u32,
-        media: &'a norte::MediaPart,
+        media: &'a norte_code_wire::MediaPart,
     },
     /// A context compaction lifecycle update.
     ContextUpdate {
@@ -1434,23 +1265,23 @@ enum CanonicalEvent<'a> {
     },
     /// A budget warning.
     BudgetWarning {
-        scope: RaepBudgetScope,
-        unit: RaepBudgetUnit,
+        scope: norte_code_wire::NoticeScope,
+        unit: norte_code_wire::BudgetUnit,
         spent: f64,
         limit: f64,
     },
     /// A budget was exhausted.
     BudgetExceeded {
-        scope: RaepBudgetScope,
-        unit: RaepBudgetUnit,
+        scope: norte_code_wire::NoticeScope,
+        unit: norte_code_wire::BudgetUnit,
         spent: f64,
         limit: f64,
-        action: RaepBudgetAction,
+        action: norte_code_wire::BudgetAction,
     },
     /// The session budget changed.
     BudgetChanged {
         #[serde(skip_serializing_if = "Option::is_none")]
-        budget: Option<&'a norte_code_protocol::Budget>,
+        budget: Option<&'a norte_code_wire::Budget>,
     },
     /// Session usage totals.
     SessionStats {
@@ -1495,7 +1326,7 @@ enum CanonicalEvent<'a> {
     },
     /// A protocol error.
     Error {
-        code: &'a norte_code_protocol::ErrorCode,
+        code: &'a norte_code_wire::ErrorCode,
         message: &'a str,
     },
     /// A session was exported.
@@ -1519,7 +1350,7 @@ enum CanonicalEvent<'a> {
     /// A child session changed state.
     ChildSessionUpdated {
         child_session_id: &'a String,
-        state: &'a String,
+        state: &'a norte_code_wire::ChildState,
         reason: &'a String,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<&'a Value>,
@@ -1538,6 +1369,37 @@ enum CanonicalEvent<'a> {
         question: &'a String,
         prompt: &'a String,
     },
+    /// One page of history, answering `HistoryGet`.
+    HistoryPage { items: Value, has_more: bool },
+    /// History was rewound to a turn.
+    HistoryRewound {
+        to_turn_id: &'a String,
+        inclusive: bool,
+        rewound_turn_ids: Value,
+        side_effects: Value,
+        workspace_restored: bool,
+    },
+    /// A non-text output part started on a turn.
+    OutputPartStarted {
+        turn: u64,
+        part_id: &'a String,
+        index: u32,
+        modality: Value,
+        mime_type: Option<String>,
+        streamed: bool,
+        bytes_expected: Option<u64>,
+    },
+    /// A non-text output part finished on a turn.
+    OutputPartFinished {
+        turn: u64,
+        part_id: &'a String,
+        index: u32,
+        modality: Value,
+        bytes: u64,
+        sha256: &'a String,
+        blob: Option<String>,
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -1550,7 +1412,7 @@ mod tests {
             turn: 3,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: OutputStream::Stdout,
+            stream: norte_code_wire::OutputStream::Stdout,
             text: "hello".to_owned(),
             last: true,
         });
@@ -1565,7 +1427,7 @@ mod tests {
     #[test]
     fn session_forked_uses_the_raep_turn_and_source_fields() {
         let payload = canonical_event_payload(&ServerEventKind::SessionForked {
-            from: norte_code_protocol::SessionKey::new("source"),
+            from: norte_code_wire::SessionKey::new("source"),
             from_turn_id: Some("turn_4".to_owned()),
             title: Some("branch".to_owned()),
         });
@@ -1584,11 +1446,11 @@ mod tests {
     #[test]
     fn standard_payloads_match_the_raep_schemas() {
         let budget = standard_event_payload(&ServerEventKind::BudgetExceeded {
-            scope: norte_code_protocol::BudgetScope::GlobalDaily,
-            unit: norte_code_protocol::BudgetUnit::Usd,
+            scope: norte_code_wire::BudgetScope::GlobalDaily,
+            unit: norte_code_wire::BudgetUnit::Usd,
             spent: 4.5,
             limit: 5.0,
-            action: norte_code_protocol::BudgetAction::Stop,
+            action: norte_code_wire::BudgetAction::Stop,
         })
         .expect("standard budget payload");
         assert_eq!(
@@ -1606,7 +1468,7 @@ mod tests {
             turn: 2,
             call_id: "call-1".to_owned(),
             tool: "shell".to_owned(),
-            stream: OutputStream::Stdout,
+            stream: norte_code_wire::OutputStream::Stdout,
             text: "hello".to_owned(),
             last: false,
         })
@@ -1624,8 +1486,8 @@ mod tests {
 
         let history = standard_event_payload(&ServerEventKind::MessageReplayed {
             index: 1,
-            role: norte_code_protocol::MessageRole::User,
-            kind: norte_code_protocol::ReplayedKind::Text,
+            role: norte_code_wire::MessageRole::User,
+            kind: norte_code_wire::ReplayedKind::Text,
             text: "hi".to_owned(),
         })
         .expect("standard history page");
@@ -1643,7 +1505,7 @@ mod tests {
 
         let child = standard_event_payload(&ServerEventKind::ChildSessionUpdated {
             child_session_id: "child-1".to_owned(),
-            state: "IDLE".to_owned(),
+            state: norte_code_wire::ChildState::Idle,
             reason: "turn_finished".to_owned(),
             result: Some(json!({
                 "status": "completed",
@@ -1659,7 +1521,7 @@ mod tests {
         assert_eq!(child["output_schema_valid"], true);
 
         let error = standard_event_payload(&ServerEventKind::Error {
-            code: norte_code_protocol::ErrorCode::Internal,
+            code: norte_code_wire::ErrorCode::Internal,
             message: "boom".to_owned(),
         })
         .expect("standard error");
@@ -1668,11 +1530,11 @@ mod tests {
         assert!(error["code"].is_string());
 
         let jobs = standard_event_payload(&ServerEventKind::JobList {
-            jobs: vec![norte_code_protocol::JobInfo {
+            jobs: vec![norte_code_wire::JobInfo {
                 id: "job-1".to_owned(),
                 label: "sleep 1".to_owned(),
                 script: String::new(),
-                state: norte_code_protocol::JobState::Running,
+                state: norte_code_wire::JobState::Running,
                 exit_code: None,
                 timed_out: false,
                 elapsed_ms: 10,
@@ -1707,8 +1569,9 @@ mod tests {
 
         let finished = standard_event_payload(&ServerEventKind::TurnFinished {
             turn: 2,
-            phase: norte_code_protocol::Phase::Idle,
+            phase: norte_code_wire::Phase::Idle,
             committed: true,
+            output_schema_valid: None,
         })
         .expect("standard turn state");
         assert_eq!(
@@ -1779,7 +1642,7 @@ mod tests {
             tool_call_id: "call-1".to_owned(),
             command: "make".to_owned(),
             started_at: 1_700_000_000_000,
-            limits: norte_code_protocol::JobLimits {
+            limits: norte_code_wire::JobLimits {
                 timeout_s: Some(120),
                 max_output_bytes: Some(1_048_576),
             },
@@ -1797,7 +1660,7 @@ mod tests {
 
         let progress = standard_event_payload(&ServerEventKind::JobProgressDelta {
             job_id: "job-1".to_owned(),
-            stream: OutputStream::Stderr,
+            stream: norte_code_wire::OutputStream::Stderr,
             delta: "warning\n".to_owned(),
             index: 17,
         })
@@ -1812,7 +1675,7 @@ mod tests {
                 id: "job-1".to_owned(),
                 label: "make".to_owned(),
                 script: "make".to_owned(),
-                state: norte_code_protocol::JobState::Finished,
+                state: norte_code_wire::JobState::Finished,
                 exit_code: Some(0),
                 timed_out: false,
                 elapsed_ms: 21,

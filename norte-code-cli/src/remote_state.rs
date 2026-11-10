@@ -14,12 +14,12 @@ use std::sync::{Arc, RwLock};
 use futures_util::StreamExt;
 use norte_code_client::RemoteClient;
 use norte_code_client::{AgentClient, ClientError, EventStream};
-use norte_code_protocol::ClientRequest;
-use norte_code_protocol::ClientRequestKind;
 use norte_code_protocol::config::{CliConfig, Config, project_cli_path, user_cli_path};
-use norte_code_protocol::plugins::ContextUsage;
 use norte_code_protocol::sqlite::RequestRecord;
-use norte_code_protocol::{
+use norte_code_wire::ClientRequest;
+use norte_code_wire::ClientRequestKind;
+use norte_code_wire::ContextUsage;
+use norte_code_wire::{
     McpFailure, McpInfo, ModelInfo, Reasoning, ServerEventKind, SessionKey, ToolInfo,
 };
 
@@ -71,7 +71,13 @@ impl RemoteState {
             .map_err(|error| error.to_string())?;
         while let Some(event) = stream.next().await {
             match event.kind {
-                ServerEventKind::Telemetry { records } => return Ok(records),
+                ServerEventKind::Telemetry { records } => {
+                    return records
+                        .into_iter()
+                        .map(RequestRecord::try_from)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| format!("telemetry record is unreadable: {error}"));
+                }
                 ServerEventKind::Error { message, .. } => return Err(message),
                 _ => {}
             }
@@ -383,7 +389,7 @@ impl ModelInfoExt for ModelInfo {
 pub(crate) fn effective_reasoning(
     requested: Option<&Reasoning>,
     configured: &serde_json::Value,
-    _capabilities: &norte_code_protocol::ReasoningInfo,
+    _capabilities: &norte_code_wire::ReasoningInfo,
 ) -> Result<Reasoning, String> {
     Ok(requested.cloned().unwrap_or_else(|| {
         let _ = configured;

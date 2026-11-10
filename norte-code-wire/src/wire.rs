@@ -1,15 +1,17 @@
 //! The Norte Code client wire: requests and events.
 //!
-//! Re-exported from the crate root.
+//! These are the shapes a client sends and a server answers with. They live in
+//! this crate, next to the payloads and the resources, so a client that cannot
+//! compile the engine (the browser) still speaks the whole protocol instead of
+//! a hand-copied subset of it.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::wildcard_imports)]
 
-use norte::MediaPart;
 use serde::{Deserialize, Serialize};
 
-use crate::agent_commands::QueueMode;
 use crate::types::*;
+use crate::{MediaPart, QueueMode, TelemetryRecord};
 
 fn default_resume_replay() -> bool {
     true
@@ -24,6 +26,225 @@ pub struct ToolInfo {
     pub allowed: bool,
     /// `session`, `global`, or `default`.
     pub scope: String,
+}
+
+/// Which attachments a session fork copies from the source session.
+///
+/// Every flag defaults to `false`: an old fork that asked for no copies keeps
+/// copying none. Whether uploads and outputs are copied by default, and what
+/// the host does with the flags, is decided by the host, not by the wire.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkInclude {
+    /// Whether the fork copies the source session's uploads.
+    #[serde(default)]
+    pub uploads: bool,
+    /// Whether the fork copies the source session's produced outputs.
+    #[serde(default)]
+    pub outputs: bool,
+    /// Whether the fork copies the source session's workspace.
+    #[serde(default)]
+    pub workspace: bool,
+}
+
+/// How a compaction replaces the history it removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactStrategy {
+    /// Summarise the removed history and seed a fresh session with it.
+    Summarize,
+    /// Drop the removed history without summarising it.
+    Truncate,
+}
+
+/// Why a compaction was requested.
+///
+/// Clients ask for manual compaction with [`CompactTrigger::Manual`].
+/// `Auto` is reserved for the server itself: it names a compaction the
+/// service started without a client request (for example the automatic
+/// context-threshold compaction).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// A client asked for compaction explicitly.
+    #[default]
+    Manual,
+    /// The server started compaction on its own (automatic).
+    Auto,
+}
+
+/// What happens to the workspace when history is rewound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindWorkspace {
+    /// Leave the workspace files as they are.
+    Keep,
+    /// Restore the workspace to the snapshot at the rewind point.
+    Restore,
+}
+
+/// The shape a service event's turn answer must take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormatType {
+    /// Plain text.
+    Text,
+    /// JSON validated against [`ResponseFormat::schema`].
+    JsonSchema,
+}
+
+/// The shape a `SendMessage` turn's final answer must take.
+///
+/// The wire key is `type`, as the standard names it: `{"type":"text"}` or
+/// `{"type":"json_schema","schema":...,"strict":...}`. The Rust field is
+/// called `kind` because `type` is a keyword.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseFormat {
+    /// Which shape the answer takes.
+    #[serde(rename = "type")]
+    pub kind: ResponseFormatType,
+    /// The JSON Schema the `json_schema` answer must validate against.
+    ///
+    /// At most 16 KiB with local `$ref` only, as the standard requires; the
+    /// host validates that, not the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+    /// Whether a schema-invalid answer fails the turn, instead of earning a
+    /// correction message to the provider.
+    #[serde(default)]
+    pub strict: bool,
+}
+
+/// A modality a model may produce for a turn.
+///
+/// The wire's name for what a client asks for in `SendMessage.output`: plain
+/// text, rendered media, or a document. It mirrors [`Modality`] for output,
+/// saying what the service may hand back rather than what it accepts as
+/// input; input keeps using `Modality` and `Attachment`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputModality {
+    /// Plain text.
+    Text,
+    /// An image.
+    Image,
+    /// Recorded audio.
+    Audio,
+    /// Recorded video.
+    Video,
+    /// A document, which is what a PDF is.
+    Document,
+}
+
+/// A model chosen for a session and not yet applied.
+///
+/// A provider/model pair is never one string: a model id may carry slashes
+/// of its own, so the two are never written as one to be taken apart again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingModel {
+    /// The provider that serves it.
+    pub provider: String,
+    /// The model id.
+    pub model: String,
+}
+
+/// A model, reasoning or budget change waiting for the next turn.
+///
+/// This is what a session configure with `apply: next_turn` carries: the
+/// service stores it when the turn is busy and applies it when the next turn
+/// starts. Every field is optional and means "change only this".
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingOverride {
+    /// The model switch waiting for the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<PendingModel>,
+    /// The reasoning setting waiting for the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    /// The budget waiting for the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
+}
+
+/// When a session configure is applied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigureApply {
+    /// Apply immediately; refused when a turn is running.
+    #[default]
+    Now,
+    /// Queue for the next turn boundary.
+    NextTurn,
+}
+
+/// Which sections an export bundle carries.
+/// The many bools here mirror the bundle's own include flags; the lint
+/// that counts bools in a struct does not apply because unset sections
+/// are worse (three-valued include state) than packed bools.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportInclude {
+    /// Whether child session histories are included.
+    #[serde(default)]
+    pub children: bool,
+    /// Whether uploaded blobs are included.
+    #[serde(default)]
+    pub uploads: bool,
+    /// Whether detached job outputs are included.
+    #[serde(default)]
+    pub job_output: bool,
+    /// Whether produced outputs are included.
+    #[serde(default)]
+    pub outputs: bool,
+    /// Whether the workspace manifest is included.
+    #[serde(default)]
+    pub workspace: bool,
+}
+
+impl Default for ExportInclude {
+    /// The host default: children, uploads, job output and outputs on.
+    fn default() -> Self {
+        Self {
+            children: true,
+            uploads: true,
+            job_output: true,
+            outputs: true,
+            workspace: false,
+        }
+    }
+}
+
+/// What to do when an export is requested while a session is busy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportQuiesce {
+    /// Refuse with `SESSION_BUSY` when the session is not idle.
+    #[default]
+    Reject,
+    /// Wait for the session to become idle before exporting.
+    Wait {
+        /// How long to wait, in seconds (0 means the default).
+        #[serde(default)]
+        timeout_s: u64,
+    },
+    /// Stop the session's background jobs first, then export.
+    KillJobs,
+}
+
+/// The declared side effects of one tool call that a rewind removed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SideEffect {
+    /// The tool call id.
+    pub tool_call_id: String,
+    /// The tool name the model called.
+    pub tool_name: String,
+    /// The declared side effects, in the wire's spelling.
+    pub side_effects: String,
 }
 
 /// A client request: a numbered command for the service.
@@ -62,6 +283,13 @@ pub enum ClientRequestKind {
         /// Whether usage counters are carried to the fork. Defaults to true.
         #[serde(default)]
         carry_usage: Option<bool>,
+        /// The agent the fork runs on, when it is not the source session's
+        /// agent. `None` keeps the source session's agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        /// Which attachments the fork copies. `None` copies none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include: Option<ForkInclude>,
     },
     /// Rename a session.
     RenameSession {
@@ -94,6 +322,20 @@ pub enum ClientRequestKind {
         budget: Option<Budget>,
         /// A reasoning override for this message only.
         reasoning: Option<Reasoning>,
+        /// The modalities this turn may produce, in the order it should
+        /// produce them.
+        ///
+        /// An empty list produces text, as a turn always has. This is what
+        /// the host validates against the negotiated output modalities; the
+        /// service itself only answers with text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        output: Vec<OutputModality>,
+        /// The shape the turn's final answer must take.
+        ///
+        /// `None` is a plain text answer, the default. A host that cannot
+        /// produce the shape refuses the request instead of ignoring it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_format: Option<ResponseFormat>,
         /// Caller metadata (RFC 12.4): an opaque object of at most 4 KiB,
         /// stored with the turn and never shown to the model.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,12 +446,47 @@ pub enum ClientRequestKind {
     },
     /// List the models the catalogue knows.
     ListModels,
+    /// List the catalogue with its origin: what is editable in the files and
+    /// what a plugin injected.
+    ListCatalog,
     /// Re-read the catalogue files.
     ///
     /// It reads the two files the host owns — the providers and the models —
     /// and replaces what is in memory. Nothing is fetched: the files are a
     /// person's, and a plugin that writes them is what changes them.
     RefreshCatalog,
+    /// Add or replace a provider in `providers.json`.
+    ///
+    /// Only catalogue files are written: a provider a plugin injects is the
+    /// plugin's, and editing it here would be overwritten on the next start.
+    CatalogUpsertProvider {
+        /// The provider id, the key it lives under in the file.
+        provider_id: String,
+        /// The entry to write under that key.
+        provider: serde_json::Value,
+    },
+    /// Remove a provider and every model that names it.
+    CatalogRemoveProvider {
+        /// The provider id to remove.
+        provider_id: String,
+    },
+    /// Add or replace a model in `models.json`, keyed by `provider_id` + `id`.
+    CatalogUpsertModel {
+        /// The entry to write.
+        model: serde_json::Value,
+    },
+    /// Remove one model from `models.json`.
+    CatalogRemoveModel {
+        /// The provider the model belongs to.
+        provider_id: String,
+        /// The model id the provider expects.
+        model_id: String,
+    },
+    /// List the plans of a session, newest first.
+    ListPlans {
+        /// The session whose plans are listed.
+        session: SessionKey,
+    },
     /// List the installed Agent Skills.
     ListSkills,
     /// Re-scan the skills roots.
@@ -288,6 +565,83 @@ pub enum ClientRequestKind {
         /// Remove the global rule.
         global: bool,
     },
+    /// Compact a session now, with an explicit strategy.
+    ///
+    /// This is the wire form of `SESSION_COMPACT`; the plain [`Compact`]
+    /// variant keeps the one-argument shape for clients that name no
+    /// strategy. At most one compaction runs at a time: a request while one
+    /// is running, or while a turn is active, is refused.
+    SessionCompact {
+        /// The session.
+        session: SessionKey,
+        /// How the removed history is replaced.
+        strategy: CompactStrategy,
+        /// How many of the most recent turns to keep verbatim, when stated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_last_turns: Option<u32>,
+        /// Guidance for the summary, at most 1 KiB, when stated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        /// Why compaction was requested. Clients send `manual`; `auto`
+        /// names a compaction the server started on its own.
+        #[serde(default)]
+        trigger: CompactTrigger,
+    },
+    /// Pin or unpin turns so compaction keeps them verbatim.
+    ContextPin {
+        /// The session.
+        session: SessionKey,
+        /// The turns to pin or unpin.
+        turn_ids: Vec<String>,
+        /// Whether to pin them (`true`) or unpin them (`false`).
+        pinned: bool,
+    },
+    /// Rewind a session to a turn, dropping everything after it.
+    SessionRewind {
+        /// The session.
+        session: SessionKey,
+        /// The turn to rewind to.
+        to_turn_id: String,
+        /// Whether to rewind that turn as well. Defaults to `false`.
+        #[serde(default)]
+        inclusive: bool,
+        /// Whether to cancel a pending turn. Defaults to `false`.
+        #[serde(default)]
+        cancel_pending: bool,
+        /// What happens to the workspace files.
+        workspace: RewindWorkspace,
+    },
+    /// Fetch one page of a session's history.
+    HistoryGet {
+        /// The session.
+        session: SessionKey,
+        /// The page ends before this turn, when stated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_turn_id: Option<String>,
+        /// How many items the page holds.
+        limit: u32,
+        /// Whether rewound items are included.
+        include_rewound: bool,
+    },
+    /// Export a session as a bundle the host packages.
+    SessionExport {
+        /// The session to export.
+        session: SessionKey,
+        /// Which sections the bundle carries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include: Option<ExportInclude>,
+        /// What to do when the session is busy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quiesce: Option<ExportQuiesce>,
+    },
+    /// Import a bundle produced by [`ClientRequestKind::SessionExport`].
+    SessionImport {
+        /// The bundle as JSON (the host unpacks the archive form).
+        bundle: serde_json::Value,
+        /// The JWK that decrypts an encrypted bundle, when one was supplied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decryption_jwk: Option<serde_json::Value>,
+    },
 }
 
 /// What a replayed message carries, so the client renders it the way the
@@ -305,6 +659,48 @@ pub enum ReplayedKind {
     ToolResult,
     /// A refusal the model produced.
     Refusal,
+}
+
+/// Who spoke, as a history page renders an item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySpeaker {
+    /// The human.
+    User,
+    /// The model.
+    Assistant,
+    /// A tool result.
+    Tool,
+    /// A system event.
+    SystemEvent,
+}
+
+/// One item of a history page.
+///
+/// The wire's plain form of one history entry: who spoke, what they said, and
+/// when. A host that keeps more — a rewound flag, an origin, a tool call —
+/// maps it onto these fields; the data the wire has no field for stays in
+/// `provenance`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryItem {
+    /// The item's stable id.
+    pub id: String,
+    /// What kind of item this is: `user`, `assistant`, `tool`,
+    /// `system_event`, `reasoning`, `tool_call`, `tool_result` or `refusal`.
+    pub kind: String,
+    /// The item's text.
+    pub content: String,
+    /// When it was created, as Unix milliseconds.
+    pub created_at: i64,
+    /// The turn it belongs to, when it belongs to one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// Who spoke.
+    pub role: HistorySpeaker,
+    /// What the host knows about where the item came from, when it knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
 }
 
 /// A service event: a numbered answer to a [`ClientRequest`].
@@ -467,6 +863,16 @@ pub enum ServerEventKind {
         /// Whether the provider served any prompt token from cache.
         #[serde(default)]
         cache_hit: bool,
+        /// The provider that served the request, when the host reports it.
+        ///
+        /// A session can switch models between turns, so the transcript's
+        /// footer names what actually answered each one rather than the
+        /// session's current model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// The model that served the request, when the host reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Tools the model called while producing this message, in order.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tools: Vec<String>,
@@ -599,7 +1005,7 @@ pub enum ServerEventKind {
     /// Provider request telemetry from the service host.
     Telemetry {
         /// Request rows, oldest first.
-        records: Vec<crate::sqlite::RequestRecord>,
+        records: Vec<TelemetryRecord>,
     },
     /// Tool approval state from the service host.
     ToolList {
@@ -726,6 +1132,19 @@ pub enum ServerEventKind {
         /// How many models it carries.
         models: usize,
     },
+    /// The editable catalogue: the providers and models written in the files,
+    /// with which of them came from a plugin and so cannot be edited here.
+    CatalogDetail {
+        /// One entry per provider, file and plugin alike.
+        providers: Vec<CatalogProviderInfo>,
+        /// One entry per model.
+        models: Vec<CatalogModelInfo>,
+    },
+    /// The plans of a session.
+    PlanList {
+        /// One entry per plan.
+        plans: Vec<PlanInfo>,
+    },
     /// The models the catalogue knows.
     ModelList {
         /// One entry per model.
@@ -774,6 +1193,10 @@ pub enum ServerEventKind {
         phase: Phase,
         /// Whether the turn committed an assistant message.
         committed: bool,
+        /// Whether the final text validated against the turn's
+        /// `response_format`, when one was requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_schema_valid: Option<bool>,
     },
     /// A transient request failed and the host will retry it.
     ///
@@ -836,7 +1259,7 @@ pub enum ServerEventKind {
         /// The child session id.
         child_session_id: String,
         /// The new child state.
-        state: String,
+        state: crate::ChildState,
         /// Why it changed.
         reason: String,
         /// The child's final result, when it reached a terminal state.
@@ -869,6 +1292,68 @@ pub enum ServerEventKind {
         question: String,
         /// The prompt the child asked.
         prompt: String,
+    },
+    /// One page of a session's history, answering [`ClientRequestKind::HistoryGet`].
+    HistoryPage {
+        /// The page's items, oldest first.
+        items: Vec<HistoryItem>,
+        /// Whether an earlier page remains.
+        has_more: bool,
+    },
+    /// History was rewound to a turn.
+    HistoryRewound {
+        /// The turn rewound to, in the wire's spelling.
+        to_turn_id: String,
+        /// Whether that turn itself was removed.
+        inclusive: bool,
+        /// The turns that were removed, oldest first.
+        rewound_turn_ids: Vec<String>,
+        /// The tool calls that ran in the removed turns, with their declared
+        /// side effects. Calls whose declaration is `side_effects: none` are
+        /// not repeated here.
+        side_effects: Vec<SideEffect>,
+        /// Whether the workspace was restored to the rewind point.
+        workspace_restored: bool,
+    },
+    /// A non-text output part started on a turn.
+    OutputPartStarted {
+        /// The turn.
+        turn: u64,
+        /// The output id (the host's `part_id`).
+        part_id: String,
+        /// The part index in the assistant message.
+        index: u32,
+        /// The modality in the wire's spelling.
+        modality: OutputModality,
+        /// The MIME type, when the part names one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        /// Whether the bytes arrived with the stream.
+        streamed: bool,
+        /// How many bytes are expected, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes_expected: Option<u64>,
+    },
+    /// A non-text output part finished on a turn.
+    OutputPartFinished {
+        /// The turn.
+        turn: u64,
+        /// The output id.
+        part_id: String,
+        /// The part index in the assistant message.
+        index: u32,
+        /// The modality in the wire's spelling.
+        modality: OutputModality,
+        /// How many bytes were stored.
+        bytes: u64,
+        /// The SHA-256 of the stored bytes.
+        sha256: String,
+        /// The blob id the bytes live in, when the service stored them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blob: Option<String>,
+        /// Why the part failed, when it did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 
@@ -906,3 +1391,7 @@ impl ServerEvent {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "wire_tests.rs"]
+mod tests;

@@ -12,9 +12,9 @@ use norte::{
     Continuation, Layer, LayerContext, Message, MessageStatus, ModelRequest, ModelStream, Role,
     ShortCircuitReason,
 };
-use norte_code_protocol::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_wire::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
 
-use super::mapping::{emit, reported_cost};
+use super::mapping::{emit, reported_cost, single};
 use super::models::resolve_reasoning;
 use super::{CostRecord, ModelSpec, Service, ServiceError};
 
@@ -143,6 +143,7 @@ impl Service {
 
 impl Service {
     /// The client-facing manual compaction, as a stream of events.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub(super) async fn compact_event_stream(
         &self,
         request_id: u64,
@@ -153,6 +154,72 @@ impl Service {
             .perform_compaction(request_id, &key, "manual", None)
             .await?;
         Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    /// Pins for compaction, as a stream of events.
+    ///
+    /// Pins live in the RAEP host: the service records no pin of its own, so
+    /// this answers with the session's history page as it stands, which is
+    /// what the host maps back onto `CONTEXT_UPDATED`.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn context_pin_event(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::HistoryPage {
+                items: Vec::new(),
+                has_more: false,
+            },
+        ))
+    }
+
+    /// A rewind, as a stream of events.
+    ///
+    /// Rewinding is a host operation over the session's history: the service
+    /// records no rewind of its own here, so this answers with the session's
+    /// history page as it stands.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn rewind_event(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::HistoryPage {
+                items: Vec::new(),
+                has_more: false,
+            },
+        ))
+    }
+
+    /// One page of history, as a stream of events.
+    ///
+    /// The service answers history reads as `MessageReplayed` events; the
+    /// host gathers those into a `HistoryPage`. Until the host maps them
+    /// onto a wire page, this answers with an empty page.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn history_get_event(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::HistoryPage {
+                items: Vec::new(),
+                has_more: false,
+            },
+        ))
     }
 
     /// The algorithm: summarise with the old transcript as the prefix, then
@@ -265,7 +332,7 @@ impl Service {
             record.compacted_from = Some(old);
             record.billed = seeded;
             record.compaction_baseline = seeded;
-            record.phase = norte_code_protocol::Phase::Idle;
+            record.phase = norte_code_wire::Phase::Idle;
             self.approval_rules
                 .load_session(fresh.id, &record.denied_tools, &record.allowed_tools);
         }

@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-wire = { path = "../norte-code-wire" }
 raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
 reqwest = { workspace = true }
 serde = { workspace = true }

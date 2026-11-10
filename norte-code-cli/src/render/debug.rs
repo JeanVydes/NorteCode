@@ -198,7 +198,7 @@ pub(crate) fn report_start(
 pub(crate) fn model_lines(
     style: Style,
     spec: &ModelSpec,
-    model: Option<&norte_code_protocol::ModelInfo>,
+    model: Option<&norte_code_wire::ModelInfo>,
 ) -> Vec<String> {
     let mut lines = vec![String::new(), heading(style, "model")];
     if let Some(model) = model {
@@ -301,7 +301,7 @@ pub(crate) async fn tools_panel(
 pub(crate) async fn report_tools(
     style: Style,
     state: &RemoteState,
-    session: Option<&norte_code_protocol::SessionKey>,
+    session: Option<&norte_code_wire::SessionKey>,
 ) -> Vec<String> {
     let mut lines = vec![heading(style, "tools")];
     // The session's list and not the configuration's: a session keeps the tools

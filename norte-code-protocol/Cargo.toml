@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 norte = { workspace = true }
+norte-code-wire = { path = "../norte-code-wire" }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }

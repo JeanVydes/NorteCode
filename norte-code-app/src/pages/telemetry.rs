@@ -1,7 +1,8 @@
-use crate::api::{ApiClient, TelemetryRecord, TelemetryStatus};
+use crate::api::ApiClient;
 use crate::components::{EmptyState, MetricCard, PageHeader};
 use crate::state::AppContext;
 use dioxus::prelude::*;
+use norte_code_wire::{RequestStatus as TelemetryStatus, TelemetryRecord};
 
 const RECORDS_PER_PAGE: usize = 25;
 

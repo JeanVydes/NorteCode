@@ -6,8 +6,10 @@ members = [
     "norte-code-client",
     "norte-code-cli",
     "norte-code-protocol",
+    "norte-code-wire",
     "norte-code-raep",
     "norte-code-plugin-host",
+    "tools/app-smoke",
 ]
 
 [workspace.package]

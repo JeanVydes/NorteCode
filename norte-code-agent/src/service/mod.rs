@@ -16,6 +16,7 @@ mod jobs;
 mod manage;
 mod mapping;
 mod mcp;
+mod media_wire;
 mod models;
 mod plans;
 mod prompt;
@@ -60,11 +61,13 @@ use norte_tools::{
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-use norte_code_protocol::catalog::{Catalog, Models, Providers, load_catalog_files};
-use norte_code_protocol::config::{ApiKey, CompactionTrigger, Config};
+use norte_code_protocol::catalog::{Catalog, load_catalog_files};
+use norte_code_protocol::config::CompactionTrigger;
+use norte_code_protocol::config::{ApiKey, Config};
 use norte_code_protocol::keys::KeyStore;
-use norte_code_protocol::plugins::ContextUsage;
-use norte_code_protocol::{
+use norte_code_wire::ContextUsage;
+use norte_code_wire::catalog::{Models, Providers};
+use norte_code_wire::{
     JobInfo, JobTurnPolicy, Phase, Reasoning, ServerEvent, ServerEventKind, SessionKey,
 };
 
@@ -161,6 +164,12 @@ pub(super) struct CancelRegistration {
     pub(super) token: CancellationToken,
 }
 
+/// How long a cancelled turn has to close itself before the service closes it.
+const CANCEL_CLOSE_GRACE: u64 = 3;
+
+/// The reason a cancelled turn reports when the service closes it.
+const STOP_REASON_CANCELLED: &str = "cancelled";
+
 /// The Norte Code service.
 pub struct Service {
     /// How many inputs may wait for the turn in flight (RFC 12.1:
@@ -254,20 +263,10 @@ pub struct ChildSessionSummary {
 }
 
 /// The current state of a child session runner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChildSessionState {
-    /// The child is not currently producing a turn.
-    Idle,
-    /// The child is producing a turn.
-    Streaming,
-    /// The child is waiting for a tool call to run.
-    AwaitingTool,
-    /// The child stopped after an unrecoverable error.
-    Failed,
-    /// The child was stopped by its parent.
-    Stopped,
-}
+///
+/// It is the protocol's own closed set, so the runner and the event stream
+/// cannot disagree about what a child is doing.
+pub type ChildSessionState = norte_code_wire::ChildState;
 
 /// Whether a name is in a session's withheld list.
 ///
@@ -540,7 +539,7 @@ impl Service {
 
     /// The sessions the client can see, newest first.
     #[must_use]
-    pub fn sessions(&self) -> Vec<norte_code_protocol::SessionInfo> {
+    pub fn sessions(&self) -> Vec<norte_code_wire::SessionInfo> {
         self.list_sessions()
     }
 
@@ -1606,7 +1605,7 @@ impl Service {
         &self,
         session: &SessionKey,
         job_id: &str,
-    ) -> Option<norte_code_protocol::JobInfo> {
+    ) -> Option<norte_code_wire::JobInfo> {
         let session_id = self.lock_sessions().get(session)?.id;
         self.jobs
             .get_for_session(session_id, job_id)
@@ -1619,7 +1618,7 @@ impl Service {
         &self,
         session: &SessionKey,
         job_id: &str,
-    ) -> Option<norte_code_protocol::JobInfo> {
+    ) -> Option<norte_code_wire::JobInfo> {
         let session_id = self.lock_sessions().get(session)?.id;
         self.jobs
             .get_for_session_with_retention(session_id, job_id)
@@ -1701,7 +1700,7 @@ impl Service {
         &self,
         session: &SessionKey,
         job_id: &str,
-    ) -> Option<norte_code_protocol::JobInfo> {
+    ) -> Option<norte_code_wire::JobInfo> {
         self.stop_session_job_with_grace(session, job_id, None)
             .await
     }
@@ -1712,7 +1711,7 @@ impl Service {
         session: &SessionKey,
         job_id: &str,
         grace: Option<Duration>,
-    ) -> Option<norte_code_protocol::JobInfo> {
+    ) -> Option<norte_code_wire::JobInfo> {
         let session_id = self.lock_sessions().get(session)?.id;
         let mut terminal = self.jobs.terminal_for_session(session_id, job_id)?;
         let _ = self
@@ -1997,10 +1996,25 @@ impl Service {
     /// same way the command line does. A pair that is neither — a typo, or
     /// a catalogue model that does not exist — is still an error.
     ///
+    /// An empty catalogue is not a hard stop: a catalogue plugin feeds the
+    /// service an in-memory catalogue at startup (`set_plugin_catalogue`), and
+    /// that catalogue may be the only one there is. The message says which
+    /// file to edit only when nothing at all was offered, files or plugin.
+    ///
     /// # Errors
     ///
     /// Returns [`ServiceError`] when the pair names neither a catalogue
     /// provider nor a configured one.
+    #[allow(dead_code)]
+    pub(crate) fn default_spec_for_test(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<ModelSpec, ServiceError> {
+        let catalog = self.catalog_with_plugins();
+        self.default_spec_for(&self.lock_config(), &catalog, provider, model)
+    }
+
     fn default_spec_for(
         &self,
         config: &Config,
@@ -2015,7 +2029,19 @@ impl Service {
         if provider.trim().is_empty() || model.trim().is_empty() {
             return Err(ServiceError::Unsupported("no model is configured"));
         }
-        let spec = ModelSpec::from_catalog(config, catalog, provider, model, None)?;
+        // The file catalogue first, the plugin catalogue second. A plugin
+        // offers pairs that no file carries, and a resolve that skipped it
+        // would call those unknown even though the session can use them.
+        let spec = match ModelSpec::from_catalog(config, catalog, provider, model, None) {
+            Ok(spec) => spec,
+            Err(catalog_error) => {
+                let merged = self.catalog_with_plugins();
+                if Arc::ptr_eq(&merged, &self.catalog()) {
+                    return Err(catalog_error);
+                }
+                ModelSpec::from_catalog(config, &merged, provider, model, None)?
+            }
+        };
         // The key is in hand now, so it joins the redaction list even when the
         // spec is rebuilt for a session the startup pass never resolved.
         self.remember_secret(&spec.api_key);
@@ -2057,9 +2083,9 @@ impl Service {
     #[allow(clippy::too_many_lines)] // one arm per request variant, which is the enum.
     fn canonical(
         &self,
-        kind: norte_code_protocol::ClientRequestKind,
-    ) -> Result<norte_code_protocol::ClientRequestKind, ServiceError> {
-        use norte_code_protocol::ClientRequestKind as Kind;
+        kind: norte_code_wire::ClientRequestKind,
+    ) -> Result<norte_code_wire::ClientRequestKind, ServiceError> {
+        use norte_code_wire::ClientRequestKind as Kind;
         let resolve = |key: SessionKey| self.resolve_key(&key);
         Ok(match kind {
             Kind::ForkSession {
@@ -2068,12 +2094,16 @@ impl Service {
                 from_turn_id,
                 inclusive,
                 carry_usage,
+                agent_id,
+                include,
             } => Kind::ForkSession {
                 session: resolve(session)?,
                 title,
                 from_turn_id,
                 inclusive,
                 carry_usage,
+                agent_id,
+                include,
             },
             Kind::RenameSession { session, title } => Kind::RenameSession {
                 session: resolve(session)?,
@@ -2088,6 +2118,8 @@ impl Service {
                 attachments,
                 budget,
                 reasoning,
+                output,
+                response_format,
                 metadata,
                 replay,
             } => Kind::SendMessage {
@@ -2096,6 +2128,8 @@ impl Service {
                 attachments,
                 budget,
                 reasoning,
+                output,
+                response_format,
                 metadata,
                 replay,
             },
@@ -2161,6 +2195,52 @@ impl Service {
             Kind::Compact { session } => Kind::Compact {
                 session: resolve(session)?,
             },
+            Kind::SessionCompact {
+                session,
+                strategy,
+                keep_last_turns,
+                instructions,
+                trigger,
+            } => Kind::SessionCompact {
+                session: resolve(session)?,
+                strategy,
+                keep_last_turns,
+                instructions,
+                trigger,
+            },
+            Kind::ContextPin {
+                session,
+                turn_ids,
+                pinned,
+            } => Kind::ContextPin {
+                session: resolve(session)?,
+                turn_ids,
+                pinned,
+            },
+            Kind::SessionRewind {
+                session,
+                to_turn_id,
+                inclusive,
+                cancel_pending,
+                workspace,
+            } => Kind::SessionRewind {
+                session: resolve(session)?,
+                to_turn_id,
+                inclusive,
+                cancel_pending,
+                workspace,
+            },
+            Kind::HistoryGet {
+                session,
+                before_turn_id,
+                limit,
+                include_rewound,
+            } => Kind::HistoryGet {
+                session: resolve(session)?,
+                before_turn_id,
+                limit,
+                include_rewound,
+            },
             Kind::CostReport { session } => Kind::CostReport {
                 session: session.map(resolve).transpose()?,
             },
@@ -2180,9 +2260,9 @@ impl Service {
     #[allow(clippy::too_many_lines)]
     pub async fn submit(
         self: &Arc<Self>,
-        mut request: norte_code_protocol::ClientRequest,
+        mut request: norte_code_wire::ClientRequest,
     ) -> Result<EventStream, ServiceError> {
-        use norte_code_protocol::ClientRequestKind as Kind;
+        use norte_code_wire::ClientRequestKind as Kind;
         // A session may be named by a prefix of its id: the footer shows eight
         // characters and a person types back what they can see. Resolve it once
         // here, at the one door every request comes through, so no handler has
@@ -2203,7 +2283,7 @@ impl Service {
                 request_id,
                 None,
                 ServerEventKind::SessionList {
-                    sessions: self.list_sessions(),
+                    sessions: self.list_live_sessions().await,
                 },
             )),
             Kind::ForkSession {
@@ -2212,6 +2292,8 @@ impl Service {
                 from_turn_id,
                 inclusive,
                 carry_usage,
+                agent_id: _,
+                include: _,
             } => {
                 let (key, from_turn_id) = self
                     .fork_session(
@@ -2254,9 +2336,31 @@ impl Service {
                 attachments,
                 budget,
                 reasoning,
+                output: _,
+                response_format,
                 metadata: _,
                 replay,
             } => {
+                // `response_format` (RFC 12.6) is validated here, not only in
+                // the host: the service is the layer that has the schema,
+                // the correction message, and the `OUTPUT_SCHEMA_INVALID`
+                // terminal. The host validates the shape and the
+                // `structured_output` capability before the turn starts.
+                if let Some(format) = &response_format
+                    && format.kind == norte_code_wire::ResponseFormatType::JsonSchema
+                {
+                    let Some(schema) = &format.schema else {
+                        return Err(ServiceError::Unsupported(
+                            "response_format json_schema requires schema",
+                        ));
+                    };
+                    let bytes = serde_json::to_vec(schema).unwrap_or_default().len();
+                    if bytes > 16 * 1024 {
+                        return Err(ServiceError::Unsupported(
+                            "response_format schema exceeds 16 KiB",
+                        ));
+                    }
+                }
                 self.start_turn(
                     request_id,
                     session,
@@ -2286,9 +2390,7 @@ impl Service {
                 .await
             }
             Kind::CancelTurn { session } => {
-                if let Some(registration) = self.lock_cancels().get(&session) {
-                    registration.token.cancel();
-                }
+                self.cancel_turn_and_watch(&session);
                 Ok(Box::pin(futures_util::stream::empty()))
             }
             Kind::StopJobs { session, id } => {
@@ -2379,9 +2481,23 @@ impl Service {
                 Ok(self.tool_list_event(request_id, session.as_ref()))
             }
             Kind::ListModels => Ok(self.list_models_event(request_id)),
+            Kind::ListCatalog => Ok(self.catalog_detail_event(request_id)),
             Kind::ListSkills => Ok(self.skill_list_event(request_id)),
+            Kind::ListPlans { session } => self.list_plans_event(request_id, session).await,
             Kind::RefreshSkills => Ok(self.refresh_skills_event(request_id)),
             Kind::RefreshCatalog => self.reload_catalog(request_id),
+            Kind::CatalogUpsertProvider {
+                provider_id,
+                provider,
+            } => self.upsert_provider(request_id, &provider_id, provider),
+            Kind::CatalogRemoveProvider { provider_id } => {
+                self.remove_provider(request_id, &provider_id)
+            }
+            Kind::CatalogUpsertModel { model } => self.upsert_model(request_id, model),
+            Kind::CatalogRemoveModel {
+                provider_id,
+                model_id,
+            } => self.remove_model(request_id, &provider_id, &model_id),
             Kind::SetModel {
                 session,
                 provider,
@@ -2416,6 +2532,31 @@ impl Service {
                 queue_mode,
             } => self.steer(request_id, session, text, id, queue_mode).await,
             Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
+            Kind::SessionCompact { session, .. } => {
+                self.compact_event_stream(request_id, session).await
+            }
+            Kind::ContextPin {
+                session,
+                turn_ids: _,
+                pinned: _,
+            } => self.context_pin_event(request_id, session).await,
+            Kind::SessionRewind { session, .. } => self.rewind_event(request_id, session).await,
+            Kind::HistoryGet { session, .. } => self.history_get_event(request_id, session).await,
+            Kind::SessionExport {
+                session,
+                include,
+                quiesce,
+            } => {
+                self.export_session(request_id, &session, include, quiesce)
+                    .await
+            }
+            Kind::SessionImport {
+                bundle,
+                decryption_jwk,
+            } => {
+                self.import_session(request_id, bundle, decryption_jwk)
+                    .await
+            }
             Kind::ListPlugins
             | Kind::InstallPlugin { .. }
             | Kind::UpdatePlugins { .. }
@@ -2424,7 +2565,7 @@ impl Service {
                 request_id,
                 None,
                 ServerEventKind::Error {
-                    code: norte_code_protocol::ErrorCode::InvalidRequest,
+                    code: norte_code_wire::ErrorCode::InvalidRequest,
                     message: "plugin lifecycle is managed by the RAEP host".to_owned(),
                 },
             )),
@@ -2445,7 +2586,9 @@ impl Service {
         Ok(single(
             request_id,
             session.cloned(),
-            ServerEventKind::Telemetry { records },
+            ServerEventKind::Telemetry {
+                records: records.iter().map(Into::into).collect(),
+            },
         ))
     }
 
@@ -2453,7 +2596,7 @@ impl Service {
         let tools = self
             .tool_rules(session)
             .into_iter()
-            .map(|tool| norte_code_protocol::ToolInfo {
+            .map(|tool| norte_code_wire::ToolInfo {
                 name: tool.name,
                 allowed: tool.allowed,
                 scope: match tool.scope {
@@ -2475,7 +2618,7 @@ impl Service {
         let servers = self
             .mcp_status()
             .into_iter()
-            .map(|server| norte_code_protocol::McpInfo {
+            .map(|server| norte_code_wire::McpInfo {
                 name: server.name,
                 command: server.command,
                 tools: server.tools,
@@ -2486,7 +2629,7 @@ impl Service {
         let failures = self
             .mcp_failures()
             .into_iter()
-            .map(|(name, reason)| norte_code_protocol::McpFailure { name, reason })
+            .map(|(name, reason)| norte_code_wire::McpFailure { name, reason })
             .collect();
         single(
             request_id,
@@ -2540,7 +2683,7 @@ impl Service {
         key: SessionKey,
         text: String,
         id: String,
-        queue_mode: norte_code_protocol::QueueMode,
+        queue_mode: norte_code_wire::QueueMode,
     ) -> Result<EventStream, ServiceError> {
         // The message takes the request already in flight. The durable copy
         // stays in the session until the engine reports that it applied it, so
@@ -2548,15 +2691,15 @@ impl Service {
         let (nid, _, _) = self.require_record(&key)?;
         let busy = self.turn_lock(&key).try_lock().is_err();
         match queue_mode {
-            norte_code_protocol::QueueMode::Reject if busy => {
+            norte_code_wire::QueueMode::Reject if busy => {
                 return Err(ServiceError::SessionBusy);
             }
-            norte_code_protocol::QueueMode::Interrupt if busy => {
+            norte_code_wire::QueueMode::Interrupt if busy => {
                 self.cancel_turn(&key);
             }
-            norte_code_protocol::QueueMode::Reject
-            | norte_code_protocol::QueueMode::Queue
-            | norte_code_protocol::QueueMode::Interrupt => {}
+            norte_code_wire::QueueMode::Reject
+            | norte_code_wire::QueueMode::Queue
+            | norte_code_wire::QueueMode::Interrupt => {}
         }
         let id = if id.is_empty() {
             uuid::Uuid::new_v4().to_string()
@@ -2635,14 +2778,89 @@ impl Service {
 
     /// Cancels the turn for `session`, if one is running. Returns whether a
     /// token was found and signalled.
+    ///
+    /// The token alone is not enough: the engine can be parked inside a tool
+    /// that awaits a client (an unanswered `ask_user`), and then it never
+    /// emits the terminal event — the session stayed busy for good. A watchdog
+    /// closes the turn if the engine has not done so a few seconds after the
+    /// cancel.
     pub fn cancel_turn(&self, session: &SessionKey) -> bool {
-        let cancels = self.lock_cancels();
-        if let Some(registration) = cancels.get(session) {
-            registration.token.cancel();
-            true
-        } else {
-            false
+        let cancelled = {
+            let cancels = self.lock_cancels();
+            match cancels.get(session) {
+                Some(registration) => {
+                    registration.token.cancel();
+                    true
+                }
+                None => false,
+            }
+        };
+        // A question outlives the turn's token: the tool waits on a oneshot
+        // that only closes when it is answered or dropped, so a cancel that
+        // left it pending kept the turn open and the session busy for good.
+        if let Ok((nid, _, _)) = self.require_record(session) {
+            self.questions.abandon_session(Some(nid));
         }
+        cancelled
+    }
+
+    /// Cancels a turn and closes it if the engine does not.
+    ///
+    /// The token alone is not enough: the engine can be parked inside a tool
+    /// that awaits a client (an unanswered `ask_user`), and then it never
+    /// emits the terminal event. This is the form callers with an `Arc` use.
+    pub fn cancel_turn_and_watch(self: &Arc<Self>, session: &SessionKey) -> bool {
+        let cancelled = self.cancel_turn(session);
+        if cancelled && let Some(turn) = self.active_turn(session) {
+            let service = Arc::clone(self);
+            let key = session.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(CANCEL_CLOSE_GRACE)).await;
+                service.close_cancelled_turn(&key, turn).await;
+            });
+        }
+        cancelled
+    }
+
+    /// Closes a turn the engine did not close after its cancellation.
+    ///
+    /// The engine owns the turn and normally reports its end; when it cannot —
+    /// it is parked in a tool that never returns — the service is the only one
+    /// left that can put the session back to `Idle` and tell the client.
+    async fn close_cancelled_turn(&self, key: &SessionKey, turn: u64) {
+        self.clear_active_turn(key, turn);
+        let Ok((_, _, phase)) = self.require_record(key) else {
+            return;
+        };
+        if phase == norte_code_wire::Phase::Idle && self.active_turn(key).is_none() {
+            return;
+        }
+        self.set_phase(key, norte_code_wire::Phase::Idle).await;
+        self.emit_delegation(ServerEvent::new(
+            0,
+            Some(key.clone()),
+            ServerEventKind::TurnStopped {
+                reason: STOP_REASON_CANCELLED.to_owned(),
+            },
+        ));
+        self.emit_delegation(ServerEvent::new(
+            0,
+            Some(key.clone()),
+            ServerEventKind::TurnFinished {
+                turn,
+                phase: norte_code_wire::Phase::Idle,
+                committed: false,
+                output_schema_valid: None,
+            },
+        ));
+    }
+
+    fn active_turn(&self, key: &SessionKey) -> Option<u64> {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .copied()
     }
 
     fn lock_catalog(&self) -> RwLockReadGuard<'_, Arc<Catalog>> {
@@ -2657,6 +2875,27 @@ impl Service {
         self.plugin_catalogue
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The plugin catalogue folded over the catalogue on disk.
+    ///
+    /// A plugin offers providers and models that `providers.json` and
+    /// `models.json` do not carry, and the host calls
+    /// [`Service::set_plugin_catalogue`] before any session exists. A resolve
+    /// that only looked at the files would then say a plugin-provided pair is
+    /// unknown; this is the one place the two sources are joined, and a
+    /// resolve tries it when the file catalogue misses.
+    fn catalog_with_plugins(&self) -> Arc<Catalog> {
+        let catalog = self.catalog();
+        let (providers, models) = self.lock_plugin_catalogue().clone();
+        if providers.providers.is_empty() && models.models.is_empty() {
+            return catalog;
+        }
+        let mut merged = (*catalog).clone();
+        for skipped in merged.extend(providers.providers, models.models) {
+            tracing::debug!("plugin catalogue entry not applied: {skipped}");
+        }
+        Arc::new(merged)
     }
 
     fn lock_plugin_catalogue_write(&self) -> RwLockWriteGuard<'_, (Providers, Models)> {
@@ -2719,7 +2958,21 @@ impl Service {
     }
 
     /// Emits a delegation event to the host subscribers.
-    pub(super) fn emit_delegation(&self, event: ServerEvent) {
+    pub(super) fn emit_delegation(&self, mut event: ServerEvent) {
+        // A producer inside the engine knows a session by its Norte id; the
+        // wire names it by the client's key. Sending the engine id through
+        // put the frame on a session that does not exist on the wire, so the
+        // host dropped it — job start and progress never reached a client,
+        // while job *finish* did, because that one already carries the key.
+        if let Some(session) = event.session.as_ref()
+            && let Some(key) = self
+                .lock_sessions()
+                .iter()
+                .find(|(_, record)| record.id.to_string() == session.as_str())
+                .map(|(key, _)| key.clone())
+        {
+            event.session = Some(key);
+        }
         let _ = self.delegation_events.send(event);
     }
 
@@ -2879,7 +3132,8 @@ impl Service {
         {
             Ok(mut stream) => {
                 while let Some(event) = stream.next().await {
-                    if !reported && let ServerEventKind::TurnStarted { turn } = event.kind {
+                    if !reported && let ServerEventKind::TurnStarted { turn } = &event.kind {
+                        let turn = *turn;
                         self.job_auto_turns
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
@@ -2890,6 +3144,13 @@ impl Service {
                         }
                         reported = true;
                     }
+                    // A turn started here has no request behind it, so nobody
+                    // else reads its stream. Draining it without forwarding
+                    // left the client with the job's end and then silence: the
+                    // injected message, the answer and the turn's end never
+                    // reached the page, which stayed on "Thinking…" until a
+                    // reload read the history instead.
+                    self.emit_delegation(event);
                 }
             }
             Err(error) => {
@@ -3006,7 +3267,7 @@ fn job_policy_allows_turn(policy: JobTurnPolicy, job: &JobInfo) -> bool {
     match policy {
         JobTurnPolicy::Always => true,
         JobTurnPolicy::OnFailure => {
-            job.state == norte_code_protocol::JobState::Cancelled
+            job.state == norte_code_wire::JobState::Cancelled
                 || job.timed_out
                 || job.exit_code.is_some_and(|code| code != 0)
         }

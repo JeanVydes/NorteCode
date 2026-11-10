@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use norte_code_protocol::{
+use norte_code_wire::{
     Delta, MessageRole, OutputStream, ReplayedKind, ServerEvent, ServerEventKind, SessionKey,
 };
 
@@ -1031,7 +1031,7 @@ fn a_summary_with_no_answer_still_stops_the_bar() {
     renderer.usage_event(&ServerEventKind::RequestReconstructed {
         turn: 1,
         index: 0,
-        usage: norte_code_protocol::Usage::default(),
+        usage: norte_code_wire::Usage::default(),
         cost_usd: Some(0.0),
         truncated: false,
         duration_ms: 3_000,
@@ -1039,6 +1039,8 @@ fn a_summary_with_no_answer_still_stops_the_bar() {
         tokens_per_second: None,
         cache_hit: false,
         tools: vec!["shell".to_owned()],
+        provider: Some("test".to_owned()),
+        model: Some("scripted".to_owned()),
     });
     assert!(
         renderer.waiting.is_none(),
@@ -2126,7 +2128,7 @@ fn a_conflict_replaces_the_stale_transcript_with_replayed_history() {
             request_id: 1,
             session: None,
             kind: ServerEventKind::Error {
-                code: norte_code_protocol::ErrorCode::Conflict,
+                code: norte_code_wire::ErrorCode::Conflict,
                 message: "session advanced".to_owned(),
             },
         })

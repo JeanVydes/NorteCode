@@ -16,21 +16,41 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use norte::Cancellation;
-use norte_code_protocol::SessionKey;
+use norte_code_wire::SessionKey;
 use tokio::sync::Notify;
 
-/// Lifecycle state of a child delegation.
+/// How a child's run ended.
+///
+/// The call site used to pass two booleans — `terminal` and `failed` — and the
+/// registry decoded them into a third state. `(false, true)` was a failure that
+/// was not terminal, a combination nothing ever meant but nothing rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ChildState {
-    /// A turn is active or starting.
-    Running,
-    /// The child can accept another message.
+pub(super) enum RunEnd {
+    /// The turn ended; the child can take another message.
     Idle,
-    /// The child failed and cannot be messaged again.
+    /// It failed and will not run again.
     Failed,
-    /// The child was stopped and cannot be messaged again.
+    /// It was stopped and will not run again.
     Stopped,
 }
+
+impl RunEnd {
+    /// The state a finished run leaves the child in.
+    fn into_state(self) -> ChildState {
+        match self {
+            Self::Idle => ChildState::Idle,
+            Self::Failed => ChildState::Failed,
+            Self::Stopped => ChildState::Stopped,
+        }
+    }
+}
+
+/// Lifecycle state of a child delegation.
+///
+/// It is the protocol's `ChildState`, not a fourth copy of it: the registry,
+/// the event stream and the resource endpoint all describe one child, and a
+/// state each of them spells differently is a state that drifts.
+pub(super) use norte_code_wire::ChildState;
 
 /// One delegation: a child session and what the parent knows about it.
 #[derive(Debug)]
@@ -72,11 +92,13 @@ impl Child {
     }
 
     pub(super) fn is_finished(&self) -> bool {
-        self.state != ChildState::Running
+        // `AwaitingApproval` is not progress: the child is parked until its
+        // parent answers, which for the registry is finished with its turn.
+        !matches!(self.state, ChildState::Running)
     }
 
     pub(super) fn is_terminal(&self) -> bool {
-        matches!(self.state, ChildState::Failed | ChildState::Stopped)
+        self.state.is_terminal()
     }
 
     pub(super) fn is_failed(&self) -> bool {
@@ -184,7 +206,7 @@ impl ChildRegistry {
             .get_mut(parent)
             .and_then(|list| list.iter_mut().find(|child| child.child == *id))
         {
-            if matches!(child.state, ChildState::Failed | ChildState::Stopped) {
+            if child.state.is_terminal() {
                 return false;
             }
             child.state = ChildState::Running;
@@ -198,28 +220,17 @@ impl ChildRegistry {
         &self,
         parent: &SessionKey,
         id: &SessionKey,
-        terminal: bool,
-        failed: bool,
+        ended: RunEnd,
     ) -> Option<String> {
         let (changed, message) = {
             let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
             let child = children
                 .get_mut(parent)
                 .and_then(|list| list.iter_mut().find(|child| child.child == *id))?;
-            if !matches!(child.state, ChildState::Failed | ChildState::Stopped) {
-                child.state = if terminal {
-                    if failed {
-                        ChildState::Failed
-                    } else {
-                        ChildState::Stopped
-                    }
-                } else {
-                    ChildState::Idle
-                };
+            if !child.state.is_terminal() {
+                child.state = ended.into_state();
             }
-            let message = if matches!(child.state, ChildState::Failed | ChildState::Stopped)
-                || child.pending_messages.is_empty()
-            {
+            let message = if child.state.is_terminal() || child.pending_messages.is_empty() {
                 None
             } else {
                 child.state = ChildState::Running;
@@ -245,7 +256,7 @@ impl ChildRegistry {
         let child = children
             .get_mut(parent)
             .and_then(|list| list.iter_mut().find(|child| child.child == *id))?;
-        if matches!(child.state, ChildState::Failed | ChildState::Stopped) {
+        if child.state.is_terminal() {
             return None;
         }
         let start = child.state == ChildState::Idle && child.pending_messages.is_empty();
@@ -266,9 +277,7 @@ impl ChildRegistry {
         let child = children
             .get_mut(parent)
             .and_then(|list| list.iter_mut().find(|child| child.child == *id))?;
-        if matches!(child.state, ChildState::Failed | ChildState::Stopped)
-            || child.pending_messages.is_empty()
-        {
+        if child.state.is_terminal() || child.pending_messages.is_empty() {
             return None;
         }
         child.state = ChildState::Running;
@@ -297,7 +306,7 @@ impl ChildRegistry {
                 .get_mut(parent)
                 .and_then(|list| list.iter_mut().find(|child| child.child == *id))
                 .map(|child| {
-                    child.state = ChildState::Stopped;
+                    child.state = RunEnd::Stopped.into_state();
                     child.pending_messages.clear();
                     Arc::clone(&child.changed)
                 })
@@ -438,7 +447,7 @@ mod tests {
         notified.as_mut().enable();
 
         assert_eq!(
-            registry.finish_and_take_message(&parent, &child, false, false),
+            registry.finish_and_take_message(&parent, &child, RunEnd::Idle),
             None
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), notified)
@@ -462,7 +471,7 @@ mod tests {
             Child::new(child.clone(), "call-1".to_owned()),
         );
         assert_eq!(
-            registry.finish_and_take_message(&parent, &child, false, false),
+            registry.finish_and_take_message(&parent, &child, RunEnd::Idle),
             None
         );
 
@@ -479,7 +488,7 @@ mod tests {
             Some("first")
         );
         assert_eq!(
-            registry.finish_and_take_message(&parent, &child, false, false),
+            registry.finish_and_take_message(&parent, &child, RunEnd::Idle),
             Some("second".to_owned())
         );
         assert!(
@@ -489,7 +498,7 @@ mod tests {
                 .is_finished()
         );
         assert_eq!(
-            registry.finish_and_take_message(&parent, &child, false, false),
+            registry.finish_and_take_message(&parent, &child, RunEnd::Idle),
             None
         );
         assert!(

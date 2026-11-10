@@ -41,7 +41,7 @@ use super::Service;
 use super::detach::DetachRegistry;
 use super::jobs::{JobRegistry, JobState, JobSummary, job_info};
 use super::steering::{Steered, Steering};
-use norte_code_protocol::{JobLimits, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_wire::{JobLimits, ServerEvent, ServerEventKind, SessionKey};
 
 /// What a call hands back when it is detached before it has anything to show.
 ///

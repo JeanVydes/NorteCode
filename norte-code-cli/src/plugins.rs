@@ -2,8 +2,8 @@
 
 use std::sync::OnceLock;
 
-use norte_code_protocol::SessionKey;
-use norte_code_protocol::plugins::Plugins;
+use norte_code_plugin_host::Plugins;
+use norte_code_wire::SessionKey;
 
 static PLUGINS: OnceLock<Plugins> = OnceLock::new();
 

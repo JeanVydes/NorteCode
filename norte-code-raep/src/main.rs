@@ -8,19 +8,19 @@ use std::{
 
 use norte_code_agent::{DEFAULT_SYSTEM_PROMPT, ModelSpec, Service, VendorModels};
 use norte_code_plugin_host::load_plugins;
+use norte_code_plugin_host::plugins::{Catalogue, Plugins};
 use norte_code_protocol::{
-    catalog::{Catalog, CatalogError, Models, Providers, ensure_catalog_files, load_catalog_files},
+    catalog::{Catalog, CatalogError, ensure_catalog_files, load_catalog_files},
     config::{
         Agent, ServiceConfig, ensure_user_service_config, project_config_path, user_config_path,
     },
-    plugins::Catalogue,
-    plugins::Plugins,
     sqlite::{SessionDirectory, SqliteStore},
 };
 use norte_code_raep::{
     BlobArtifactStore, FilePinStore, HostConfig, NorteCodeRaepHost, SqliteReplayStore,
     SqliteUploadIndex, router,
 };
+use norte_code_wire::catalog::{Models, Providers};
 
 async fn build_services(
     agents: Vec<Agent>,

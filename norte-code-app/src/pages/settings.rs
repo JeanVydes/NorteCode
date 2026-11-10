@@ -117,6 +117,12 @@ pub fn SettingsPage() -> Element {
                 onchange: move |value| context.set_show_tool_output(value),
             }
             ToggleRow {
+                label: "Live session list",
+                description: "Refresh the sidebar from the host every 15 seconds while this tab is visible, so another client's turns and new sessions show up.",
+                checked: *context.live_session_list.read(),
+                onchange: move |value| context.set_live_session_list(value),
+            }
+            ToggleRow {
                 label: "Developer mode",
                 description: "Expose negotiated capabilities and transport diagnostics on a separate page.",
                 checked: *context.developer_mode.read(),

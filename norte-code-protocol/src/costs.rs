@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Budget, BudgetAction, BudgetScope, BudgetUnit};
 use chrono::{DateTime, Utc};
+use norte_code_wire::{Budget, BudgetAction, BudgetScope, BudgetUnit};
 use serde::{Deserialize, Serialize};
 
 /// The fraction of a limit at which a warning is emitted.
