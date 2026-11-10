@@ -1,8 +1,5 @@
 use norte_code_wire::ServerEvent;
 
-#[allow(clippy::wildcard_imports)]
-use crate::*;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SeqStep {
     Apply,
@@ -19,6 +16,9 @@ pub(crate) fn seq_step(previous: Option<u64>, seq: u64) -> SeqStep {
         _ => SeqStep::Apply,
     }
 }
+
+use crate::decode::server_event_from_frame;
+use crate::frame::FrameWire;
 
 /// Drains complete SSE blocks from `buffer`, in wire order.
 ///

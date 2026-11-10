@@ -20,14 +20,5 @@ pub(crate) fn render_safe_markdown(content: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::render_safe_markdown;
-
-    #[test]
-    fn markdown_html_is_sanitized_before_rendering() {
-        let safe_html = render_safe_markdown("**safe** <script>alert('x')</script>");
-        assert!(safe_html.contains("<strong>safe</strong>"));
-        assert!(!safe_html.contains("<script"));
-        assert!(!safe_html.contains("alert('x')"));
-    }
-}
+#[path = "markdown_tests.rs"]
+mod tests;

@@ -3,7 +3,10 @@ use raep_types::Envelope;
 use serde_json::Value;
 
 #[allow(clippy::wildcard_imports)]
-use crate::*;
+use crate::canonical::*;
+use crate::error::ClientError;
+#[allow(clippy::wildcard_imports)]
+use crate::frame::*;
 
 pub(crate) fn timestamp_millis() -> i64 {
     std::time::SystemTime::now()

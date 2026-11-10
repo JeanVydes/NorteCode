@@ -4,8 +4,7 @@ use norte_code_wire::QueueMode;
 use norte_code_wire::{ClientRequest, ServerEvent};
 use std::pin::Pin;
 
-#[allow(clippy::wildcard_imports)]
-use crate::*;
+use crate::error::ClientError;
 
 /// A stream of events answering one client request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;

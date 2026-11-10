@@ -1212,65 +1212,6 @@ impl Service {
         Ok(tools)
     }
 
-    /// Connects the configured MCP servers, once, at startup.
-    async fn connect_mcp(&self) {
-        let root = self.workspace_root.clone();
-        // The servers are read before the first await: a `std` lock must not be
-        // held across one.
-        let configured = self.lock_config().mcp_servers.clone();
-        let connected = McpServers::connect(&configured, &root).await;
-        for (name, reason) in &connected.failures {
-            tracing::warn!(server = %name, %reason, "an MCP server could not be started");
-        }
-        if let Ok(mut slot) = self.mcp_servers.write() {
-            *slot = connected;
-        }
-    }
-
-    /// The MCP servers that connected, for the startup line.
-    ///
-    /// Each one carries the names of the tools it published, because a count
-    /// says the server is up and the names are what a person needs to ask the
-    /// model for one.
-    pub fn mcp_status(&self) -> Vec<McpServerStatus> {
-        self.mcp_servers
-            .read()
-            .map(|servers| {
-                servers
-                    .servers
-                    .iter()
-                    .map(|server| McpServerStatus {
-                        name: server.name.clone(),
-                        command: server.label(),
-                        tools: server.tool_names(),
-                        active: server.is_active(),
-                        filtered: server.filtered.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Turns one MCP server off or on for the rest of the process.
-    ///
-    /// The process stays up, so turning it back on is instant; what changes is
-    /// whether its tools are put in front of the model.
-    ///
-    /// Returns the state the server is in afterwards, or `None` when no server
-    /// by that name connected.
-    pub fn set_mcp_active(&self, name: &str, active: bool) -> Option<bool> {
-        let mut servers = self.mcp_servers.write().ok()?;
-        servers.set_active(name, active)
-    }
-
-    /// The MCP servers that could not be started, for the startup line.
-    pub fn mcp_failures(&self) -> Vec<(String, String)> {
-        self.mcp_servers
-            .read()
-            .map(|servers| servers.failures.clone())
-            .unwrap_or_default()
-    }
-
     /// Selects the config file global approval rules are written to.
     ///
     /// The CLI calls this after loading `--config`, so "always" lands in the
@@ -1486,95 +1427,6 @@ impl Service {
         Ok(())
     }
 
-    /// Re-scans the skill roots and returns how many valid skills remain.
-    ///
-    /// The next engine build registers the refreshed tools; a turn already in
-    /// flight keeps the registry it started with.
-    pub fn refresh_skills(&self) -> usize {
-        let registry = Arc::new(discover_skills(&self.lock_config(), &self.workspace_root));
-        let count = registry.len();
-        for warning in registry.warnings() {
-            tracing::warn!(
-                path = %warning.path.display(),
-                "skipping skill: {}",
-                warning.message
-            );
-        }
-        *self.lock_skills_write() = registry;
-        count
-    }
-
-    /// Retries the MCP servers that failed, returning how many answered.
-    ///
-    /// The ones that are connected are left alone: they keep their process and
-    /// their session.
-    pub async fn retry_mcp(&self) -> usize {
-        let root = self.workspace_root.clone();
-        // A `std` lock must not be held across an await, so the config is read
-        // and the retry runs without one; the lock is taken only to install the
-        // result.
-        let configured = self.lock_config().mcp_servers.clone();
-        let pending = match self.mcp_servers.read() {
-            Ok(servers) => servers.failed_to_retry(&configured),
-            Err(_) => return 0,
-        };
-        let mut recovered = Vec::new();
-        let mut still_failed = Vec::new();
-        for (name, config) in pending {
-            match McpServers::connect_configured(&name, &config, &root).await {
-                Ok(server) => recovered.push(server),
-                Err(reason) => still_failed.push((name, reason)),
-            }
-        }
-        let count = recovered.len();
-        if let Ok(mut servers) = self.mcp_servers.write() {
-            servers.install(recovered, still_failed);
-        }
-        count
-    }
-
-    /// Rebuilds the MCP connections from the current configuration.
-    ///
-    /// A server added, removed or disabled in the config takes effect here: the
-    /// connections are made from the configuration in force, not the one the
-    /// process started with. The on/off state a person set in the panel is
-    /// carried across by name, so a server they turned off is not turned back on
-    /// by a refresh, and a process that is no longer configured is dropped with
-    /// its children.
-    ///
-    /// Returns how many servers are up afterwards.
-    pub async fn reload_mcp(&self) -> usize {
-        let root = self.workspace_root.clone();
-        let configured = self.lock_config().mcp_servers.clone();
-        let was_active = self
-            .mcp_servers
-            .read()
-            .map(|servers| servers.active_by_name())
-            .unwrap_or_default();
-        let mut connected = McpServers::connect(&configured, &root).await;
-        for (name, reason) in &connected.failures {
-            tracing::warn!(server = %name, %reason, "an MCP server could not be started");
-        }
-        // The state a person set wins over the default the connection has: a
-        // server carried across the reload keeps whether it was on.
-        for server in &mut connected.servers {
-            if let Some(active) = was_active.get(&server.name) {
-                server.active = *active;
-            }
-        }
-        let up = connected.servers.len();
-        if let Ok(mut slot) = self.mcp_servers.write() {
-            *slot = connected;
-        }
-        up
-    }
-
-    /// The skills registry in use.
-    #[must_use]
-    pub fn skills(&self) -> Arc<SkillRegistry> {
-        Arc::clone(&self.lock_skills())
-    }
-
     /// The `provider/model` reference a session is on, if it is known.
     ///
     /// A client needs it to change one half of the reference while keeping the
@@ -1599,89 +1451,6 @@ impl Service {
             .and_then(|record| record.spec.clone())
     }
 
-    /// Returns a background job only when it belongs to `session`.
-    #[must_use]
-    pub fn session_job(
-        &self,
-        session: &SessionKey,
-        job_id: &str,
-    ) -> Option<norte_code_wire::JobInfo> {
-        let session_id = self.lock_sessions().get(session)?.id;
-        self.jobs
-            .get_for_session(session_id, job_id)
-            .map(|job| job_info(&job))
-    }
-
-    /// Returns a session job after applying the configured output-retention window.
-    #[must_use]
-    pub fn session_job_with_output_retention(
-        &self,
-        session: &SessionKey,
-        job_id: &str,
-    ) -> Option<norte_code_wire::JobInfo> {
-        let session_id = self.lock_sessions().get(session)?.id;
-        self.jobs
-            .get_for_session_with_retention(session_id, job_id)
-            .map(|job| job_info(&job))
-    }
-
-    /// Sets the limits applied to detached jobs owned by this service.
-    pub fn configure_job_limits(&self, max_concurrent: usize, output_retention_s: u64) {
-        self.jobs
-            .configure_limits(max_concurrent, output_retention_s);
-    }
-
-    /// Sets the session's policy for turns caused by detached job results.
-    #[must_use]
-    pub fn set_job_turn_policy(&self, session: &SessionKey, policy: JobTurnPolicy) -> bool {
-        let Some(session_id) = self.lock_sessions().get(session).map(|record| record.id) else {
-            return false;
-        };
-        self.job_turn_policies
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(session_id, policy);
-        true
-    }
-
-    /// Whether a session's finished job reserved a new turn.
-    #[must_use]
-    pub fn session_job_triggered_new_turn(
-        &self,
-        session: &SessionKey,
-        job_id: &str,
-    ) -> Option<bool> {
-        self.session_job(session, job_id)?;
-        Some(
-            self.job_auto_turns
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(job_id),
-        )
-    }
-
-    /// Waits for the turn reserved by a job to start, or returns `None` if it
-    /// could not be started.
-    pub async fn session_job_new_turn_id(&self, session: &SessionKey, job_id: &str) -> Option<u64> {
-        self.session_job(session, job_id)?;
-        loop {
-            let notified = self.job_auto_turn_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let state = self
-                .job_auto_turns
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(job_id)
-                .copied();
-            match state {
-                Some(Some(turn)) => return Some(turn),
-                Some(None) => notified.await,
-                None => return None,
-            }
-        }
-    }
-
     /// The turn currently running for a session, if one has started.
     #[must_use]
     pub fn session_active_turn_id(&self, session: &SessionKey) -> Option<u64> {
@@ -1690,39 +1459,6 @@ impl Service {
             .unwrap_or_else(PoisonError::into_inner)
             .get(session)
             .copied()
-    }
-
-    /// Cancels a job belonging to `session` and waits for its runner to settle.
-    ///
-    /// The job may show as killed as soon as cancellation is requested, but the
-    /// final output and duration are not stable until its streams have closed.
-    pub async fn stop_session_job(
-        &self,
-        session: &SessionKey,
-        job_id: &str,
-    ) -> Option<norte_code_wire::JobInfo> {
-        self.stop_session_job_with_grace(session, job_id, None)
-            .await
-    }
-
-    /// Cancels a job, applying an optional grace before forced process termination.
-    pub async fn stop_session_job_with_grace(
-        &self,
-        session: &SessionKey,
-        job_id: &str,
-        grace: Option<Duration>,
-    ) -> Option<norte_code_wire::JobInfo> {
-        let session_id = self.lock_sessions().get(session)?.id;
-        let mut terminal = self.jobs.terminal_for_session(session_id, job_id)?;
-        let _ = self
-            .jobs
-            .cancel_in_session_with_grace(session_id, job_id, grace);
-        while !*terminal.borrow() {
-            if terminal.changed().await.is_err() {
-                break;
-            }
-        }
-        self.session_job(session, job_id)
     }
 
     /// How much of its model's context a session is using.
@@ -1765,18 +1501,6 @@ impl Service {
         self.lock_sessions()
             .get(session)
             .and_then(|record| record.title.clone())
-    }
-
-    /// Whether the session has a background job still running.
-    ///
-    /// The CLI asks before deciding what `Ctrl-C` means: it ends a job when
-    /// there is one and does nothing otherwise. A plain `bool` rather than a
-    /// borrow, so the answer does not hold the sessions lock across a redraw.
-    #[must_use]
-    pub fn has_running_jobs(&self, session: &SessionKey) -> bool {
-        self.lock_sessions()
-            .get(session)
-            .is_some_and(|record| self.jobs.any_running(record.id))
     }
 
     /// The configuration in force.
@@ -3257,6 +2981,265 @@ impl Service {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
+    }
+    /// Returns a background job only when it belongs to `session`.
+    #[must_use]
+    pub fn session_job(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<norte_code_wire::JobInfo> {
+        let session_id = self.lock_sessions().get(session)?.id;
+        self.jobs
+            .get_for_session(session_id, job_id)
+            .map(|job| job_info(&job))
+    }
+    /// Returns a session job after applying the configured output-retention window.
+    #[must_use]
+    pub fn session_job_with_output_retention(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<norte_code_wire::JobInfo> {
+        let session_id = self.lock_sessions().get(session)?.id;
+        self.jobs
+            .get_for_session_with_retention(session_id, job_id)
+            .map(|job| job_info(&job))
+    }
+    /// Sets the limits applied to detached jobs owned by this service.
+    pub fn configure_job_limits(&self, max_concurrent: usize, output_retention_s: u64) {
+        self.jobs
+            .configure_limits(max_concurrent, output_retention_s);
+    }
+    /// Sets the session's policy for turns caused by detached job results.
+    #[must_use]
+    pub fn set_job_turn_policy(&self, session: &SessionKey, policy: JobTurnPolicy) -> bool {
+        let Some(session_id) = self.lock_sessions().get(session).map(|record| record.id) else {
+            return false;
+        };
+        self.job_turn_policies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id, policy);
+        true
+    }
+    /// Whether a session's finished job reserved a new turn.
+    #[must_use]
+    pub fn session_job_triggered_new_turn(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<bool> {
+        self.session_job(session, job_id)?;
+        Some(
+            self.job_auto_turns
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(job_id),
+        )
+    }
+    /// Waits for the turn reserved by a job to start, or returns `None` if it
+    /// could not be started.
+    pub async fn session_job_new_turn_id(&self, session: &SessionKey, job_id: &str) -> Option<u64> {
+        self.session_job(session, job_id)?;
+        loop {
+            let notified = self.job_auto_turn_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let state = self
+                .job_auto_turns
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(job_id)
+                .copied();
+            match state {
+                Some(Some(turn)) => return Some(turn),
+                Some(None) => notified.await,
+                None => return None,
+            }
+        }
+    }
+    /// Cancels a job belonging to `session` and waits for its runner to settle.
+    ///
+    /// The job may show as killed as soon as cancellation is requested, but the
+    /// final output and duration are not stable until its streams have closed.
+    pub async fn stop_session_job(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+    ) -> Option<norte_code_wire::JobInfo> {
+        self.stop_session_job_with_grace(session, job_id, None)
+            .await
+    }
+    /// Cancels a job, applying an optional grace before forced process termination.
+    pub async fn stop_session_job_with_grace(
+        &self,
+        session: &SessionKey,
+        job_id: &str,
+        grace: Option<Duration>,
+    ) -> Option<norte_code_wire::JobInfo> {
+        let session_id = self.lock_sessions().get(session)?.id;
+        let mut terminal = self.jobs.terminal_for_session(session_id, job_id)?;
+        let _ = self
+            .jobs
+            .cancel_in_session_with_grace(session_id, job_id, grace);
+        while !*terminal.borrow() {
+            if terminal.changed().await.is_err() {
+                break;
+            }
+        }
+        self.session_job(session, job_id)
+    }
+    /// Whether the session has a background job still running.
+    ///
+    /// The CLI asks before deciding what `Ctrl-C` means: it ends a job when
+    /// there is one and does nothing otherwise. A plain `bool` rather than a
+    /// borrow, so the answer does not hold the sessions lock across a redraw.
+    #[must_use]
+    pub fn has_running_jobs(&self, session: &SessionKey) -> bool {
+        self.lock_sessions()
+            .get(session)
+            .is_some_and(|record| self.jobs.any_running(record.id))
+    }
+    /// Connects the configured MCP servers, once, at startup.
+    async fn connect_mcp(&self) {
+        let root = self.workspace_root.clone();
+        // The servers are read before the first await: a `std` lock must not be
+        // held across one.
+        let configured = self.lock_config().mcp_servers.clone();
+        let connected = McpServers::connect(&configured, &root).await;
+        for (name, reason) in &connected.failures {
+            tracing::warn!(server = %name, %reason, "an MCP server could not be started");
+        }
+        if let Ok(mut slot) = self.mcp_servers.write() {
+            *slot = connected;
+        }
+    }
+    /// The MCP servers that connected, for the startup line.
+    ///
+    /// Each one carries the names of the tools it published, because a count
+    /// says the server is up and the names are what a person needs to ask the
+    /// model for one.
+    pub fn mcp_status(&self) -> Vec<McpServerStatus> {
+        self.mcp_servers
+            .read()
+            .map(|servers| {
+                servers
+                    .servers
+                    .iter()
+                    .map(|server| McpServerStatus {
+                        name: server.name.clone(),
+                        command: server.label(),
+                        tools: server.tool_names(),
+                        active: server.is_active(),
+                        filtered: server.filtered.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// Turns one MCP server off or on for the rest of the process.
+    ///
+    /// The process stays up, so turning it back on is instant; what changes is
+    /// whether its tools are put in front of the model.
+    ///
+    /// Returns the state the server is in afterwards, or `None` when no server
+    /// by that name connected.
+    pub fn set_mcp_active(&self, name: &str, active: bool) -> Option<bool> {
+        let mut servers = self.mcp_servers.write().ok()?;
+        servers.set_active(name, active)
+    }
+    /// The MCP servers that could not be started, for the startup line.
+    pub fn mcp_failures(&self) -> Vec<(String, String)> {
+        self.mcp_servers
+            .read()
+            .map(|servers| servers.failures.clone())
+            .unwrap_or_default()
+    }
+    /// Retries the MCP servers that failed, returning how many answered.
+    ///
+    /// The ones that are connected are left alone: they keep their process and
+    /// their session.
+    pub async fn retry_mcp(&self) -> usize {
+        let root = self.workspace_root.clone();
+        // A `std` lock must not be held across an await, so the config is read
+        // and the retry runs without one; the lock is taken only to install the
+        // result.
+        let configured = self.lock_config().mcp_servers.clone();
+        let pending = match self.mcp_servers.read() {
+            Ok(servers) => servers.failed_to_retry(&configured),
+            Err(_) => return 0,
+        };
+        let mut recovered = Vec::new();
+        let mut still_failed = Vec::new();
+        for (name, config) in pending {
+            match McpServers::connect_configured(&name, &config, &root).await {
+                Ok(server) => recovered.push(server),
+                Err(reason) => still_failed.push((name, reason)),
+            }
+        }
+        let count = recovered.len();
+        if let Ok(mut servers) = self.mcp_servers.write() {
+            servers.install(recovered, still_failed);
+        }
+        count
+    }
+    /// Rebuilds the MCP connections from the current configuration.
+    ///
+    /// A server added, removed or disabled in the config takes effect here: the
+    /// connections are made from the configuration in force, not the one the
+    /// process started with. The on/off state a person set in the panel is
+    /// carried across by name, so a server they turned off is not turned back on
+    /// by a refresh, and a process that is no longer configured is dropped with
+    /// its children.
+    ///
+    /// Returns how many servers are up afterwards.
+    pub async fn reload_mcp(&self) -> usize {
+        let root = self.workspace_root.clone();
+        let configured = self.lock_config().mcp_servers.clone();
+        let was_active = self
+            .mcp_servers
+            .read()
+            .map(|servers| servers.active_by_name())
+            .unwrap_or_default();
+        let mut connected = McpServers::connect(&configured, &root).await;
+        for (name, reason) in &connected.failures {
+            tracing::warn!(server = %name, %reason, "an MCP server could not be started");
+        }
+        // The state a person set wins over the default the connection has: a
+        // server carried across the reload keeps whether it was on.
+        for server in &mut connected.servers {
+            if let Some(active) = was_active.get(&server.name) {
+                server.active = *active;
+            }
+        }
+        let up = connected.servers.len();
+        if let Ok(mut slot) = self.mcp_servers.write() {
+            *slot = connected;
+        }
+        up
+    }
+    /// Re-scans the skill roots and returns how many valid skills remain.
+    ///
+    /// The next engine build registers the refreshed tools; a turn already in
+    /// flight keeps the registry it started with.
+    pub fn refresh_skills(&self) -> usize {
+        let registry = Arc::new(discover_skills(&self.lock_config(), &self.workspace_root));
+        let count = registry.len();
+        for warning in registry.warnings() {
+            tracing::warn!(
+                path = %warning.path.display(),
+                "skipping skill: {}",
+                warning.message
+            );
+        }
+        *self.lock_skills_write() = registry;
+        count
+    }
+    /// The skills registry in use.
+    #[must_use]
+    pub fn skills(&self) -> Arc<SkillRegistry> {
+        Arc::clone(&self.lock_skills())
     }
 }
 
