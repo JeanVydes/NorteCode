@@ -513,7 +513,7 @@ async fn sqlite_replay_store_round_trips_and_rotates() {
         .expect("load idempotency record");
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].fingerprint, record.fingerprint);
-    assert!(loaded[0].response.is_empty());
+    assert_eq!(loaded[0].response, Vec::new());
     assert_eq!(
         store
             .idempotency_response("session-a", "request-1")
