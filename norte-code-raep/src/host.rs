@@ -1018,7 +1018,10 @@ impl Default for HostConfig {
             agent_id: "norte-code".to_owned(),
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
             replay_capacity: 10_000,
-            replay_dir: std::path::PathBuf::from("norte-code-replay"),
+            // A host embedded without a database (tests, tooling) must not
+            // write into the source tree. The server binary points this at
+            // the database's directory.
+            replay_dir: std::env::temp_dir().join("norte-code-replay"),
             replay_bytes: 8 * 1024 * 1024,
             max_concurrent_jobs: 8,
             job_output_retention_s: 86_400,
