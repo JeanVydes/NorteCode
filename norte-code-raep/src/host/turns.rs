@@ -23,6 +23,12 @@ use super::stores::*;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+/// Largest response body the host keeps for a duplicate frame.
+///
+/// A response above this is re-run instead of held: the journal is a cache of
+/// answers, not a second copy of the conversation.
+const MAX_CACHED_RESPONSE_BYTES: usize = 1024 * 1024;
+
 use super::NorteCodeRaepHost;
 
 impl NorteCodeRaepHost {
@@ -72,6 +78,17 @@ impl NorteCodeRaepHost {
             &frame.kind,
             FrameType::Standard(StandardFrameType::UserInput)
         );
+        // A read is safe to run again, and its answer is often the largest
+        // thing the host ever produces: the catalogue and the telemetry report
+        // are single frames of megabytes, and caching each request's copy
+        // filled the journal with hundreds of megabytes nobody reads.
+        let read_only = match &frame.kind {
+            FrameType::Extension(name) if name == NorteCodeExtension::Command.as_str() => {
+                serde_json::from_value::<norte_code_wire::ClientRequest>(frame.payload.clone())
+                    .is_ok_and(|request| is_read_only_request(&request.kind))
+            }
+            _ => false,
+        };
         let turn_id = is_user_input.then(|| frame.turn_id.clone()).flatten();
         let turn_fingerprint = if is_user_input {
             Some(crate::bundle::sha256(&serde_json::to_vec(&frame.payload)?))
@@ -210,31 +227,35 @@ impl NorteCodeRaepHost {
         } else {
             None
         };
-        if let Some(store) = &self.replay_store {
-            store
-                .save_idempotency(&IdempotencyRecord {
-                    session_id: idempotency_key.0.clone(),
-                    frame_id: idempotency_key.1.clone(),
-                    fingerprint: frame_fingerprint.clone(),
-                    turn_id,
-                    turn_fingerprint,
-                    service_turn_id,
+        let response_bytes = serde_json::to_vec(&result).map_or(usize::MAX, |bytes| bytes.len());
+        let keep = !read_only && response_bytes <= MAX_CACHED_RESPONSE_BYTES;
+        if keep {
+            if let Some(store) = &self.replay_store {
+                store
+                    .save_idempotency(&IdempotencyRecord {
+                        session_id: idempotency_key.0.clone(),
+                        frame_id: idempotency_key.1.clone(),
+                        fingerprint: frame_fingerprint.clone(),
+                        turn_id,
+                        turn_fingerprint,
+                        service_turn_id,
+                        response: result.clone(),
+                    })
+                    .await?;
+            }
+            let mut state = self.state.lock().await;
+            state.idempotency.insert(
+                idempotency_key.clone(),
+                CachedRequest {
+                    fingerprint: frame_fingerprint,
                     response: result.clone(),
-                })
-                .await?;
-        }
-        let mut state = self.state.lock().await;
-        state.idempotency.insert(
-            idempotency_key.clone(),
-            CachedRequest {
-                fingerprint: frame_fingerprint,
-                response: result.clone(),
-            },
-        );
-        state.idempotency_order.push_back(idempotency_key);
-        while state.idempotency_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.idempotency_order.pop_front() {
-                state.idempotency.remove(&oldest);
+                },
+            );
+            state.idempotency_order.push_back(idempotency_key);
+            while state.idempotency_order.len() > self.config.idempotency_capacity {
+                if let Some(oldest) = state.idempotency_order.pop_front() {
+                    state.idempotency.remove(&oldest);
+                }
             }
         }
         Ok(result)

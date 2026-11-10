@@ -1437,6 +1437,13 @@ pub(crate) fn is_read_only_request(kind: &ClientRequestKind) -> bool {
         ClientRequestKind::ListTelemetry { .. }
             | ClientRequestKind::CostReport { .. }
             | ClientRequestKind::ListJobs { .. }
+            | ClientRequestKind::ListModels
+            | ClientRequestKind::ListCatalog
+            | ClientRequestKind::ListSkills
+            | ClientRequestKind::ListMcp
+            | ClientRequestKind::ListTools { .. }
+            | ClientRequestKind::ListPlans { .. }
+            | ClientRequestKind::ListSessions
     )
 }
 

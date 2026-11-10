@@ -617,7 +617,9 @@ async fn command_frames_are_idempotent_and_reject_unknown_wire_versions() {
         FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
         serde_json::to_value(ClientRequest {
             request_id: 1,
-            kind: ClientRequestKind::ListSessions,
+            kind: ClientRequestKind::CreateSession {
+                title: Some("idempotent".to_owned()),
+            },
         })
         .expect("request"),
         1,
@@ -677,7 +679,9 @@ async fn sqlite_idempotency_survives_host_restart() {
         FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
         serde_json::to_value(ClientRequest {
             request_id: 1,
-            kind: ClientRequestKind::ListSessions,
+            kind: ClientRequestKind::CreateSession {
+                title: Some("idempotent".to_owned()),
+            },
         })
         .expect("request"),
         1,
