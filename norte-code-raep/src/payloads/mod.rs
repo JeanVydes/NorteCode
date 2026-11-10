@@ -35,7 +35,7 @@ pub(crate) fn payload<T: Serialize>(value: T) -> Value {
 struct JobEntryPayload {
     job_id: String,
     command: String,
-    status: super::host::JobStatus,
+    status: norte_code_wire::JobStatus,
 }
 
 /// A job list frame.
