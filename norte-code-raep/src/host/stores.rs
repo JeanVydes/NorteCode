@@ -11,25 +11,6 @@ use std::sync::Arc;
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// A durable request fingerprint and the response to return for a retry.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct IdempotencyRecord {
-    /// Session scope (empty for connection-level commands).
-    pub session_id: String,
-    /// Client-provided request identifier.
-    pub frame_id: FrameId,
-    /// SHA-256 fingerprint of the complete request envelope.
-    pub fingerprint: String,
-    /// Optional client turn identifier.
-    pub turn_id: Option<TurnId>,
-    /// Fingerprint of the `USER_INPUT` payload, when applicable.
-    pub turn_fingerprint: Option<String>,
-    /// Norte Code's numeric turn key, used to restore client-ID correlation.
-    pub service_turn_id: Option<u64>,
-    /// Frames returned for the request.
-    pub response: Vec<Envelope<Value>>,
-}
-
 /// A stored upload that can be referenced by a user input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactRef {

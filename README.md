@@ -1,38 +1,44 @@
 # Norte Code
 
-A terminal client for the Norte service. The server owns sessions, execution,
-catalogues and plugins; the CLI connects to it through RAEP.
+Norte Code is the RAEP server for the Norte agent, plus a Dioxus client that
+talks to it over the same protocol any other client does. The server owns
+sessions, execution, catalogues and plugins; a client attaches to a session
+and sends the next user input.
 
-## Install
+## Build
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/JeanVydes/NorteCode/dev/scripts/install.sh | sh
-```
-
-Or build it from source (Rust 1.88+):
+Rust 1.88+:
 
 ```sh
 cargo build --release
 ```
 
-## Quick start
+The server binary is `target/release/norte-code-server`. It listens on
+`127.0.0.1:8787` and keeps its state beside `NORTE_CODE_DATABASE` (default
+`norte-code.db`).
+
+## Run
 
 ```sh
-norte-code service start
-norte-code
+NORTE_CODE_DATABASE=./norte-code.db cargo run -p norte-code-raep
 ```
 
-Pick or create a session and start typing. Configure the client endpoint in
-`cli.json`; use `service_type: "remote"` for a server on another machine.
+The client is a Dioxus app:
+
+```sh
+cd norte-code-app && dx serve
+```
+
 A few things worth knowing:
 
-- **Approvals** — tools run only under your rules. `/allow` and `/deny`
-  decide per tool, per session or globally.
-- **Plans** — the model proposes work as a Markdown file and asks your
-  approval before it becomes active. `/plans` lists them.
-- **Budgets** — cap spend in USD, tokens or requests: `--budget` on the
-  command line or `budgets` in the config.
-- **Sandbox** — opt-in OS containment for `shell` (`--sandbox`).
+- **Approvals**: tools run only under your rules; a client answers each
+  approval over the protocol, per tool, per session or globally.
+- **Plans**: the model proposes work as a Markdown file and asks your
+  approval before it becomes active.
+- **Budgets**: cap spend in USD, tokens or requests per session or turn.
+- **Sandbox**: opt-in OS containment for `shell`.
+- **Compaction, forks and rewind**: history is a node graph, so a session can
+  branch, rewind to a turn, or replace its history with a summary.
 
 ## Providers and models
 
@@ -119,10 +125,11 @@ can be read back with authenticated `GET /raep/v1/artifacts/{artifact_id}`.
 
 ## Documentation
 
-- **[Guide](https://jeanvydes.github.io/NorteCode/)** — getting started,
-  sessions, plans, approvals, budgets, sandbox, plugins and the full CLI
-  and config reference. Run `mdbook serve guide` to read it locally.
-- **[CONFIG.md](CONFIG.md)** — the full configuration schema.
+- **[CONFIG.md](CONFIG.md)**: the full configuration schema.
+- **[AGENTS.md](AGENTS.md)**: the crate layout and the rules that keep it
+  that way.
+- **`guide/`**: written for the terminal client that no longer ships; it is
+  being rewritten for the app and the protocol.
 
 ## License
 

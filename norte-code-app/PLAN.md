@@ -19,11 +19,11 @@ norte-code-protocol    protocol + wire: store SQLite, config, catálogo, costes,
                        skills, planes. Reexporta todos los tipos de wire, así que
                        `norte_code_protocol::Foo` sigue resolviendo.
 
-norte-code-client → protocol
-norte-code-agent  → client, protocol
+norte-code-client → wire, raep-types (decodifica el protocolo; el adaptador
+                    HTTP nativo vive detrás de la feature `native`)
+norte-code-agent  → protocol, wire
 norte-code-raep   → agent, protocol, wire, plugin-host
-norte-code-cli    → client, protocol (usa los tipos de wire por el reexport)
-norte-code-app    → wire, raep-types (sin tokio/rusqlite)
+norte-code-app    → client (sin features por defecto), wire, raep-types
 ```
 
 ## Qué se centralizó
@@ -56,20 +56,8 @@ norte-code-app    → wire, raep-types (sin tokio/rusqlite)
 
 ## Pendiente
 
-1. `norte-code-app`: `ServerInfo`/`ProtocolInfo`/`ServerLimits`/`Health*`/
-   `Readiness*`/`PluginSummary`/`SkillCatalog`/`ToolRule`/`McpCatalog`/
-   `CostReport`/`UploadReceipt`/`CatalogDetail` siguen siendo copias locales;
-   el host usa nombres distintos (`InfoPayload`, `LimitsRef`, `McpListData`…)
-   para el mismo JSON. Siguiente tanda.
-2. `wire_types.rs` aún declara `TurnState` y `HistoryPage/HistoryItem/History*`
-   mientras el host serializa `raep_types::{TurnStateChanged, HistoryPage,
-   HistoryItem}`; hay que decidir si la app usa `raep-types` para esas o si
-   wire las modela.
-3. `norte-code-cli` no declara `wire` directamente: consume los tipos por el
-   reexport de protocol. Decidir si se ata a wire donde corresponda.
-4. Funcionalidad de la tanda anterior: avisos de cuota en UI, multimodal de
-   entrada punta a punta, steering.
-5. `norte-code-agent`: `a_failed_eager_summary_stops_at_the_safe_point` falla
+1. Avisos de cuota en UI, multimodal de entrada punta a punta, steering.
+2. `norte-code-agent`: `a_failed_eager_summary_stops_at_the_safe_point` falla
    esporádicamente bajo carga paralela (pasa aislado y 3 de 3 en serie).
 
 ## Verificación
