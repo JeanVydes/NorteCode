@@ -1,8 +1,5 @@
 use serde_json::Value;
 
-#[allow(clippy::wildcard_imports)]
-use crate::*;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CanonicalKind {
     SessionCreated,
@@ -93,6 +90,8 @@ impl CanonicalKind {
         }
     }
 }
+
+use crate::error::ClientError;
 
 /// How a turn state changed, in the canonical payload's spelling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]

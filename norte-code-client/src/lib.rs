@@ -24,14 +24,5 @@ pub use agent::{AgentClient, EventStream, SessionSummary};
 pub use error::ClientError;
 pub use remote::{RemoteClient, RemoteSessionStats};
 
-#[allow(clippy::wildcard_imports)]
-pub(crate) use canonical::*;
-#[allow(clippy::wildcard_imports)]
-pub(crate) use decode::*;
-#[allow(clippy::wildcard_imports)]
-pub(crate) use frame::*;
-#[allow(clippy::wildcard_imports)]
-pub(crate) use sse::*;
-
 #[cfg(test)]
 mod tests;

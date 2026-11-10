@@ -1,9 +1,6 @@
 use raep_types::{Envelope, FrameType, StandardFrameType};
 use serde_json::Value;
 
-#[allow(clippy::wildcard_imports)]
-use crate::*;
-
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct FrameWire {
     #[serde(default)]
@@ -49,6 +46,8 @@ impl FrameWire {
         }
     }
 }
+
+use crate::error::ClientError;
 
 /// A fork request payload. `raep-types` defines the `SessionFork` frame
 /// but no payload struct for it yet, so the client owns this one shape.
