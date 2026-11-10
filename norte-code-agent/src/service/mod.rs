@@ -347,7 +347,7 @@ impl Service {
                 .cloned()
                 .unwrap_or(root_config);
             let target_name = requested_agent
-                .or(parent_config.subagent.as_deref())
+                .or(parent_config.default_subagent_delegation.as_deref())
                 .unwrap_or(&parent_profile)
                 .to_owned();
             if !parent_config
