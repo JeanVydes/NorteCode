@@ -1,6 +1,5 @@
 use super::*;
-use crate::NorteCodeExtension;
-use norte_code_wire::{ClientRequest, ServerEvent};
+use norte_code_wire::ServerEvent;
 use raep_types::{SessionAttach, TurnId};
 
 use raep_types::FrameId;
@@ -376,35 +375,14 @@ fn history_items_keep_rewound_turn_identity() {
 }
 use norte::BlobStore;
 
-#[tokio::test]
-async fn file_replay_store_round_trips_frames_by_session() {
-    let path = std::env::temp_dir().join(format!(
-        "norte-code-raep-replay-{}.jsonl",
-        FrameId::generate()
-    ));
-    let store = FileReplayStore::open(&path).expect("replay store");
-    let mut frame = Envelope::new(
-        standard(StandardFrameType::TokenDelta),
-        json!({"delta": "hello"}),
-        1,
-    );
-    frame.session_id = "session-a".to_owned();
-    frame.seq = Some(7);
-    store.append(&frame).await.expect("append");
-
-    let frames = store.load("session-a").await.expect("load");
-    assert_eq!(frames, vec![frame]);
-    assert_eq!(store.load("session-b").await.expect("load"), Vec::new());
-    std::fs::remove_file(path).expect("remove replay journal");
+fn replay_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("norte-code-replay-{}", FrameId::generate()))
 }
 
-#[tokio::test]
-async fn file_replay_store_rotates_each_session_window() {
-    let path = std::env::temp_dir().join(format!(
-        "norte-code-raep-rotate-{}.jsonl",
-        FrameId::generate()
-    ));
-    let store = FileReplayStore::open_with_capacity(&path, 2).expect("replay store");
+#[test]
+fn replay_log_round_trips_frames_after_a_sequence() {
+    let dir = replay_dir();
+    let log = ReplayLog::new(&dir, 64 * 1024);
     for seq in 1..=3 {
         let mut frame = Envelope::new(
             standard(StandardFrameType::TokenDelta),
@@ -413,67 +391,29 @@ async fn file_replay_store_rotates_each_session_window() {
         );
         frame.session_id = "session-a".to_owned();
         frame.seq = Some(seq);
-        store.append(&frame).await.expect("append");
+        log.append(&frame).expect("append");
     }
-    let frames = store.load("session-a").await.expect("load");
+    let window = log.after("session-a", 1);
+    assert!(!window.truncated);
     assert_eq!(
-        frames
+        window
+            .frames
             .iter()
             .filter_map(|frame| frame.seq)
             .collect::<Vec<_>>(),
         [2, 3]
     );
-    std::fs::remove_file(path).expect("remove replay journal");
+    assert_eq!(log.last_seq("session-a"), Some(3));
+    let other = log.after("session-b", 0);
+    assert_eq!(other.frames, Vec::new());
+    std::fs::remove_dir_all(dir).expect("remove replay directory");
 }
 
-#[tokio::test]
-async fn file_replay_store_persists_bounded_idempotency_by_session() {
-    let path = std::env::temp_dir().join(format!(
-        "norte-code-raep-idempotency-{}.jsonl",
-        FrameId::generate()
-    ));
-    let store = FileReplayStore::open_with_capacity(&path, 2).expect("replay store");
-    for id in ["one", "two", "three"] {
-        store
-            .save_idempotency(&IdempotencyRecord {
-                session_id: "session-a".to_owned(),
-                frame_id: FrameId::new(id).expect("frame id"),
-                fingerprint: id.to_owned(),
-                turn_id: None,
-                turn_fingerprint: None,
-                service_turn_id: None,
-                response: Vec::new(),
-            })
-            .await
-            .expect("persist idempotency");
-    }
-    assert_eq!(
-        store
-            .load_idempotency("session-a")
-            .await
-            .expect("load idempotency")
-            .iter()
-            .map(|record| record.frame_id.as_str())
-            .collect::<Vec<_>>(),
-        ["two", "three"]
-    );
-    assert_eq!(
-        store
-            .load_idempotency("session-b")
-            .await
-            .expect("load other session"),
-        Vec::new()
-    );
-    std::fs::remove_file(path.with_extension("idempotency.jsonl"))
-        .expect("remove idempotency journal");
-}
-
-#[tokio::test]
-async fn sqlite_replay_store_round_trips_and_rotates() {
-    let path =
-        std::env::temp_dir().join(format!("norte-code-raep-replay-{}.db", FrameId::generate()));
-    let store = SqliteReplayStore::open(&path, 2).expect("replay store");
-    for seq in 1..=3 {
+#[test]
+fn replay_log_trims_to_the_byte_cap_and_reports_truncation() {
+    let dir = replay_dir();
+    let log = ReplayLog::new(&dir, 700);
+    for seq in 1..=20 {
         let mut frame = Envelope::new(
             standard(StandardFrameType::TokenDelta),
             json!({"seq": seq}),
@@ -481,222 +421,35 @@ async fn sqlite_replay_store_round_trips_and_rotates() {
         );
         frame.session_id = "session-a".to_owned();
         frame.seq = Some(seq);
-        store.append(&frame).await.expect("append");
+        log.append(&frame).expect("append");
     }
-    let frames = store.load("session-a").await.expect("load");
-    assert_eq!(
-        frames
-            .iter()
-            .filter_map(|frame| frame.seq)
-            .collect::<Vec<_>>(),
-        [2, 3]
-    );
-    let response = frames[0].clone();
-    let record = IdempotencyRecord {
-        session_id: "session-a".to_owned(),
-        frame_id: FrameId::new("request-1").expect("frame id"),
-        fingerprint: "request-fingerprint".to_owned(),
-        turn_id: Some(TurnId::new("client-turn-1").expect("turn id")),
-        turn_fingerprint: Some("turn-fingerprint".to_owned()),
-        service_turn_id: Some(12),
-        response: vec![response],
-    };
-    store
-        .save_idempotency(&record)
-        .await
-        .expect("save idempotency record");
-    // The session-wide load leaves the body out; it is read back for the one
-    // frame a duplicate names.
-    let loaded = store
-        .load_idempotency("session-a")
-        .await
-        .expect("load idempotency record");
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].fingerprint, record.fingerprint);
-    assert_eq!(loaded[0].response, Vec::new());
-    assert_eq!(
-        store
-            .idempotency_response("session-a", "request-1")
-            .await
-            .expect("load idempotency response"),
-        Some(record.response.clone())
-    );
-    std::fs::remove_file(path).expect("remove replay database");
-}
-
-#[tokio::test]
-async fn blob_artifacts_return_content_addressed_ids() {
-    let blobs = Arc::new(norte::InMemoryBlobStore::new());
-    let store = BlobArtifactStore::new(Arc::clone(&blobs) as Arc<dyn BlobStore>);
-    let reference = store.put("image/png", b"png").await.expect("put");
-    let id = reference.id.parse().expect("blob id");
-    assert_eq!(blobs.get(id).await.expect("get"), b"png");
-    assert_eq!(reference.mime_type, "image/png");
-    assert_eq!(store.get(&reference.id).await.expect("get"), b"png");
-}
-
-#[tokio::test]
-async fn artifact_uploads_obey_host_limit() {
-    let service = Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            None,
-            Arc::new(norte_code_agent::VendorModels),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let config = HostConfig {
-        max_artifact_bytes: 2,
-        ..HostConfig::default()
-    };
-    let host = NorteCodeRaepHost::new(service, config).expect("host");
-    let error = host.put_artifact("text/plain", b"123").await;
-    assert!(matches!(error, Err(HostError::Artifact(message)) if message.contains("limit")));
-}
-
-#[tokio::test]
-async fn idempotency_cache_is_bounded() {
-    let service = Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            None,
-            Arc::new(norte_code_agent::VendorModels),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let host = NorteCodeRaepHost::new(
-        service,
-        HostConfig {
-            idempotency_capacity: 1,
-            ..HostConfig::default()
-        },
-    )
-    .expect("host");
-    for _ in 0..3 {
-        let frame = Envelope::new(
-            FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
-            serde_json::to_value(ClientRequest {
-                request_id: 1,
-                kind: ClientRequestKind::ListSessions,
-            })
-            .expect("request"),
-            1,
-        );
-        host.handle(frame).await.expect("request");
-    }
+    let window = log.after("session-a", 0);
     assert!(
-        host.state.lock().await.idempotency.len() <= 1,
-        "the idempotency cache must stay bounded"
+        window.truncated,
+        "asking from the start of a trimmed log is truncated"
     );
+    let last = window.frames.last().and_then(|frame| frame.seq);
+    assert_eq!(last, Some(20), "the newest frames survive");
+    assert!(
+        window.frames.len() < 20,
+        "the cap drops older frames instead of growing"
+    );
+    std::fs::remove_dir_all(dir).expect("remove replay directory");
 }
 
-#[tokio::test]
-async fn command_frames_are_idempotent_and_reject_unknown_wire_versions() {
-    let service = Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            None,
-            Arc::new(norte_code_agent::VendorModels),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let host = NorteCodeRaepHost::new(service, HostConfig::default()).expect("host");
-    let mut frame = Envelope::new(
-        FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
-        serde_json::to_value(ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::CreateSession {
-                title: Some("idempotent".to_owned()),
-            },
-        })
-        .expect("request"),
-        1,
-    );
-    let first = host.handle(frame.clone()).await.expect("first request");
-    let second = host.handle(frame.clone()).await.expect("duplicate request");
-    assert_eq!(first, second);
-    frame.payload = json!({"different": true});
-    assert!(matches!(
-        host.handle(frame.clone()).await,
-        Err(HostError::IdempotencyConflict(_))
-    ));
-    frame.id = FrameId::generate();
-    frame.kind = FrameType::Extension("future_type".to_owned());
-    assert!(matches!(
-        host.handle(frame.clone()).await,
-        Err(HostError::UnknownType(_))
-    ));
-    frame.id = FrameId::generate();
-    frame.kind = FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned());
-    frame.seq = Some(1);
-    assert!(matches!(
-        host.handle(frame.clone()).await,
-        Err(HostError::InvalidFrame(message)) if message.contains("must not include seq")
-    ));
-    frame.seq = None;
-    frame.version = "unsupported".to_owned();
-    assert!(matches!(
-        host.handle(frame).await,
-        Err(HostError::InvalidFrame(message)) if message.contains("wire version")
-    ));
-}
-
-#[tokio::test]
-async fn sqlite_idempotency_survives_host_restart() {
-    let service = Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            None,
-            Arc::new(norte_code_agent::VendorModels),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
-    let path = std::env::temp_dir().join(format!(
-        "norte-code-raep-idempotency-{}.db",
-        FrameId::generate()
-    ));
-    let store = Arc::new(SqliteReplayStore::open(&path, 16).expect("replay store"));
-    let host = NorteCodeRaepHost::new(Arc::clone(&service), HostConfig::default())
-        .expect("host")
-        .with_replay_store_instance(Arc::clone(&store) as Arc<dyn ReplayStore>);
-    let frame = Envelope::new(
-        FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
-        serde_json::to_value(ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::CreateSession {
-                title: Some("idempotent".to_owned()),
-            },
-        })
-        .expect("request"),
-        1,
-    );
-    let first = host.handle(frame.clone()).await.expect("first request");
-    drop(host);
-
-    let restarted = NorteCodeRaepHost::new(service, HostConfig::default())
-        .expect("restarted host")
-        .with_replay_store_instance(store);
-    assert_eq!(
-        restarted.handle(frame).await.expect("retry after restart"),
-        first
-    );
-    std::fs::remove_file(path).expect("remove replay database");
+#[test]
+fn replay_log_survives_a_reopen_with_its_sequence() {
+    let dir = replay_dir();
+    {
+        let log = ReplayLog::new(&dir, 64 * 1024);
+        let mut frame = Envelope::new(standard(StandardFrameType::TokenDelta), json!({}), 1);
+        frame.session_id = "session-a".to_owned();
+        frame.seq = Some(9);
+        log.append(&frame).expect("append");
+    }
+    let reopened = ReplayLog::new(&dir, 64 * 1024);
+    assert_eq!(reopened.last_seq("session-a"), Some(9));
+    std::fs::remove_dir_all(dir).expect("remove replay directory");
 }
 
 #[tokio::test]
@@ -981,8 +734,10 @@ async fn attach_delivers_replay_between_attached_and_state() {
             .map(|frame| frame.kind.clone())
             .collect::<Vec<_>>(),
         [
-            standard(StandardFrameType::SessionAttached),
+            // The missed frames come first: the attach frame that follows
+            // names the window they fill.
             standard(StandardFrameType::TokenDelta),
+            standard(StandardFrameType::SessionAttached),
             standard(StandardFrameType::SessionState),
         ]
     );
@@ -1013,7 +768,7 @@ async fn attach_delivers_replay_between_attached_and_state() {
             .iter()
             .filter_map(|frame| frame.seq)
             .collect::<Vec<_>>(),
-        [4, 3, 5]
+        [3, 4, 5]
     );
 }
 

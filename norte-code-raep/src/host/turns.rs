@@ -73,11 +73,6 @@ impl NorteCodeRaepHost {
         }
         let frame_fingerprint = crate::bundle::sha256(&serde_json::to_vec(&frame)?);
         let idempotency_key = (frame.session_id.clone(), frame.id.clone());
-        self.load_persisted_idempotency(&frame.session_id).await?;
-        let is_user_input = matches!(
-            &frame.kind,
-            FrameType::Standard(StandardFrameType::UserInput)
-        );
         // A read is safe to run again, and its answer is often the largest
         // thing the host ever produces: the catalogue and the telemetry report
         // are single frames of megabytes, and caching each request's copy
@@ -88,12 +83,6 @@ impl NorteCodeRaepHost {
                     .is_ok_and(|request| is_read_only_request(&request.kind))
             }
             _ => false,
-        };
-        let turn_id = is_user_input.then(|| frame.turn_id.clone()).flatten();
-        let turn_fingerprint = if is_user_input {
-            Some(crate::bundle::sha256(&serde_json::to_vec(&frame.payload)?))
-        } else {
-            None
         };
         if let Some(principal) = principal
             && !frame.session_id.is_empty()
@@ -121,36 +110,22 @@ impl NorteCodeRaepHost {
         {
             let state = self.state.lock().await;
             if let Some(previous) = state.idempotency.get(&idempotency_key) {
-                if previous.fingerprint == frame_fingerprint {
-                    if matches!(
-                        &frame.kind,
-                        FrameType::Standard(StandardFrameType::UserInput)
-                    ) && let Some(turn_id) = &frame.turn_id
-                        && let Some(latest) = state
-                            .turn_request_frames
-                            .get(&(frame.session_id.clone(), turn_id.clone()))
-                    {
-                        return Ok(vec![latest.clone()]);
-                    }
-                    let cached = previous.response.clone();
-                    let store = self.replay_store.clone();
-                    let session_id = frame.session_id.clone();
-                    let frame_id = frame.id.as_str().to_owned();
-                    drop(state);
-                    if !cached.is_empty() {
-                        return Ok(cached);
-                    }
-                    let Some(store) = store else {
-                        return Ok(Vec::new());
-                    };
-                    return Ok(store
-                        .idempotency_response(&session_id, &frame_id)
-                        .await?
-                        .unwrap_or_default());
+                if previous.fingerprint != frame_fingerprint {
+                    return Err(HostError::IdempotencyConflict(
+                        "frame id was reused with a different request".to_owned(),
+                    ));
                 }
-                return Err(HostError::IdempotencyConflict(
-                    "frame id was reused with a different request".to_owned(),
-                ));
+                if matches!(
+                    &frame.kind,
+                    FrameType::Standard(StandardFrameType::UserInput)
+                ) && let Some(turn_id) = &frame.turn_id
+                    && let Some(latest) = state
+                        .turn_request_frames
+                        .get(&(frame.session_id.clone(), turn_id.clone()))
+                {
+                    return Ok(vec![latest.clone()]);
+                }
+                return Ok(previous.response.clone());
             }
         }
         let is_attach = matches!(
@@ -214,35 +189,8 @@ impl NorteCodeRaepHost {
                 }
             }
         }
-        let service_turn_id = if let Some(turn_id) = &turn_id {
-            self.state
-                .lock()
-                .await
-                .turn_aliases
-                .iter()
-                .find(|((session_id, _), alias)| {
-                    session_id == &idempotency_key.0 && *alias == turn_id
-                })
-                .map(|((_, service_turn), _)| *service_turn)
-        } else {
-            None
-        };
         let response_bytes = serde_json::to_vec(&result).map_or(usize::MAX, |bytes| bytes.len());
-        let keep = !read_only && response_bytes <= MAX_CACHED_RESPONSE_BYTES;
-        if keep {
-            if let Some(store) = &self.replay_store {
-                store
-                    .save_idempotency(&IdempotencyRecord {
-                        session_id: idempotency_key.0.clone(),
-                        frame_id: idempotency_key.1.clone(),
-                        fingerprint: frame_fingerprint.clone(),
-                        turn_id,
-                        turn_fingerprint,
-                        service_turn_id,
-                        response: result.clone(),
-                    })
-                    .await?;
-            }
+        if !read_only && response_bytes <= MAX_CACHED_RESPONSE_BYTES {
             let mut state = self.state.lock().await;
             state.idempotency.insert(
                 idempotency_key.clone(),
@@ -1028,6 +976,7 @@ impl NorteCodeRaepHost {
             state.attached.remove(&frame.session_id);
             state.attachment_modes.remove(&frame.session_id);
         }
+        self.replay.remove(&frame.session_id);
         Ok(output)
     }
     pub(crate) async fn ack(
@@ -1040,7 +989,7 @@ impl NorteCodeRaepHost {
             .get("last_seq")
             .and_then(Value::as_u64)
             .ok_or_else(|| HostError::InvalidFrame("ACK.last_seq is required".to_owned()))?;
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         if last_seq
             > state
                 .sequences
@@ -1051,9 +1000,6 @@ impl NorteCodeRaepHost {
             return Err(HostError::InvalidFrame(
                 "ACK.last_seq exceeds the last emitted sequence".to_owned(),
             ));
-        }
-        if let Some(frames) = state.replay.get_mut(&frame.session_id) {
-            frames.retain(|stored| stored.seq.is_none_or(|seq| seq > last_seq));
         }
         Ok(Vec::new())
     }

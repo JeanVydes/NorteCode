@@ -4,7 +4,7 @@ use crate::payloads::payload;
 use norte_code_agent::Service;
 use norte_code_wire::SessionTitleSource;
 use norte_code_wire::{ClientRequestKind, SessionKey};
-use raep_types::{AttachMode, Envelope, FrameType, SessionAttach, StandardFrameType};
+use raep_types::{AttachMode, Envelope, SessionAttach, StandardFrameType};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -257,6 +257,7 @@ impl NorteCodeRaepHost {
         )
         .await?;
         self.state.lock().await.attached.remove(session_id);
+        self.replay.remove(session_id);
         Ok(true)
     }
     /// Returns the session a previous `Idempotency-Key` created.
@@ -306,163 +307,15 @@ impl NorteCodeRaepHost {
     }
     /// Returns replay frames strictly after `last_seq`.
     ///
+    /// A request older than what the session's file still holds comes back
+    /// empty and truncated, so the client reloads history instead of
+    /// pretending the stream is whole.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the session has no retained replay window or the
-    /// requested sequence predates the retained window.
-    pub async fn replay_after(
-        &self,
-        session_id: &str,
-        last_seq: u64,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        let state = self.state.lock().await;
-        let frames = state
-            .replay
-            .get(session_id)
-            .ok_or_else(|| HostError::Replay("session replay window is missing".to_owned()))?;
-        if let Some(first) = frames.front().and_then(|frame| frame.seq)
-            && last_seq.saturating_add(1) < first
-        {
-            return Err(HostError::Replay(
-                "requested sequence is older than the retained window".to_owned(),
-            ));
-        }
-        Ok(frames
-            .iter()
-            .filter(|frame| frame.seq.is_some_and(|seq| seq > last_seq))
-            .cloned()
-            .collect())
-    }
-    pub(crate) async fn load_persisted_replay(&self, session_id: &str) -> Result<(), HostError> {
-        let Some(store) = &self.replay_store else {
-            return Ok(());
-        };
-        if self.state.lock().await.loaded_replay.contains(session_id) {
-            return Ok(());
-        }
-        let persisted = store.load(session_id).await?;
-        let mut state = self.state.lock().await;
-        let mut max_seq = 0;
-        let replayed = persisted
-            .into_iter()
-            .filter(|frame| {
-                if let Some(seq) = frame.seq {
-                    max_seq = max_seq.max(seq);
-                    true
-                } else {
-                    false
-                }
-            })
-            .collect::<Vec<_>>();
-        if max_seq > 0 {
-            state
-                .sequences
-                .entry(session_id.to_owned())
-                .and_modify(|current| *current = (*current).max(max_seq))
-                .or_insert(max_seq);
-        }
-        let replay = state.replay.entry(session_id.to_owned()).or_default();
-        replay.extend(replayed);
-        while replay.len() > self.config.replay_capacity {
-            replay.pop_front();
-        }
-        let turn_states = replay
-            .iter()
-            .filter(|frame| {
-                matches!(
-                    frame.kind,
-                    FrameType::Standard(StandardFrameType::TurnStateChanged)
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for frame in turn_states {
-            if let Some(turn_id) = &frame.turn_id {
-                let key = (session_id.to_owned(), turn_id.clone());
-                if state.turn_request_fingerprints.contains_key(&key) {
-                    state.turn_request_frames.insert(key, frame);
-                }
-            }
-        }
-        state.loaded_replay.insert(session_id.to_owned());
-        Ok(())
-    }
-    pub(crate) async fn load_persisted_idempotency(
-        &self,
-        session_id: &str,
-    ) -> Result<(), HostError> {
-        let Some(store) = &self.replay_store else {
-            return Ok(());
-        };
-        if self
-            .state
-            .lock()
-            .await
-            .loaded_idempotency
-            .contains(session_id)
-        {
-            return Ok(());
-        }
-        let records = store.load_idempotency(session_id).await?;
-        let mut state = self.state.lock().await;
-        if !state.loaded_idempotency.insert(session_id.to_owned()) {
-            return Ok(());
-        }
-        for record in records {
-            let frame_key = (session_id.to_owned(), record.frame_id);
-            state.idempotency.insert(
-                frame_key.clone(),
-                CachedRequest {
-                    fingerprint: record.fingerprint,
-                    response: record.response.clone(),
-                },
-            );
-            state.idempotency_order.push_back(frame_key);
-            if let (Some(turn_id), Some(turn_fingerprint)) =
-                (record.turn_id, record.turn_fingerprint)
-            {
-                let turn_key = (session_id.to_owned(), turn_id.clone());
-                state
-                    .turn_request_fingerprints
-                    .insert(turn_key.clone(), turn_fingerprint);
-                if let Some(frame) = record
-                    .response
-                    .iter()
-                    .rev()
-                    .find(|frame| frame.turn_id.as_ref() == Some(&turn_id))
-                {
-                    state
-                        .turn_request_frames
-                        .insert(turn_key.clone(), frame.clone());
-                }
-                state.turn_request_order.push_back(turn_key);
-                if let Some(service_turn_id) = record.service_turn_id {
-                    state
-                        .turn_aliases
-                        .insert((session_id.to_owned(), service_turn_id), turn_id);
-                    state
-                        .turn_alias_order
-                        .push_back((session_id.to_owned(), service_turn_id));
-                }
-            }
-        }
-        while state.idempotency_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.idempotency_order.pop_front() {
-                state.idempotency.remove(&oldest);
-            }
-        }
-        while state.turn_request_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.turn_request_order.pop_front() {
-                state.turn_request_fingerprints.remove(&oldest);
-                state.turn_request_frames.remove(&oldest);
-            }
-        }
-        while state.turn_alias_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.turn_alias_order.pop_front() {
-                state.turn_aliases.remove(&oldest);
-            }
-        }
-        Ok(())
+    /// Returns an error when the replay file cannot be read.
+    pub(crate) fn replay_after(&self, session_id: &str, last_seq: u64) -> ReplayWindow {
+        self.replay.after(session_id, last_seq)
     }
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn attach(
@@ -602,7 +455,7 @@ impl NorteCodeRaepHost {
             .await
             .session_agents
             .insert(session_id.clone(), agent_id);
-        self.load_persisted_replay(&session_id).await?;
+        let resumed = self.replay.last_seq(&session_id).unwrap_or(0);
         {
             let mut state = self.state.lock().await;
             state.attached.insert(session_id.clone());
@@ -612,36 +465,26 @@ impl NorteCodeRaepHost {
             state
                 .client_capabilities
                 .insert(session_id.clone(), client_capabilities.clone());
-            state.sequences.entry(session_id.clone()).or_insert(0);
-            state.replay.entry(session_id.clone()).or_default();
+            state.sequences.entry(session_id.clone()).or_insert(resumed);
         }
         let (replayed, replay_meta) = match attach.resume_from_seq {
-            Some(after) => match self.replay_after(&session_id, after).await {
-                Ok(frames) => {
-                    let to_seq = frames
-                        .iter()
-                        .filter_map(|frame| frame.seq)
-                        .max()
-                        .unwrap_or(after);
-                    (
-                        frames,
-                        ReplayMeta {
-                            from_seq: Some(after.saturating_add(1)),
-                            to_seq: Some(to_seq),
-                            truncated: false,
-                        },
-                    )
-                }
-                Err(HostError::Replay(_)) => (
-                    Vec::new(),
+            Some(after) => {
+                let window = self.replay_after(&session_id, after);
+                let to_seq = window
+                    .frames
+                    .iter()
+                    .filter_map(|frame| frame.seq)
+                    .max()
+                    .unwrap_or(after);
+                (
+                    window.frames,
                     ReplayMeta {
                         from_seq: Some(after.saturating_add(1)),
-                        to_seq: Some(after),
-                        truncated: true,
+                        to_seq: Some(to_seq),
+                        truncated: window.truncated,
                     },
-                ),
-                Err(error) => return Err(error),
-            },
+                )
+            }
             None => (
                 Vec::new(),
                 ReplayMeta {
@@ -723,8 +566,10 @@ impl NorteCodeRaepHost {
                 }),
             )
             .await?;
-        let mut output = vec![attached];
-        output.extend(replayed);
+        // The frames the client missed come first: the attach frame that
+        // follows names the window it just replayed.
+        let mut output = replayed;
+        output.push(attached);
         output.push(state);
         output.extend(override_frames);
         Ok(output)

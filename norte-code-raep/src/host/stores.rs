@@ -162,10 +162,8 @@ pub(super) struct HostState {
     pub(super) attached: HashSet<String>,
     pub(super) attachment_modes: HashMap<String, AttachMode>,
     pub(super) sequences: HashMap<String, u64>,
-    pub(super) replay: HashMap<String, VecDeque<Envelope<Value>>>,
     pub(super) idempotency: HashMap<(String, FrameId), CachedRequest>,
     pub(super) idempotency_order: VecDeque<(String, FrameId)>,
-    pub(super) loaded_replay: HashSet<String>,
     pub(super) session_owners: HashMap<String, String>,
     pub(super) artifact_owners: HashMap<String, String>,
     pub(super) exports: HashMap<String, StoredExport>,
@@ -184,7 +182,6 @@ pub(super) struct HostState {
     pub(super) turn_request_fingerprints: HashMap<(String, TurnId), String>,
     pub(super) turn_request_frames: HashMap<(String, TurnId), Envelope<Value>>,
     pub(super) turn_request_order: VecDeque<(String, TurnId)>,
-    pub(super) loaded_idempotency: HashSet<String>,
     pub(super) queued_turns: HashMap<String, VecDeque<QueuedTurn>>,
     /// Pinned turns per session (RFC 18.5). Held in-memory; the service
     /// has no pin table yet, so pins do not survive a restart.

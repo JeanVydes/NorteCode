@@ -16,7 +16,7 @@ mod payloads;
 mod plugin_manager;
 
 pub use commands::AgentCommand;
-pub use host::replay::{FileReplayStore, ReplayStore, SqliteReplayStore};
+pub use host::replay::ReplayLog;
 pub use host::stores::{
     ArtifactRef, ArtifactStore, BlobArtifactStore, FilePinStore, IdempotencyRecord, PinStore,
 };
