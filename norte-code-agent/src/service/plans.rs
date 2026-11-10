@@ -17,6 +17,55 @@ use serde::{Deserialize, Serialize};
 use super::mapping::single;
 use super::{EventStream, Service, ServiceError};
 
+/// A failure reading or writing a session's plans.
+#[derive(Debug, thiserror::Error)]
+pub enum PlanError {
+    /// The local artifacts directory has no location because HOME is unset.
+    #[error("HOME is not set, so the local session artifacts directory has no location")]
+    NoHome,
+    /// A session or plan id is not a safe path component.
+    #[error("invalid {description} `{value}`")]
+    InvalidName {
+        /// What the value was supposed to be.
+        description: &'static str,
+        /// The value that failed.
+        value: String,
+    },
+    /// The session the plans belong to is not stored.
+    #[error("session `{0}` is not stored")]
+    UnknownSession(String),
+    /// A plan with that id already exists.
+    #[error("plan `{0}` already exists")]
+    Exists(String),
+    /// There is no plan with that id in the session.
+    #[error("no plan `{0}` in this session")]
+    Missing(String),
+    /// A plan document could not be parsed.
+    #[error(transparent)]
+    Document(#[from] norte_code_protocol::plans::PlanError),
+    /// A filesystem operation failed.
+    #[error("{action} {}: {source}", path.display())]
+    Io {
+        /// What was being done.
+        action: &'static str,
+        /// The file or directory involved.
+        path: PathBuf,
+        /// The operating system error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl PlanError {
+    fn io(action: &'static str, path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> Self {
+        move |source| Self::Io {
+            action,
+            path: path.into(),
+            source,
+        }
+    }
+}
+
 /// Filesystem access to plans. Session records remain in the database; plans
 /// live separately so they can be opened and edited as Markdown.
 pub(super) struct PlanRepository {
@@ -91,34 +140,35 @@ impl PlanRepository {
     pub(super) async fn ensure_session_folder(
         &self,
         session: &SessionKey,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let root = self.root()?;
         validate_component(session.as_str(), "session id")?;
         tokio::fs::create_dir_all(root.join(session.as_str()))
             .await
-            .map_err(|error| format!("could not create the session directory: {error}"))
+            .map_err(PlanError::io(
+                "could not create the session directory",
+                root.join(session.as_str()),
+            ))
     }
 
-    fn root(&self) -> std::result::Result<&Path, String> {
-        self.root.as_deref().ok_or_else(|| {
-            "HOME is not set, so the local session artifacts directory has no location".to_owned()
-        })
+    fn root(&self) -> std::result::Result<&Path, PlanError> {
+        self.root.as_deref().ok_or(PlanError::NoHome)
     }
 
     async fn stored_session(
         &self,
         session: SessionId,
-    ) -> std::result::Result<StoredSession, String> {
+    ) -> std::result::Result<StoredSession, PlanError> {
         self.directory
             .sessions()
             .await
-            .map_err(|error| format!("could not find the session for its plans: {error}"))?
+            .map_err(|error| PlanError::UnknownSession(error.to_string()))?
             .into_iter()
             .find(|stored| stored.north == session)
-            .ok_or_else(|| format!("session `{session}` is not stored"))
+            .ok_or_else(|| PlanError::UnknownSession(session.to_string()))
     }
 
-    async fn plan_directory(&self, session: SessionId) -> std::result::Result<PathBuf, String> {
+    async fn plan_directory(&self, session: SessionId) -> std::result::Result<PathBuf, PlanError> {
         let stored = self.stored_session(session).await?;
         validate_component(&stored.key, "session id")?;
         Ok(self.root()?.join(stored.key).join("plans"))
@@ -127,15 +177,14 @@ impl PlanRepository {
     pub(super) async fn list(
         &self,
         session: SessionId,
-    ) -> std::result::Result<Vec<(Plan, PathBuf)>, String> {
+    ) -> std::result::Result<Vec<(Plan, PathBuf)>, PlanError> {
         let directory = self.plan_directory(session).await?;
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
-                return Err(format!(
-                    "could not read plan directory {}: {error}",
-                    directory.display()
+                return Err(PlanError::io("could not read plan directory", &directory)(
+                    error,
                 ));
             }
         };
@@ -143,12 +192,12 @@ impl PlanRepository {
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|error| format!("could not list plans: {error}"))?
+            .map_err(PlanError::io("could not list plans", &directory))?
         {
             let file_type = entry
                 .file_type()
                 .await
-                .map_err(|error| format!("could not inspect plan file: {error}"))?;
+                .map_err(PlanError::io("could not inspect plan file", entry.path()))?;
             if !file_type.is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
                 continue;
             }
@@ -156,11 +205,9 @@ impl PlanRepository {
                 .path()
                 .file_stem()
                 .and_then(std::ffi::OsStr::to_str)
-                .ok_or_else(|| {
-                    format!(
-                        "plan filename is not valid UTF-8: {}",
-                        entry.path().display()
-                    )
+                .ok_or_else(|| PlanError::InvalidName {
+                    description: "plan filename",
+                    value: entry.path().display().to_string(),
                 })?
                 .to_owned();
             validate_component(&id, "plan id")?;
@@ -181,14 +228,12 @@ impl PlanRepository {
         &self,
         session: SessionId,
         id: &str,
-    ) -> std::result::Result<Option<Plan>, String> {
+    ) -> std::result::Result<Option<Plan>, PlanError> {
         let path = self.plan_path(session, id).await?;
         match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => parse_plan(id, &contents)
-                .map(Some)
-                .map_err(|error| format!("could not read plan {}: {error}", path.display())),
+            Ok(contents) => parse_plan(id, &contents).map(Some).map_err(PlanError::from),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!("could not read plan {}: {error}", path.display())),
+            Err(error) => Err(PlanError::io("could not read plan", &path)(error)),
         }
     }
 
@@ -196,7 +241,7 @@ impl PlanRepository {
         &self,
         session: SessionId,
         id: &str,
-    ) -> std::result::Result<PathBuf, String> {
+    ) -> std::result::Result<PathBuf, PlanError> {
         validate_component(id, "plan id")?;
         Ok(self.plan_directory(session).await?.join(format!("{id}.md")))
     }
@@ -205,10 +250,10 @@ impl PlanRepository {
         &self,
         session: SessionId,
         plan: &Plan,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let _guard = self.writes.lock().await;
         if self.get(session, &plan.id).await?.is_some() {
-            return Err(format!("plan `{}` already exists", plan.id));
+            return Err(PlanError::Exists(plan.id.clone()));
         }
         let stored = self.stored_session(session).await?;
         let now = Utc::now();
@@ -225,12 +270,12 @@ impl PlanRepository {
         session: SessionId,
         id: &str,
         status: PlanStatus,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let _guard = self.writes.lock().await;
         let mut plan = self
             .get(session, id)
             .await?
-            .ok_or_else(|| format!("no plan `{id}` in this session"))?;
+            .ok_or_else(|| PlanError::Missing(id.to_owned()))?;
         plan.status = status;
         plan.updated_at = Some(Utc::now());
         self.write(session, &plan).await
@@ -241,12 +286,12 @@ impl PlanRepository {
         session: SessionId,
         id: &str,
         content: String,
-    ) -> std::result::Result<Plan, String> {
+    ) -> std::result::Result<Plan, PlanError> {
         let _guard = self.writes.lock().await;
         let mut plan = self
             .get(session, id)
             .await?
-            .ok_or_else(|| format!("no plan `{id}` in this session"))?;
+            .ok_or_else(|| PlanError::Missing(id.to_owned()))?;
         plan.content = content;
         plan.title = plan_title(&plan.content).map(str::to_owned);
         plan.status = PlanStatus::Pending;
@@ -260,13 +305,13 @@ impl PlanRepository {
         &self,
         session: SessionId,
         id: &str,
-    ) -> std::result::Result<bool, String> {
+    ) -> std::result::Result<bool, PlanError> {
         let _guard = self.writes.lock().await;
         let path = self.plan_path(session, id).await?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!("could not delete plan {}: {error}", path.display())),
+            Err(error) => Err(PlanError::io("could not delete plan", &path)(error)),
         }
     }
 
@@ -274,33 +319,36 @@ impl PlanRepository {
         &self,
         from: SessionId,
         to: SessionId,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let source = self.plan_directory(from).await?;
         let destination = self.plan_directory(to).await?;
         let mut entries = match tokio::fs::read_dir(&source).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("could not read source plans: {error}")),
+            Err(error) => return Err(PlanError::io("could not read source plans", &source)(error)),
         };
         tokio::fs::create_dir_all(&destination)
             .await
-            .map_err(|error| format!("could not create destination plan directory: {error}"))?;
+            .map_err(PlanError::io(
+                "could not create destination plan directory",
+                &destination,
+            ))?;
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|error| format!("could not list source plans: {error}"))?
+            .map_err(PlanError::io("could not list source plans", &source))?
         {
             if entry
                 .file_type()
                 .await
-                .map_err(|error| format!("could not inspect source plan: {error}"))?
+                .map_err(PlanError::io("could not inspect source plan", entry.path()))?
                 .is_file()
                 && entry.path().extension().is_some_and(|ext| ext == "md")
             {
                 let name = entry.file_name();
                 tokio::fs::copy(entry.path(), destination.join(name))
                     .await
-                    .map_err(|error| format!("could not copy a plan: {error}"))?;
+                    .map_err(PlanError::io("could not copy a plan", entry.path()))?;
             }
         }
         Ok(())
@@ -309,45 +357,54 @@ impl PlanRepository {
     pub(super) async fn remove_session_folder(
         &self,
         session: &SessionKey,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         validate_component(session.as_str(), "session id")?;
         let path = self.root()?.join(session.as_str());
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "could not remove local session artifacts {}: {error}",
-                path.display()
-            )),
+            Err(error) => Err(PlanError::io(
+                "could not remove local session artifacts",
+                &path,
+            )(error)),
         }
     }
 
-    async fn write(&self, session: SessionId, plan: &Plan) -> std::result::Result<(), String> {
+    async fn write(&self, session: SessionId, plan: &Plan) -> std::result::Result<(), PlanError> {
         let directory = self.plan_directory(session).await?;
         tokio::fs::create_dir_all(&directory)
             .await
-            .map_err(|error| format!("could not create plan directory: {error}"))?;
+            .map_err(PlanError::io("could not create plan directory", &directory))?;
         let path = self.plan_path(session, &plan.id).await?;
         let temporary = directory.join(format!(".{}.{}.tmp", plan.id, uuid::Uuid::new_v4()));
         let document = plan_markdown(plan);
         if let Err(error) = tokio::fs::write(&temporary, document).await {
-            return Err(format!("could not write temporary plan file: {error}"));
+            return Err(PlanError::io(
+                "could not write temporary plan file",
+                &temporary,
+            )(error));
         }
         if let Err(error) = tokio::fs::rename(&temporary, &path).await {
             let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(format!("could not save plan {}: {error}", path.display()));
+            return Err(PlanError::io("could not save plan", &path)(error));
         }
         Ok(())
     }
 }
 
-fn validate_component(value: &str, description: &str) -> std::result::Result<(), String> {
+fn validate_component(
+    value: &str,
+    description: &'static str,
+) -> std::result::Result<(), PlanError> {
     if value.is_empty()
         || !value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        return Err(format!("invalid {description} `{value}`"));
+        return Err(PlanError::InvalidName {
+            description,
+            value: value.to_owned(),
+        });
     }
     Ok(())
 }
@@ -594,7 +651,7 @@ impl FnExecutor<PlanArgs, ToolOutput> for PlanTool {
                         Ok(()) => {
                             plan_output(&self.plans, session, id, "Plan status updated.").await
                         }
-                        Err(error) => ToolOutput::error(error),
+                        Err(error) => ToolOutput::error(error.to_string()),
                     }
                 }
                 (None, _) => ToolOutput::error("`set_status` needs an `id`"),
