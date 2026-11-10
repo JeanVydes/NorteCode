@@ -132,7 +132,16 @@ pub(super) fn stop_turn(context: &AppContext) {
     let Some(session) = context.selected_session.read().clone() else {
         return;
     };
-    let Some(turn_id) = context.active_turn_id.read().clone() else {
+    // A turn this page adopted from the stream has a streaming id and no
+    // active id; the host cancels by the same id either way.
+    let turn_id = context.active_turn_id.read().clone().or_else(|| {
+        context
+            .streaming_turn_id
+            .read()
+            .as_deref()
+            .and_then(|id| raep_types::TurnId::new(id).ok())
+    });
+    let Some(turn_id) = turn_id else {
         return;
     };
     let context = *context;
@@ -140,7 +149,11 @@ pub(super) fn stop_turn(context: &AppContext) {
         if let Err(error) = api.cancel_turn(&session.session_id, &turn_id).await {
             context.set_page_error(Some(format!("Could not stop the turn: {error}")));
         }
+        // A question the model was parked on belongs to the turn that just
+        // ended: leaving it on screen offered an answer to a dead turn.
+        context.set_pending_questions(Vec::new());
         context.set_streaming_turn_id(None);
+        context.set_active_turn_id(None);
         context.set_chat_state(ChatState::Idle);
     });
 }

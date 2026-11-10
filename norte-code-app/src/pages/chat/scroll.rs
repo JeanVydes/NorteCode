@@ -54,7 +54,9 @@ pub(super) fn at_transcript_bottom() -> bool {
             && let Ok(element) = element.dyn_into::<web_sys::HtmlElement>()
         {
             let distance = element.scroll_height() - element.scroll_top() - element.client_height();
-            return distance < 48;
+            // A delta can add more than a line between two frames; a tight
+            // threshold turned following off mid-answer.
+            return distance < 160;
         }
         true
     }
