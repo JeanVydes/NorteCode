@@ -123,7 +123,7 @@ pub(super) fn sandboxed_arguments(
         wrap_command(program, args, cwd.as_deref(), workspace, network, writable)?;
     // The sandbox is a wrapper program now, so the request becomes a shell
     // script that runs it. Every argument is quoted, so the script the sandbox
-    // wraps reaches the shell as one word exactly as it arrived — joining on a
+    // wraps reaches the shell as one word exactly as it arrived: joining on a
     // space would split `echo hi` into two arguments.
     let mut line = shell_quote(&program);
     for argument in &args {

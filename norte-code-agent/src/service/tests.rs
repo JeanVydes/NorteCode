@@ -228,7 +228,7 @@ fn spec(model: &str) -> ModelSpec {
 /// The configuration the tests run on.
 ///
 /// Empty, and deliberately: the key now comes from the environment and nowhere
-/// else — the catalogue names its variables and a file is not one of them — and
+/// else: the catalogue names its variables and a file is not one of them: and
 /// a test cannot set one without `unsafe`, which this crate forbids. The test
 /// catalogue names `PATH`, which is set in every environment a test runs in, so
 /// a spec resolves for real without a test racing the others over `set_var`.
@@ -2119,7 +2119,7 @@ async fn a_prefix_that_matches_two_sessions_is_refused_by_name() {
 async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
     // The provider fails for good: no retry is scheduled, and the turn ends
     // with an error. The engine left the session `Streaming` so a resume could
-    // pick it up, but this process has no retry left and never lowers it — so
+    // pick it up, but this process has no retry left and never lowers it: so
     // before this was settled, `/model` queued behind an idle boundary the
     // session could no longer reach: the switch was accepted and never applied.
     let reference = ModelRef::new(
@@ -2161,7 +2161,7 @@ async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
         }
     )));
 
-    // The switch goes through — and, being a boundary switch, applies now
+    // The switch goes through: and, being a boundary switch, applies now
     // instead of being queued as a pending model.
     let changed = drain(
         &service,
@@ -2187,7 +2187,7 @@ async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
     // no process is streaming a session it just loaded. The repair commits the
     // phase back to idle; it used to carry the session's own head, which a
     // commit with no nodes rejects, so the write failed and the session stayed
-    // streamable-forever — the store, not just the directory row, was the thing
+    // streamable-forever: the store, not just the directory row, was the thing
     // `/model` read.
     let (service, store) = persistent_service_with_config(config(), scripted_model()).await;
     let created = drain(
@@ -3701,7 +3701,7 @@ async fn a_model_switch_and_a_compaction_at_the_same_boundary_are_both_reported(
 /// The first consult of a turn runs before the input is appended, when the
 /// session is still idle; stopping there leaves it idle, which is not what most
 /// of these tests are about. `nth(2)` stops on the consult that follows
-/// `append_turn`, when the turn is already `Streaming` — the leftover this file
+/// `append_turn`, when the turn is already `Streaming`: the leftover this file
 /// asserts the host settles.
 struct StopAtConsult {
     reason: String,
@@ -3834,7 +3834,7 @@ async fn a_turn_an_interceptor_stopped_is_reported_as_stopped() {
 #[tokio::test]
 async fn a_stop_after_the_input_is_appended_leaves_the_session_idle() {
     // The stop here lands after `append_turn`, so the engine has already
-    // committed `Streaming` and hands the turn back as an `Ok` outcome — not an
+    // committed `Streaming` and hands the turn back as an `Ok` outcome: not an
     // error. A host that only settled the failure path left this one streaming,
     // and every `/model` after it queued behind a boundary that never came.
     let reference = ModelRef::new(
@@ -4695,7 +4695,7 @@ fn the_skills_block_is_bounded_and_says_what_it_left_out() {
 
 #[test]
 fn the_names_go_in_and_the_descriptions_do_not() {
-    // A description is long — the AWS set alone is nineteen thousand characters —
+    // A description is long: the AWS set alone is nineteen thousand characters -
     // and `skill(action: list)` hands the same text back when it is asked for.
     // The prompt carries what a model needs to know a skill exists.
     let skills = vec!["tiny".to_owned()];
@@ -5692,7 +5692,7 @@ async fn forgetting_a_session_rule_clears_memory_and_the_record() {
 async fn a_message_with_an_attachment_carries_the_image_to_the_model() {
     // The end of the paste path. A client pastes a file, the draft carries its
     // path, and the message the model is asked about has to hold the image as a
-    // part of the same message — not a second one, and not a path the model
+    // part of the same message: not a second one, and not a path the model
     // would have to go and open.
     let dir = std::env::temp_dir().join(format!("norte-attach-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -5759,7 +5759,7 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
     // The bug this pins down: the engine commits the user's message and only
     // then checks it against the model, so a refused image used to land in the
     // history first. Every later turn rebuilt that history and met the same
-    // part, which left the session unusable — and a model switch did not help,
+    // part, which left the session unusable: and a model switch did not help,
     // because the part is in the history, not in the request. The check now runs
     // before anything is committed, so the session is untouched and the next
     // message goes through.
@@ -5830,7 +5830,7 @@ async fn an_attachment_the_model_cannot_take_never_enters_the_session() {
 
     // The point of the whole thing: the session still works. A plain message
     // after the refused attachment answers normally, which it could not do if
-    // the image had been committed — the history would refuse it every turn.
+    // the image had been committed: the history would refuse it every turn.
     let after = drain(
         &service,
         ClientRequestKind::SendMessage {
@@ -7658,7 +7658,7 @@ async fn a_ctrl_g_detached_job_reports_its_final_exit_code() {
 async fn a_process_that_ends_after_the_detach_reports_once() {
     // The two ends can arrive in either order: the process may end before the
     // call has returned, and then the report would be sent with no job to send
-    // it from — or sent twice, once from each end.
+    // it from: or sent twice, once from each end.
     let dir = std::env::temp_dir().join(format!("norte-detach-report-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let jobs = Arc::new(JobRegistry::default());
@@ -7909,7 +7909,7 @@ async fn a_compaction_does_not_reset_the_session_cache_share() {
     // block that reloads them when a compaction replaces the session behind the
     // record. The second copied every counter but the two cache ones, so the
     // first compaction zeroed a session's cache share and no later turn could
-    // bring it back — the record was the thing that was wrong.
+    // bring it back: the record was the thing that was wrong.
     let reference = ModelRef::new(
         ProviderId::new("test").expect("provider"),
         ModelId::new("scripted").expect("model"),
@@ -8243,7 +8243,7 @@ async fn a_resumed_session_sends_the_effort_it_was_left_on() {
 
     // Reopened, and asked for a turn with no reasoning in the request: what the
     // client does when the flag was not passed. `high` rather than `max`
-    // because the scripted model declares up to high — the engine checks the
+    // because the scripted model declares up to high: the engine checks the
     // effort against what the model says it takes, which is the model's answer
     // and not the catalogue's, and a fixture that declares four efforts is the
     // right thing to check that against.
@@ -8362,8 +8362,8 @@ async fn a_withheld_tool_is_not_registered_at_all() {
 async fn a_session_whose_tools_were_taken_away_still_runs_its_turns() {
     // The rule the configuration promises: the list bites when a session is
     // *made*, and a session that already exists keeps working. Its history can
-    // hold calls to a tool that no longer exists anywhere — the conversation is
-    // messages the engine replays, not a lookup in the registry — so a turn
+    // hold calls to a tool that no longer exists anywhere: the conversation is
+    // messages the engine replays, not a lookup in the registry: so a turn
     // after the change runs exactly as it did before it.
     let mut before = config();
     before.tools.disabled = vec!["todo".to_owned()];

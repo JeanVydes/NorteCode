@@ -13,9 +13,9 @@
 //! the call is an error the model reads.
 //!
 //! The wrapper is here and not in the broker for the same reason `ShellCalls`
-//! wraps the shell: what a job needs — a registration, an output that a reader
+//! wraps the shell: what a job needs, a registration, an output that a reader
 //! can find later, an end reported to a model that has no call left to answer
-//! — is the host's business, and the engine knows nothing about it.
+//!: is the host's business, and the engine knows nothing about it.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -107,7 +107,7 @@ struct DetachedRun {
 ///
 /// The service implements this: create the child, build its engine, run one
 /// turn, and read back what it committed. The tool does not reach into the
-/// service's lock-guarded state — it asks through this trait.
+/// service's lock-guarded state: it asks through this trait.
 #[async_trait]
 pub(super) trait SubagentRunner: Send + Sync {
     /// Runs one turn of `prompt` on a fresh child session.
@@ -414,7 +414,7 @@ fn emit_child_state(
 /// What a detached subagent hands back before the child has anything to show.
 ///
 /// It is a normal tool result, which is the point: the conversation stays
-/// coherent — a `tool_call` always has its `tool_result` — and the child
+/// coherent: a `tool_call` always has its `tool_result`: and the child
 /// reports separately when it has something to say.
 fn started(id: &str, label: &str) -> ToolOutput {
     ToolOutput::text(format!(
@@ -678,7 +678,7 @@ pub(super) fn child_result(outcome: &SubagentOutcome) -> serde_json::Value {
 /// The schema is trusted input from the model, not from a file: a schema
 /// that does not compile is not an invalid output, it is an invalid ask,
 /// and the tool says so rather than marking the child failed. Validation
-/// is a tiny subset — `type`, `required`, `properties`, `items`, `enum` —
+/// is a tiny subset: `type`, `required`, `properties`, `items`, `enum` -
 /// enough for the schemas the registry carries, without a new dependency.
 pub(super) fn validate_output_schema(schema: &serde_json::Value, output: &str) -> bool {
     let value = serde_json::from_str::<serde_json::Value>(output)
@@ -1624,8 +1624,8 @@ impl FnExecutor<WaitArgs, ToolOutput> for WaitAgent {
                 args.child_session_id
             )));
         };
-        // The argument is the model's text, so it is validated here — once,
-        // into a value — and the two waits below ask the same question of it.
+        // The argument is the model's text, so it is validated here: once,
+        // into a value: and the two waits below ask the same question of it.
         let until = match args.until.as_deref().unwrap_or("idle") {
             "idle" => WaitUntil::Idle,
             "finished" => WaitUntil::Finished,

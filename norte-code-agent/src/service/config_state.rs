@@ -191,8 +191,8 @@ impl Service {
 
         // Every open session's spec is rebuilt from the new configuration. A
         // spec is resolved once and carries the provider's settings baked into
-        // it — the endpoint, the wire, the headers, whether the prompt cache key
-        // is sent — so a config that changed one of them changed nothing for a
+        // it: the endpoint, the wire, the headers, whether the prompt cache key
+        // is sent: so a config that changed one of them changed nothing for a
         // session already open: the record kept the spec built at startup and
         // the next turn used it. Reloading the file and still sending the field
         // a provider rejects is the worst version of this, because the person
@@ -239,12 +239,12 @@ impl Service {
     /// provider is not in it: `river` and every other private endpoint is
     /// declared in `service.json` and nowhere else. A reload that went straight
     /// to the catalogue therefore failed on a default model that a run resolves
-    /// without complaint — `run --provider river` worked while `/refresh` said
+    /// without complaint: `run --provider river` worked while `/refresh` said
     /// the provider was unknown, which is the same pair answered two ways.
     ///
     /// So the catalogue is tried first and a configured provider falls back the
-    /// same way the command line does. A pair that is neither — a typo, or
-    /// a catalogue model that does not exist — is still an error.
+    /// same way the command line does. A pair that is neither: a typo, or
+    /// a catalogue model that does not exist: is still an error.
     ///
     /// An empty catalogue is not a hard stop: a catalogue plugin feeds the
     /// service an in-memory catalogue at startup (`set_plugin_catalogue`), and

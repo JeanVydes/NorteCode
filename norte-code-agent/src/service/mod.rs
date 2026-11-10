@@ -38,7 +38,14 @@ mod steering;
 mod subagents;
 mod tool_rules;
 mod tooling;
-mod turns;
+mod turn_context;
+mod turn_events;
+mod turn_helpers;
+mod turn_history;
+mod turn_media;
+mod turn_run;
+mod turn_start;
+mod turn_telemetry;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -116,7 +123,7 @@ struct Stats {
     /// The input tokens of the last request, which is the context.
     ///
     /// The whole conversation is sent again every time, so the last request's
-    /// input tokens are what the context holds — not the sum, which is what
+    /// input tokens are what the context holds: not the sum, which is what
     /// was spent.
     context_used: u64,
     /// The request telemetry that has not been matched to a committed message
@@ -265,7 +272,7 @@ pub type ChildSessionState = norte_code_wire::ChildState;
 /// Whether a name is in a session's withheld list.
 ///
 /// The comparison is exact: a name is what the model calls a tool, and a prefix
-/// that matched — `read` for `read_file` — would take away a tool nobody named.
+/// that matched: `read` for `read_file`: would take away a tool nobody named.
 fn withheld(disabled: &[String], name: &str) -> bool {
     disabled.iter().any(|entry| entry == name)
 }
@@ -514,8 +521,8 @@ impl Service {
 
     /// Starts a session without a message.
     ///
-    /// A client that offers a startup choice — begin a new session, continue the
-    /// last one, pick one from a list — needs the session to exist *before* the
+    /// A client that offers a startup choice: begin a new session, continue the
+    /// last one, pick one from a list: needs the session to exist *before* the
     /// first message decides it. Until now the only ways in were a message, which
     /// creates one as a side effect, and a resume, which needs a session that
     /// already exists; so a client that asked for the list first, then for the new
@@ -745,7 +752,7 @@ impl Service {
     ) -> Result<Harness, ServiceError> {
         let model: Arc<dyn Model> = self.factory.build(spec, &spec.capabilities)?;
         // The adapter is what turns a `Blob` back into bytes on the way out. A
-        // message may carry media the client stored — a pasted image — and the
+        // message may carry media the client stored: a pasted image: and the
         // wire only takes inline bytes or a URL, so without this the part
         // reaches the provider as a blob id it has never heard of. The engine
         // resolves it here, and always the same way, so a cached prefix does not
@@ -802,7 +809,7 @@ impl Service {
                     Arc::clone(&self.approval_rules),
                     Arc::clone(&self.activity),
                 )));
-                // Read from the spec the engine was built with — never
+                // Read from the spec the engine was built with: never
                 // rebuilt, so the check the interceptor makes and the
                 // capabilities the model is handed are the same ones.
                 interceptors.push(Arc::new(ScreenshotInterceptor::new(

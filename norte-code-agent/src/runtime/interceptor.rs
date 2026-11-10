@@ -1,8 +1,8 @@
 //! Host hooks the engine consults at the safe points of a running turn.
 //!
-//! One seam, not several. Everything a host decides while a turn runs — what
+//! One seam, not several. Everything a host decides while a turn runs: what
 //! the conversation gets, whether the turn goes on, whether one tool call may
-//! run — is decided here, on a context that names the point being decided at.
+//! run: is decided here, on a context that names the point being decided at.
 
 use std::sync::Arc;
 
@@ -120,8 +120,8 @@ pub enum Interception {
     /// This is the answer at [`ConsultationPoint::ToolCall`], where the engine
     /// has not run anything yet and a refusal is a message to the model: the
     /// call the model asked for is answered with an error result it reads like
-    /// any other failed call, and it can adapt. Elsewhere it is a mistake —
-    /// there is no call to refuse — and the engine treats it as a stop.
+    /// any other failed call, and it can adapt. Elsewhere it is a mistake -
+    /// there is no call to refuse: and the engine treats it as a stop.
     RefuseCall {
         /// Why the call does not run. The model reads this.
         reason: String,

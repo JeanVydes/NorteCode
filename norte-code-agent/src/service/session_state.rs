@@ -47,8 +47,8 @@ impl Service {
     }
     /// How much of its model's context a session is using.
     ///
-    /// The used part is what the last request carried — the whole
-    /// conversation goes again every time — and the window is what the
+    /// The used part is what the last request carried: the whole
+    /// conversation goes again every time: and the window is what the
     /// catalogue says the model holds. A session that has made no request yet
     /// has used nothing.
     #[must_use]
@@ -66,7 +66,7 @@ impl Service {
     /// The reasoning override a session carries, if it has one.
     ///
     /// `None` is not "no reasoning": it means the session set none, so the
-    /// answer is the config's default as the model resolves it — a different
+    /// answer is the config's default as the model resolves it: a different
     /// thing, because a model that cannot reason turns `auto` into `off`.
     #[must_use]
     pub fn session_reasoning(&self, session: &SessionKey) -> Option<Reasoning> {

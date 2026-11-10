@@ -130,7 +130,7 @@ pub(super) struct SessionRecord {
     /// under a running session would invalidate the provider's cached prefix
     /// and re-bill the whole conversation. The list is fixed when the session
     /// is made, kept across a resume, and never consulted against the file
-    /// again — a tool enabled then and disabled now stays with the session that
+    /// again: a tool enabled then and disabled now stays with the session that
     /// already had it.
     pub(super) disabled_tools: Vec<String>,
     /// Tools this session refuses without asking again.
@@ -436,8 +436,8 @@ impl Service {
     ///
     /// `Phase::Streaming` means "a turn is in flight": the engine commits it
     /// before it asks the model, and only a committed answer lowers it. A turn
-    /// that ends without one — the provider failed with the retries spent, or
-    /// the process was killed — leaves the phase behind, and nothing visible
+    /// that ends without one: the provider failed with the retries spent, or
+    /// the process was killed: leaves the phase behind, and nothing visible
     /// breaks, which is what makes it hard to see: the next turn starts from
     /// `Idle | Streaming` either way. What does break is that `/model` and
     /// compaction apply only at an idle boundary, so every later switch queues
@@ -459,7 +459,7 @@ impl Service {
             nodes: Vec::new(),
             // No nodes, so no head: `Commit::validate` requires a head to be one
             // of the commit's own nodes, and `None` means "leave it where it
-            // is", which is what this wants — settling a phase does not move
+            // is", which is what this wants: settling a phase does not move
             // the conversation.
             head: None,
             phase: crate::runtime::Phase::Idle,
@@ -650,7 +650,7 @@ impl Service {
         // The commit's head must be one of its own nodes. A bundle that
         // carries no history has nothing to commit, and committing an empty
         // node list with the session's existing head is rejected by the store
-        // — so an export without messages could never be imported back.
+        //: so an export without messages could never be imported back.
         let existing_messages = match current.head {
             Some(head) => self.store.ancestors(head).await?.len(),
             None => 0,
@@ -1229,8 +1229,8 @@ impl Service {
         // every rewind that crossed a tool call and nothing recorded what was
         // skipped. The rewind now proceeds and names the calls it removed; the
         // host passes them back in `HISTORY_REWOUND.side_effects` so the reader
-        // sees what happened outside the conversation — a file written, a
-        // command run — and can undo it themselves.
+        // sees what happened outside the conversation: a file written, a
+        // command run: and can undo it themselves.
         let kept_turn = boundaries
             .iter()
             .filter(|boundary| boundary.turn < to_turn || (!inclusive && boundary.turn == to_turn))
@@ -1302,8 +1302,8 @@ impl Service {
     ///
     /// A rewind archives the text of the turns it removes; this answers which
     /// tools ran there so the client can tell the person what happened outside
-    /// the conversation. Nothing here claims to know the effects themselves —
-    /// no tool declares them yet — only that the call happened.
+    /// the conversation. Nothing here claims to know the effects themselves -
+    /// no tool declares them yet: only that the call happened.
     #[must_use]
     pub fn rewound_tool_calls(
         &self,
@@ -1487,7 +1487,7 @@ impl Service {
     /// The sessions the client can see.
     /// The sessions the store can still open.
     ///
-    /// A record can outlive its stored session — a delete that removed the
+    /// A record can outlive its stored session: a delete that removed the
     /// row but not the in-memory record, or a database restored from an older
     /// copy. Such a record lists fine and then fails on the first attach with
     /// a store error naming an id nobody sent, which is a ghost the client
@@ -1503,8 +1503,8 @@ impl Service {
         let mut dead = Vec::new();
         for (key, id) in &records {
             // Only a store that says the session does not exist proves the
-            // record is an orphan. Any other failure — a busy database, a
-            // decode problem — is a reason to keep the session, not to delete
+            // record is an orphan. Any other failure: a busy database, a
+            // decode problem: is a reason to keep the session, not to delete
             // it.
             if let Err(error) = self.store.load(*id).await
                 && error.to_string().contains("not found")

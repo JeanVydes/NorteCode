@@ -46,7 +46,7 @@ use norte_code_wire::{JobLimits, ServerEvent, ServerEventKind, SessionKey};
 /// What a call hands back when it is detached before it has anything to show.
 ///
 /// It is a normal tool result, which is the point: the conversation stays
-/// coherent — a `tool_call` always has its `tool_result` — and the job reports
+/// coherent: a `tool_call` always has its `tool_result`: and the job reports
 /// separately when it has something to say.
 fn started(id: &str, script: &str) -> ToolOutput {
     let head: String = script
@@ -153,8 +153,8 @@ impl FnExecutor<ShellRequest, ToolOutput> for ShellCalls {
 
         // The call runs under a token that either the turn or the job can
         // signal: the turn's cancellation is what `Escape` reaches, and the
-        // job's is what `/jobs stop` and `Ctrl-C` reach. Linking them one way —
-        // turn to job and not back — is what keeps stopping a job from stopping
+        // job's is what `/jobs stop` and `Ctrl-C` reach. Linking them one way -
+        // turn to job and not back: is what keeps stopping a job from stopping
         // a turn while leaving a running call cancellable the way it always was.
         let cancel = Arc::new(Cancellation::new());
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
@@ -382,7 +382,7 @@ fn name_job(mut output: ToolOutput, id: &str) -> ToolOutput {
 ///
 /// While a call is being waited for this is a pass-through: it delivers to the
 /// sink the engine installed, so the client keeps its live view. Once the call is
-/// let go of there is no live view to keep — the turn has moved on — so it files
+/// let go of there is no live view to keep: the turn has moved on: so it files
 /// the bytes in the job registry instead, where `manage_jobs` can find them. The
 /// same moment is when the job is registered for a call that was not a job when
 /// it started.
@@ -578,7 +578,7 @@ impl ProgressSink for ShellProgress {
             }
         }
         // A stream's closing chunk is its pipe closing. The job is over once
-        // every stream has closed — one for a merged run, two otherwise — and
+        // every stream has closed: one for a merged run, two otherwise: and
         // not before: ending on the first would cut off a job whose stderr is
         // still producing.
         if progress.last && self.open.fetch_sub(1, Ordering::AcqRel) <= 1 {
@@ -704,7 +704,7 @@ fn report(
 /// What a job looks like to the model, as `manage_jobs` prints it.
 pub(super) fn describe(job: &JobSummary) -> String {
     let mut line = format!(
-        "`{}` {} — {}{} ({} ms)",
+        "`{}` {}: {}{} ({} ms)",
         job.id,
         job.state.label(),
         job.label,

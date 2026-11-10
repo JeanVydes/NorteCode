@@ -55,7 +55,7 @@ impl Service {
         // A producer inside the engine knows a session by its Norte id; the
         // wire names it by the client's key. Sending the engine id through
         // put the frame on a session that does not exist on the wire, so the
-        // host dropped it — job start and progress never reached a client,
+        // host dropped it: job start and progress never reached a client,
         // while job *finish* did, because that one already carries the key.
         if let Some(session) = event.session.as_ref()
             && let Some(key) = self
@@ -282,7 +282,7 @@ impl Service {
     /// starting: the flag is on, the session is idle, and no other auto-turn
     /// is running for it.
     ///
-    /// `start_turn` with `input: None` only, and then drain the events —
+    /// `start_turn` with `input: None` only, and then drain the events -
     /// the client sees the turn happen through them.
     pub(super) async fn auto_turn_on_job_end(self: &Arc<Self>, session: norte::SessionId) {
         if !self.config().tools.auto_turn_on_job_end {

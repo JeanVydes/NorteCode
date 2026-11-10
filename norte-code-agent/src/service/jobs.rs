@@ -1,8 +1,8 @@
 //! Background jobs: work that is not waited for.
 //!
 //! A call is a job when nobody is left waiting for it, which happens two ways.
-//! It asked to be detached — `detach: true`, or a `Ctrl-G` on a call that was
-//! being waited for — and so answered before it had anything to show. A call
+//! It asked to be detached: `detach: true`, or a `Ctrl-G` on a call that was
+//! being waited for: and so answered before it had anything to show. A call
 //! nobody detached is not a job at all, and its result is its own answer.
 //!
 //! A job is whatever work can be left running: a shell process, a subagent's
@@ -12,7 +12,7 @@
 //! it. Nothing else needs to know whether a call was waited for.
 //!
 //! That is what makes the end of a job unambiguous: it ends when its runner
-//! settles, never when the call that started it finished — for a call that let
+//! settles, never when the call that started it finished: for a call that let
 //! go happens at the very start. For shell jobs, stream closure and the runner's
 //! terminal result together provide that settlement.
 //!
@@ -47,7 +47,7 @@ pub(super) struct JobStartError {
 ///
 /// It is the protocol's own enum and not a copy: the service writes it into
 /// every `JobInfo` it hands out, and a second type here would be a second
-/// spelling of the same three words — which is what the string was.
+/// spelling of the same three words: which is what the string was.
 pub(super) use norte_code_wire::JobState;
 
 /// What a job looks like from outside.
@@ -199,7 +199,7 @@ impl JobRegistry {
     /// Appends a chunk of a call's output to its job, when it is one.
     ///
     /// Chunks arrive for every tool call, so this is a no-op for a call that is
-    /// not a job — which is what keeps the registry out of the way of the
+    /// not a job: which is what keeps the registry out of the way of the
     /// waited path. Callers that hold no call id (a subagent job, whose
     /// session is the child's) use [`JobRegistry::write_id`].
     /// Writers that do hold the job's id use that directly.
@@ -260,7 +260,7 @@ impl JobRegistry {
     /// The code arrives with the result, which the holder of the process reads
     /// after its streams have closed, so it lands on a job that is already
     /// `Finished`. That is why this only records the code rather than also
-    /// deciding the state — except for a job that was cancelled, where the code
+    /// deciding the state: except for a job that was cancelled, where the code
     /// is the consequence of the cancellation and not a fact about it.
     pub(super) fn settle(&self, id: &str, exit_code: Option<i32>, timed_out: bool) {
         let mut jobs = self.jobs();

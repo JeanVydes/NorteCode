@@ -258,7 +258,7 @@ impl RequestMetadata {
                 "cache_boundaries": request.cache_boundaries.len(),
                 "estimated_input_tokens": u64::try_from(bytes / 4).unwrap_or(0),
                 // Which upstream the request asked for, and which one served it.
-                // `requested` is the vendor extension as it went out — for
+                // `requested` is the vendor extension as it went out: for
                 // OpenRouter, `openai.chat:provider`. `served` is what the
                 // response named, and stays null until Norte exposes it.
                 "route": json!({

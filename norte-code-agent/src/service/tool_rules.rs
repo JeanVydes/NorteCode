@@ -100,9 +100,9 @@ impl Service {
     /// The tools withheld from a session.
     ///
     /// A session that exists answers with the list it was made with, which is
-    /// what keeps its prompt prefix stable. One that does not exist yet — the
+    /// what keeps its prompt prefix stable. One that does not exist yet: the
     /// engine a session is created through, before there is a record to freeze
-    /// — answers with the configuration, which is the list that is about to be
+    ///: answers with the configuration, which is the list that is about to be
     /// frozen into it.
     pub(super) fn disabled_for(&self, session: Option<&SessionKey>) -> Vec<String> {
         session
@@ -354,7 +354,7 @@ impl Service {
             .map(|servers| servers.tools())
             .unwrap_or_default();
         for tool in mcp_tools {
-            // An MCP tool is named by its server — `server__tool` — and the
+            // An MCP tool is named by its server: `server__tool`: and the
             // configuration disables it by that same name, so one list covers
             // the host's tools and the servers' alike.
             if withheld(&disabled, tool.name()) {
@@ -463,8 +463,8 @@ impl Service {
     ///
     /// It is the third state a rule panel offers: a tool is allowed or denied,
     /// and "no rule" is what is left when neither is written down. The rule is
-    /// removed from both sides — the live registry and the session or the
-    /// config file — because a rule forgotten in memory and kept on disk comes
+    /// removed from both sides: the live registry and the session or the
+    /// config file: because a rule forgotten in memory and kept on disk comes
     /// back at the next restart.
     ///
     /// # Errors

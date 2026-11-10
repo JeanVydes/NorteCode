@@ -1,5 +1,7 @@
-use super::*;
-use norte::{Part, ToolOutput};
+use norte::{MediaKind, Part, ToolOutput};
+
+use super::kind_of_mime;
+use crate::service::turn_helpers::is_detached;
 
 /// A shell result as the tool renders it, for the code the caller names.
 fn shell_result(code: &str) -> ToolOutput {
@@ -49,7 +51,7 @@ fn a_result_carries_the_text_the_model_saw() {
 fn a_mime_type_names_the_kind_the_part_is_built_with() {
     // The check and the part have to agree, and they did not: the part was
     // built as `Image` whatever the file was, so a PDF was checked against
-    // the model as a document — the modality a `pdf` override names — and
+    // the model as a document: the modality a `pdf` override names: and
     // then sent as an image. A model that takes documents and not images
     // would have passed the check and failed at the provider.
     assert_eq!(kind_of_mime("image/png"), MediaKind::Image);

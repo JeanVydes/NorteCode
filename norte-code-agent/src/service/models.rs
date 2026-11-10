@@ -24,8 +24,8 @@ use super::{EventStream, Service};
 
 /// Flattens a catalogue for a picker.
 ///
-/// The capabilities come from the provider's preferred wire — the one a session
-/// opens on when nobody named another — because the list is what a person picks
+/// The capabilities come from the provider's preferred wire: the one a session
+/// opens on when nobody named another: because the list is what a person picks
 /// from and the entry has to describe what picking it will get.
 #[must_use]
 pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
@@ -610,8 +610,8 @@ impl Service {
     ) -> Result<ModelSpec, ServiceError> {
         // The catalogue first, a configured provider second, which is how a run
         // resolves the same pair. Going straight to the catalogue failed on
-        // every provider the catalogue does not list — `exa`, `river`, any
-        // private endpoint declared in the config and nowhere else — so
+        // every provider the catalogue does not list: `exa`, `river`, any
+        // private endpoint declared in the config and nowhere else: so
         // `/model exa/…` said the provider was unknown while `--provider exa`
         // worked.
         let spec = self.default_spec_for(&self.lock_config(), &self.catalog(), provider, model)?;

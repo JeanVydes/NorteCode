@@ -31,7 +31,7 @@ impl Service {
     ///
     /// The token alone is not enough: the engine can be parked inside a tool
     /// that awaits a client (an unanswered `ask_user`), and then it never
-    /// emits the terminal event — the session stayed busy for good. A watchdog
+    /// emits the terminal event: the session stayed busy for good. A watchdog
     /// closes the turn if the engine has not done so a few seconds after the
     /// cancel.
     pub fn cancel_turn(&self, session: &SessionKey) -> bool {
@@ -72,8 +72,8 @@ impl Service {
     }
     /// Closes a turn the engine did not close after its cancellation.
     ///
-    /// The engine owns the turn and normally reports its end; when it cannot —
-    /// it is parked in a tool that never returns — the service is the only one
+    /// The engine owns the turn and normally reports its end; when it cannot -
+    /// it is parked in a tool that never returns: the service is the only one
     /// left that can put the session back to `Idle` and tell the client.
     pub(crate) async fn close_cancelled_turn(&self, key: &SessionKey, turn: u64) {
         self.clear_active_turn(key, turn);

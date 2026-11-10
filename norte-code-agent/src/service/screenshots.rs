@@ -3,13 +3,13 @@
 //! `browser_use` answers a `screenshot` with the PNG as base64 inside its
 //! result's `structured` value, and the model reads the text of that result:
 //! `screenshot: 326 624 bytes of base64 PNG`. The image itself never reached it,
-//! and on the chat completions wire it cannot — a tool message carries text only
+//! and on the chat completions wire it cannot: a tool message carries text only
 //! there, and the adapter refuses media in a tool result with a typed capability
 //! error rather than dropping it silently (`norte-openai/src/chat/request.rs`).
 //!
 //! Every wire *does* have a shape for an image in a user message. So the capture
 //! is taken out of the tool result, bounded, stored as a blob, and injected as a
-//! user message carrying one `Part::Media` — which the engine commits, so it
+//! user message carrying one `Part::Media`: which the engine commits, so it
 //! lands in the history, in the request digest and in what the policies read,
 //! exactly as a pasted image does.
 //!
@@ -29,7 +29,7 @@
 //! injects nothing when the model cannot take an image. That check is not
 //! optional: an interceptor's messages are committed *before* the engine checks
 //! them against the model, so a capture injected into a text-only model would
-//! land in the history and fail every later turn — the exact way a refused
+//! land in the history and fail every later turn: the exact way a refused
 //! attachment used to poison a session.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -83,7 +83,7 @@ impl Screenshots {
     }
 }
 
-/// Bounds a capture, stores it, and queues it — removing it from the tool's
+/// Bounds a capture, stores it, and queues it: removing it from the tool's
 /// answer on the way through.
 ///
 /// The bytes are re-encoded to fit the configured bounds, so what reaches the
@@ -93,7 +93,7 @@ impl Screenshots {
 ///
 /// The field is removed from the result once the capture is safely queued.
 /// Leaving it would store the same PNG twice: once as the blob the model reads
-/// and once as base64 in the history that nothing reads — 3.5 MB of it in a
+/// and once as base64 in the history that nothing reads: 3.5 MB of it in a
 /// measured session, since the tool result is rebuilt on every later turn. The
 /// text the model reads still says how big the capture was, so the answer stays
 /// honest about what happened; only the dead copy goes.

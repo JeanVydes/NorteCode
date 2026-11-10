@@ -141,7 +141,7 @@ pub enum EngineEvent {
     },
     /// A chunk of a running tool's output, as it arrives.
     ///
-    /// A tool that streams — the shell executor does — reports what it reads
+    /// A tool that streams: the shell executor does: reports what it reads
     /// while it reads it, so a host can show the output live instead of waiting
     /// for the call to finish. The chunks are not the result: the result is the
     /// `ToolCallFinished` that follows, and a host that ignores these loses

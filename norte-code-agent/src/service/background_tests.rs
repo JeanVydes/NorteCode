@@ -129,7 +129,7 @@ fn job_output_is_encoded_as_explicitly_untrusted_data() {
 fn a_job_adopted_after_its_process_ended_still_reports() {
     // The race the two ends can lose. The closing chunk is read just before
     // the detach, so it finds no job to end and reports nothing; the call
-    // then returns detached and registers the job — whose process is already
+    // then returns detached and registers the job: whose process is already
     // gone. Without the end being attempted again here, that job would never
     // be reported at all, and the model would wait forever for a result that
     // had already been produced.
