@@ -128,7 +128,6 @@ pub(crate) fn standard_event_from_frame(
     let frame_type = frame.frame_type;
     let turn = frame.turn;
     let job_id = frame.job_id;
-    let extension_finished = frame.extension_turn_finished.clone();
     let payload = frame.payload;
     let session = frame.session;
     let event = |kind| ServerEvent {
@@ -179,23 +178,14 @@ pub(crate) fn standard_event_from_frame(
                             })
                         }
                         raep_types::TurnState::Completed => {
-                            // `phase`/`committed` are NorteCode's own fields: the RAEP
-                            // spec has no equivalent, so they travel inside the
-                            // compatibility extension the server writes, not in the
-                            // canonical payload. Read them from there, defaulting to
-                            // the only honest values (idle, committed) when absent.
-                            let phase = extension_finished
-                                .as_ref()
-                                .and_then(|finished| finished.phase)
-                                .unwrap_or(norte_code_wire::Phase::Idle);
-                            let committed = extension_finished
-                                .as_ref()
-                                .and_then(|finished| finished.committed)
-                                .unwrap_or(true);
+                            // `phase`/`committed` are NorteCode's own and the
+                            // standard frame does not carry them; a client that
+                            // needs them asks history. Default to the only
+                            // honest pair: idle and committed.
                             event(norte_code_wire::ServerEventKind::TurnFinished {
                                 turn,
-                                phase,
-                                committed,
+                                phase: norte_code_wire::Phase::Idle,
+                                committed: true,
                                 output_schema_valid: None,
                             })
                         }
@@ -359,6 +349,26 @@ pub(crate) fn standard_event_from_frame(
                             .and_then(|id| id.parse().ok()),
                     })
                 }
+                FrameKind::ChildSessionStarted => {
+                    let started: norte_code_wire::ChildSessionStarted = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::ChildSessionStarted {
+                        child_session_id: started.child_session_id,
+                        agent_id: started.agent_id,
+                        tool_call_id: started.tool_call_id,
+                        lifetime: started.lifetime,
+                        task_summary: started.task_summary,
+                    })
+                }
+                FrameKind::ChildSessionUpdated => {
+                    let updated: norte_code_wire::ChildSessionUpdated = from_payload(payload)?;
+                    event(norte_code_wire::ServerEventKind::ChildSessionUpdated {
+                        child_session_id: updated.child_session_id,
+                        state: updated.state,
+                        reason: updated.reason,
+                        result: updated.result,
+                        output_schema_valid: updated.output_schema_valid,
+                    })
+                }
                 FrameKind::JobListResult => {
                     let decoded: norte_code_wire::JobList = from_payload(payload)?;
                     let jobs = decoded
@@ -405,6 +415,87 @@ pub(crate) fn standard_event_from_frame(
     Ok(Some(kind))
 }
 
+/// Decodes an extension frame the host writes with a standard payload.
+///
+/// The host sends `norte_code.<event>` frames; when the event has a standard
+/// shape it travels bare, and when it does not the payload is the canonical
+/// one (with an `event` tag), which the canonical path decodes. This handles
+/// the bare half, so no frame depends on a second, mirrored copy of the event.
+fn extension_event(
+    name: &str,
+    payload: Value,
+) -> Result<Option<norte_code_wire::ServerEventKind>, ClientError> {
+    use norte_code_wire::ServerEventKind as Kind;
+    if payload.get("event").is_some() {
+        return Ok(None);
+    }
+    let tag = name.rsplit('.').next().unwrap_or(name);
+    let kind = match tag {
+        "question_asked" => {
+            let asked: norte_code_wire::QuestionAsked = from_payload(payload)?;
+            Kind::QuestionAsked {
+                turn: asked.turn_id,
+                question: asked.question,
+                prompt: asked.prompt,
+                options: asked.options,
+                multiple: asked.multiple,
+            }
+        }
+        "question_answered" => {
+            let answered: norte_code_wire::QuestionAnswered = from_payload(payload)?;
+            Kind::QuestionAnswered {
+                question: answered.question,
+            }
+        }
+        "session_todos" => {
+            let todos: norte_code_wire::SessionTodos = from_payload(payload)?;
+            Kind::SessionTodos { todos: todos.todos }
+        }
+        "session_stats" => {
+            let stats: norte_code_wire::SessionStats = from_payload(payload)?;
+            Kind::SessionStats {
+                input_tokens: stats.input_tokens,
+                output_tokens: stats.output_tokens,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost_usd: stats.cost_usd,
+                requests: stats.requests,
+                context_used: 0,
+                context_window: None,
+            }
+        }
+        "compaction_finished" => {
+            let finished: norte_code_wire::CompactionFinished = from_payload(payload)?;
+            let compacted = finished
+                .compacted
+                .unwrap_or_else(|| finished.error.is_none() && finished.summary.is_some());
+            Kind::CompactionFinished {
+                compacted,
+                north_session: None,
+                summary: finished.summary,
+                error: finished.error,
+            }
+        }
+        "agent_changed" => {
+            let changed: norte_code_wire::AgentChanged = from_payload(payload)?;
+            // The extension names the pair as the agent that takes over:
+            // provider in `id`, model in `version`.
+            Kind::ModelChanged {
+                provider: changed.to_agent.id,
+                model: changed.to_agent.version,
+            }
+        }
+        "jobs_stopped" => {
+            let stopped: norte_code_wire::JobsStopped = from_payload(payload)?;
+            Kind::JobsStopped {
+                stopped: stopped.stopped,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(kind))
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, ClientError> {
     if frame.version != raep_types::WIRE_VERSION {
@@ -420,14 +511,15 @@ pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerE
     if let Some(event) = standard_event_from_frame(frame)? {
         return Ok(event);
     }
-    if let Some(event) = frame
-        .ext
-        .as_ref()
-        .and_then(|ext| ext.get("norte_code"))
-        .cloned()
+    if let raep_types::FrameType::Extension(name) = &frame.kind
+        && let Some(kind) = extension_event(name, frame.payload.clone())?
     {
-        return serde_json::from_value(event)
-            .map_err(|error| ClientError::new(format!("invalid NorteCode event: {error}")));
+        return Ok(ServerEvent {
+            request_id: 0,
+            session: (!frame.session_id.is_empty())
+                .then(|| norte_code_wire::SessionKey::new(frame.session_id.clone())),
+            kind,
+        });
     }
     let session = (!frame.session_id.is_empty())
         .then(|| norte_code_wire::SessionKey::new(frame.session_id.clone()));

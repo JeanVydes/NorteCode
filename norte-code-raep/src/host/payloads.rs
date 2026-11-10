@@ -1,6 +1,5 @@
 //! The payloads this host serializes, one struct per frame.
 
-use norte_code_wire::ServerEvent;
 use raep_types::TurnId;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -332,11 +331,6 @@ pub(crate) struct OutputPartFinishedPayload<'a> {
     pub(crate) sha256: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) transcript: Option<&'a str>,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct NorteCodeEventExtension<'a> {
-    pub(crate) norte_code: &'a ServerEvent,
 }
 
 #[derive(Debug, serde::Serialize)]

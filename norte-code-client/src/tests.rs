@@ -18,18 +18,13 @@ fn frame(kind: FrameType, session_id: &str, payload: serde_json::Value) -> Envel
 }
 
 #[test]
-fn prefers_the_standard_payload_over_the_compatibility_extension() {
+fn decodes_a_standard_payload() {
     let mut frame = frame(
         FrameType::Standard(StandardFrameType::TokenDelta),
         "session-1",
         serde_json::json!({"delta": "canonical", "index": 2, "channel": "text"}),
     );
     frame.turn_id = raep_types::TurnId::new("7").ok();
-    frame.ext = Some(serde_json::json!({"norte_code": {
-        "request_id": 0,
-        "session": "session-1",
-        "kind": {"event": "committed", "turn": 7, "version": 1}
-    }}));
     let event = server_event_from_frame(&frame).expect("standard token delta");
     assert!(matches!(
         event.kind,
@@ -122,6 +117,33 @@ fn prefixes_bearer_tokens_without_redacting_the_value() {
             .and_then(|value| value.to_str().ok()),
         Some("Bearer secret-token")
     );
+}
+
+#[test]
+fn decodes_a_bare_extension_payload() {
+    // The host writes `norte_code.question_asked` with the event's standard
+    // shape and nothing else: no mirrored event, no canonical tag.
+    let frame = frame(
+        FrameType::Extension("norte_code.question_asked".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "turn_id": 4,
+            "question": "q-1",
+            "prompt": "Which color?",
+            "options": ["red", "blue"],
+            "multiple": false,
+        }),
+    );
+    let event = server_event_from_frame(&frame).expect("bare extension payload");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::QuestionAsked {
+            turn: 4,
+            ref question,
+            ref options,
+            ..
+        } if question == "q-1" && options == &vec!["red".to_owned(), "blue".to_owned()]
+    ));
 }
 
 #[test]

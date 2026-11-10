@@ -18,13 +18,9 @@ fn frame_with_event(kind: &str, payload: Value, event: Value) -> Envelope<Value>
         1,
     );
     envelope.session_id = "s".to_owned();
-    envelope.ext = Some(serde_json::json!({
-        "norte_code": {
-            "request_id": 0,
-            "session": "s",
-            "kind": event,
-        }
-    }));
+    // The payload is what the host sends for an extension frame; the event
+    // argument documents it but the client must not need a mirrored copy.
+    let _ = event;
     envelope
 }
 
@@ -240,15 +236,9 @@ fn a_compaction_finished_event_reports_the_summary() {
 
 #[test]
 fn a_child_session_start_is_typed() {
-    let decoded = decode_frame(&frame_with_event(
-        "child_session_started",
+    let decoded = decode_frame(&frame(
+        FrameType::Standard(StandardFrameType::ChildSessionStarted),
         serde_json::json!({
-            "child_session_id": "child-1",
-            "agent_id": "sub",
-            "task_summary": "read the docs",
-        }),
-        serde_json::json!({
-            "event": "child_session_started",
             "child_session_id": "child-1",
             "agent_id": "sub",
             "tool_call_id": "c-1",

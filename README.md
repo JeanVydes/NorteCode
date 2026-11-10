@@ -103,11 +103,10 @@ conversation history. Each session's frames are kept in
 survives a server restart; an attach whose sequence is older than what the file
 still holds comes back truncated and the client reloads history. Artifact uploads go directly into Norte's
 content-addressed BlobStore; no second artifact directory is created. The
-common event families use canonical RAEP payloads (`turn`, tools, jobs,
-questions, budget, usage, retries and errors). The original NorteCode event is
-kept under envelope `ext.norte_code` for lossless compatibility while the
-session, history, compaction, agent/catalogue and cost events are normalized
-as well.
+common event families use standard RAEP payloads (`turn`, tools, jobs,
+questions, budget, usage, retries and errors); events with no standard shape
+travel as `norte_code.<event>` frames, and each event has exactly one encoding
+on the wire.
 `norte_code.command` extension is available when a
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
