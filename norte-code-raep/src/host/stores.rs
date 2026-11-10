@@ -919,7 +919,7 @@ pub(super) struct HostState {
 }
 
 #[derive(Clone)]
-pub(super) struct QueuedTurn {
+pub(crate) struct QueuedTurn {
     pub(super) turn_id: TurnId,
     pub(super) text: String,
     pub(super) attachments: Vec<norte_code_wire::Attachment>,

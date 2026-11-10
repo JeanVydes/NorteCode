@@ -1,28 +1,33 @@
 //! Runtime-independent RAEP host adapter.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use norte_code_agent::Service;
-use norte_code_wire::{
-    ClientRequest, ClientRequestKind, Delta, ServerEvent, ServerEventKind, SessionKey,
-};
-use raep_types::{
-    AttachMode, Envelope, FrameType, SessionAttach, StandardFrameType, TurnId, WIRE_VERSION,
-};
+use norte_code_wire::{ClientRequestKind, ServerEventKind, SessionKey};
+use raep_types::{AttachMode, Envelope, FrameType, StandardFrameType};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
-use crate::NorteCodeExtension;
-use crate::payloads::{canonical_event_payload, payload, standard_event_payload};
-use norte_code_wire::{JobStatus, SessionTitleSource};
+use crate::payloads::payload;
+use norte_code_wire::JobStatus;
 
+mod agents;
+mod artifacts;
 pub(crate) mod capabilities;
+mod config_accessors;
+mod emit;
+mod exports;
+mod frames;
+mod history;
+mod jobs;
 pub(crate) mod payloads;
+mod sessions;
 pub(crate) mod stores;
+mod turns;
 
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
@@ -37,7 +42,7 @@ use stores::*;
 /// The kind of a canonical `service_data` payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ServiceDataKind {
+pub(crate) enum ServiceDataKind {
     Telemetry,
     ToolList,
     McpList,
@@ -45,14 +50,14 @@ enum ServiceDataKind {
 
 /// A canonical `service_data` payload, decoded to find the telemetry rows.
 #[derive(Debug, serde::Deserialize)]
-struct CanonicalServiceData {
+pub(crate) struct CanonicalServiceData {
     kind: ServiceDataKind,
     data: Value,
 }
 
 /// A replay descriptor in an attach payload.
 #[derive(Debug, serde::Serialize)]
-struct ReplayMeta {
+pub(crate) struct ReplayMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     from_seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,7 +67,7 @@ struct ReplayMeta {
 
 /// The session-attached payload.
 #[derive(Debug, serde::Serialize)]
-struct SessionAttachedPayload {
+pub(crate) struct SessionAttachedPayload {
     created: bool,
     mode: AttachMode,
     last_seq: u64,
@@ -74,23 +79,23 @@ struct SessionAttachedPayload {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct UserInputOrigin {
+pub(crate) struct UserInputOrigin {
     kind: UserInputOriginKind,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct QueuedTurnStatePayload {
+pub(crate) struct QueuedTurnStatePayload {
     state: raep_types::TurnState,
 }
 
 #[derive(Debug, serde::Serialize)]
-enum UserInputOriginKind {
+pub(crate) enum UserInputOriginKind {
     #[serde(rename = "user")]
     User,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
-struct AcceptedContentPart {
+pub(crate) struct AcceptedContentPart {
     #[serde(rename = "type")]
     kind: AcceptedPartKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,7 +120,7 @@ struct AcceptedContentPart {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-enum AcceptedPartKind {
+pub(crate) enum AcceptedPartKind {
     #[default]
     Text,
     Image,
@@ -138,7 +143,7 @@ impl AcceptedPartKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-enum ImageDetail {
+pub(crate) enum ImageDetail {
     Auto,
     Low,
     High,
@@ -146,7 +151,7 @@ enum ImageDetail {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
-enum AcceptedSource {
+pub(crate) enum AcceptedSource {
     #[serde(rename = "upload")]
     Upload { upload_id: String },
     #[serde(rename = "output")]
@@ -154,7 +159,7 @@ enum AcceptedSource {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AssetSourceKind {
+pub(crate) enum AssetSourceKind {
     Upload,
     Output,
 }
@@ -182,7 +187,7 @@ enum AssetSourceKind {
 /// response_format_unsupported`. Implemented in
 /// [`NorteCodeRaepHost::user_input`] and [`NorteCodeRaepHost::validate_user_input`].
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
-struct AcceptedUserInput {
+pub(crate) struct AcceptedUserInput {
     /// Plain text input. Exactly one of `prompt` and `content` is required.
     #[serde(default)]
     prompt: Option<String>,
@@ -219,13 +224,13 @@ struct AcceptedUserInput {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ResponseFormatKind {
+pub(crate) enum ResponseFormatKind {
     Text,
     JsonSchema,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
-struct AcceptedResponseFormat {
+pub(crate) struct AcceptedResponseFormat {
     #[serde(rename = "type")]
     kind: ResponseFormatKind,
     /// JSON Schema 2020-12, at most 16 KiB, local `$ref` only. Only present for
@@ -246,7 +251,7 @@ struct AcceptedResponseFormat {
 ///
 /// The spec allows `$ref` only within the same schema; a reference to
 /// another document would need a resolver the host does not carry.
-fn refs_are_local(value: &Value) -> Result<(), HostError> {
+pub(crate) fn refs_are_local(value: &Value) -> Result<(), HostError> {
     match value {
         Value::Object(map) => {
             if let Some(Value::String(reference)) = map.get("$ref")
@@ -271,7 +276,9 @@ fn refs_are_local(value: &Value) -> Result<(), HostError> {
     }
 }
 
-fn validate_response_format_shape(format: &AcceptedResponseFormat) -> Result<(), HostError> {
+pub(crate) fn validate_response_format_shape(
+    format: &AcceptedResponseFormat,
+) -> Result<(), HostError> {
     match format.kind {
         ResponseFormatKind::Text => Ok(()),
         ResponseFormatKind::JsonSchema => {
@@ -296,7 +303,7 @@ fn validate_response_format_shape(format: &AcceptedResponseFormat) -> Result<(),
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HistoryGetRequest {
+pub(crate) struct HistoryGetRequest {
     #[serde(default)]
     before_turn_id: Option<String>,
     #[serde(default)]
@@ -307,7 +314,7 @@ struct HistoryGetRequest {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ForkRequest {
+pub(crate) struct ForkRequest {
     /// The fork source, repeated from the envelope by clients that fill the
     /// payload the way the spec's example does. The host reads the envelope's
     /// `session_id`; the field is accepted so a client naming the session
@@ -331,7 +338,7 @@ struct ForkRequest {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RewindRequest {
+pub(crate) struct RewindRequest {
     to_turn_id: String,
     #[serde(default)]
     inclusive: bool,
@@ -343,19 +350,19 @@ struct RewindRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum WorkspaceRewindPolicy {
+pub(crate) enum WorkspaceRewindPolicy {
     Keep,
     Restore,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)]
-struct ExportInclude {
+pub(crate) struct ExportInclude {
     #[serde(default = "default_true")]
     children: bool,
     #[serde(default = "default_true")]
@@ -382,7 +389,7 @@ impl Default for ExportInclude {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExportRequest {
+pub(crate) struct ExportRequest {
     #[serde(default)]
     include: ExportInclude,
     #[serde(default)]
@@ -395,7 +402,7 @@ struct ExportRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum QuiescePolicy {
+pub(crate) enum QuiescePolicy {
     Reject,
     Wait,
     KillJobs,
@@ -413,7 +420,7 @@ pub(crate) struct ImportCommitRequest {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct PortableHistoryItem {
+pub(crate) struct PortableHistoryItem {
     role: PortableHistoryRole,
     content: Value,
     #[serde(default)]
@@ -430,7 +437,7 @@ struct PortableHistoryItem {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum PortableHistoryRole {
+pub(crate) enum PortableHistoryRole {
     User,
     Assistant,
 }
@@ -446,7 +453,7 @@ impl PortableHistoryRole {
 
 /// The `SESSION_CONFIGURED` payload.
 #[derive(Debug, serde::Serialize)]
-struct SessionConfiguredPayload {
+pub(crate) struct SessionConfiguredPayload {
     applied: bool,
 }
 
@@ -459,7 +466,7 @@ struct SessionConfiguredPayload {
 /// accepted only when both the model and the attached client support it;
 /// `metadata` over 4 KiB violates the spec's bound for opaque caller
 /// metadata.
-fn validate_user_input(input: &AcceptedUserInput) -> Result<(), HostError> {
+pub(crate) fn validate_user_input(input: &AcceptedUserInput) -> Result<(), HostError> {
     match (input.prompt.as_deref(), input.content.as_deref()) {
         (Some(prompt), None) if !prompt.trim().is_empty() => {
             if prompt.len() > 256 * 1024 {
@@ -519,7 +526,7 @@ fn validate_user_input(input: &AcceptedUserInput) -> Result<(), HostError> {
     Ok(())
 }
 
-fn validate_content_parts(parts: &[AcceptedContentPart]) -> Result<(), HostError> {
+pub(crate) fn validate_content_parts(parts: &[AcceptedContentPart]) -> Result<(), HostError> {
     if parts.len() > 16 {
         return Err(HostError::InvalidFrame(
             "content exceeds max_parts".to_owned(),
@@ -537,7 +544,10 @@ fn validate_content_parts(parts: &[AcceptedContentPart]) -> Result<(), HostError
     Ok(())
 }
 
-fn validate_content_part(part: &AcceptedContentPart, index: usize) -> Result<usize, HostError> {
+pub(crate) fn validate_content_part(
+    part: &AcceptedContentPart,
+    index: usize,
+) -> Result<usize, HostError> {
     match part.kind {
         AcceptedPartKind::Text => {
             if part.text.as_deref().is_none_or(str::is_empty)
@@ -615,7 +625,10 @@ fn validate_content_part(part: &AcceptedContentPart, index: usize) -> Result<usi
     }
 }
 
-fn validate_upload_source(part: &AcceptedContentPart, index: usize) -> Result<(), HostError> {
+pub(crate) fn validate_upload_source(
+    part: &AcceptedContentPart,
+    index: usize,
+) -> Result<(), HostError> {
     let mime = part.mime_type.as_deref().ok_or_else(|| {
         HostError::InvalidFrame(format!("content part {index}: mime_type is required"))
     })?;
@@ -628,7 +641,7 @@ fn validate_upload_source(part: &AcceptedContentPart, index: usize) -> Result<()
         .map_err(|message| HostError::InvalidFrame(format!("content part {index}: {message}")))
 }
 
-fn validate_media_mime(kind: AcceptedPartKind, mime: &str) -> Result<(), String> {
+pub(crate) fn validate_media_mime(kind: AcceptedPartKind, mime: &str) -> Result<(), String> {
     norte::MimeType::new(mime.to_owned())
         .map_err(|_| format!("`{mime}` is not a valid MIME type"))?;
     let supported = match kind {
@@ -650,7 +663,10 @@ fn validate_media_mime(kind: AcceptedPartKind, mime: &str) -> Result<(), String>
     }
 }
 
-fn supported_input_modalities(service: &Service, session: &SessionKey) -> Vec<norte::Modality> {
+pub(crate) fn supported_input_modalities(
+    service: &Service,
+    session: &SessionKey,
+) -> Vec<norte::Modality> {
     let Some(spec) = service.session_spec(session) else {
         return Vec::new();
     };
@@ -666,7 +682,7 @@ fn supported_input_modalities(service: &Service, session: &SessionKey) -> Vec<no
     .collect()
 }
 
-fn to_norte_modality(modality: &raep_types::Modality) -> norte::Modality {
+pub(crate) fn to_norte_modality(modality: &raep_types::Modality) -> norte::Modality {
     match modality {
         raep_types::Modality::Text => norte::Modality::Text,
         raep_types::Modality::Image => norte::Modality::Image,
@@ -676,7 +692,7 @@ fn to_norte_modality(modality: &raep_types::Modality) -> norte::Modality {
     }
 }
 
-fn raep_modality_for_media(kind: norte_code_wire::MediaKind) -> raep_types::Modality {
+pub(crate) fn raep_modality_for_media(kind: norte_code_wire::MediaKind) -> raep_types::Modality {
     match kind {
         norte_code_wire::MediaKind::Image => raep_types::Modality::Image,
         norte_code_wire::MediaKind::Document => raep_types::Modality::Document,
@@ -691,13 +707,13 @@ fn raep_modality_for_media(kind: norte_code_wire::MediaKind) -> raep_types::Moda
 /// Only the fields in the closed set below are accepted; any other key
 /// fails with `AGENT_OVERRIDE_DENIED`, so a client that sends a field this
 /// host cannot honour gets an error naming it rather than a silent no-op.
-type OverrideParts = (
+pub(crate) type OverrideParts = (
     Option<norte_code_wire::Reasoning>,
     Option<(String, String)>,
     Option<norte_code_wire::Budget>,
 );
 
-fn decode_override(value: &Value) -> Result<OverrideParts, HostError> {
+pub(crate) fn decode_override(value: &Value) -> Result<OverrideParts, HostError> {
     let Value::Object(fields) = value else {
         return Err(HostError::InvalidFrame(
             "overrides must be an object".to_owned(),
@@ -749,7 +765,7 @@ fn decode_override(value: &Value) -> Result<OverrideParts, HostError> {
 /// there is no raise — so the check is that the value decodes at all. A
 /// malformed value fails here, naming the field, instead of deep inside the
 /// service.
-fn validate_override(
+pub(crate) fn validate_override(
     reasoning: Option<&norte_code_wire::Reasoning>,
     model: Option<&(String, String)>,
     budget: Option<&norte_code_wire::Budget>,
@@ -784,7 +800,9 @@ fn validate_override(
 /// (`off`/`auto`/`on`), `effort` (a name) and `budget_tokens`. `mode: on`
 /// without an effort maps to `Effort` with the service's default effort;
 /// `mode: auto` maps to `Automatic` and `mode: off` to `Disabled`.
-fn decode_reasoning_override(value: &Value) -> Result<norte_code_wire::Reasoning, HostError> {
+pub(crate) fn decode_reasoning_override(
+    value: &Value,
+) -> Result<norte_code_wire::Reasoning, HostError> {
     let Some(fields) = value.as_object() else {
         return Err(HostError::InvalidFrame(
             "reasoning override must be an object".to_owned(),
@@ -841,7 +859,7 @@ fn decode_reasoning_override(value: &Value) -> Result<norte_code_wire::Reasoning
 /// budget semantics are a single per-session limit, so the first field
 /// present wins; a field this host does not map fails instead of being
 /// silently dropped.
-fn decode_budget_override(value: &Value) -> Result<norte_code_wire::Budget, HostError> {
+pub(crate) fn decode_budget_override(value: &Value) -> Result<norte_code_wire::Budget, HostError> {
     let Some(fields) = value.as_object() else {
         return Err(HostError::InvalidFrame(
             "budget override must be an object".to_owned(),
@@ -908,7 +926,7 @@ fn decode_budget_override(value: &Value) -> Result<norte_code_wire::Budget, Host
 /// translates its known fields onto service requests; anything it cannot
 /// express fails with `AGENT_OVERRIDE_DENIED` instead of being ignored.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
-struct SessionConfigurePayload {
+pub(crate) struct SessionConfigurePayload {
     /// Switch to another agent. Only honoured when it names the host's
     /// configured agent; anything else is `agent_mismatch`.
     #[serde(default)]
@@ -926,19 +944,19 @@ struct SessionConfigurePayload {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ConfigureApplyPolicy {
+pub(crate) enum ConfigureApplyPolicy {
     Now,
     NextTurn,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SessionOptions {
+pub(crate) struct SessionOptions {
     #[serde(default)]
     job_turn_policy: Option<norte_code_wire::JobTurnPolicy>,
 }
 
-fn parse_job_turn_policy(
+pub(crate) fn parse_job_turn_policy(
     options: Option<&Value>,
 ) -> Result<Option<norte_code_wire::JobTurnPolicy>, HostError> {
     let Some(options) = options else {
@@ -1065,7 +1083,7 @@ pub struct NorteCodeRaepHost {
     connections: Arc<Semaphore>,
 }
 
-fn summarize_plugin_updates(
+pub(crate) fn summarize_plugin_updates(
     results: Vec<(String, Result<String, String>)>,
 ) -> Result<String, String> {
     let updated = results
@@ -1214,942 +1232,6 @@ impl NorteCodeRaepHost {
         self
     }
 
-    /// Stores an uploaded artifact.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when artifact storage is disabled or the upload fails.
-    pub async fn put_artifact(
-        &self,
-        mime_type: &str,
-        bytes: &[u8],
-    ) -> Result<ArtifactRef, HostError> {
-        self.put_artifact_as(mime_type, bytes, None).await
-    }
-
-    /// Stores an artifact and records ownership for an authenticated principal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when storage is disabled, the artifact exceeds the
-    /// configured limit, or the backing store rejects the write.
-    pub async fn put_artifact_as(
-        &self,
-        mime_type: &str,
-        bytes: &[u8],
-        principal: Option<&str>,
-    ) -> Result<ArtifactRef, HostError> {
-        if bytes.len() > self.config.max_artifact_bytes {
-            return Err(HostError::Artifact(format!(
-                "artifact exceeds {} byte limit",
-                self.config.max_artifact_bytes
-            )));
-        }
-        let reference = self
-            .artifact_store
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
-            .put(mime_type, bytes)
-            .await?;
-        if let Some(principal) = principal {
-            self.state
-                .lock()
-                .await
-                .artifact_owners
-                .insert(reference.id.clone(), principal.to_owned());
-        }
-        Ok(reference)
-    }
-
-    /// Stores an authenticated upload scoped to one session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when uploads are disabled, the MIME type is not
-    /// supported, the upload exceeds the configured limit, or storage fails.
-    pub async fn put_session_upload_as(
-        &self,
-        session_id: &str,
-        mime_type: &str,
-        bytes: &[u8],
-        owner: Option<&str>,
-    ) -> Result<UploadReceipt, HostError> {
-        if self
-            .session_summary(session_id, owner.unwrap_or_default())
-            .await
-            .is_none()
-        {
-            return Err(HostError::Artifact("session not found".to_owned()));
-        }
-        if bytes.is_empty() {
-            return Err(HostError::Artifact("upload must not be empty".to_owned()));
-        }
-        if bytes.len() > self.config.max_artifact_bytes {
-            return Err(HostError::Artifact(format!(
-                "upload exceeds {} byte limit",
-                self.config.max_artifact_bytes
-            )));
-        }
-        let kind = if mime_type.starts_with("image/") {
-            AcceptedPartKind::Image
-        } else if mime_type.starts_with("audio/") {
-            AcceptedPartKind::Audio
-        } else if mime_type.starts_with("video/") {
-            AcceptedPartKind::Video
-        } else {
-            AcceptedPartKind::Document
-        };
-        validate_media_mime(kind, mime_type).map_err(HostError::Artifact)?;
-        let artifact_store = self
-            .artifact_store
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?;
-        let upload_index = self
-            .upload_index
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("upload metadata storage is disabled".to_owned()))?;
-        let artifact = artifact_store.put(mime_type, bytes).await?;
-        let upload_id = format!("upl_{}", uuid::Uuid::new_v4());
-        let expires_at = now_millis().saturating_add(60 * 60 * 1000);
-        let sha256 = crate::bundle::sha256(bytes);
-        upload_index
-            .insert(UploadRecord {
-                id: upload_id.clone(),
-                session_id: session_id.to_owned(),
-                owner: owner.map(str::to_owned),
-                blob_id: artifact.id,
-                mime_type: mime_type.to_owned(),
-                bytes: bytes.len() as u64,
-                sha256: sha256.clone(),
-                expires_at,
-                referenced: false,
-            })
-            .await?;
-        Ok(UploadReceipt {
-            upload_id,
-            mime_type: mime_type.to_owned(),
-            bytes: bytes.len() as u64,
-            sha256,
-            expires_at,
-        })
-    }
-
-    async fn resolve_session_asset(
-        &self,
-        session_id: &str,
-        asset_id: &str,
-        owner: Option<&str>,
-        output: bool,
-    ) -> Result<UploadRecord, HostError> {
-        let index = self
-            .upload_index
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("upload metadata storage is disabled".to_owned()))?;
-        let expected_prefix = if output { "out_" } else { "upl_" };
-        let record = index
-            .get(asset_id)
-            .await?
-            .filter(|record| {
-                record.session_id == session_id
-                    && record.owner.as_deref() == owner
-                    && (record.referenced || record.expires_at > now_millis())
-                    && record.id.starts_with(expected_prefix)
-                    && (!output || record.referenced)
-            })
-            .ok_or_else(|| HostError::Artifact("upload not found".to_owned()))?;
-        Ok(record)
-    }
-
-    /// Fetches one generated output after checking its session and owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the output is unknown, expired, foreign, or the
-    /// backing blob cannot be read.
-    pub async fn get_session_output_as(
-        &self,
-        session_id: &str,
-        output_id: &str,
-        owner: Option<&str>,
-    ) -> Result<(Vec<u8>, String), HostError> {
-        let record = self
-            .resolve_session_asset(session_id, output_id, owner, true)
-            .await?;
-        let bytes = self
-            .artifact_store
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
-            .get(&record.blob_id)
-            .await?;
-        Ok((bytes, record.mime_type))
-    }
-
-    /// Reads an uploaded artifact.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when artifact storage is disabled or the identifier is
-    /// invalid or missing.
-    pub async fn get_artifact(&self, id: &str) -> Result<Vec<u8>, HostError> {
-        self.get_artifact_as(id, None).await
-    }
-
-    /// Reads an artifact after checking its authenticated owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the artifact is not owned by the principal,
-    /// storage is disabled, or the backing store cannot resolve the id.
-    pub async fn get_artifact_as(
-        &self,
-        id: &str,
-        principal: Option<&str>,
-    ) -> Result<Vec<u8>, HostError> {
-        if let Some(principal) = principal
-            && let Some(owner) = self.state.lock().await.artifact_owners.get(id)
-            && owner != principal
-        {
-            return Err(HostError::Artifact(
-                "artifact belongs to another principal".to_owned(),
-            ));
-        }
-        self.artifact_store
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("artifact storage is disabled".to_owned()))?
-            .get(id)
-            .await
-    }
-
-    /// Reads an unexpired portable bundle after checking its owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the export is missing, expired, or owned by a
-    /// different principal.
-    pub async fn get_export_as(
-        &self,
-        id: &str,
-        principal: &str,
-    ) -> Result<(Vec<u8>, i64), HostError> {
-        let mut state = self.state.lock().await;
-        if state
-            .exports
-            .get(id)
-            .is_some_and(|export| export.expires_at <= now_millis())
-        {
-            state.exports.remove(id);
-        }
-        let export = state
-            .exports
-            .get(id)
-            .ok_or_else(|| HostError::Artifact("export not found or expired".to_owned()))?;
-        if export
-            .owner
-            .as_deref()
-            .is_some_and(|owner| owner != principal)
-        {
-            return Err(HostError::Artifact(
-                "export not found or expired".to_owned(),
-            ));
-        }
-        Ok((export.bytes.clone(), export.expires_at))
-    }
-
-    /// Validates a portable bundle and stores a one-hour import preview.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an invalid/oversized bundle, unsupported history
-    /// content, or a preview store failure.
-    pub async fn preview_import_as(
-        &self,
-        bytes: &[u8],
-        principal: &str,
-    ) -> Result<Value, HostError> {
-        if bytes.len() > self.config.max_export_bytes {
-            return Err(HostError::InvalidFrame(
-                "PAYLOAD_TOO_LARGE: import exceeds max_export_bytes".to_owned(),
-            ));
-        }
-        let (manifest, files) = crate::bundle::read_bundle(bytes, self.config.max_export_bytes)
-            .map_err(|error| HostError::InvalidFrame(format!("BUNDLE_INVALID: {error}")))?;
-        if manifest.sessions.len() != 1
-            || manifest.sessions[0].session_id != manifest.root_session_id
-            || manifest.sessions[0].parent_session_id.is_some()
-            || files.len() != 2
-        {
-            return Err(HostError::InvalidFrame(
-                "BUNDLE_UNSUPPORTED: this host imports a single text-only root session".to_owned(),
-            ));
-        }
-        let session = &manifest.sessions[0];
-        if let Some(usage) = session.usage_total.as_ref() {
-            validate_bundle_usage(usage)?;
-        }
-        let items = parse_portable_history(files.get(&session.history_file).ok_or_else(|| {
-            HostError::InvalidFrame("BUNDLE_INVALID: history file is missing".to_owned())
-        })?)?;
-        let session_json_path = format!("sessions/{}/session.json", session.session_id);
-        let session_json: Value =
-            serde_json::from_slice(files.get(&session_json_path).ok_or_else(|| {
-                HostError::InvalidFrame("BUNDLE_INVALID: session.json is missing".to_owned())
-            })?)?;
-        let title = session_json
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if title.as_ref().is_some_and(|title| title.len() > 512) {
-            return Err(HostError::InvalidFrame(
-                "BUNDLE_INVALID: session title exceeds 512 bytes".to_owned(),
-            ));
-        }
-        let agent_id = session
-            .agent
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                HostError::InvalidFrame("BUNDLE_INVALID: session agent id is missing".to_owned())
-            })?;
-        let version = session
-            .agent
-            .get("version")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let available = self.services.contains_key(agent_id)
-            && (version.is_empty() || version == self.config.server_version);
-        let expires_at = now_millis().saturating_add(60 * 60 * 1000);
-        let import_id = format!("imp_{}", uuid::Uuid::new_v4().simple());
-        {
-            let mut state = self.state.lock().await;
-            state
-                .imports
-                .retain(|_, import| import.expires_at > now_millis());
-            if state.imports.len() >= 4 {
-                return Err(HostError::InvalidFrame(
-                    "IMPORT_STORE_FULL: active preview limit reached".to_owned(),
-                ));
-            }
-            state.imports.insert(
-                import_id.clone(),
-                StoredImport {
-                    manifest: manifest.clone(),
-                    history: items,
-                    title,
-                    owner: principal.to_owned(),
-                    expires_at,
-                },
-            );
-        }
-        Ok(payload(ImportPreviewPayload {
-            import_id: &import_id,
-            bundle_version: &manifest.bundle_version,
-            sessions: manifest.sessions.len(),
-            signature: ImportSignatureStatus::Absent,
-            agents: vec![ImportAgentAvailability {
-                agent_id,
-                version,
-                available,
-            }],
-            warnings: [
-                "Only plain-text user and assistant history is restored.",
-                "Children, uploads, job output, generated outputs, and workspace data are not imported.",
-            ],
-            expires_at,
-        }))
-    }
-
-    /// Commits a previously validated portable bundle preview.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an expired/foreign preview, unavailable agent,
-    /// unsupported usage carry-over, or a failed session creation.
-    pub(crate) async fn commit_import_as(
-        &self,
-        import_id: &str,
-        request: ImportCommitRequest,
-        principal: &str,
-    ) -> Result<Value, HostError> {
-        if request.decryption_jwk.is_some() {
-            return Err(HostError::InvalidFrame(
-                "encrypted imports are not supported".to_owned(),
-            ));
-        }
-        let imported = {
-            let mut state = self.state.lock().await;
-            if state
-                .imports
-                .get(import_id)
-                .is_some_and(|import| import.expires_at <= now_millis())
-            {
-                state.imports.remove(import_id);
-            }
-            let imported = state
-                .imports
-                .get(import_id)
-                .ok_or_else(|| HostError::InvalidFrame("IMPORT_NOT_FOUND".to_owned()))?;
-            if imported.owner != principal {
-                return Err(HostError::InvalidFrame("IMPORT_NOT_FOUND".to_owned()));
-            }
-            imported.clone()
-        };
-        let source = &imported.manifest.sessions[0];
-        let usage_total = request
-            .carry_usage
-            .unwrap_or(true)
-            .then(|| source.usage_total.clone())
-            .flatten();
-        let agent_id = source
-            .agent
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                HostError::InvalidFrame("BUNDLE_INVALID: missing agent id".to_owned())
-            })?;
-        let version = source
-            .agent
-            .get("version")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let mapped = request
-            .agent_map
-            .get(&format!("{agent_id}@{version}"))
-            .or_else(|| request.agent_map.get(agent_id))
-            .map_or(agent_id, String::as_str);
-        let service = self.services.get(mapped).cloned().ok_or_else(|| {
-            HostError::InvalidFrame(format!("AGENT_NOT_FOUND: `{mapped}` is unavailable"))
-        })?;
-        {
-            let mut state = self.state.lock().await;
-            let can_consume = state.imports.get(import_id).is_some_and(|import| {
-                import.owner == principal && import.expires_at > now_millis()
-            });
-            if !can_consume {
-                return Err(HostError::InvalidFrame("IMPORT_NOT_FOUND".to_owned()));
-            }
-            state.imports.remove(import_id);
-        }
-        let imported_from = payload(ImportedFromPayload {
-            exporter: &imported.manifest.exporter,
-            session_id: &source.session_id,
-            exported_at: imported.manifest.exported_at,
-        });
-        let key = service
-            .import_plain_history(imported.title, imported.history, imported_from, usage_total)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        {
-            let mut state = self.state.lock().await;
-            state
-                .session_agents
-                .insert(key.to_string(), mapped.to_owned());
-            state
-                .session_owners
-                .insert(key.to_string(), principal.to_owned());
-        }
-        let id_map = BTreeMap::from([(source.session_id.clone(), key.to_string())]);
-        Ok(payload(ImportCommittedPayload {
-            session_id: key.as_str(),
-            id_map,
-            warnings: [
-                "Only plain-text user and assistant history was restored.",
-                "The imported session is suspended until its first controller attachment.",
-            ],
-        }))
-    }
-
-    /// Removes an import preview owned by `principal`.
-    pub async fn delete_import_as(&self, import_id: &str, principal: &str) -> bool {
-        let mut state = self.state.lock().await;
-        if state
-            .imports
-            .get(import_id)
-            .is_some_and(|import| import.owner == principal)
-        {
-            state.imports.remove(import_id);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Returns the server-owned agent service.
-    #[must_use]
-    pub fn service(&self) -> &Arc<Service> {
-        &self.service
-    }
-
-    /// Returns the configured agent identifier.
-    #[must_use]
-    pub fn agent_id(&self) -> &str {
-        &self.config.agent_id
-    }
-
-    /// Maximum configured upload size.
-    #[must_use]
-    pub fn max_artifact_bytes(&self) -> usize {
-        self.config.max_artifact_bytes
-    }
-
-    fn output_part_bytes_limit(&self) -> usize {
-        self.config
-            .max_artifact_bytes
-            .min(DEFAULT_MAX_OUTPUT_PART_BYTES)
-    }
-
-    /// Whether authenticated single-shot uploads are configured.
-    #[must_use]
-    pub fn uploads_enabled(&self) -> bool {
-        self.artifact_store.is_some() && self.upload_index.is_some()
-    }
-
-    /// Maximum configured portable bundle size.
-    #[must_use]
-    pub fn max_export_bytes(&self) -> usize {
-        self.config.max_export_bytes
-    }
-
-    fn service_for_agent(&self, agent_id: &str) -> Result<Arc<Service>, HostError> {
-        let requested = if agent_id.is_empty() {
-            &self.config.agent_id
-        } else {
-            agent_id
-        };
-        self.services
-            .get(requested)
-            .cloned()
-            .ok_or_else(|| HostError::InvalidFrame(format!("unknown agent `{requested}`")))
-    }
-
-    async fn service_for_session(&self, session_id: &str) -> Result<Arc<Service>, HostError> {
-        if let Some(agent_id) = self.agent_for_session(session_id).await {
-            return self.service_for_agent(&agent_id);
-        }
-        Ok(Arc::clone(&self.service))
-    }
-
-    async fn agent_for_session(&self, session_id: &str) -> Option<String> {
-        if let Some(agent_id) = self
-            .state
-            .lock()
-            .await
-            .session_agents
-            .get(session_id)
-            .cloned()
-        {
-            return Some(agent_id);
-        }
-        self.services
-            .iter()
-            .find(|(_, service)| {
-                service
-                    .sessions()
-                    .iter()
-                    .any(|session| session.session.as_str() == session_id)
-            })
-            .map(|(agent_id, _)| agent_id.clone())
-    }
-
-    /// Returns the RAEP `session_summary` for every session `principal` may see.
-    ///
-    /// A session with no recorded owner is visible to everyone; a session with
-    /// an owner is visible only to that principal.
-    pub async fn session_summaries(&self, principal: &str) -> Vec<Value> {
-        let owners = {
-            let state = self.state.lock().await;
-            state.session_owners.clone()
-        };
-        let now = now_millis();
-        // Every agent has its own service over the same directory, so each of
-        // them lists every session: flat-mapping them showed one session twice
-        // — once per agent — and the sidebar carried a phantom copy of each.
-        // A session belongs to exactly one key, so it is listed once.
-        let mut seen = std::collections::BTreeSet::new();
-        let mut live = Vec::new();
-        for service in self.services.values() {
-            for info in service.list_live_sessions().await {
-                if seen.insert(info.session.as_str().to_owned()) {
-                    live.push(info);
-                }
-            }
-        }
-        live.into_iter()
-            .filter(|info| {
-                owners
-                    .get(info.session.as_str())
-                    .is_none_or(|owner| owner == principal)
-            })
-            .map(|info| self.session_summary_value(&info, now))
-            .collect()
-    }
-
-    /// Returns one `session_summary`.
-    ///
-    /// `None` means the session does not exist or belongs to another principal,
-    /// which the HTTP resource answers as `404` rather than leaking existence.
-    pub async fn session_summary(&self, session_id: &str, principal: &str) -> Option<Value> {
-        let owner = self
-            .state
-            .lock()
-            .await
-            .session_owners
-            .get(session_id)
-            .cloned();
-        if owner.is_some_and(|owner| owner != principal) {
-            return None;
-        }
-        let service = self.service_for_session(session_id).await.ok()?;
-        let info = service
-            .sessions()
-            .into_iter()
-            .find(|info| info.session.as_str() == session_id)?;
-        Some(self.session_summary_value(&info, now_millis()))
-    }
-
-    /// Returns child sessions only when the principal owns the parent session.
-    pub async fn child_sessions(
-        &self,
-        parent_session_id: &str,
-        principal: &str,
-    ) -> Option<Vec<norte_code_agent::service::ChildSessionSummary>> {
-        self.session_summary(parent_session_id, principal).await?;
-        let service = self.service_for_session(parent_session_id).await.ok()?;
-        Some(service.children_of(&SessionKey::new(parent_session_id)))
-    }
-
-    fn session_summary_value(&self, info: &norte_code_wire::SessionInfo, now: i64) -> Value {
-        let created_at = info
-            .created_at
-            .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .map_or(now, |value| value.timestamp_millis());
-        let agent_id = self
-            .services
-            .iter()
-            .find(|(_, service)| {
-                service
-                    .sessions()
-                    .iter()
-                    .any(|session| session.session == info.session)
-            })
-            .map_or(self.config.agent_id.as_str(), |(agent_id, _)| {
-                agent_id.as_str()
-            });
-        let spec = self
-            .services
-            .values()
-            .find_map(|service| service.session_spec(&info.session));
-        payload(norte_code_wire::SessionSummary {
-            session_id: info.session.as_str().to_owned(),
-            title: info.title.clone(),
-            title_source: SessionTitleSource::User,
-            labels: BTreeMap::new(),
-            pinned: false,
-            archived: false,
-            status: if self
-                .services
-                .values()
-                .any(|service| service.session_imported_suspended(&info.session))
-            {
-                norte_code_wire::SessionStatus::Suspended
-            } else {
-                norte_code_wire::SessionStatus::Active
-            },
-            agent: Some(norte_code_wire::AgentRef {
-                id: agent_id.to_owned(),
-                version: self.config.server_version.clone(),
-            }),
-            model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                id: spec.model.clone(),
-                version: String::new(),
-            }),
-            provider: spec.as_ref().map(|spec| spec.provider.clone()),
-            reasoning: info.reasoning.clone(),
-            parent_session_id: info.parent.as_ref().map(ToString::to_string),
-            created_at: Some(created_at),
-            updated_at: Some(now),
-            last_activity_at: Some(now),
-            turn_count: Some(0),
-            has_pending: Some(false),
-        })
-    }
-
-    /// Creates a session through the management API and records its owner.
-    ///
-    /// # Errors
-    ///
-    /// Returns a service error when the session cannot be created.
-    pub async fn create_session(
-        &self,
-        agent_id: &str,
-        title: Option<String>,
-        principal: &str,
-    ) -> Result<String, HostError> {
-        let key = self
-            .service_for_agent(agent_id)?
-            .start_session(title)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        self.claim_session(key.as_str(), principal).await?;
-        Ok(key.to_string())
-    }
-
-    /// Renames a session through the management API.
-    ///
-    /// Returns `false` when the session is unknown or belongs to another
-    /// principal.
-    ///
-    /// # Errors
-    ///
-    /// Returns a service error when the rename cannot be persisted.
-    pub async fn rename_session(
-        &self,
-        session_id: &str,
-        title: &str,
-        principal: &str,
-    ) -> Result<bool, HostError> {
-        if self.session_summary(session_id, principal).await.is_none() {
-            return Ok(false);
-        }
-        self.service_for_session(session_id)
-            .await?
-            .rename(&SessionKey::new(session_id), title)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        Ok(true)
-    }
-
-    /// Deletes a session through the management API.
-    ///
-    /// Returns `false` when the session is unknown or belongs to another
-    /// principal.
-    ///
-    /// # Errors
-    ///
-    /// Returns a service error when the delete is rejected.
-    pub async fn delete_session(
-        &self,
-        session_id: &str,
-        principal: &str,
-    ) -> Result<bool, HostError> {
-        if self.session_summary(session_id, principal).await.is_none() {
-            return Ok(false);
-        }
-        self.submit_service(
-            session_id,
-            ClientRequestKind::DeleteSession {
-                session: SessionKey::new(session_id),
-            },
-        )
-        .await?;
-        self.state.lock().await.attached.remove(session_id);
-        Ok(true)
-    }
-
-    /// Returns the session a previous `Idempotency-Key` created.
-    pub async fn session_for_create_key(&self, key: &str) -> Option<String> {
-        self.state
-            .lock()
-            .await
-            .session_create_keys
-            .get(key)
-            .cloned()
-    }
-
-    /// Remembers the session created for an `Idempotency-Key`.
-    ///
-    /// The map keeps the same bound as the command idempotency cache so a
-    /// client that sends a fresh key on every create cannot grow it without
-    /// limit.
-    pub async fn remember_create_key(&self, key: &str, session_id: &str) {
-        let mut state = self.state.lock().await;
-        state
-            .session_create_keys
-            .insert(key.to_owned(), session_id.to_owned());
-        state.session_create_order.push_back(key.to_owned());
-        while state.session_create_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.session_create_order.pop_front() {
-                state.session_create_keys.remove(&oldest);
-            }
-        }
-    }
-
-    /// Returns the `agent_summary` for every agent this host serves.
-    #[must_use]
-    pub fn agents(&self) -> Vec<Value> {
-        let mut ids = self.services.keys().cloned().collect::<Vec<_>>();
-        ids.sort();
-        ids.into_iter()
-            .map(|id| {
-                let spec = self
-                    .services
-                    .get(&id)
-                    .and_then(|service| service.default_spec());
-                payload(norte_code_wire::AgentSummary {
-                    id: id.clone(),
-                    version: self.config.server_version.clone(),
-                    capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
-                    provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                        id: spec.provider.clone(),
-                        version: String::new(),
-                    }),
-                    model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                        id: spec.model.clone(),
-                        version: String::new(),
-                    }),
-                })
-            })
-            .collect()
-    }
-
-    /// Returns one `agent_summary` and its latest version, or `None` when the
-    /// agent is unknown.
-    #[must_use]
-    pub fn agent(&self, agent_id: &str) -> Option<Value> {
-        let service = self.services.get(agent_id)?;
-        let spec = service.default_spec();
-        Some(payload(AgentDetail {
-            agent: norte_code_wire::AgentSummary {
-                id: agent_id.to_owned(),
-                version: self.config.server_version.clone(),
-                capabilities: agent_capabilities(spec.as_ref(), self.uploads_enabled()),
-                provider: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                    id: spec.provider.clone(),
-                    version: String::new(),
-                }),
-                model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
-                    id: spec.model.clone(),
-                    version: String::new(),
-                }),
-            },
-            latest_version: AgentVersion {
-                version: &self.config.server_version,
-                created_at: 0,
-                deprecated: false,
-            },
-        }))
-    }
-
-    /// Returns the versions an agent has, or `None` when the agent is unknown.
-    #[must_use]
-    pub fn agent_versions(&self, agent_id: &str) -> Option<Value> {
-        self.services.get(agent_id)?;
-        Some(payload(AgentVersions {
-            versions: vec![AgentVersion {
-                version: &self.config.server_version,
-                created_at: 0,
-                deprecated: false,
-            }],
-        }))
-    }
-
-    /// Returns the configured bearer token, when transport authentication is enabled.
-    #[must_use]
-    pub fn auth_token(&self) -> Option<&str> {
-        self.config.auth_token.as_deref()
-    }
-
-    /// Resolves a bearer token to its configured principal.
-    ///
-    /// When authentication is disabled, all requests use the anonymous
-    /// principal. A single legacy token maps to `default` unless an explicit
-    /// principal mapping exists.
-    #[must_use]
-    pub fn authenticate_bearer(&self, token: &str) -> Option<String> {
-        let configured = self.config.auth_token.as_deref();
-        if configured.is_none() && self.config.auth_principals.is_empty() {
-            return None;
-        }
-        if configured != Some(token) && !self.config.auth_principals.contains_key(token) {
-            return None;
-        }
-        Some(
-            self.config
-                .auth_principals
-                .get(token)
-                .cloned()
-                .unwrap_or_else(|| "default".to_owned()),
-        )
-    }
-
-    /// Returns the principal used for unauthenticated local operation.
-    #[must_use]
-    pub fn anonymous_principal(&self) -> &'static str {
-        "anonymous"
-    }
-
-    /// Returns whether this host requires transport authentication.
-    #[must_use]
-    pub fn authentication_enabled(&self) -> bool {
-        self.config.auth_token.is_some() || !self.config.auth_principals.is_empty()
-    }
-
-    /// Returns whether a browser origin may call the HTTP API.
-    #[must_use]
-    pub fn origin_allowed(&self, origin: &str) -> bool {
-        self.config
-            .allowed_origins
-            .iter()
-            .any(|allowed| allowed == origin)
-    }
-
-    /// Attempts to reserve one long-lived transport connection.
-    pub fn try_connection(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        Arc::clone(&self.connections).try_acquire_owned().ok()
-    }
-
-    /// Returns the configured command timeout.
-    #[must_use]
-    pub fn command_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.config.command_timeout_ms)
-    }
-
-    /// Returns the maximum accepted RAEP frame size.
-    #[must_use]
-    pub fn max_frame_bytes(&self) -> usize {
-        usize::try_from(self.config.max_frame_bytes).unwrap_or(usize::MAX)
-    }
-
-    /// Returns quota for one principal.
-    ///
-    /// Norte Code has no tenant quota store yet, so the answer is derived
-    /// from what the host knows: sessions the principal owns, turns, and
-    /// replay frames. The limits are the host's own configured limits;
-    /// `used`/`remaining` come from in-memory counters.
-    #[must_use]
-    pub async fn quota(&self, principal: &str) -> Value {
-        let (sessions, replay_frames) = {
-            let state = self.state.lock().await;
-            let sessions = state
-                .session_owners
-                .values()
-                .filter(|owner| *owner == principal)
-                .count() as u64;
-            let frames = state.replay.values().map(VecDeque::len).sum::<usize>() as u64;
-            (sessions, frames)
-        };
-        let session_limit = 100_u64;
-        let frame_limit = self.config.replay_capacity as u64;
-        payload(norte_code_wire::QuotaReport {
-            tenant: principal.to_owned(),
-            period: norte_code_wire::QuotaPeriod { start: 0, end: 0 },
-            dimensions: vec![
-                norte_code_wire::QuotaDimension {
-                    name: norte_code_wire::QuotaDimensionName::Sessions,
-                    limit: session_limit,
-                    used: sessions,
-                    remaining: session_limit.saturating_sub(sessions),
-                },
-                norte_code_wire::QuotaDimension {
-                    name: norte_code_wire::QuotaDimensionName::ReplayBufferEvents,
-                    limit: frame_limit,
-                    used: replay_frames,
-                    remaining: frame_limit.saturating_sub(replay_frames),
-                },
-            ],
-        })
-    }
-
     /// Returns a receiver for live frames emitted by any attached connection.
     pub fn subscribe(&self) -> broadcast::Receiver<Envelope<Value>> {
         self.events.subscribe()
@@ -2209,2976 +1291,9 @@ impl NorteCodeRaepHost {
             .copied()
             .unwrap_or(0)
     }
-
-    /// Returns the RAEP handshake frame.
-    #[must_use]
-    pub fn hello(&self) -> Envelope<Value> {
-        Envelope::new(
-            standard(StandardFrameType::Hello),
-            payload(HelloPayload {
-                protocol: ProtocolRef {
-                    name: "RAEP",
-                    version: WIRE_VERSION,
-                },
-                server_version: &self.config.server_version,
-                wire_versions: vec![WIRE_VERSION],
-                capabilities: advertised_capabilities(self.uploads_enabled()),
-                extensions: vec![NorteCodeExtension::Command.as_str()],
-                limits: LimitsRef {
-                    max_frame_bytes: self.config.max_frame_bytes,
-                    replay_buffer_events: self.config.replay_capacity,
-                    max_concurrent_jobs: self.config.max_concurrent_jobs,
-                    job_output_retention_s: self.config.job_output_retention_s,
-                    max_artifact_bytes: self.config.max_artifact_bytes,
-                    max_upload_bytes: self.config.max_artifact_bytes,
-                    max_inline_bytes: 0,
-                    max_output_part_bytes: self.output_part_bytes_limit(),
-                    max_prompt_bytes: 256 * 1024,
-                    max_parts: 16,
-                    max_queued_inputs: self.config.max_queued_inputs,
-                    max_export_bytes: self.config.max_export_bytes,
-                    export_ttl_s: self.config.export_ttl_s,
-                },
-                heartbeat_s: 20,
-                draining: false,
-                deprecations: Vec::new(),
-            }),
-            now_millis(),
-        )
-    }
-
-    /// Returns discovery information for an HTTP info route.
-    #[must_use]
-    pub fn info(&self) -> Value {
-        let default_model = match self
-            .services
-            .get(&self.config.agent_id)
-            .and_then(|service| service.default_spec())
-        {
-            Some(spec) => payload(ModelRef {
-                provider: &spec.provider,
-                model: &spec.model,
-            }),
-            None => Value::Null,
-        };
-        payload(InfoPayload {
-            protocol: ProtocolRef {
-                name: "RAEP",
-                version: WIRE_VERSION,
-            },
-            server_version: &self.config.server_version,
-            wire_versions: vec![WIRE_VERSION],
-            capabilities: advertised_capabilities(self.uploads_enabled()),
-            extensions: vec![NorteCodeExtension::Command.as_str()],
-            limits: LimitsRef {
-                max_frame_bytes: self.config.max_frame_bytes,
-                replay_buffer_events: self.config.replay_capacity,
-                max_concurrent_jobs: self.config.max_concurrent_jobs,
-                job_output_retention_s: self.config.job_output_retention_s,
-                max_artifact_bytes: self.config.max_artifact_bytes,
-                max_upload_bytes: self.config.max_artifact_bytes,
-                max_inline_bytes: 0,
-                max_output_part_bytes: self.output_part_bytes_limit(),
-                max_prompt_bytes: 256 * 1024,
-                max_parts: 16,
-                max_queued_inputs: self.config.max_queued_inputs,
-                max_export_bytes: self.config.max_export_bytes,
-                export_ttl_s: self.config.export_ttl_s,
-            },
-            agents: self.services.keys().cloned().collect::<Vec<_>>(),
-            default_agent: &self.config.agent_id,
-            default_model,
-        })
-    }
-
-    /// Returns readiness and basic operational counters for health probes.
-    #[must_use]
-    pub fn readiness(&self) -> Value {
-        payload(ReadinessPayload {
-            status: ReadinessStatus::Ready,
-            agent_id: &self.config.agent_id,
-            agents: self.services.len(),
-            replay: self.replay_store.is_some(),
-            artifacts: self.artifact_store.is_some(),
-            limits: ReadinessLimits {
-                max_connections: self.config.max_connections,
-                command_timeout_ms: self.config.command_timeout_ms,
-            },
-        })
-    }
-
-    /// Returns a structured telemetry report for operational dashboards.
-    ///
-    /// The command remains the source of truth for the records. This method
-    /// adds stable aggregate counters without changing the streaming wire
-    /// event consumed by existing clients.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the telemetry command cannot be routed or its
-    /// response cannot be serialized.
-    pub async fn telemetry_report(
-        &self,
-        session: Option<&str>,
-        principal: &str,
-    ) -> Result<Value, HostError> {
-        let session_key = session.map(SessionKey::new);
-        let request = ClientRequest {
-            request_id: 0,
-            kind: ClientRequestKind::ListTelemetry {
-                session: session_key,
-            },
-        };
-        let frame = Envelope::new(
-            FrameType::Extension(NorteCodeExtension::Command.as_str().to_owned()),
-            serde_json::to_value(request)?,
-            now_millis(),
-        );
-        let frames = self.handle_as(frame, Some(principal)).await?;
-        // The telemetry records are the service's own `RequestRecord` struct
-        // inside the canonical `service_data` payload: decode them through
-        // the type instead of reading token counters by string key.
-        let records: Vec<norte_code_protocol::sqlite::RequestRecord> = frames
-            .iter()
-            .find_map(|frame| {
-                let event: CanonicalServiceData =
-                    serde_json::from_value(frame.payload.clone()).ok()?;
-                (event.kind == ServiceDataKind::Telemetry).then_some(event.data)
-            })
-            .and_then(|data| serde_json::from_value(data).ok())
-            .unwrap_or_default();
-        let mut input_tokens = 0_u64;
-        let mut output_tokens = 0_u64;
-        let mut cache_read_tokens = 0_u64;
-        let mut cache_write_tokens = 0_u64;
-        let mut errors = 0_u64;
-        let mut cancelled = 0_u64;
-        let mut duration_ms = 0_u64;
-        for row in &records {
-            input_tokens += row.input_tokens.unwrap_or(0);
-            output_tokens += row.output_tokens.unwrap_or(0);
-            cache_read_tokens += row.cache_read_tokens.unwrap_or(0);
-            cache_write_tokens += row.cache_write_tokens.unwrap_or(0);
-            duration_ms += row.duration_ms;
-            match row.status {
-                norte_code_protocol::sqlite::RequestStatus::Error => errors += 1,
-                norte_code_protocol::sqlite::RequestStatus::Cancelled => cancelled += 1,
-                norte_code_protocol::sqlite::RequestStatus::Ok => {}
-            }
-        }
-        let request_count = records.len();
-        Ok(payload(norte_code_wire::TelemetryReport {
-            session: session.map(str::to_owned),
-            records: records.iter().map(Into::into).collect(),
-            summary: norte_code_wire::TelemetrySummary {
-                requests: u64::try_from(request_count).unwrap_or(u64::MAX),
-                errors,
-                cancelled,
-                duration_ms,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            },
-        }))
-    }
-
-    /// Handles one decoded RAEP frame.
-    ///
-    /// Service events are published as soon as they arrive, while the
-    /// returned vector provides the same frames to a request/response
-    /// transport. This keeps transports independent from the agent loop.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the frame is malformed, unsupported, unauthenticated
-    /// for the current attachment, or rejected by the Norte Code service.
-    ///
-    pub async fn handle(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.handle_as(frame, None).await
-    }
-
-    /// Handles one frame while enforcing ownership for `principal`.
-    ///
-    /// `None` is reserved for in-process callers and keeps the existing local
-    /// behavior. HTTP and WebSocket adapters pass the authenticated principal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the frame is invalid or the principal does not
-    /// own the requested session.
-    #[allow(clippy::too_many_lines)]
-    pub async fn handle_as(
-        &self,
-        frame: Envelope<Value>,
-        principal: Option<&str>,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        if frame.version != WIRE_VERSION {
-            return Err(HostError::InvalidFrame(
-                "unsupported RAEP wire version".to_owned(),
-            ));
-        }
-        if frame.seq.is_some() {
-            return Err(HostError::InvalidFrame(
-                "client frames must not include seq".to_owned(),
-            ));
-        }
-        let frame_fingerprint = crate::bundle::sha256(&serde_json::to_vec(&frame)?);
-        let idempotency_key = (frame.session_id.clone(), frame.id.clone());
-        self.load_persisted_idempotency(&frame.session_id).await?;
-        let is_user_input = matches!(
-            &frame.kind,
-            FrameType::Standard(StandardFrameType::UserInput)
-        );
-        let turn_id = is_user_input.then(|| frame.turn_id.clone()).flatten();
-        let turn_fingerprint = if is_user_input {
-            Some(crate::bundle::sha256(&serde_json::to_vec(&frame.payload)?))
-        } else {
-            None
-        };
-        if let Some(principal) = principal
-            && !frame.session_id.is_empty()
-        {
-            self.claim_session(&frame.session_id, principal).await?;
-        }
-        if !matches!(
-            &frame.kind,
-            FrameType::Standard(
-                StandardFrameType::SessionAttach | StandardFrameType::SessionDetach,
-            )
-        ) && self
-            .state
-            .lock()
-            .await
-            .attachment_modes
-            .get(&frame.session_id)
-            .is_some_and(|mode| *mode == AttachMode::Observer)
-            && !observer_read_only_frame(&frame.kind)
-        {
-            return Err(HostError::InvalidFrame(
-                "FORBIDDEN: observer attachments are read-only".to_owned(),
-            ));
-        }
-        {
-            let state = self.state.lock().await;
-            if let Some(previous) = state.idempotency.get(&idempotency_key) {
-                if previous.fingerprint == frame_fingerprint {
-                    if matches!(
-                        &frame.kind,
-                        FrameType::Standard(StandardFrameType::UserInput)
-                    ) && let Some(turn_id) = &frame.turn_id
-                        && let Some(latest) = state
-                            .turn_request_frames
-                            .get(&(frame.session_id.clone(), turn_id.clone()))
-                    {
-                        return Ok(vec![latest.clone()]);
-                    }
-                    return Ok(previous.response.clone());
-                }
-                return Err(HostError::IdempotencyConflict(
-                    "frame id was reused with a different request".to_owned(),
-                ));
-            }
-        }
-        let is_attach = matches!(
-            &frame.kind,
-            FrameType::Standard(StandardFrameType::SessionAttach)
-        );
-        let result = match frame.kind {
-            FrameType::Standard(StandardFrameType::SessionAttach) => self.attach(frame).await,
-            FrameType::Standard(StandardFrameType::UserInput) => {
-                self.user_input(frame, principal).await
-            }
-            FrameType::Standard(StandardFrameType::CancelTurn) => self.cancel(frame).await,
-            FrameType::Standard(StandardFrameType::SessionDetach) => self.detach(frame).await,
-            FrameType::Standard(StandardFrameType::SessionClose) => self.close(frame).await,
-            FrameType::Standard(StandardFrameType::Ack) => self.ack(frame).await,
-            FrameType::Standard(StandardFrameType::SessionConfigure) => {
-                self.agent_command(frame).await
-            }
-            FrameType::Standard(StandardFrameType::HistoryGet) => self.history_get(frame).await,
-            FrameType::Standard(StandardFrameType::CancelJob) => self.cancel_job(frame).await,
-            FrameType::Standard(StandardFrameType::JobList) => self.job_list(frame).await,
-            FrameType::Standard(StandardFrameType::JobGet) => self.job_get(frame).await,
-            FrameType::Standard(StandardFrameType::SessionFork) => self.fork(frame).await,
-            FrameType::Standard(StandardFrameType::SessionCompact) => self.compact(frame).await,
-            FrameType::Standard(StandardFrameType::ContextPin) => self.context_pin(frame).await,
-            FrameType::Standard(StandardFrameType::SessionExport) => {
-                self.export(frame, principal).await
-            }
-            FrameType::Standard(StandardFrameType::SessionImport) => Self::import(),
-            FrameType::Standard(StandardFrameType::ToolApprovalResponse) => {
-                Self::approval_response(&frame)
-            }
-            FrameType::Standard(StandardFrameType::SessionRewind) => self.rewind(frame).await,
-            FrameType::Standard(StandardFrameType::InputStreamStart) => {
-                Self::input_stream(&frame, "start")
-            }
-            FrameType::Standard(StandardFrameType::InputStreamData) => {
-                Self::input_stream(&frame, "data")
-            }
-            FrameType::Standard(StandardFrameType::InputStreamEnd) => {
-                Self::input_stream(&frame, "end")
-            }
-            FrameType::Standard(StandardFrameType::ClientToolResult) => {
-                Self::client_tool_result(&frame)
-            }
-            FrameType::Standard(StandardFrameType::PresenceUpdate) => Self::presence_update(&frame),
-            FrameType::Standard(StandardFrameType::DelegatorControl) => {
-                self.delegator_control(frame).await
-            }
-            FrameType::Standard(StandardFrameType::Handoff) => Self::handoff(&frame),
-            FrameType::Standard(StandardFrameType::AuthRefresh) => Self::auth_refresh(&frame),
-            FrameType::Extension(ref name) if name == NorteCodeExtension::Command.as_str() => {
-                self.extension_command(frame).await
-            }
-            kind => Err(HostError::UnknownType(format!("{kind:?}"))),
-        }?;
-        if is_attach && let Some(principal) = principal {
-            for attached in &result {
-                if !attached.session_id.is_empty() {
-                    self.claim_session(&attached.session_id, principal).await?;
-                }
-            }
-        }
-        let service_turn_id = if let Some(turn_id) = &turn_id {
-            self.state
-                .lock()
-                .await
-                .turn_aliases
-                .iter()
-                .find(|((session_id, _), alias)| {
-                    session_id == &idempotency_key.0 && *alias == turn_id
-                })
-                .map(|((_, service_turn), _)| *service_turn)
-        } else {
-            None
-        };
-        if let Some(store) = &self.replay_store {
-            store
-                .save_idempotency(&IdempotencyRecord {
-                    session_id: idempotency_key.0.clone(),
-                    frame_id: idempotency_key.1.clone(),
-                    fingerprint: frame_fingerprint.clone(),
-                    turn_id,
-                    turn_fingerprint,
-                    service_turn_id,
-                    response: result.clone(),
-                })
-                .await?;
-        }
-        let mut state = self.state.lock().await;
-        state.idempotency.insert(
-            idempotency_key.clone(),
-            CachedRequest {
-                fingerprint: frame_fingerprint,
-                response: result.clone(),
-            },
-        );
-        state.idempotency_order.push_back(idempotency_key);
-        while state.idempotency_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.idempotency_order.pop_front() {
-                state.idempotency.remove(&oldest);
-            }
-        }
-        Ok(result)
-    }
-
-    async fn claim_session(&self, session_id: &str, principal: &str) -> Result<(), HostError> {
-        let mut state = self.state.lock().await;
-        match state.session_owners.get(session_id) {
-            Some(owner) if owner != principal => Err(HostError::InvalidFrame(
-                "session belongs to another principal".to_owned(),
-            )),
-            Some(_) => Ok(()),
-            None => {
-                state
-                    .session_owners
-                    .insert(session_id.to_owned(), principal.to_owned());
-                Ok(())
-            }
-        }
-    }
-
-    /// Handles a standard `SESSION_CONFIGURE` frame (RFC 8.1).
-    ///
-    /// The payload is the standard one — `agent_id`, `agent_override`,
-    /// `options`, `apply` — not a serialised [`AgentCommand`]. Known
-    /// override fields are translated onto service requests; anything the
-    /// host cannot express fails with `AGENT_OVERRIDE_DENIED` instead of
-    /// being silently dropped.
-    async fn agent_command(
-        &self,
-        frame: Envelope<Value>,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let configure: SessionConfigurePayload = serde_json::from_value(frame.payload)?;
-        let job_turn_policy = parse_job_turn_policy(configure.options.as_ref())?;
-        if job_turn_policy.is_some()
-            && configure
-                .apply
-                .is_some_and(|apply| apply != ConfigureApplyPolicy::Now)
-        {
-            return Err(HostError::InvalidFrame(
-                "SESSION_OPTIONS_UNSUPPORTED: job_turn_policy only supports apply=now".to_owned(),
-            ));
-        }
-        let session_id = frame.session_id;
-        let session = SessionKey::new(session_id.clone());
-        if let Some(agent_id) = &configure.agent_id
-            && agent_id != &self.config.agent_id
-        {
-            return Err(HostError::InvalidFrame(format!(
-                "agent_mismatch: session runs agent `{}`",
-                self.config.agent_id
-            )));
-        }
-        let override_value = configure.agent_override.unwrap_or(Value::Null);
-        let (reasoning, model, budget) = if override_value.is_null() {
-            (None, None, None)
-        } else {
-            let decoded = decode_override(&override_value)?;
-            validate_override(decoded.0.as_ref(), decoded.1.as_ref(), decoded.2.as_ref())?;
-            decoded
-        };
-        let mut output = Vec::new();
-        if let Some((provider, model_id)) = model {
-            output.extend(
-                self.submit_service(
-                    &session_id,
-                    ClientRequestKind::SetModel {
-                        session: session.clone(),
-                        provider,
-                        model: model_id,
-                    },
-                )
-                .await?,
-            );
-        }
-        if let Some(reasoning) = reasoning {
-            output.extend(
-                self.submit_service(
-                    &session_id,
-                    ClientRequestKind::SetReasoning {
-                        session: session.clone(),
-                        scope: norte_code_wire::ReasoningScope::Session,
-                        reasoning,
-                    },
-                )
-                .await?,
-            );
-        }
-        if let Some(budget) = budget {
-            output.extend(
-                self.submit_service(
-                    &session_id,
-                    ClientRequestKind::SetBudget {
-                        session: session.clone(),
-                        budget,
-                    },
-                )
-                .await?,
-            );
-        }
-        if let Some(policy) = job_turn_policy {
-            let service = self.service_for_session(&session_id).await?;
-            if !service.set_job_turn_policy(&session, policy) {
-                return Err(HostError::InvalidFrame(
-                    "session not found while applying job_turn_policy".to_owned(),
-                ));
-            }
-        }
-        if output.is_empty() {
-            output.push(
-                self.emit(
-                    &session_id,
-                    StandardFrameType::SessionConfigured,
-                    payload(SessionConfiguredPayload { applied: true }),
-                )
-                .await?,
-            );
-        }
-        Ok(output)
-    }
-
-    /// Returns replay frames strictly after `last_seq`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the session has no retained replay window or the
-    /// requested sequence predates the retained window.
-    pub async fn replay_after(
-        &self,
-        session_id: &str,
-        last_seq: u64,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        let state = self.state.lock().await;
-        let frames = state
-            .replay
-            .get(session_id)
-            .ok_or_else(|| HostError::Replay("session replay window is missing".to_owned()))?;
-        if let Some(first) = frames.front().and_then(|frame| frame.seq)
-            && last_seq.saturating_add(1) < first
-        {
-            return Err(HostError::Replay(
-                "requested sequence is older than the retained window".to_owned(),
-            ));
-        }
-        Ok(frames
-            .iter()
-            .filter(|frame| frame.seq.is_some_and(|seq| seq > last_seq))
-            .cloned()
-            .collect())
-    }
-
-    #[allow(clippy::too_many_lines)]
-    async fn attach(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        let attach: SessionAttach = serde_json::from_value(frame.payload)?;
-        let client_capabilities = attach.capabilities.clone().unwrap_or_default();
-        let job_turn_policy = parse_job_turn_policy(attach.options.as_ref())?;
-        let mode = attach.mode.unwrap_or(AttachMode::Controller);
-        if mode == AttachMode::Observer && job_turn_policy.is_some() {
-            return Err(HostError::InvalidFrame(
-                "FORBIDDEN: observer attachments cannot configure job_turn_policy".to_owned(),
-            ));
-        }
-        let agent_id = if attach.agent_id.is_empty() {
-            self.config.agent_id.clone()
-        } else {
-            attach.agent_id.clone()
-        };
-        let service = self.service_for_agent(&agent_id)?;
-        let (session_id, created) = if frame.session_id.is_empty() {
-            let key = service
-                .start_session(None)
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?;
-            (key.to_string(), true)
-        } else {
-            (frame.session_id.clone(), false)
-        };
-        let exists = created
-            || self
-                .service_for_session(&session_id)
-                .await
-                .ok()
-                .and_then(|service| service.session_title(&SessionKey::new(session_id.clone())))
-                .is_some()
-            || service
-                .session_title(&SessionKey::new(session_id.clone()))
-                .is_some()
-            || service
-                .session_spec(&SessionKey::new(session_id.clone()))
-                .is_some()
-            || service
-                .sessions()
-                .iter()
-                .any(|session| session.session.as_str() == session_id);
-        // A session this host cannot find is not created here, whatever
-        // `create_if_missing` says: the id was chosen by the client, and
-        // binding a fresh engine session to it would resurrect a deleted
-        // session — and fail later with a store error naming an internal id.
-        // A new session is made by attaching with an empty id, or by POSTing
-        // one; reusing an id that is gone is "not found".
-        if !exists {
-            return Err(HostError::InvalidFrame("session not found".to_owned()));
-        }
-        // One controller at a time. Attaching again on a session this host
-        // already considers attached is the reload case — the browser
-        // reopens the stream before the old connection's detach lands — so
-        // the new attachment takes over instead of leaving the client with a
-        // 409 and no way forward. A named `takeover: false` is still
-        // honoured as "do not displace anyone".
-        let already_attached = self.state.lock().await.attached.contains(&session_id);
-        if already_attached && attach.takeover == Some(false) {
-            return Err(HostError::InvalidFrame(
-                "SESSION_BUSY: another client is already attached to this session".to_owned(),
-            ));
-        }
-        if already_attached {
-            tracing::info!(
-                session = %session_id,
-                "taking over an existing attachment on re-attach"
-            );
-        }
-        // `agent_mismatch` (RFC 6): for an existing session, the requested
-        // agent must equal the session's current agent.
-        if exists && !created {
-            let current_agent = self
-                .agent_for_session(&session_id)
-                .await
-                .unwrap_or_else(|| self.config.agent_id.clone());
-            if current_agent != agent_id {
-                return Err(HostError::InvalidFrame(format!(
-                    "agent_mismatch: session runs agent `{current_agent}`"
-                )));
-            }
-        }
-        // `agent_override` on attach (RFC 6/7): same fragment as in
-        // `SESSION_CONFIGURE`. Applied through the same translation, after
-        // the session is bound but before `SESSION_ATTACHED` is emitted.
-        let mut override_frames = Vec::new();
-        if let Some(ref override_value) = attach.agent_override {
-            let decoded = decode_override(override_value)?;
-            validate_override(decoded.0.as_ref(), decoded.1.as_ref(), decoded.2.as_ref())?;
-            let session = SessionKey::new(session_id.clone());
-            if let Some((provider, model_id)) = decoded.1 {
-                override_frames.extend(
-                    self.submit_service(
-                        &session_id,
-                        ClientRequestKind::SetModel {
-                            session: session.clone(),
-                            provider,
-                            model: model_id,
-                        },
-                    )
-                    .await?,
-                );
-            }
-            if let Some(reasoning) = decoded.0 {
-                override_frames.extend(
-                    self.submit_service(
-                        &session_id,
-                        ClientRequestKind::SetReasoning {
-                            session: session.clone(),
-                            scope: norte_code_wire::ReasoningScope::Session,
-                            reasoning,
-                        },
-                    )
-                    .await?,
-                );
-            }
-            if let Some(budget) = decoded.2 {
-                override_frames.extend(
-                    self.submit_service(
-                        &session_id,
-                        ClientRequestKind::SetBudget {
-                            session: session.clone(),
-                            budget,
-                        },
-                    )
-                    .await?,
-                );
-            }
-        }
-        self.state
-            .lock()
-            .await
-            .session_agents
-            .insert(session_id.clone(), agent_id);
-        self.load_persisted_replay(&session_id).await?;
-        {
-            let mut state = self.state.lock().await;
-            state.attached.insert(session_id.clone());
-            state
-                .attachment_modes
-                .insert(session_id.clone(), mode.clone());
-            state
-                .client_capabilities
-                .insert(session_id.clone(), client_capabilities.clone());
-            state.sequences.entry(session_id.clone()).or_insert(0);
-            state.replay.entry(session_id.clone()).or_default();
-        }
-        let (replayed, replay_meta) = match attach.resume_from_seq {
-            Some(after) => match self.replay_after(&session_id, after).await {
-                Ok(frames) => {
-                    let to_seq = frames
-                        .iter()
-                        .filter_map(|frame| frame.seq)
-                        .max()
-                        .unwrap_or(after);
-                    (
-                        frames,
-                        ReplayMeta {
-                            from_seq: Some(after.saturating_add(1)),
-                            to_seq: Some(to_seq),
-                            truncated: false,
-                        },
-                    )
-                }
-                Err(HostError::Replay(_)) => (
-                    Vec::new(),
-                    ReplayMeta {
-                        from_seq: Some(after.saturating_add(1)),
-                        to_seq: Some(after),
-                        truncated: true,
-                    },
-                ),
-                Err(error) => return Err(error),
-            },
-            None => (
-                Vec::new(),
-                ReplayMeta {
-                    from_seq: None,
-                    to_seq: None,
-                    truncated: false,
-                },
-            ),
-        };
-        let last_seq = self.current_seq(&session_id).await;
-        let attached = self
-            .emit(
-                &session_id,
-                StandardFrameType::SessionAttached,
-                payload(SessionAttachedPayload {
-                    created,
-                    mode,
-                    last_seq,
-                    replay: replay_meta,
-                    negotiated_capabilities: negotiated_capabilities(
-                        self.uploads_enabled(),
-                        &client_capabilities,
-                    ),
-                    agent: session_agent_summary(
-                        &service,
-                        &self.config.agent_id,
-                        &self.config.server_version,
-                        &SessionKey::new(session_id.clone()),
-                        self.uploads_enabled(),
-                    ),
-                }),
-            )
-            .await?;
-        let session_key = SessionKey::new(session_id.clone());
-        let imported_from = service.session_imported_from(&session_key);
-        service
-            .activate_imported_session(&session_key)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        if !service.set_job_turn_policy(
-            &session_key,
-            job_turn_policy.unwrap_or(norte_code_wire::JobTurnPolicy::Always),
-        ) {
-            return Err(HostError::InvalidFrame(
-                "session not found while applying job_turn_policy".to_owned(),
-            ));
-        }
-        let title = service.session_title(&SessionKey::new(session_id.clone()));
-        let history = service
-            .session_history_with_provenance(&SessionKey::new(session_id.clone()))
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        let history_start = history.len().saturating_sub(20);
-        let history_summary = history
-            .into_iter()
-            .skip(history_start)
-            .map(|(turn, role, kind, text, timestamp, origin)| {
-                history_item_value(HistoryItemView {
-                    turn,
-                    role,
-                    kind,
-                    text,
-                    timestamp,
-                    rewound: false,
-                    origin,
-                    max_content_bytes: Some(2 * 1024),
-                })
-            })
-            .collect();
-        let state = self
-            .emit(
-                &session_id,
-                StandardFrameType::SessionState,
-                payload(SessionStatePayload {
-                    status: SessionStateStatus::Active,
-                    title: title.as_deref(),
-                    history_summary,
-                    imported_from: imported_from.as_ref(),
-                }),
-            )
-            .await?;
-        let mut output = vec![attached];
-        output.extend(replayed);
-        output.push(state);
-        output.extend(override_frames);
-        Ok(output)
-    }
-
-    async fn load_persisted_replay(&self, session_id: &str) -> Result<(), HostError> {
-        let Some(store) = &self.replay_store else {
-            return Ok(());
-        };
-        if self.state.lock().await.loaded_replay.contains(session_id) {
-            return Ok(());
-        }
-        let persisted = store.load(session_id).await?;
-        let mut state = self.state.lock().await;
-        let mut max_seq = 0;
-        let replayed = persisted
-            .into_iter()
-            .filter(|frame| {
-                if let Some(seq) = frame.seq {
-                    max_seq = max_seq.max(seq);
-                    true
-                } else {
-                    false
-                }
-            })
-            .collect::<Vec<_>>();
-        if max_seq > 0 {
-            state
-                .sequences
-                .entry(session_id.to_owned())
-                .and_modify(|current| *current = (*current).max(max_seq))
-                .or_insert(max_seq);
-        }
-        let replay = state.replay.entry(session_id.to_owned()).or_default();
-        replay.extend(replayed);
-        while replay.len() > self.config.replay_capacity {
-            replay.pop_front();
-        }
-        let turn_states = replay
-            .iter()
-            .filter(|frame| {
-                matches!(
-                    frame.kind,
-                    FrameType::Standard(StandardFrameType::TurnStateChanged)
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for frame in turn_states {
-            if let Some(turn_id) = &frame.turn_id {
-                let key = (session_id.to_owned(), turn_id.clone());
-                if state.turn_request_fingerprints.contains_key(&key) {
-                    state.turn_request_frames.insert(key, frame);
-                }
-            }
-        }
-        state.loaded_replay.insert(session_id.to_owned());
-        Ok(())
-    }
-
-    async fn load_persisted_idempotency(&self, session_id: &str) -> Result<(), HostError> {
-        let Some(store) = &self.replay_store else {
-            return Ok(());
-        };
-        if self
-            .state
-            .lock()
-            .await
-            .loaded_idempotency
-            .contains(session_id)
-        {
-            return Ok(());
-        }
-        let records = store.load_idempotency(session_id).await?;
-        let mut state = self.state.lock().await;
-        if !state.loaded_idempotency.insert(session_id.to_owned()) {
-            return Ok(());
-        }
-        for record in records {
-            let frame_key = (session_id.to_owned(), record.frame_id);
-            state.idempotency.insert(
-                frame_key.clone(),
-                CachedRequest {
-                    fingerprint: record.fingerprint,
-                    response: record.response.clone(),
-                },
-            );
-            state.idempotency_order.push_back(frame_key);
-            if let (Some(turn_id), Some(turn_fingerprint)) =
-                (record.turn_id, record.turn_fingerprint)
-            {
-                let turn_key = (session_id.to_owned(), turn_id.clone());
-                state
-                    .turn_request_fingerprints
-                    .insert(turn_key.clone(), turn_fingerprint);
-                if let Some(frame) = record
-                    .response
-                    .iter()
-                    .rev()
-                    .find(|frame| frame.turn_id.as_ref() == Some(&turn_id))
-                {
-                    state
-                        .turn_request_frames
-                        .insert(turn_key.clone(), frame.clone());
-                }
-                state.turn_request_order.push_back(turn_key);
-                if let Some(service_turn_id) = record.service_turn_id {
-                    state
-                        .turn_aliases
-                        .insert((session_id.to_owned(), service_turn_id), turn_id);
-                    state
-                        .turn_alias_order
-                        .push_back((session_id.to_owned(), service_turn_id));
-                }
-            }
-        }
-        while state.idempotency_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.idempotency_order.pop_front() {
-                state.idempotency.remove(&oldest);
-            }
-        }
-        while state.turn_request_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.turn_request_order.pop_front() {
-                state.turn_request_fingerprints.remove(&oldest);
-                state.turn_request_frames.remove(&oldest);
-            }
-        }
-        while state.turn_alias_order.len() > self.config.idempotency_capacity {
-            if let Some(oldest) = state.turn_alias_order.pop_front() {
-                state.turn_aliases.remove(&oldest);
-            }
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_lines)]
-    async fn user_input(
-        &self,
-        frame: Envelope<Value>,
-        principal: Option<&str>,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let turn_id = frame.turn_id.clone().ok_or_else(|| {
-            HostError::InvalidFrame("USER_INPUT requires envelope.turn_id".to_owned())
-        })?;
-        let turn_fingerprint = crate::bundle::sha256(&serde_json::to_vec(&frame.payload)?);
-        let turn_key = (frame.session_id.clone(), turn_id.clone());
-        {
-            let state = self.state.lock().await;
-            if let Some(previous_fingerprint) = state.turn_request_fingerprints.get(&turn_key) {
-                if previous_fingerprint != &turn_fingerprint {
-                    return Err(HostError::IdempotencyConflict(
-                        "turn_id was reused with different input".to_owned(),
-                    ));
-                }
-                return Ok(state
-                    .turn_request_frames
-                    .get(&turn_key)
-                    .cloned()
-                    .into_iter()
-                    .collect());
-            }
-        }
-        let input: AcceptedUserInput = serde_json::from_value(frame.payload)?;
-        validate_user_input(&input)?;
-        let accepted_content = match (&input.prompt, &input.content) {
-            (Some(text), None) => vec![AcceptedContentPart {
-                kind: AcceptedPartKind::Text,
-                text: Some(text.clone()),
-                ..AcceptedContentPart::default()
-            }],
-            (None, Some(content)) => content.clone(),
-            _ => {
-                return Err(HostError::InvalidFrame(
-                    "prompt or non-empty content is required".to_owned(),
-                ));
-            }
-        };
-        let session = SessionKey::new(frame.session_id.clone());
-        let service = self.service_for_session(&frame.session_id).await?;
-        let owner = if let Some(principal) = principal {
-            Some(principal.to_owned())
-        } else {
-            self.state
-                .lock()
-                .await
-                .session_owners
-                .get(&frame.session_id)
-                .cloned()
-        };
-        let owner = owner.as_deref();
-        let session_spec = service.session_spec(&session);
-        let supported = supported_input_modalities(&service, &session);
-        let client_capabilities = self
-            .state
-            .lock()
-            .await
-            .client_capabilities
-            .get(&frame.session_id)
-            .cloned()
-            .unwrap_or_default();
-        let requested_output = input
-            .output
-            .clone()
-            .unwrap_or_else(|| vec![raep_types::Modality::Text]);
-        for modality in &requested_output {
-            if modality == &raep_types::Modality::Text {
-                continue;
-            }
-            if !self.uploads_enabled()
-                || !client_capabilities
-                    .features
-                    .contains(&raep_types::ClientFeature::OutputParts)
-                || !client_capabilities.render.contains(modality)
-            {
-                return Err(HostError::InvalidFrame(format!(
-                    "UNSUPPORTED_MODALITY: client has not negotiated output.parts and {modality:?} rendering"
-                )));
-            }
-            let supported_by_model = session_spec.as_ref().is_some_and(|spec| {
-                spec.capabilities
-                    .modalities
-                    .supports_output(to_norte_modality(modality))
-            });
-            if !supported_by_model {
-                return Err(HostError::InvalidFrame(format!(
-                    "UNSUPPORTED_MODALITY: the effective agent cannot produce {modality:?}"
-                )));
-            }
-        }
-        let mut upload_ids = Vec::new();
-        let (text, attachments) = match (input.prompt, input.content) {
-            (Some(text), None) => (text, Vec::new()),
-            (None, Some(parts)) => {
-                let mut text = String::new();
-                let mut attachments = Vec::new();
-                let mut modality_counts = HashMap::<norte::Modality, u32>::new();
-                for (part_index, part) in parts.into_iter().enumerate() {
-                    if part.kind == AcceptedPartKind::Text {
-                        text.push_str(part.text.as_deref().ok_or_else(|| {
-                            HostError::InvalidFrame("text content part is missing text".to_owned())
-                        })?);
-                        continue;
-                    }
-                    let modality = match part.kind {
-                        AcceptedPartKind::Image => norte::Modality::Image,
-                        AcceptedPartKind::Document => norte::Modality::Document,
-                        AcceptedPartKind::Audio => norte::Modality::Audio,
-                        AcceptedPartKind::Video => norte::Modality::Video,
-                        AcceptedPartKind::Text => continue,
-                    };
-                    if !supported.contains(&modality) {
-                        return Err(HostError::InvalidFrame(format!(
-                            "UNSUPPORTED_MODALITY: part {part_index} requires {modality:?}; supported: {supported:?}"
-                        )));
-                    }
-                    let modality_count = modality_counts.entry(modality).or_default();
-                    *modality_count = modality_count.saturating_add(1);
-                    let modality_limits = session_spec
-                        .as_ref()
-                        .and_then(|spec| spec.capabilities.modalities.limits(modality));
-                    if modality_limits
-                        .and_then(|limits| limits.max_count)
-                        .is_some_and(|max| *modality_count > max)
-                    {
-                        return Err(HostError::InvalidFrame(format!(
-                            "UNSUPPORTED_MODALITY: too many {modality:?} parts"
-                        )));
-                    }
-                    let mime = part.mime_type.clone().ok_or_else(|| {
-                        HostError::InvalidFrame("media content requires mime_type".to_owned())
-                    })?;
-                    validate_media_mime(part.kind, &mime).map_err(HostError::InvalidFrame)?;
-                    let mime_type = norte::MimeType::new(mime.clone())
-                        .map_err(|error| HostError::InvalidFrame(error.to_string()))?;
-                    if modality_limits.is_some_and(|limits| !limits.accepts_mime(&mime_type)) {
-                        return Err(HostError::InvalidFrame(format!(
-                            "UNSUPPORTED_MIME_TYPE: part {part_index} does not accept `{mime}`"
-                        )));
-                    }
-                    let (source_kind, asset_id) = match part.source.as_ref() {
-                        Some(AcceptedSource::Upload { upload_id }) => {
-                            (AssetSourceKind::Upload, upload_id.as_str())
-                        }
-                        Some(AcceptedSource::Output { output_id }) => {
-                            (AssetSourceKind::Output, output_id.as_str())
-                        }
-                        None => {
-                            return Err(HostError::InvalidFrame("source is required".to_owned()));
-                        }
-                    };
-                    let upload = self
-                        .resolve_session_asset(
-                            &frame.session_id,
-                            asset_id,
-                            owner,
-                            source_kind == AssetSourceKind::Output,
-                        )
-                        .await?;
-                    if modality_limits
-                        .and_then(|limits| limits.max_bytes)
-                        .is_some_and(|max| upload.bytes > max)
-                    {
-                        return Err(HostError::InvalidFrame(format!(
-                            "MEDIA_TOO_LARGE: part {part_index} exceeds the {modality:?} byte limit"
-                        )));
-                    }
-                    if upload.mime_type != mime {
-                        return Err(HostError::InvalidFrame(format!(
-                            "upload MIME type `{}` does not match content MIME type `{mime}`",
-                            upload.mime_type
-                        )));
-                    }
-                    let blob = upload.blob_id.parse().map_err(|_| {
-                        HostError::Artifact("stored upload has an invalid blob id".to_owned())
-                    })?;
-                    let name = part
-                        .name
-                        .as_deref()
-                        .or(part.alt.as_deref())
-                        .unwrap_or(asset_id)
-                        .to_owned();
-                    if let Some(alt) = &part.alt {
-                        text.push_str("\n[Media description: ");
-                        text.push_str(alt);
-                        text.push(']');
-                    }
-                    if source_kind == AssetSourceKind::Upload {
-                        upload_ids.push(asset_id.to_owned());
-                    }
-                    attachments.push(norte_code_wire::Attachment {
-                        path: String::new(),
-                        blob: Some(blob),
-                        mime,
-                        name,
-                        duration_ms: part.duration_ms,
-                        transcript: part.transcript,
-                    });
-                }
-                (text, attachments)
-            }
-            _ => {
-                return Err(HostError::InvalidFrame(
-                    "prompt or non-empty content is required".to_owned(),
-                ));
-            }
-        };
-        let queue_mode = if input.replaces_turn_id.is_some() {
-            // `queue_policy` does not apply while `replaces_turn_id` is
-            // present (RFC 18.2): the input is a rewind-and-re-run in one
-            // step, not a queued input. The rewind is applied below before
-            // any queueing decision, and the input then runs immediately.
-            norte_code_wire::QueueMode::Reject
-        } else {
-            match input.queue_policy.clone() {
-                Some(raep_types::QueuePolicy::Queue) => norte_code_wire::QueueMode::Queue,
-                Some(raep_types::QueuePolicy::Interrupt) => norte_code_wire::QueueMode::Interrupt,
-                Some(raep_types::QueuePolicy::Reject) | None => norte_code_wire::QueueMode::Reject,
-            }
-        };
-        // Per-turn `overrides` (RFC 12.4): translate the known fields onto
-        // the turn's own reasoning/budget. Model changes are not a per-turn
-        // concept in the service, so a model override here is rejected.
-        let (override_reasoning, override_model, override_budget) = match input.overrides.clone() {
-            Some(ref value) => {
-                let decoded = decode_override(value)?;
-                validate_override(decoded.0.as_ref(), decoded.1.as_ref(), decoded.2.as_ref())?;
-                decoded
-            }
-            None => (None, None, None),
-        };
-        if override_model.is_some() {
-            return Err(HostError::InvalidFrame(
-                "model override is not supported on USER_INPUT; use SESSION_CONFIGURE".to_owned(),
-            ));
-        }
-        // `response_format` (RFC 12.6): carried to the service as
-        // `SendMessage.response_format`. See `validate_response_format_shape`
-        // for the shape validation and the capability check below.
-        let response_format = input
-            .response_format
-            .clone()
-            .map(|format| {
-                Ok::<_, HostError>(norte_code_wire::ResponseFormat {
-                    kind: match format.kind {
-                        ResponseFormatKind::Text => norte_code_wire::ResponseFormatType::Text,
-                        ResponseFormatKind::JsonSchema => {
-                            norte_code_wire::ResponseFormatType::JsonSchema
-                        }
-                    },
-                    schema: format.schema.clone(),
-                    strict: format.strict,
-                })
-            })
-            .transpose()?;
-        let queued_turn = QueuedTurn {
-            turn_id: turn_id.clone(),
-            text,
-            attachments,
-            budget: override_budget,
-            reasoning: override_reasoning,
-            metadata: input.metadata.clone(),
-            output: requested_output,
-            response_format,
-            replaces_turn_id: input.replaces_turn_id.clone(),
-        };
-        let queued_position = {
-            let mut state = self.state.lock().await;
-            if let Some(previous_fingerprint) = state.turn_request_fingerprints.get(&turn_key) {
-                if previous_fingerprint != &turn_fingerprint {
-                    return Err(HostError::IdempotencyConflict(
-                        "turn_id was reused with different input".to_owned(),
-                    ));
-                }
-                return Ok(state
-                    .turn_request_frames
-                    .get(&turn_key)
-                    .cloned()
-                    .into_iter()
-                    .collect());
-            }
-            let occupied = state.active_turns.contains_key(&frame.session_id)
-                || state.turn_reservations.contains_key(&frame.session_id);
-            if occupied && queue_mode == norte_code_wire::QueueMode::Reject {
-                return Err(HostError::SessionBusy);
-            }
-            let queued = state
-                .queued_turns
-                .get(&frame.session_id)
-                .map_or(0, VecDeque::len);
-            if occupied && queued >= self.config.max_queued_inputs {
-                return Err(HostError::SessionBusy);
-            }
-            state
-                .turn_request_fingerprints
-                .insert(turn_key.clone(), turn_fingerprint);
-            state.turn_request_order.push_back(turn_key.clone());
-            while state.turn_request_order.len() > self.config.idempotency_capacity {
-                if let Some(oldest) = state.turn_request_order.pop_front() {
-                    state.turn_request_fingerprints.remove(&oldest);
-                    state.turn_request_frames.remove(&oldest);
-                }
-            }
-            if occupied {
-                let queue = state
-                    .queued_turns
-                    .entry(frame.session_id.clone())
-                    .or_default();
-                if queue_mode == norte_code_wire::QueueMode::Interrupt {
-                    queue.push_front(queued_turn.clone());
-                    Some(1)
-                } else {
-                    queue.push_back(queued_turn.clone());
-                    Some(u64::try_from(queue.len()).unwrap_or(u64::MAX))
-                }
-            } else {
-                state
-                    .turn_reservations
-                    .insert(frame.session_id.clone(), turn_id.clone());
-                state
-                    .pending_turn_ids
-                    .entry(frame.session_id.clone())
-                    .or_default()
-                    .push_back(turn_id.clone());
-                if queued_turn
-                    .output
-                    .iter()
-                    .any(|modality| !matches!(modality, raep_types::Modality::Text))
-                {
-                    state
-                        .pending_output
-                        .insert(frame.session_id.clone(), queued_turn.output.clone());
-                }
-                None
-            }
-        };
-        // `replaces_turn_id` (RFC 18.2): `SESSION_REWIND` to that turn with
-        // `inclusive: true` and `cancel_pending: false`, then run the new
-        // input as a new turn, in one step. `queue_policy` does not apply
-        // (it is forced to `Reject` above), so this input always runs
-        // immediately and never occupies the queue. Every hook here runs
-        // before queuing: the rewind is a history mutation, and the input
-        // that follows it must see the rewound history.
-        let mut output_for_rewind: Option<Envelope<Value>> = None;
-        if let Some(ref replaces_turn_id) = queued_turn.replaces_turn_id {
-            let rewound_turn_ids = self
-                .service
-                .rewind_session(
-                    &SessionKey::new(frame.session_id.clone()),
-                    replaces_turn_id,
-                    true,
-                    false,
-                    false,
-                )
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?;
-            // The rewind removes `turns > replaces_turn_id` (inclusive) and
-            // keeps `turns < replaces_turn_id`. Those removals are the
-            // `rewound_turn_ids` the `HistoryRewound` payload reports.
-            // There is a side-effect dusting in the rewind's wash: nothing
-            // is dehydrated here — the service records no side-effect
-            // metadata for removed tool calls, so `side_effects` is empty
-            // and `workspace_restored` is false, matching the standalone
-            // `SESSION_REWIND` handler.
-            output_for_rewind = Some(
-                self.emit(
-                    &frame.session_id,
-                    StandardFrameType::HistoryRewound,
-                    payload(HistoryRewoundPayload {
-                        to_turn_id: replaces_turn_id.clone(),
-                        inclusive: true,
-                        rewound_turn_ids,
-                        side_effects: Vec::new(),
-                        workspace_restored: false,
-                    }),
-                )
-                .await?,
-            );
-        }
-        if !upload_ids.is_empty()
-            && let Some(index) = &self.upload_index
-            && let Err(error) = index
-                .mark_referenced(&frame.session_id, owner, &upload_ids)
-                .await
-        {
-            self.remove_turn_request(&frame.session_id, &turn_id).await;
-            return Err(error);
-        }
-        let accepted = match self
-            .emit_with_turn_id(
-                &frame.session_id,
-                StandardFrameType::UserInputAccepted,
-                payload(UserInputAcceptedPayload {
-                    turn_id: turn_id.clone(),
-                    origin: UserInputOrigin {
-                        kind: UserInputOriginKind::User,
-                    },
-                    content: accepted_content,
-                    position: queued_position,
-                    replaces_turn_id: queued_turn.replaces_turn_id.clone(),
-                }),
-                turn_id.clone(),
-            )
-            .await
-        {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.remove_turn_request(&frame.session_id, &turn_id).await;
-                return Err(error);
-            }
-        };
-        if queued_position.is_some() {
-            let mut output = Vec::new();
-            if let Some(rewind_frame) = output_for_rewind {
-                output.push(rewind_frame);
-            }
-            output.push(accepted);
-            output.push(
-                self.emit_with_turn_id(
-                    &frame.session_id,
-                    StandardFrameType::TurnStateChanged,
-                    payload(QueuedTurnStatePayload {
-                        state: raep_types::TurnState::Queued,
-                    }),
-                    turn_id.clone(),
-                )
-                .await?,
-            );
-            if queue_mode == norte_code_wire::QueueMode::Interrupt
-                && let Err(error) = self
-                    .submit_service(
-                        &frame.session_id,
-                        ClientRequestKind::CancelTurn {
-                            session: SessionKey::new(frame.session_id.clone()),
-                        },
-                    )
-                    .await
-            {
-                let mut state = self.state.lock().await;
-                if let Some(queue) = state.queued_turns.get_mut(&frame.session_id) {
-                    queue.retain(|queued| queued.turn_id != turn_id);
-                }
-                drop(state);
-                self.remove_turn_request(&frame.session_id, &turn_id).await;
-                return Err(error);
-            }
-            return Ok(output);
-        }
-        let submission = self
-            .submit_service(
-                &frame.session_id,
-                ClientRequestKind::SendMessage {
-                    session: Some(SessionKey::new(frame.session_id.clone())),
-                    text: queued_turn.text,
-                    attachments: queued_turn.attachments,
-                    budget: queued_turn.budget,
-                    reasoning: queued_turn.reasoning,
-                    output: Vec::new(),
-                    response_format: queued_turn.response_format,
-                    metadata: queued_turn.metadata,
-                    replay: false,
-                },
-            )
-            .await;
-        let mut output = Vec::new();
-        if let Some(rewind_frame) = output_for_rewind {
-            output.push(rewind_frame);
-        }
-        output.push(accepted);
-        match submission {
-            Ok(events) => output.extend(events),
-            Err(error) => {
-                let mut state = self.state.lock().await;
-                state.pending_output.remove(&frame.session_id);
-                state.pending_turn_ids.remove(&frame.session_id);
-                state.turn_reservations.remove(&frame.session_id);
-                drop(state);
-                self.remove_turn_request(&frame.session_id, &turn_id).await;
-                return Err(error);
-            }
-        }
-        Ok(output)
-    }
-
-    /// History page request (RFC 16): one page of the session's history.
-    ///
-    /// The service answers history reads as `MessageReplayed` events; the
-    /// host gathers those into a stable, cursor-paginated history page.
-    async fn history_get(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let request: HistoryGetRequest = serde_json::from_value(frame.payload.clone())?;
-        let before_turn = request
-            .before_turn_id
-            .as_deref()
-            .map(|id| id.strip_prefix("turn_").unwrap_or(id).parse::<u64>())
-            .transpose()
-            .map_err(|_| HostError::InvalidFrame("before_turn_id must name a turn".to_owned()))?;
-        let limit = request.limit.unwrap_or(50);
-        if !(1..=100).contains(&limit) {
-            return Err(HostError::InvalidFrame(
-                "HISTORY_GET limit must be between 1 and 100".to_owned(),
-            ));
-        }
-        let active = self
-            .service
-            .session_history_with_provenance(&SessionKey::new(frame.session_id.clone()))
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        // The system prompt is the agent's own preamble, not something either
-        // side said in the conversation: a client that draws it shows the
-        // person a wall of instructions before their first message. It stays
-        // in the engine's history; it just does not belong in a transcript.
-        let mut history: Vec<_> = active
-            .into_iter()
-            .filter(|(_, role, _, _, _, _)| {
-                !matches!(
-                    role,
-                    norte_code_wire::MessageRole::System | norte_code_wire::MessageRole::Developer
-                )
-            })
-            .map(|(turn, role, kind, text, timestamp, origin)| {
-                ((turn, role, kind, text, timestamp), false, origin)
-            })
-            .collect();
-        if request.include_rewound {
-            let rewound = self
-                .service
-                .session_rewound_history_with_turns(&SessionKey::new(frame.session_id.clone()))
-                .map_err(|error| HostError::Service(error.to_string()))?;
-            history.extend(
-                rewound
-                    .into_iter()
-                    .map(|item| (item, true, Option::<Value>::None)),
-            );
-        }
-        history.sort_by_key(|((turn, _, _, _, timestamp), rewound, _)| {
-            (turn.unwrap_or_default(), *timestamp, *rewound)
-        });
-        if let Some(before) = before_turn
-            && !history
-                .iter()
-                .any(|((turn, _, _, _, _), _, _)| *turn == Some(before))
-        {
-            return Err(HostError::InvalidFrame(format!(
-                "TURN_NOT_FOUND: `{}` is not in this session's indexed history",
-                request.before_turn_id.as_deref().unwrap_or_default()
-            )));
-        }
-        let mut eligible: Vec<_> = history
-            .into_iter()
-            .filter(|((turn, _, _, _, _), _, _)| match (before_turn, turn) {
-                (Some(before), Some(turn)) => *turn < before,
-                (Some(_), None) => false,
-                (None, _) => true,
-            })
-            .collect();
-        let limit = usize::try_from(limit).unwrap_or(100);
-        let has_more = eligible.len() > limit;
-        if has_more {
-            eligible.drain(..eligible.len() - limit);
-        }
-        let items: Vec<HistorySummaryItem> = eligible
-            .into_iter()
-            .map(|((turn, role, kind, text, timestamp), rewound, origin)| {
-                history_item_value(HistoryItemView {
-                    turn,
-                    role,
-                    kind,
-                    text,
-                    timestamp,
-                    rewound,
-                    origin,
-                    max_content_bytes: None,
-                })
-            })
-            .collect();
-        Ok(vec![
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::HistoryPage,
-                payload(HistoryPagePayload { items, has_more }),
-            )
-            .await?,
-        ])
-    }
-
-    async fn rewind(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let request: RewindRequest = serde_json::from_value(frame.payload.clone())?;
-        let restore_workspace = request.workspace == Some(WorkspaceRewindPolicy::Restore);
-        let rewound_turn_ids = self
-            .service
-            .rewind_session(
-                &SessionKey::new(frame.session_id.clone()),
-                &request.to_turn_id,
-                request.inclusive,
-                request.cancel_pending,
-                restore_workspace,
-            )
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        let side_effects = self
-            .service
-            .rewound_tool_calls(
-                &SessionKey::new(frame.session_id.clone()),
-                &rewound_turn_ids,
-            )
-            .into_iter()
-            .map(|effect| HistorySideEffect {
-                tool_call_id: effect.tool_call_id,
-                tool_name: effect.tool_name,
-                // No tool declares its effects yet, and the honest reading of
-                // "we do not know" is the widest one: the call may have
-                // touched the workspace. The name and arguments travel with
-                // it so the reader can judge.
-                side_effects: raep_types::ToolSideEffects::Local,
-            })
-            .collect();
-        Ok(vec![
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::HistoryRewound,
-                payload(HistoryRewoundPayload {
-                    to_turn_id: request.to_turn_id,
-                    inclusive: request.inclusive,
-                    rewound_turn_ids,
-                    side_effects,
-                    workspace_restored: false,
-                }),
-            )
-            .await?,
-        ])
-    }
-
-    /// Cancels one job owned by this session.
-    async fn cancel_job(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        if frame
-            .payload
-            .get("grace_ms")
-            .is_some_and(|value| value.as_u64().is_none())
-        {
-            return Err(HostError::InvalidFrame(
-                "CANCEL_JOB.grace_ms must be a non-negative integer".to_owned(),
-            ));
-        }
-        let job_id = frame
-            .job_id
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(|| {
-                frame
-                    .payload
-                    .get("job_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .ok_or_else(|| HostError::InvalidFrame("CANCEL_JOB.job_id is required".to_owned()))?;
-        let grace = frame
-            .payload
-            .get("grace_ms")
-            .and_then(Value::as_u64)
-            .map_or_else(
-                || std::time::Duration::from_secs(5),
-                std::time::Duration::from_millis,
-            );
-        let session = SessionKey::new(frame.session_id.clone());
-        let service = self.service_for_session(&frame.session_id).await?;
-        let job = service
-            .stop_session_job_with_grace(&session, &job_id, Some(grace))
-            .await
-            .ok_or_else(|| HostError::InvalidFrame("JOB_NOT_FOUND".to_owned()))?;
-        let triggered_new_turn = service
-            .session_job_triggered_new_turn(&session, &job_id)
-            .unwrap_or(false);
-        let new_turn_id = if triggered_new_turn {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                service.session_job_new_turn_id(&session, &job_id),
-            )
-            .await
-            .ok()
-            .flatten()
-            .map(|turn| turn.to_string())
-        } else {
-            None
-        };
-        let active_turn_id = service
-            .session_active_turn_id(&session)
-            .map(|turn| turn.to_string());
-        let injected_into_turn_id = (!triggered_new_turn)
-            .then_some(active_turn_id.as_deref())
-            .flatten();
-        Ok(vec![
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::JobFinished,
-                job_finished_payload(
-                    &job,
-                    triggered_new_turn,
-                    new_turn_id.as_deref(),
-                    injected_into_turn_id,
-                ),
-            )
-            .await?,
-        ])
-    }
-
-    /// Job listing (RFC 14.3): `JOB_LIST` returns `JOB_LIST_RESULT`.
-    async fn job_list(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let request: JobListRequest =
-            serde_json::from_value(frame.payload.clone()).map_err(|error| {
-                HostError::InvalidFrame(format!("JOB_LIST payload is invalid: {error}"))
-            })?;
-        let limit = usize::try_from(request.limit.unwrap_or(100))
-            .map_err(|_| HostError::InvalidFrame("JOB_LIST.limit is out of range".to_owned()))?;
-        if !(1..=100).contains(&limit) {
-            return Err(HostError::InvalidFrame(
-                "JOB_LIST.limit must be between 1 and 100".to_owned(),
-            ));
-        }
-        let mut frames = self
-            .submit_service(
-                &frame.session_id,
-                ClientRequestKind::ListJobs {
-                    session: SessionKey::new(frame.session_id.clone()),
-                },
-            )
-            .await?;
-        if let Some(result) = frames
-            .iter_mut()
-            .find(|result| result.kind == standard(StandardFrameType::JobListResult))
-        {
-            let mut jobs: Vec<JobListEntry> =
-                serde_json::from_value(result.payload["jobs"].clone()).map_err(|error| {
-                    HostError::InvalidFrame(format!("JOB_LIST_RESULT payload is invalid: {error}"))
-                })?;
-            if let Some(statuses) = request.status {
-                jobs.retain(|job| statuses.contains(&job.status));
-            }
-            jobs.truncate(limit);
-            result.payload = payload(JobListResultPayload { jobs });
-        }
-        Ok(frames)
-    }
-
-    /// Job state query (RFC 14.3): `JOB_GET` returns `JOB_STATE`.
-    ///
-    /// The retained output lives in the session's `JobList` summaries (the
-    /// registry's `JobInfo` carries the most recent output) and in the
-    /// replay window (`ToolOutput`/`ToolFinished` frames). The host
-    /// answers from those: `from_index` skips that many leading frames;
-    /// running jobs return their current output, finished jobs their
-    /// latest output, and unknown jobs `JOB_NOT_FOUND`.
-    async fn job_get(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let job_id = frame
-            .job_id
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(|| {
-                frame
-                    .payload
-                    .get("job_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .ok_or_else(|| HostError::InvalidFrame("JOB_NOT_FOUND".to_owned()))?;
-        if frame
-            .payload
-            .get("from_index")
-            .is_some_and(|value| value.as_u64().is_none())
-        {
-            return Err(HostError::InvalidFrame(
-                "JOB_GET.from_index must be a non-negative integer".to_owned(),
-            ));
-        }
-        let from_index = frame
-            .payload
-            .get("from_index")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let service = self.service_for_session(&frame.session_id).await?;
-        let job = service
-            .session_job_with_output_retention(&SessionKey::new(frame.session_id.clone()), &job_id)
-            .ok_or_else(|| HostError::InvalidFrame("JOB_NOT_FOUND".to_owned()))?;
-        let output = job_output_from_index(&job, from_index)?;
-        Ok(vec![
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::JobState,
-                payload(JobStatePayload {
-                    job_id: &job_id,
-                    status: job_status(&job),
-                    output,
-                    next_index: job.output_bytes_total,
-                }),
-            )
-            .await?,
-        ])
-    }
-
-    /// Session fork (RFC 18.1): copy a session's history into a new root
-    /// session. Maps onto `ForkSession`; the new session id comes back on
-    /// the `SESSION_FORKED` event.
-    async fn fork(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let request: ForkRequest = serde_json::from_value(frame.payload.clone())?;
-        self.submit_service(
-            &frame.session_id,
-            ClientRequestKind::ForkSession {
-                session: SessionKey::new(frame.session_id.clone()),
-                title: request.title,
-                from_turn_id: request.from_turn_id,
-                inclusive: request.inclusive,
-                carry_usage: request.carry_usage,
-                agent_id: request.agent_id,
-                include: request.include,
-            },
-        )
-        .await
-    }
-
-    /// Session compaction (RFC 18.3): trigger context compaction now.
-    /// Maps onto `Compact`; the `HISTORY_COMPACTED` notification follows.
-    async fn compact(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        self.submit_service(
-            &frame.session_id,
-            ClientRequestKind::Compact {
-                session: SessionKey::new(frame.session_id.clone()),
-            },
-        )
-        .await
-    }
-
-    /// Context pins (RFC 18.5): pin or unpin turns so they stay verbatim
-    /// through compaction. The pins are held in the host's in-memory
-    /// state (up to `max_pinned_turns` = 20) and persisted through the
-    /// [`PinStore`] when one is configured; without a store they do not
-    /// survive a restart. The CLI does not pin; this is so another
-    /// client (desktop) can.
-    async fn context_pin(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let pinned = frame
-            .payload
-            .get("pinned")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let turn_ids: Vec<String> = frame
-            .payload
-            .get("turn_ids")
-            .and_then(Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| id.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if turn_ids.is_empty() {
-            return Err(HostError::InvalidFrame(
-                "CONTEXT_PIN requires turn_ids".to_owned(),
-            ));
-        }
-        let mut state = self.state.lock().await;
-        let pins = state
-            .pinned_turns
-            .entry(frame.session_id.clone())
-            .or_default();
-        for id in &turn_ids {
-            if pinned {
-                if pins.contains(id) {
-                    continue;
-                }
-                if pins.len() >= 20 {
-                    return Err(HostError::InvalidFrame(
-                        "PAYLOAD_TOO_LARGE: too many pinned turns".to_owned(),
-                    ));
-                }
-                pins.push(id.clone());
-            } else {
-                pins.retain(|p| p != id);
-            }
-        }
-        let pinned_turn_ids = pins.clone();
-        drop(state);
-        if let Some(store) = self.pin_store.clone() {
-            store.save(&frame.session_id, &pinned_turn_ids).await?;
-        }
-        Ok(vec![
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::ContextUpdated,
-                payload(ContextUpdatedPayload { pinned_turn_ids }),
-            )
-            .await?,
-        ])
-    }
-
-    async fn export(
-        &self,
-        frame: Envelope<Value>,
-        principal: Option<&str>,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let request: ExportRequest = serde_json::from_value(frame.payload)?;
-        validate_export_request(&request)?;
-        let service = self.service_for_session(&frame.session_id).await?;
-        let bytes = self.build_text_bundle(&service, &frame.session_id).await?;
-        let (export_id, expires_at, byte_count, digest) =
-            self.store_export(bytes, principal).await?;
-        let ready = self
-            .emit(
-                &frame.session_id,
-                StandardFrameType::SessionExportReady,
-                payload(ExportReadyPayload {
-                    export_id: &export_id,
-                    download_url: format!("/raep/v1/exports/{export_id}"),
-                    bytes: byte_count,
-                    sha256: &digest,
-                    expires_at,
-                    sessions: 1,
-                    encrypted: false,
-                    signed: false,
-                }),
-            )
-            .await?;
-        Ok(vec![ready])
-    }
-
-    async fn build_text_bundle(
-        &self,
-        service: &Service,
-        session_id: &str,
-    ) -> Result<Vec<u8>, HostError> {
-        let key = SessionKey::new(session_id.to_owned());
-        let session = service
-            .sessions()
-            .into_iter()
-            .find(|session| session.session.as_str() == session_id)
-            .ok_or_else(|| HostError::InvalidFrame("session not found".to_owned()))?;
-        if session.phase != norte_code_wire::Phase::Idle || service.has_running_jobs(&key) {
-            return Err(HostError::InvalidFrame(
-                "SESSION_BUSY: export requires an idle session with no running jobs".to_owned(),
-            ));
-        }
-        if !service
-            .session_rewound_history_with_turns(&key)
-            .map_err(|error| HostError::Service(error.to_string()))?
-            .is_empty()
-        {
-            return Err(HostError::InvalidFrame(
-                "SESSION_EXPORT cannot preserve rewound history on this host".to_owned(),
-            ));
-        }
-        let session_agent_id = self
-            .state
-            .lock()
-            .await
-            .session_agents
-            .get(session_id)
-            .cloned()
-            .unwrap_or_else(|| self.config.agent_id.clone());
-        let history = service
-            .session_history_with_provenance(&key)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        let history_bytes = serialize_plain_text_history(history, self.config.max_export_bytes)?;
-        let session_path = format!("sessions/{session_id}/session.json");
-        let history_path = format!("sessions/{session_id}/history.jsonl");
-        let agent = payload(BundleAgent {
-            id: &session_agent_id,
-        });
-        let session_json = serde_json::to_vec(&PortableSessionFile {
-            agent: BundleAgent {
-                id: &session_agent_id,
-            },
-            title: &session.title,
-            options: BTreeMap::new(),
-        })?;
-        let files = std::collections::BTreeMap::from([
-            (session_path, session_json),
-            (history_path.clone(), history_bytes),
-        ]);
-        let manifest = crate::bundle::BundleManifest {
-            bundle_version: "1".to_owned(),
-            raep_document_version: None,
-            wire_version: Some(WIRE_VERSION.to_owned()),
-            exported_at: u64::try_from(now_millis()).unwrap_or_default(),
-            exporter: Some(payload(BundleExporter {
-                server: &self.config.server_version,
-            })),
-            root_session_id: session_id.to_owned(),
-            sessions: vec![crate::bundle::BundleSession {
-                session_id: session_id.to_owned(),
-                parent_session_id: None,
-                agent,
-                state: Some("IDLE".to_owned()),
-                history_file: history_path,
-                last_seq: Some(self.current_seq(session_id).await),
-                usage_total: service.session_usage_total(&key),
-            }],
-            files: Vec::new(),
-            excluded: vec![
-                "children".to_owned(),
-                "uploads".to_owned(),
-                "job_output".to_owned(),
-                "outputs".to_owned(),
-                "workspace".to_owned(),
-                "system_prompt".to_owned(),
-                "credentials".to_owned(),
-            ],
-        };
-        let bytes = crate::bundle::create_bundle(manifest, files)
-            .map_err(|error| HostError::InvalidFrame(error.to_string()))?;
-        if bytes.len() > self.config.max_export_bytes {
-            return Err(HostError::InvalidFrame(
-                "PAYLOAD_TOO_LARGE: export exceeds max_export_bytes".to_owned(),
-            ));
-        }
-        Ok(bytes)
-    }
-
-    async fn store_export(
-        &self,
-        bytes: Vec<u8>,
-        principal: Option<&str>,
-    ) -> Result<(String, i64, usize, String), HostError> {
-        let byte_count = bytes.len();
-        let digest = crate::bundle::sha256(&bytes);
-        let export_id = format!("exp_{}", uuid::Uuid::new_v4().simple());
-        let expires_at = now_millis().saturating_add(
-            i64::try_from(self.config.export_ttl_s.saturating_mul(1000)).unwrap_or(i64::MAX),
-        );
-        {
-            let mut state = self.state.lock().await;
-            state
-                .exports
-                .retain(|_, export| export.expires_at > now_millis());
-            if state.exports.len() >= 4 {
-                return Err(HostError::InvalidFrame(
-                    "EXPORT_STORE_FULL: active export limit reached".to_owned(),
-                ));
-            }
-            state.exports.insert(
-                export_id.clone(),
-                StoredExport {
-                    bytes,
-                    owner: principal.map(str::to_owned),
-                    expires_at,
-                },
-            );
-        }
-        Ok((export_id, expires_at, byte_count, digest))
-    }
-
-    /// Rejects a standard operation that this host has not implemented.
-    fn not_supported(
-        _frame: &Envelope<Value>,
-        what: &str,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        Err(HostError::InvalidFrame(format!(
-            "{what} is not supported by this host"
-        )))
-    }
-
-    fn approval_response(frame: &Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        Self::not_supported(frame, "TOOL_APPROVAL_RESPONSE")
-    }
-
-    fn input_stream(
-        frame: &Envelope<Value>,
-        what: &str,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        Self::not_supported(frame, &format!("INPUT_STREAM_{what}"))
-    }
-
-    fn client_tool_result(frame: &Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        Self::not_supported(frame, "CLIENT_TOOL_RESULT")
-    }
-
-    fn presence_update(frame: &Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        Self::not_supported(frame, "PRESENCE_UPDATE")
-    }
-
-    /// Delegator control (RFC 8.2.11): `suspend`/`release` of the delegator.
-    async fn delegator_control(
-        &self,
-        frame: Envelope<Value>,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let action = frame
-            .payload
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let child_session_id = frame
-            .payload
-            .get("child_session_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let child = SessionKey::new(child_session_id.clone());
-        let (suspended, queued) = match action.as_str() {
-            "suspend" => self
-                .service
-                .set_delegator_suspended(&child, true)
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?,
-            "release" => self
-                .service
-                .set_delegator_suspended(&child, false)
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?,
-            other => {
-                return Err(HostError::InvalidFrame(format!(
-                    "DELEGATOR_CONTROL: unknown action `{other}`; use suspend or release"
-                )));
-            }
-        };
-        Ok(vec![
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::DelegatorStateChanged,
-                payload(DelegatorStateChangedPayload {
-                    child_session_id: &child_session_id,
-                    suspended,
-                    by: DelegatorActor::Client,
-                    queued_messages: queued,
-                }),
-            )
-            .await?,
-        ])
-    }
-
-    fn handoff(frame: &Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        Self::not_supported(frame, "HANDOFF")
-    }
-
-    fn auth_refresh(frame: &Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        Self::not_supported(frame, "AUTH_REFRESH")
-    }
-
-    /// Bundle import is implemented over HTTP, not as a wire-frame request.
-    fn import() -> Result<Vec<Envelope<Value>>, HostError> {
-        Err(HostError::InvalidFrame(
-            "SESSION_IMPORT is an HTTP workflow; use POST /raep/v1/imports".to_owned(),
-        ))
-    }
-
-    async fn cancel(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let requested_turn = frame.turn_id.as_ref().ok_or_else(|| {
-            HostError::InvalidFrame("CANCEL_TURN requires envelope.turn_id".to_owned())
-        })?;
-        let (active_turn, cancelled_queued_turn) = {
-            let mut state = self.state.lock().await;
-            let active_turn = state.active_turns.get(&frame.session_id).cloned();
-            // A turn that is running but has not produced its first event yet
-            // lives only in the reservation: the host reserved it when the
-            // input was accepted and learned nothing since. Treating that as
-            // "turn not active" refused the only cancel the client could send,
-            // and left the session with a reservation nothing could clear.
-            let reserved = state.turn_reservations.get(&frame.session_id).cloned();
-            if active_turn.as_ref() == Some(requested_turn)
-                || (active_turn.is_none() && reserved.as_ref() == Some(requested_turn))
-            {
-                (Some(requested_turn.clone()), false)
-            } else {
-                let Some(queue) = state.queued_turns.get_mut(&frame.session_id) else {
-                    return Err(HostError::TurnNotActive);
-                };
-                let Some(position) = queue
-                    .iter()
-                    .position(|queued| &queued.turn_id == requested_turn)
-                else {
-                    return Err(HostError::TurnNotActive);
-                };
-                queue.remove(position);
-                if queue.is_empty() {
-                    state.queued_turns.remove(&frame.session_id);
-                }
-                if let Some(pending) = state.pending_turn_ids.get_mut(&frame.session_id) {
-                    pending.retain(|turn_id| turn_id != requested_turn);
-                }
-                (active_turn, true)
-            }
-        };
-        if cancelled_queued_turn {
-            return self
-                .emit_with_turn_id(
-                    &frame.session_id,
-                    StandardFrameType::TurnStateChanged,
-                    payload(raep_types::TurnStateChanged {
-                        state: raep_types::TurnState::Cancelled,
-                        stop_reason: Some(raep_types::StopReason::Cancelled),
-                        usage: None,
-                        error: None,
-                    }),
-                    requested_turn.clone(),
-                )
-                .await
-                .map(|frame| vec![frame]);
-        }
-        let active_turn = active_turn.ok_or(HostError::TurnNotActive)?;
-        if &active_turn != requested_turn {
-            return Err(HostError::TurnNotActive);
-        }
-        let request = ClientRequest {
-            request_id: 0,
-            kind: ClientRequestKind::CancelTurn {
-                session: SessionKey::new(frame.session_id.clone()),
-            },
-        };
-        let events = self
-            .service
-            .submit(request)
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        let collected = self
-            .collect_service_events(&frame.session_id, events)
-            .await?;
-        // The service cancels the token, but an engine parked in a tool sends
-        // nothing, so the turn's reservation would stay and every later input
-        // would meet `SESSION_BUSY`. The cancel itself is the one place that
-        // knows the turn is over from the client's point of view.
-        let mut released = self.release_turn(&frame.session_id, requested_turn).await;
-        if collected.is_empty() {
-            released.push(
-                self.emit_with_turn_id(
-                    &frame.session_id,
-                    StandardFrameType::TurnStateChanged,
-                    payload(raep_types::TurnStateChanged {
-                        state: raep_types::TurnState::Cancelled,
-                        stop_reason: Some(raep_types::StopReason::Cancelled),
-                        usage: None,
-                        error: None,
-                    }),
-                    requested_turn.clone(),
-                )
-                .await?,
-            );
-        }
-        let mut output = collected;
-        output.append(&mut released);
-        Ok(output)
-    }
-
-    /// Drops the host's record of a running turn, answering the frames that
-    /// tell the client it ended.
-    async fn release_turn(&self, session_id: &str, turn_id: &TurnId) -> Vec<Envelope<Value>> {
-        {
-            let mut state = self.state.lock().await;
-            if state.active_turns.get(session_id) == Some(turn_id) {
-                state.active_turns.remove(session_id);
-            }
-            if state.turn_reservations.get(session_id) == Some(turn_id) {
-                state.turn_reservations.remove(session_id);
-                state.pending_output.remove(session_id);
-            }
-            if let Some(pending) = state.pending_turn_ids.get_mut(session_id) {
-                pending.retain(|pending_turn| pending_turn != turn_id);
-                if pending.is_empty() {
-                    state.pending_turn_ids.remove(session_id);
-                }
-            }
-        }
-        self.remove_turn_request(session_id, turn_id).await;
-        Vec::new()
-    }
-
-    async fn detach(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        let mut state = self.state.lock().await;
-        state.attached.remove(&frame.session_id);
-        state.attachment_modes.remove(&frame.session_id);
-        Ok(Vec::new())
-    }
-
-    async fn close(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let purge = frame
-            .payload
-            .get("purge")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let events = self
-            .submit_service(
-                &frame.session_id,
-                ClientRequestKind::DeleteSession {
-                    session: SessionKey::new(frame.session_id.clone()),
-                },
-            )
-            .await?;
-        let mut output = events;
-        output.push(
-            self.emit(
-                &frame.session_id,
-                StandardFrameType::SessionClosed,
-                payload(SessionClosedPayload {
-                    reason: if purge {
-                        SessionClosedReason::Purged
-                    } else {
-                        SessionClosedReason::Client
-                    },
-                }),
-            )
-            .await?,
-        );
-        {
-            let mut state = self.state.lock().await;
-            state.attached.remove(&frame.session_id);
-            state.attachment_modes.remove(&frame.session_id);
-        }
-        Ok(output)
-    }
-
-    async fn ack(&self, frame: Envelope<Value>) -> Result<Vec<Envelope<Value>>, HostError> {
-        self.require_attached(&frame.session_id).await?;
-        let last_seq = frame
-            .payload
-            .get("last_seq")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| HostError::InvalidFrame("ACK.last_seq is required".to_owned()))?;
-        let mut state = self.state.lock().await;
-        if last_seq
-            > state
-                .sequences
-                .get(&frame.session_id)
-                .copied()
-                .unwrap_or_default()
-        {
-            return Err(HostError::InvalidFrame(
-                "ACK.last_seq exceeds the last emitted sequence".to_owned(),
-            ));
-        }
-        if let Some(frames) = state.replay.get_mut(&frame.session_id) {
-            frames.retain(|stored| stored.seq.is_none_or(|seq| seq > last_seq));
-        }
-        Ok(Vec::new())
-    }
-
-    async fn extension_command(
-        &self,
-        frame: Envelope<Value>,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        let request: ClientRequest = serde_json::from_value(frame.payload)?;
-        if is_plugin_request(&request.kind) {
-            return self.plugin_command(&frame.session_id, request).await;
-        }
-        // Connection-scoped commands deliberately ignore the route's
-        // placeholder session id. The HTTP adapter has a session-shaped URL
-        // for every command, but listing sessions, creating one, and querying
-        // host-wide catalogues must work before any session is attached.
-        let session_id = session_for_request(&request.kind)
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
-        // Reads that only look at what already happened (telemetry, cost,
-        // jobs, history) do not need a live attachment: the session exists or
-        // it does not, and a dashboard opening a session to read its usage
-        // would otherwise have to attach — and displace the stream a
-        // conversation page is already holding.
-        if !session_id.is_empty() && !is_read_only_request(&request.kind) {
-            self.require_attached(&session_id).await?;
-        }
-        let service = if session_id.is_empty() {
-            Arc::clone(&self.service)
-        } else {
-            self.service_for_session(&session_id).await?
-        };
-        self.collect_service_events(
-            &session_id,
-            service
-                .submit(request)
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?,
-        )
-        .await
-    }
-
-    async fn plugin_command(
-        &self,
-        session_id: &str,
-        request: ClientRequest,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        let event = match request.kind {
-            ClientRequestKind::ListPlugins => ServerEventKind::PluginList {
-                plugins: crate::plugin_manager::plugin_info(),
-            },
-            ClientRequestKind::InstallPlugin { url, package, all } => {
-                let result = tokio::task::spawn_blocking(move || {
-                    if all {
-                        crate::plugin_manager::install_all_plugins(&url, &|_, _, _| {})
-                            .map(|names| names.join(", "))
-                    } else {
-                        crate::plugin_manager::install_plugin(
-                            &url,
-                            package.as_deref(),
-                            &|_, _, _| {},
-                        )
-                    }
-                })
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?
-                .map_err(HostError::Service)?;
-                ServerEventKind::PluginChanged {
-                    operation: "installed".to_owned(),
-                    name: result,
-                }
-            }
-            ClientRequestKind::UpdatePlugins { name } => {
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::plugin_manager::update_plugins(name.as_deref())
-                })
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?
-                .map_err(HostError::Service)?;
-                let updated = summarize_plugin_updates(result).map_err(HostError::Service)?;
-                ServerEventKind::PluginChanged {
-                    operation: "updated".to_owned(),
-                    name: updated,
-                }
-            }
-            ClientRequestKind::RemovePlugin { name } => {
-                tokio::task::spawn_blocking({
-                    let name = name.clone();
-                    move || crate::plugin_manager::remove_plugin(&name)
-                })
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?
-                .map_err(HostError::Service)?;
-                ServerEventKind::PluginChanged {
-                    operation: "removed".to_owned(),
-                    name,
-                }
-            }
-            ClientRequestKind::SetPluginEnabled { name, enabled } => {
-                tokio::task::spawn_blocking({
-                    let name = name.clone();
-                    move || crate::plugin_manager::set_plugin_enabled(&name, enabled)
-                })
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?
-                .map_err(HostError::Service)?;
-                ServerEventKind::PluginChanged {
-                    operation: if enabled { "enabled" } else { "disabled" }.to_owned(),
-                    name,
-                }
-            }
-            _ => unreachable!("plugin request was checked before dispatch"),
-        };
-        self.emit_event(
-            session_id,
-            ServerEvent {
-                request_id: request.request_id,
-                session: None,
-                kind: event,
-            },
-        )
-        .await
-        .map(|frame| vec![frame])
-    }
-
-    async fn submit_service(
-        &self,
-        session_id: &str,
-        kind: ClientRequestKind,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        let stream = self
-            .service
-            .submit(ClientRequest {
-                request_id: 0,
-                kind,
-            })
-            .await
-            .map_err(|error| HostError::Service(error.to_string()))?;
-        self.collect_service_events(session_id, stream).await
-    }
-
-    #[allow(clippy::too_many_lines)]
-    async fn collect_service_events(
-        &self,
-        session_id: &str,
-        mut stream: norte_code_agent::EventStream,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        use futures_util::StreamExt;
-        let mut output = Vec::new();
-        while let Some(event) = stream.next().await {
-            let event_session = event
-                .session
-                .as_ref()
-                .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
-            if let ServerEventKind::TurnStarted { turn } = &event.kind {
-                let mut state = self.state.lock().await;
-                let client_turn_id = state
-                    .pending_turn_ids
-                    .get_mut(&event_session)
-                    .and_then(VecDeque::pop_front)
-                    .unwrap_or_else(|| {
-                        TurnId::new(turn.to_string()).expect("numeric turn id is valid")
-                    });
-                state
-                    .turn_aliases
-                    .insert((event_session.clone(), *turn), client_turn_id.clone());
-                state
-                    .turn_alias_order
-                    .push_back((event_session.clone(), *turn));
-                while state.turn_alias_order.len() > self.config.idempotency_capacity {
-                    if let Some(oldest) = state.turn_alias_order.pop_front() {
-                        state.turn_aliases.remove(&oldest);
-                    }
-                }
-                state
-                    .active_turns
-                    .insert(event_session.clone(), client_turn_id);
-                state.turn_reservations.remove(&event_session);
-                drop(state);
-                let requested = self
-                    .state
-                    .lock()
-                    .await
-                    .pending_output
-                    .remove(&event_session);
-                if let Some(requested) = requested {
-                    self.state
-                        .lock()
-                        .await
-                        .turn_output
-                        .insert((event_session.clone(), *turn), requested);
-                }
-            }
-            if let ServerEventKind::Delta {
-                delta: Delta::Media { .. },
-                ..
-            } = &event.kind
-            {
-                continue;
-            }
-            if let ServerEventKind::MediaPartCompleted { turn, index, media } = &event.kind {
-                let requested = self
-                    .state
-                    .lock()
-                    .await
-                    .turn_output
-                    .get(&(event_session.clone(), *turn))
-                    .cloned()
-                    .unwrap_or_default();
-                if requested.contains(&raep_modality_for_media(media.kind)) {
-                    output.extend(
-                        self.emit_media_output(&event_session, *turn, *index, media)
-                            .await?,
-                    );
-                }
-                continue;
-            }
-            let tool_state_change = match &event.kind {
-                ServerEventKind::ToolStarted { turn, .. } => {
-                    Some((*turn, raep_types::TurnState::ExecutingTool))
-                }
-                _ => None,
-            };
-            let finished_tool_turn = match &event.kind {
-                ServerEventKind::ToolFinished { turn, .. } => Some(*turn),
-                _ => None,
-            };
-            if let Some((turn, state)) = tool_state_change {
-                let turn_id = self
-                    .state
-                    .lock()
-                    .await
-                    .turn_aliases
-                    .get(&(event_session.clone(), turn))
-                    .cloned();
-                if let Some(turn_id) = turn_id {
-                    output.push(
-                        self.emit_with_turn_id(
-                            &event_session,
-                            StandardFrameType::TurnStateChanged,
-                            payload(raep_types::TurnStateChanged {
-                                state,
-                                stop_reason: None,
-                                usage: None,
-                                error: None,
-                            }),
-                            turn_id,
-                        )
-                        .await?,
-                    );
-                }
-            }
-            let (finished_turn, stopped_turn_id) = match &event.kind {
-                ServerEventKind::TurnFinished { turn, .. } => (Some(*turn), None),
-                ServerEventKind::TurnStopped { .. } => {
-                    let state = self.state.lock().await;
-                    let client_turn_id = state.active_turns.get(&event_session).cloned();
-                    let service_turn_id = client_turn_id.as_ref().and_then(|client_turn_id| {
-                        state
-                            .turn_aliases
-                            .iter()
-                            .find(|((session, _), alias)| {
-                                session == &event_session && *alias == client_turn_id
-                            })
-                            .map(|((_, turn), _)| *turn)
-                    });
-                    (service_turn_id, client_turn_id)
-                }
-                _ => (None, None),
-            };
-            output.push(
-                self.emit_event_with_turn_id(session_id, event, stopped_turn_id.clone())
-                    .await?,
-            );
-            if let Some(turn) = finished_tool_turn {
-                let turn_id = self
-                    .state
-                    .lock()
-                    .await
-                    .turn_aliases
-                    .get(&(event_session.clone(), turn))
-                    .cloned();
-                if let Some(turn_id) = turn_id {
-                    output.push(
-                        self.emit_with_turn_id(
-                            &event_session,
-                            StandardFrameType::TurnStateChanged,
-                            payload(raep_types::TurnStateChanged {
-                                state: raep_types::TurnState::CallingProvider,
-                                stop_reason: None,
-                                usage: None,
-                                error: None,
-                            }),
-                            turn_id,
-                        )
-                        .await?,
-                    );
-                }
-            }
-            if finished_turn.is_some() || stopped_turn_id.is_some() {
-                {
-                    let mut state = self.state.lock().await;
-                    if let Some(turn) = finished_turn {
-                        state.turn_output.remove(&(event_session.clone(), turn));
-                    }
-                    state.active_turns.remove(&event_session);
-                    state.turn_reservations.remove(&event_session);
-                }
-                if let Some(next) = self.reserve_next_queued_turn(&event_session).await {
-                    output.extend(self.start_queued_turn(&event_session, next).await?);
-                }
-            }
-        }
-        self.state.lock().await.pending_output.remove(session_id);
-        Ok(output)
-    }
-
-    async fn reserve_next_queued_turn(&self, session_id: &str) -> Option<QueuedTurn> {
-        let mut state = self.state.lock().await;
-        let next = state
-            .queued_turns
-            .get_mut(session_id)
-            .and_then(VecDeque::pop_front);
-        if state
-            .queued_turns
-            .get(session_id)
-            .is_some_and(VecDeque::is_empty)
-        {
-            state.queued_turns.remove(session_id);
-        }
-        let next = next?;
-        state
-            .turn_reservations
-            .insert(session_id.to_owned(), next.turn_id.clone());
-        state
-            .pending_turn_ids
-            .entry(session_id.to_owned())
-            .or_default()
-            .push_back(next.turn_id.clone());
-        if next
-            .output
-            .iter()
-            .any(|modality| !matches!(modality, raep_types::Modality::Text))
-        {
-            state
-                .pending_output
-                .insert(session_id.to_owned(), next.output.clone());
-        }
-        Some(next)
-    }
-
-    async fn start_queued_turn(
-        &self,
-        session_id: &str,
-        turn: QueuedTurn,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        // `replaces_turn_id` is a one-step rewind-and-re-run: the rewind has
-        // already happened when the input was accepted (see
-        // `NorteCodeRaepHost::user_input`), so by the time a queued turn runs
-        // there is nothing left to rewind. The queued turn simply carries the
-        // response format the client asked for.
-        let stream = self
-            .service
-            .submit(ClientRequest {
-                request_id: 0,
-                kind: ClientRequestKind::SendMessage {
-                    session: Some(SessionKey::new(session_id)),
-                    text: turn.text,
-                    attachments: turn.attachments,
-                    budget: turn.budget,
-                    reasoning: turn.reasoning,
-                    output: Vec::new(),
-                    response_format: turn.response_format,
-                    metadata: turn.metadata,
-                    replay: false,
-                },
-            })
-            .await;
-        match stream {
-            Ok(stream) => Box::pin(self.collect_service_events(session_id, stream)).await,
-            Err(error) => {
-                let message = error.to_string();
-                {
-                    let mut state = self.state.lock().await;
-                    state.turn_reservations.remove(session_id);
-                    state.pending_turn_ids.remove(session_id);
-                    state.pending_output.remove(session_id);
-                }
-                let terminal = self
-                    .emit_with_turn_id(
-                        session_id,
-                        StandardFrameType::TurnStateChanged,
-                        payload(raep_types::TurnStateChanged {
-                            state: raep_types::TurnState::Failed,
-                            stop_reason: Some(raep_types::StopReason::Error),
-                            usage: None,
-                            error: Some(raep_types::ErrorPayload {
-                                code: "UNAVAILABLE".to_owned(),
-                                message,
-                                retryable: Some(true),
-                                details: None,
-                            }),
-                        }),
-                        turn.turn_id,
-                    )
-                    .await?;
-                let mut output = vec![terminal];
-                if let Some(next) = self.reserve_next_queued_turn(session_id).await {
-                    output.extend(Box::pin(self.start_queued_turn(session_id, next)).await?);
-                }
-                Ok(output)
-            }
-        }
-    }
-
-    async fn load_generated_media(
-        &self,
-        media: &norte_code_wire::MediaPart,
-    ) -> Result<(OutputPartKind, String, Vec<u8>), HostError> {
-        let (kind, input_kind) = match media.kind {
-            norte_code_wire::MediaKind::Image => (OutputPartKind::Image, AcceptedPartKind::Image),
-            norte_code_wire::MediaKind::Document => {
-                (OutputPartKind::Document, AcceptedPartKind::Document)
-            }
-            norte_code_wire::MediaKind::Audio => (OutputPartKind::Audio, AcceptedPartKind::Audio),
-            norte_code_wire::MediaKind::Video => (OutputPartKind::Video, AcceptedPartKind::Video),
-        };
-        let mime_type = media.mime.as_str();
-        validate_media_mime(input_kind, mime_type).map_err(HostError::Artifact)?;
-        let artifact_store = self
-            .artifact_store
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("output storage is disabled".to_owned()))?;
-        let bytes = match &media.source {
-            norte_code_wire::MediaSource::Inline(bytes) => bytes.clone(),
-            norte_code_wire::MediaSource::Blob(id) => artifact_store.get(id).await?,
-            norte_code_wire::MediaSource::ProviderFile(reference) => {
-                let blob = reference.blob.as_deref().ok_or_else(|| {
-                    HostError::Artifact(
-                        "generated provider file has no durable blob reference".to_owned(),
-                    )
-                })?;
-                artifact_store.get(blob).await?
-            }
-            norte_code_wire::MediaSource::Url(_) => {
-                return Err(HostError::Artifact(
-                    "generated media URL was not materialized into the blob store".to_owned(),
-                ));
-            }
-        };
-        let output_limit = self.output_part_bytes_limit();
-        if bytes.is_empty() || bytes.len() > output_limit {
-            return Err(HostError::Artifact(format!(
-                "generated media must be between 1 and {output_limit} bytes"
-            )));
-        }
-        Ok((kind, mime_type.to_owned(), bytes))
-    }
-
-    async fn emit_media_output(
-        &self,
-        session_id: &str,
-        turn: u64,
-        index: u32,
-        media: &norte_code_wire::MediaPart,
-    ) -> Result<Vec<Envelope<Value>>, HostError> {
-        let (kind, mime_type, bytes) = self.load_generated_media(media).await?;
-        let artifact_store = self
-            .artifact_store
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("output storage is disabled".to_owned()))?;
-        let upload_index = self
-            .upload_index
-            .as_ref()
-            .ok_or_else(|| HostError::Artifact("output metadata storage is disabled".to_owned()))?;
-        let blob = artifact_store.put(&mime_type, &bytes).await?;
-        let output_id = format!("out_{}", uuid::Uuid::new_v4());
-        let sha256 = crate::bundle::sha256(&bytes);
-        let owner = self
-            .state
-            .lock()
-            .await
-            .session_owners
-            .get(session_id)
-            .cloned();
-        upload_index
-            .insert(UploadRecord {
-                id: output_id.clone(),
-                session_id: session_id.to_owned(),
-                owner,
-                blob_id: blob.id,
-                mime_type: mime_type.clone(),
-                bytes: bytes.len() as u64,
-                sha256: sha256.clone(),
-                expires_at: i64::MAX,
-                referenced: true,
-            })
-            .await?;
-        let name = media.metadata.extension.get("name").and_then(Value::as_str);
-        let alt = media.metadata.extension.get("alt").and_then(Value::as_str);
-        let started = self
-            .emit_with_extension(
-                session_id,
-                standard(StandardFrameType::OutputPartStarted),
-                payload(OutputPartStartedPayload {
-                    part_id: &output_id,
-                    index,
-                    kind,
-                    mime_type: &mime_type,
-                    streamed: false,
-                    name,
-                    alt,
-                    duration_ms: media.metadata.duration_ms,
-                    width: media.metadata.width,
-                    height: media.metadata.height,
-                    bytes_expected: bytes.len(),
-                }),
-                None,
-                Some(turn),
-                None,
-                None,
-            )
-            .await?;
-        let finished = self
-            .emit_with_extension(
-                session_id,
-                standard(StandardFrameType::OutputPartFinished),
-                payload(OutputPartFinishedPayload {
-                    part_id: &output_id,
-                    index,
-                    status: OutputPartStatus::Ok,
-                    source: OutputPartSource::Output {
-                        output_id: &output_id,
-                    },
-                    bytes: bytes.len(),
-                    sha256: &sha256,
-                    transcript: media.metadata.transcript.as_deref(),
-                }),
-                None,
-                Some(turn),
-                None,
-                None,
-            )
-            .await?;
-        Ok(vec![started, finished])
-    }
-
-    async fn emit_event(
-        &self,
-        session_id: &str,
-        event: ServerEvent,
-    ) -> Result<Envelope<Value>, HostError> {
-        self.emit_event_with_turn_id(session_id, event, None).await
-    }
-
-    async fn emit_event_with_turn_id(
-        &self,
-        session_id: &str,
-        event: ServerEvent,
-        turn_id_override: Option<TurnId>,
-    ) -> Result<Envelope<Value>, HostError> {
-        let kind = frame_type_for_event(&event.kind);
-        let session_id = event
-            .session
-            .as_ref()
-            .map_or_else(|| session_id.to_owned(), |key| key.as_str().to_owned());
-        let job_id = job_id_for_event(&event.kind);
-        let event_payload = standard_event_payload(&event.kind)
-            .unwrap_or_else(|| canonical_event_payload(&event.kind));
-        self.emit_with_extension(
-            &session_id,
-            kind,
-            event_payload,
-            Some(payload(NorteCodeEventExtension { norte_code: &event })),
-            turn_id_for_event(&event.kind),
-            job_id.as_deref(),
-            turn_id_override,
-        )
-        .await
-    }
-
-    async fn emit(
-        &self,
-        session_id: &str,
-        kind: StandardFrameType,
-        payload: Value,
-    ) -> Result<Envelope<Value>, HostError> {
-        self.emit_with_extension(session_id, standard(kind), payload, None, None, None, None)
-            .await
-    }
-
-    async fn emit_with_turn_id(
-        &self,
-        session_id: &str,
-        kind: StandardFrameType,
-        payload: Value,
-        turn_id: TurnId,
-    ) -> Result<Envelope<Value>, HostError> {
-        let mut frame = Envelope::new(standard(kind), payload, now_millis());
-        frame.session_id = session_id.to_owned();
-        frame.turn_id = Some(turn_id);
-        self.emit_frame(session_id, frame).await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn emit_with_extension(
-        &self,
-        session_id: &str,
-        kind: FrameType,
-        payload: Value,
-        ext: Option<Value>,
-        turn_id: Option<u64>,
-        job_id: Option<&str>,
-        turn_id_override: Option<TurnId>,
-    ) -> Result<Envelope<Value>, HostError> {
-        let mut frame = Envelope::new(kind, payload, now_millis());
-        frame.session_id = session_id.to_owned();
-        frame.ext = ext;
-        if let Some(job) = job_id {
-            frame.job_id = Some(
-                raep_types::JobId::new(job.to_owned())
-                    .map_err(|error| HostError::InvalidFrame(error.to_string()))?,
-            );
-        }
-        if let Some(turn) = turn_id {
-            let numeric_turn_id = TurnId::new(turn.to_string())
-                .map_err(|error| HostError::InvalidFrame(error.to_string()))?;
-            let state = self.state.lock().await;
-            frame.turn_id = state
-                .turn_aliases
-                .get(&(session_id.to_owned(), turn))
-                .cloned()
-                .or(Some(numeric_turn_id));
-        }
-        if let Some(turn_id) = turn_id_override {
-            frame.turn_id = Some(turn_id);
-        }
-        self.emit_frame(session_id, frame).await
-    }
-
-    async fn emit_frame(
-        &self,
-        session_id: &str,
-        mut frame: Envelope<Value>,
-    ) -> Result<Envelope<Value>, HostError> {
-        let mut state = self.state.lock().await;
-        let sequence = state
-            .sequences
-            .get(session_id)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
-        frame.seq = Some(sequence);
-        if let Some(store) = &self.replay_store {
-            store.append(&frame).await?;
-        }
-        state.sequences.insert(session_id.to_owned(), sequence);
-        if let Some(turn_id) = &frame.turn_id {
-            let key = (session_id.to_owned(), turn_id.clone());
-            if state.turn_request_fingerprints.contains_key(&key) {
-                state.turn_request_frames.insert(key, frame.clone());
-            }
-        }
-        let replay = state.replay.entry(session_id.to_owned()).or_default();
-        replay.push_back(frame.clone());
-        while replay.len() > self.config.replay_capacity {
-            replay.pop_front();
-        }
-        drop(state);
-        let _ = self.events.send(frame.clone());
-        Ok(frame)
-    }
-
-    async fn require_attached(&self, session_id: &str) -> Result<(), HostError> {
-        if self.state.lock().await.attached.contains(session_id) {
-            Ok(())
-        } else {
-            Err(HostError::InvalidFrame(
-                "session is not attached".to_owned(),
-            ))
-        }
-    }
-
-    async fn remove_turn_request(&self, session_id: &str, turn_id: &TurnId) {
-        let mut state = self.state.lock().await;
-        let key = (session_id.to_owned(), turn_id.clone());
-        state.turn_request_fingerprints.remove(&key);
-        state.turn_request_frames.remove(&key);
-        state
-            .turn_request_order
-            .retain(|candidate| candidate != &key);
-        if state.turn_reservations.get(session_id) == Some(turn_id) {
-            state.turn_reservations.remove(session_id);
-            state.pending_output.remove(session_id);
-        }
-        if let Some(pending) = state.pending_turn_ids.get_mut(session_id) {
-            pending.retain(|pending_turn| pending_turn != turn_id);
-            if pending.is_empty() {
-                state.pending_turn_ids.remove(session_id);
-            }
-        }
-        if let Some(queue) = state.queued_turns.get_mut(session_id) {
-            queue.retain(|queued| &queued.turn_id != turn_id);
-            if queue.is_empty() {
-                state.queued_turns.remove(session_id);
-            }
-        }
-    }
 }
 
-fn turn_id_for_event(kind: &ServerEventKind) -> Option<u64> {
+pub(crate) fn turn_id_for_event(kind: &ServerEventKind) -> Option<u64> {
     match kind {
         ServerEventKind::TurnStarted { turn }
         | ServerEventKind::Delta { turn, .. }
@@ -5195,7 +1310,7 @@ fn turn_id_for_event(kind: &ServerEventKind) -> Option<u64> {
     }
 }
 
-fn job_id_for_event(kind: &ServerEventKind) -> Option<String> {
+pub(crate) fn job_id_for_event(kind: &ServerEventKind) -> Option<String> {
     match kind {
         ServerEventKind::JobStarted { job_id, .. }
         | ServerEventKind::JobProgressDelta { job_id, .. } => Some(job_id.clone()),
@@ -5204,7 +1319,7 @@ fn job_id_for_event(kind: &ServerEventKind) -> Option<String> {
     }
 }
 
-fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
+pub(crate) fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
     match kind {
         ServerEventKind::Delta { .. } => standard(StandardFrameType::TokenDelta),
         ServerEventKind::MediaPartCompleted { .. } => {
@@ -5241,7 +1356,7 @@ fn frame_type_for_event(kind: &ServerEventKind) -> FrameType {
 ///
 /// Extensions carry the adapter's own payload, so a standard frame is never
 /// sent with a shape the standard does not define.
-fn extension_name_for_event(kind: &ServerEventKind) -> String {
+pub(crate) fn extension_name_for_event(kind: &ServerEventKind) -> String {
     let tag = serde_json::to_value(kind)
         .ok()
         .and_then(|value| {
@@ -5254,7 +1369,7 @@ fn extension_name_for_event(kind: &ServerEventKind) -> String {
     format!("norte_code.{tag}")
 }
 
-fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
+pub(crate) fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
     match kind {
         ClientRequestKind::RenameSession { session, .. }
         | ClientRequestKind::DeleteSession { session }
@@ -5317,7 +1432,7 @@ fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKey> {
 }
 
 /// Whether a command only reads state and can run without an attachment.
-fn is_read_only_request(kind: &ClientRequestKind) -> bool {
+pub(crate) fn is_read_only_request(kind: &ClientRequestKind) -> bool {
     matches!(
         kind,
         ClientRequestKind::ListTelemetry { .. }
@@ -5326,7 +1441,7 @@ fn is_read_only_request(kind: &ClientRequestKind) -> bool {
     )
 }
 
-fn is_plugin_request(kind: &ClientRequestKind) -> bool {
+pub(crate) fn is_plugin_request(kind: &ClientRequestKind) -> bool {
     matches!(
         kind,
         ClientRequestKind::ListPlugins
@@ -5337,11 +1452,11 @@ fn is_plugin_request(kind: &ClientRequestKind) -> bool {
     )
 }
 
-fn standard(kind: StandardFrameType) -> FrameType {
+pub(crate) fn standard(kind: StandardFrameType) -> FrameType {
     FrameType::Standard(kind)
 }
 
-fn observer_read_only_frame(kind: &FrameType) -> bool {
+pub(crate) fn observer_read_only_frame(kind: &FrameType) -> bool {
     matches!(
         kind,
         FrameType::Standard(
@@ -5353,7 +1468,7 @@ fn observer_read_only_frame(kind: &FrameType) -> bool {
     )
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -5375,7 +1490,7 @@ pub(super) fn job_status(job: &norte_code_wire::JobInfo) -> JobStatus {
     }
 }
 
-fn job_output_from_index(
+pub(crate) fn job_output_from_index(
     job: &norte_code_wire::JobInfo,
     from_index: u64,
 ) -> Result<&str, HostError> {
@@ -5426,7 +1541,7 @@ pub(super) fn job_finished_payload(
     })
 }
 
-fn parse_portable_history(
+pub(crate) fn parse_portable_history(
     bytes: &[u8],
 ) -> Result<Vec<norte_code_agent::service::ImportedHistoryItem>, HostError> {
     let mut items = Vec::new();
@@ -5482,7 +1597,7 @@ fn parse_portable_history(
     Ok(items)
 }
 
-fn validate_bundle_usage(usage: &Value) -> Result<(), HostError> {
+pub(crate) fn validate_bundle_usage(usage: &Value) -> Result<(), HostError> {
     let Some(object) = usage.as_object() else {
         return Err(HostError::InvalidFrame(
             "BUNDLE_INVALID: usage_total must be an object".to_owned(),
@@ -5551,7 +1666,7 @@ fn validate_bundle_usage(usage: &Value) -> Result<(), HostError> {
     Ok(())
 }
 
-fn validate_export_request(request: &ExportRequest) -> Result<(), HostError> {
+pub(crate) fn validate_export_request(request: &ExportRequest) -> Result<(), HostError> {
     if request
         .quiesce
         .is_some_and(|policy| policy != QuiescePolicy::Reject)
@@ -5584,7 +1699,7 @@ fn validate_export_request(request: &ExportRequest) -> Result<(), HostError> {
     Ok(())
 }
 
-type PortableHistoryEntry = (
+pub(crate) type PortableHistoryEntry = (
     Option<u64>,
     norte_code_wire::MessageRole,
     norte_code_wire::ReplayedKind,
@@ -5593,7 +1708,7 @@ type PortableHistoryEntry = (
     Option<Value>,
 );
 
-fn serialize_plain_text_history(
+pub(crate) fn serialize_plain_text_history(
     history: Vec<PortableHistoryEntry>,
     max_bytes: usize,
 ) -> Result<Vec<u8>, HostError> {
