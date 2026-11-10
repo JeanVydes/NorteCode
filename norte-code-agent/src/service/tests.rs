@@ -1,3 +1,4 @@
+use super::background::ShellCalls;
 use super::compaction::recent_start;
 use super::jobs::{JOB_BUFFER_BYTES, JobRegistry, JobState};
 use super::mapping::retry_plan;
