@@ -6,9 +6,7 @@ use raep_types::{Envelope, FrameId, TurnId};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use std::sync::Arc;
 
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
@@ -43,28 +41,38 @@ pub struct FileReplayStore {
     lock: tokio::sync::Mutex<()>,
 }
 /// SQLite-backed replay storage safe for multiple server processes.
+///
+/// One connection is kept behind a mutex rather than opened per frame: every
+/// append used to be its own connection, and two writers in one process made
+/// SQLite answer "database is locked" under load, which surfaced as a replay
+/// journal error in the middle of a turn.
 pub struct SqliteReplayStore {
-    path: PathBuf,
+    connection: Arc<std::sync::Mutex<rusqlite::Connection>>,
     max_frames: usize,
 }
+
 impl SqliteReplayStore {
-    /// Opens or creates the replay table in the supplied database.
+    /// Opens or creates the replay tables in the supplied database.
     ///
     /// # Errors
     ///
-    /// Returns an error when SQLite cannot open the database or create its
-    /// schema.
-    pub fn open(path: impl Into<PathBuf>, max_frames: usize) -> Result<Self, HostError> {
+    /// Returns an error when SQLite cannot open the database, enable WAL or
+    /// create its schema.
+    pub fn open(path: impl AsRef<Path>, max_frames: usize) -> Result<Self, HostError> {
         if max_frames == 0 {
             return Err(HostError::ReplayJournal(
                 "replay journal capacity must be positive".to_owned(),
             ));
         }
-        let path = path.into();
-        let connection = rusqlite::Connection::open(&path)
+        let connection = rusqlite::Connection::open(path)
             .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        // WAL lets a reader and this writer coexist. It is an error here and
+        // not a silent fallback: without it every read blocks the writer.
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
             .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
         connection
             .execute_batch(
@@ -90,25 +98,37 @@ impl SqliteReplayStore {
                     ON raep_idempotency(session_id);",
             )
             .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-        Ok(Self { path, max_frames })
+        Ok(Self {
+            connection: Arc::new(std::sync::Mutex::new(connection)),
+            max_frames,
+        })
+    }
+
+    /// Runs one blocking database operation on the shared connection.
+    async fn with_connection<T, F>(&self, work: F) -> Result<T, HostError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> Result<T, HostError> + Send + 'static,
+    {
+        let connection = Arc::clone(&self.connection);
+        tokio::task::spawn_blocking(move || {
+            let guard = connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            work(&guard)
+        })
+        .await
+        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
     }
 }
+
 #[async_trait]
 impl ReplayStore for SqliteReplayStore {
     async fn append(&self, frame: &Envelope<Value>) -> Result<(), HostError> {
-        let path = self.path.clone();
         let max_frames = i64::try_from(self.max_frames)
             .map_err(|_| HostError::ReplayJournal("replay capacity is too large".to_owned()))?;
         let frame = frame.clone();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        self.with_connection(move |connection| {
             let encoded = serde_json::to_string(&frame)?;
             let sequence = frame.seq.ok_or_else(|| {
                 HostError::ReplayJournal("replay frame has no sequence".to_owned())
@@ -136,18 +156,11 @@ impl ReplayStore for SqliteReplayStore {
             Ok(())
         })
         .await
-        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
     }
 
     async fn load(&self, session_id: &str) -> Result<Vec<Envelope<Value>>, HostError> {
-        let path = self.path.clone();
         let session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        self.with_connection(move |connection| {
             let mut statement = connection
                 .prepare(
                     "SELECT frame FROM raep_replay
@@ -164,21 +177,14 @@ impl ReplayStore for SqliteReplayStore {
             .collect()
         })
         .await
-        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
     }
 
     async fn save_idempotency(&self, record: &IdempotencyRecord) -> Result<(), HostError> {
-        let path = self.path.clone();
         let max_entries = i64::try_from(self.max_frames).map_err(|_| {
             HostError::ReplayJournal("idempotency capacity is too large".to_owned())
         })?;
         let record = record.clone();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        self.with_connection(move |connection| {
             let response = serde_json::to_string(&record.response)?;
             connection
                 .execute(
@@ -212,21 +218,14 @@ impl ReplayStore for SqliteReplayStore {
             Ok(())
         })
         .await
-        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
     }
 
     async fn load_idempotency(
         &self,
         session_id: &str,
     ) -> Result<Vec<IdempotencyRecord>, HostError> {
-        let path = self.path.clone();
         let session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path)
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
+        self.with_connection(move |connection| {
             let mut statement = connection
                 .prepare(
                     "SELECT frame_id, turn_id, fingerprint, turn_fingerprint,
@@ -270,7 +269,6 @@ impl ReplayStore for SqliteReplayStore {
             .collect()
         })
         .await
-        .map_err(|error| HostError::ReplayJournal(error.to_string()))?
     }
 }
 impl FileReplayStore {

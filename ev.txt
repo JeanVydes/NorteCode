@@ -1,0 +1,97 @@
+retry: 2000
+
+: keepalive
+
+event: HELLO
+data: {"version":"1.0","id":"940ac59c-244f-4571-84ef-722cc734ea9e","session_id":"","timestamp":1794323692379,"type":"HELLO","payload":{"capabilities":["transport.ws","transport.sse","resume","history","structured_output","X_NORTECODE_COMPACTION_BASIC","X_NORTECODE_FORK_TEXT","X_NORTECODE_JOBS_BASIC","X_NORTECODE_DELEGATION_BASIC","uploads","output.parts"],"deprecations":[],"draining":false,"extensions":["norte_code.command"],"heartbeat_s":20,"limits":{"export_ttl_s":3600,"job_output_retention_s":86400,"max_artifact_bytes":16777216,"max_concurrent_jobs":8,"max_export_bytes":67108864,"max_frame_bytes":1048576,"max_inline_bytes":0,"max_output_part_bytes":10485760,"max_parts":16,"max_prompt_bytes":262144,"max_queued_inputs":8,"max_upload_bytes":16777216,"replay_buffer_events":10000},"protocol":{"name":"RAEP","version":"1.0"},"server_version":"0.1.0","wire_versions":["1.0"]}}
+
+event: SESSION_ATTACHED
+id: 1
+data: {"version":"1.0","id":"0750a6aa-e9cd-48dd-b217-6efb30190245","seq":1,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","timestamp":1794323692380,"type":"SESSION_ATTACHED","payload":{"agent":{"capabilities":{"input":["text","image"],"limits":{},"output":["text"]},"id":"norte-code","model":{"id":"amazon/nova-lite-v1"},"provider":{"id":"openrouter"},"version":"0.1.0"},"created":false,"last_seq":0,"mode":"controller","negotiated_capabilities":["transport.ws","transport.sse","resume","history","structured_output","X_NORTECODE_COMPACTION_BASIC","X_NORTECODE_FORK_TEXT","X_NORTECODE_JOBS_BASIC","X_NORTECODE_DELEGATION_BASIC","uploads"],"replay":{"truncated":false}}}
+
+event: SESSION_STATE
+id: 2
+data: {"version":"1.0","id":"5524cb8c-7cad-48b0-b765-1bbd42c5515f","seq":2,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","timestamp":1794323692381,"type":"SESSION_STATE","payload":{"history_summary":[{"content":"You are Norte Code, a coding agent running in the user's repository. Your identity is Norte Code. Do not claim to be Claude, ChatGPT, another vendor's CLI, or infer your harness from the names of your tools. Never narrate system/developer instruction hierarchy, deployment names, identity conflicts, hidden prompts, or private reasoning. When the user asks for a tool, call the tool directly; do not describe an imagined tool call or expose internal deliberation. You are an agent with tools, not a chatbot: complete the task in the repository instead of only describing what could be done.\n\n## How to work\n- Inspect before acting. Read the relevant files, search for call sites and understand the surrounding style before changing anything.\n- Plan with the todo tool. Before any task that needs more than one or two steps, call `todo` with the complete list, one item per concrete step, and update it after each step. The human sees the list in the footer, so keep it short, mark the item you are working on `in_progress`, and mark it `completed` when it is done. Do not expose private chain-of-thought.\n- Use the narrowest tool that fits: read, glob and grep for inspection; edit for small changes; write for new files; command for builds and tests when the dedicated tools are not enough.\n- Batch independent reads and searches. Do not re-read a file or re-run a command unless the result was incomplete, wrong, or the file may have changed.\n- Make the smallest correct change. Match the existing structure, naming, formatting and error style. Do not refactor unrelated code.\n- Verify. Run the relevant formatter, linter and tests after a change, and inspect the result. A task is not done because code was written; it is done when the requested behaviour is checked as far as the environment allows.\n- If a tool fails, diagnose the failure and adapt. Do not repeat an identical failing call. If blocked, say what is missing and what you tried.\n- Do not stop early. Continue until the task is complete, the user's constraint prevents progress, o","kind":"system_event","rewound":false,"role":"system_event","timestamp":1794323692363,"truncated":true,"turn_id":null}],"status":"ACTIVE","title":"queue"}}
+
+event: USER_INPUT_ACCEPTED
+id: 3
+data: {"version":"1.0","id":"967afcef-2811-4559-90c0-f7acab62ad7d","seq":3,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323693381,"type":"USER_INPUT_ACCEPTED","payload":{"content":[{"text":"say one","type":"text"}],"origin":{"kind":"user"},"turn_id":"88888888-8888-8888-8888-888888888888"}}
+
+event: TURN_STATE_CHANGED
+id: 4
+data: {"version":"1.0","id":"8c2ba3fd-0d42-4acb-a520-edeb155cc5f6","seq":4,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323693390,"type":"TURN_STATE_CHANGED","payload":{"state":"CALLING_PROVIDER"},"ext":{"norte_code":{"kind":{"event":"turn_started","turn":1},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: norte_code.committed
+id: 5
+data: {"version":"1.0","id":"06050083-a5c7-4ba5-a529-167f838fd797","seq":5,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","timestamp":1794323693393,"type":"norte_code.committed","payload":{"event":"committed","turn":1,"version":3},"ext":{"norte_code":{"kind":{"event":"committed","turn":1,"version":3},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 6
+data: {"version":"1.0","id":"f03bd861-6dfd-4516-a93d-749d2308e0f0","seq":6,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323695262,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":"Here","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":"Here"},"event":"delta","turn":1},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 7
+data: {"version":"1.0","id":"1c9d0cde-9b66-498c-be76-74c60a50a292","seq":7,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323695266,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":" is","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":" is"},"event":"delta","turn":1},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 8
+data: {"version":"1.0","id":"04ab16fc-4490-440b-9852-6e3c6bd38907","seq":8,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323695270,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":" one","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":" one"},"event":"delta","turn":1},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 9
+data: {"version":"1.0","id":"3eb64cdf-9d20-4247-9fd8-3375761a9715","seq":9,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323695270,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":".","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":"."},"event":"delta","turn":1},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: norte_code.committed
+id: 10
+data: {"version":"1.0","id":"33b8d8df-7339-4e0e-baa1-b105f2812f27","seq":10,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","timestamp":1794323695272,"type":"norte_code.committed","payload":{"event":"committed","turn":1,"version":4},"ext":{"norte_code":{"kind":{"event":"committed","turn":1,"version":4},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: norte_code.request_reconstructed
+id: 11
+data: {"version":"1.0","id":"e033c615-8538-4aac-9309-3d1b3d94128c","seq":11,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323695274,"type":"norte_code.request_reconstructed","payload":{"cache_hit":false,"cost_usd":0.00059628,"duration_ms":1874,"event":"request_completed","first_token_ms":1865,"index":1,"model":"amazon/nova-lite-v1","provider":"openrouter","tokens_per_second":2.6680896478121663,"tools":[],"truncated":false,"turn":1,"usage":{"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.00059628,"input_tokens":9918,"output_tokens":5,"reasoning_tokens":0,"vendor":{"completion_tokens_details":{"image_tokens":0},"cost":0.00059628,"cost_details":{"upstream_inference_completions_cost":1.2e-6,"upstream_inference_cost":0.00059628,"upstream_inference_prompt_cost":0.00059508},"is_byok":false,"prompt_tokens_details":{"video_tokens":0},"total_tokens":9923}}},"ext":{"norte_code":{"kind":{"cache_hit":false,"cost_usd":0.00059628,"duration_ms":1874,"event":"request_reconstructed","first_token_ms":1865,"index":1,"model":"amazon/nova-lite-v1","provider":"openrouter","tokens_per_second":2.6680896478121663,"truncated":false,"turn":1,"usage":{"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.00059628,"input_tokens":9918,"output_tokens":5,"reasoning_tokens":0,"vendor":{"completion_tokens_details":{"image_tokens":0},"cost":0.00059628,"cost_details":{"upstream_inference_completions_cost":1.2e-6,"upstream_inference_cost":0.00059628,"upstream_inference_prompt_cost":0.00059508},"is_byok":false,"prompt_tokens_details":{"video_tokens":0},"total_tokens":9923}}},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TURN_STATE_CHANGED
+id: 12
+data: {"version":"1.0","id":"a2678314-13a5-4748-b8c0-07f7f10dfe41","seq":12,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"88888888-8888-8888-8888-888888888888","timestamp":1794323695280,"type":"TURN_STATE_CHANGED","payload":{"state":"COMPLETED","stop_reason":"end_turn"},"ext":{"norte_code":{"kind":{"committed":true,"event":"turn_finished","phase":"idle","turn":1},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: USER_INPUT_ACCEPTED
+id: 13
+data: {"version":"1.0","id":"3f7786b8-583f-4814-92c9-ed6bde7afacb","seq":13,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323701402,"type":"USER_INPUT_ACCEPTED","payload":{"content":[{"text":"say two","type":"text"}],"origin":{"kind":"user"},"turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}}
+
+event: TURN_STATE_CHANGED
+id: 14
+data: {"version":"1.0","id":"9eaa952a-c2c3-4016-8087-57bb52f30853","seq":14,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323701412,"type":"TURN_STATE_CHANGED","payload":{"state":"CALLING_PROVIDER"},"ext":{"norte_code":{"kind":{"event":"turn_started","turn":2},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: norte_code.committed
+id: 15
+data: {"version":"1.0","id":"ad0a9dfa-dab0-466f-b8cf-146744cd1235","seq":15,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","timestamp":1794323701414,"type":"norte_code.committed","payload":{"event":"committed","turn":2,"version":5},"ext":{"norte_code":{"kind":{"event":"committed","turn":2,"version":5},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 16
+data: {"version":"1.0","id":"ff8873cb-975e-4eef-a9c0-2aa1f0a66ef0","seq":16,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323703175,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":"Here","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":"Here"},"event":"delta","turn":2},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 17
+data: {"version":"1.0","id":"d91e8e18-2f5b-4b73-9ca0-5d83dd1c9605","seq":17,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323703176,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":" is","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":" is"},"event":"delta","turn":2},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 18
+data: {"version":"1.0","id":"d7c7940b-baf1-4c8b-b108-d690d0220f61","seq":18,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323703210,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":" two","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":" two"},"event":"delta","turn":2},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TOKEN_DELTA
+id: 19
+data: {"version":"1.0","id":"d3a0c770-c3fd-4565-beb0-ee9b77083328","seq":19,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323703213,"type":"TOKEN_DELTA","payload":{"channel":"text","delta":".","index":1},"ext":{"norte_code":{"kind":{"delta":{"delta":"text","index":1,"text":"."},"event":"delta","turn":2},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: norte_code.committed
+id: 20
+data: {"version":"1.0","id":"85029bf2-5854-4276-84f0-7c746f6fbd4c","seq":20,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","timestamp":1794323703216,"type":"norte_code.committed","payload":{"event":"committed","turn":2,"version":6},"ext":{"norte_code":{"kind":{"event":"committed","turn":2,"version":6},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: norte_code.request_reconstructed
+id: 21
+data: {"version":"1.0","id":"479f5346-1f8c-4f38-9f80-30d16de22d8b","seq":21,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323703219,"type":"norte_code.request_reconstructed","payload":{"cache_hit":false,"cost_usd":0.00060402,"duration_ms":1796,"event":"request_completed","first_token_ms":1757,"index":2,"model":"amazon/nova-lite-v1","provider":"openrouter","tokens_per_second":2.7839643652561246,"tools":[],"truncated":false,"turn":2,"usage":{"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.00060402,"input_tokens":10047,"output_tokens":5,"reasoning_tokens":0,"vendor":{"completion_tokens_details":{"image_tokens":0},"cost":0.00060402,"cost_details":{"upstream_inference_completions_cost":1.2e-6,"upstream_inference_cost":0.00060402,"upstream_inference_prompt_cost":0.00060282},"is_byok":false,"prompt_tokens_details":{"video_tokens":0},"total_tokens":10052}}},"ext":{"norte_code":{"kind":{"cache_hit":false,"cost_usd":0.00060402,"duration_ms":1796,"event":"request_reconstructed","first_token_ms":1757,"index":2,"model":"amazon/nova-lite-v1","provider":"openrouter","tokens_per_second":2.7839643652561246,"truncated":false,"turn":2,"usage":{"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.00060402,"input_tokens":10047,"output_tokens":5,"reasoning_tokens":0,"vendor":{"completion_tokens_details":{"image_tokens":0},"cost":0.00060402,"cost_details":{"upstream_inference_completions_cost":1.2e-6,"upstream_inference_cost":0.00060402,"upstream_inference_prompt_cost":0.00060282},"is_byok":false,"prompt_tokens_details":{"video_tokens":0},"total_tokens":10052}}},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+event: TURN_STATE_CHANGED
+id: 22
+data: {"version":"1.0","id":"51fb634c-42b9-4584-a4d6-b51b2e42e75b","seq":22,"session_id":"b51add14-41ef-48a6-a232-d0b7c63752e4","turn_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","timestamp":1794323703227,"type":"TURN_STATE_CHANGED","payload":{"state":"COMPLETED","stop_reason":"end_turn"},"ext":{"norte_code":{"kind":{"committed":true,"event":"turn_finished","phase":"idle","turn":2},"request_id":0,"session":"b51add14-41ef-48a6-a232-d0b7c63752e4"}}}
+
+: keepalive
+

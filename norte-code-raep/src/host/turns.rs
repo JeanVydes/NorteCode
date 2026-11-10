@@ -666,152 +666,159 @@ impl NorteCodeRaepHost {
                 None
             }
         };
-        // `replaces_turn_id` (RFC 18.2): `SESSION_REWIND` to that turn with
-        // `inclusive: true` and `cancel_pending: false`, then run the new
-        // input as a new turn, in one step. `queue_policy` does not apply
-        // (it is forced to `Reject` above), so this input always runs
-        // immediately and never occupies the queue. Every hook here runs
-        // before queuing: the rewind is a history mutation, and the input
-        // that follows it must see the rewound history.
-        let mut output_for_rewind: Option<Envelope<Value>> = None;
-        if let Some(ref replaces_turn_id) = queued_turn.replaces_turn_id {
-            let rewound_turn_ids = self
-                .service
-                .rewind_session(
-                    &SessionKey::new(frame.session_id.clone()),
-                    replaces_turn_id,
-                    true,
-                    false,
-                    false,
-                )
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?;
-            // The rewind removes `turns > replaces_turn_id` (inclusive) and
-            // keeps `turns < replaces_turn_id`. Those removals are the
-            // `rewound_turn_ids` the `HistoryRewound` payload reports.
-            // There is a side-effect dusting in the rewind's wash: nothing
-            // is dehydrated here — the service records no side-effect
-            // metadata for removed tool calls, so `side_effects` is empty
-            // and `workspace_restored` is false, matching the standalone
-            // `SESSION_REWIND` handler.
-            output_for_rewind = Some(
-                self.emit(
-                    &frame.session_id,
-                    StandardFrameType::HistoryRewound,
-                    payload(HistoryRewoundPayload {
-                        to_turn_id: replaces_turn_id.clone(),
-                        inclusive: true,
-                        rewound_turn_ids,
-                        side_effects: Vec::new(),
-                        workspace_restored: false,
-                    }),
-                )
-                .await?,
-            );
-        }
-        if !upload_ids.is_empty()
-            && let Some(index) = &self.upload_index
-            && let Err(error) = index
-                .mark_referenced(&frame.session_id, owner, &upload_ids)
-                .await
-        {
-            self.remove_turn_request(&frame.session_id, &turn_id).await;
-            return Err(error);
-        }
-        let accepted = match self
-            .emit_with_turn_id(
-                &frame.session_id,
-                StandardFrameType::UserInputAccepted,
-                payload(UserInputAcceptedPayload {
-                    turn_id: turn_id.clone(),
-                    origin: UserInputOrigin {
-                        kind: UserInputOriginKind::User,
-                    },
-                    content: accepted_content,
-                    position: queued_position,
-                    replaces_turn_id: queued_turn.replaces_turn_id.clone(),
-                }),
-                turn_id.clone(),
-            )
-            .await
-        {
-            Ok(frame) => frame,
-            Err(error) => {
+        let outcome: Result<Vec<Envelope<Value>>, HostError> = async {
+            // `replaces_turn_id` (RFC 18.2): `SESSION_REWIND` to that turn with
+            // `inclusive: true` and `cancel_pending: false`, then run the new
+            // input as a new turn, in one step. `queue_policy` does not apply
+            // (it is forced to `Reject` above), so this input always runs
+            // immediately and never occupies the queue. Every hook here runs
+            // before queuing: the rewind is a history mutation, and the input
+            // that follows it must see the rewound history.
+            let mut output_for_rewind: Option<Envelope<Value>> = None;
+            if let Some(ref replaces_turn_id) = queued_turn.replaces_turn_id {
+                let rewound_turn_ids = self
+                    .service
+                    .rewind_session(
+                        &SessionKey::new(frame.session_id.clone()),
+                        replaces_turn_id,
+                        true,
+                        false,
+                        false,
+                    )
+                    .await
+                    .map_err(|error| HostError::Service(error.to_string()))?;
+                // The rewind removes `turns > replaces_turn_id` (inclusive) and
+                // keeps `turns < replaces_turn_id`. Those removals are the
+                // `rewound_turn_ids` the `HistoryRewound` payload reports.
+                // There is a side-effect dusting in the rewind's wash: nothing
+                // is dehydrated here — the service records no side-effect
+                // metadata for removed tool calls, so `side_effects` is empty
+                // and `workspace_restored` is false, matching the standalone
+                // `SESSION_REWIND` handler.
+                output_for_rewind = Some(
+                    self.emit(
+                        &frame.session_id,
+                        StandardFrameType::HistoryRewound,
+                        payload(HistoryRewoundPayload {
+                            to_turn_id: replaces_turn_id.clone(),
+                            inclusive: true,
+                            rewound_turn_ids,
+                            side_effects: Vec::new(),
+                            workspace_restored: false,
+                        }),
+                    )
+                    .await?,
+                );
+            }
+            if !upload_ids.is_empty()
+                && let Some(index) = &self.upload_index
+                && let Err(error) = index
+                    .mark_referenced(&frame.session_id, owner, &upload_ids)
+                    .await
+            {
                 self.remove_turn_request(&frame.session_id, &turn_id).await;
                 return Err(error);
             }
-        };
-        if queued_position.is_some() {
+            let accepted = match self
+                .emit_with_turn_id(
+                    &frame.session_id,
+                    StandardFrameType::UserInputAccepted,
+                    payload(UserInputAcceptedPayload {
+                        turn_id: turn_id.clone(),
+                        origin: UserInputOrigin {
+                            kind: UserInputOriginKind::User,
+                        },
+                        content: accepted_content,
+                        position: queued_position,
+                        replaces_turn_id: queued_turn.replaces_turn_id.clone(),
+                    }),
+                    turn_id.clone(),
+                )
+                .await
+            {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.remove_turn_request(&frame.session_id, &turn_id).await;
+                    return Err(error);
+                }
+            };
+            if queued_position.is_some() {
+                let mut output = Vec::new();
+                if let Some(rewind_frame) = output_for_rewind {
+                    output.push(rewind_frame);
+                }
+                output.push(accepted);
+                output.push(
+                    self.emit_with_turn_id(
+                        &frame.session_id,
+                        StandardFrameType::TurnStateChanged,
+                        payload(QueuedTurnStatePayload {
+                            state: raep_types::TurnState::Queued,
+                        }),
+                        turn_id.clone(),
+                    )
+                    .await?,
+                );
+                if queue_mode == norte_code_wire::QueueMode::Interrupt
+                    && let Err(error) = self
+                        .submit_service(
+                            &frame.session_id,
+                            ClientRequestKind::CancelTurn {
+                                session: SessionKey::new(frame.session_id.clone()),
+                            },
+                        )
+                        .await
+                {
+                    let mut state = self.state.lock().await;
+                    if let Some(queue) = state.queued_turns.get_mut(&frame.session_id) {
+                        queue.retain(|queued| queued.turn_id != turn_id);
+                    }
+                    drop(state);
+                    self.remove_turn_request(&frame.session_id, &turn_id).await;
+                    return Err(error);
+                }
+                return Ok(output);
+            }
+            let submission = self
+                .submit_service(
+                    &frame.session_id,
+                    ClientRequestKind::SendMessage {
+                        session: Some(SessionKey::new(frame.session_id.clone())),
+                        text: queued_turn.text,
+                        attachments: queued_turn.attachments,
+                        budget: queued_turn.budget,
+                        reasoning: queued_turn.reasoning,
+                        output: Vec::new(),
+                        response_format: queued_turn.response_format,
+                        metadata: queued_turn.metadata,
+                        replay: false,
+                    },
+                )
+                .await;
             let mut output = Vec::new();
             if let Some(rewind_frame) = output_for_rewind {
                 output.push(rewind_frame);
             }
             output.push(accepted);
-            output.push(
-                self.emit_with_turn_id(
-                    &frame.session_id,
-                    StandardFrameType::TurnStateChanged,
-                    payload(QueuedTurnStatePayload {
-                        state: raep_types::TurnState::Queued,
-                    }),
-                    turn_id.clone(),
-                )
-                .await?,
-            );
-            if queue_mode == norte_code_wire::QueueMode::Interrupt
-                && let Err(error) = self
-                    .submit_service(
-                        &frame.session_id,
-                        ClientRequestKind::CancelTurn {
-                            session: SessionKey::new(frame.session_id.clone()),
-                        },
-                    )
-                    .await
-            {
-                let mut state = self.state.lock().await;
-                if let Some(queue) = state.queued_turns.get_mut(&frame.session_id) {
-                    queue.retain(|queued| queued.turn_id != turn_id);
+            match submission {
+                Ok(events) => output.extend(events),
+                Err(error) => {
+                    let mut state = self.state.lock().await;
+                    state.pending_output.remove(&frame.session_id);
+                    state.pending_turn_ids.remove(&frame.session_id);
+                    state.turn_reservations.remove(&frame.session_id);
+                    drop(state);
+                    self.remove_turn_request(&frame.session_id, &turn_id).await;
+                    return Err(error);
                 }
-                drop(state);
-                self.remove_turn_request(&frame.session_id, &turn_id).await;
-                return Err(error);
             }
-            return Ok(output);
+            Ok(output)
         }
-        let submission = self
-            .submit_service(
-                &frame.session_id,
-                ClientRequestKind::SendMessage {
-                    session: Some(SessionKey::new(frame.session_id.clone())),
-                    text: queued_turn.text,
-                    attachments: queued_turn.attachments,
-                    budget: queued_turn.budget,
-                    reasoning: queued_turn.reasoning,
-                    output: Vec::new(),
-                    response_format: queued_turn.response_format,
-                    metadata: queued_turn.metadata,
-                    replay: false,
-                },
-            )
-            .await;
-        let mut output = Vec::new();
-        if let Some(rewind_frame) = output_for_rewind {
-            output.push(rewind_frame);
+        .await;
+        if outcome.is_err() {
+            self.release_turn(&frame.session_id, &turn_id).await;
         }
-        output.push(accepted);
-        match submission {
-            Ok(events) => output.extend(events),
-            Err(error) => {
-                let mut state = self.state.lock().await;
-                state.pending_output.remove(&frame.session_id);
-                state.pending_turn_ids.remove(&frame.session_id);
-                state.turn_reservations.remove(&frame.session_id);
-                drop(state);
-                self.remove_turn_request(&frame.session_id, &turn_id).await;
-                return Err(error);
-            }
-        }
-        Ok(output)
+        outcome
     }
     pub(crate) async fn cancel(
         &self,
