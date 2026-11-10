@@ -44,15 +44,17 @@ pub struct Agent {
     pub origin_url: Option<String>,
     /// Person or organization that publishes the agent.
     pub author: Option<String>,
-    /// Agent used for delegated `subagent` turns.
+    /// Agent a delegation uses when the request names none.
     ///
-    /// `None` keeps the parent session's model. When set, the name must refer
-    /// to another configured agent; that agent supplies the child defaults.
-    pub subagent: Option<String>,
+    /// `None` keeps the parent session's profile. When set, the name must
+    /// refer to another configured agent; that agent supplies the child
+    /// defaults, and it must also appear in `delegates`.
+    #[serde(alias = "subagent")]
+    pub default_subagent_delegation: Option<String>,
     /// Agent ids this profile may delegate to.
     ///
-    /// An empty list disables delegation. `subagent`, when set, is the default
-    /// target and must also appear here.
+    /// An empty list disables delegation. `default_subagent_delegation`, when
+    /// set, is the default target and must also appear here.
     pub delegates: Vec<String>,
     /// The provider a new session uses when none is named.
     ///
@@ -245,19 +247,19 @@ impl ServiceConfig {
                     ));
                 }
             }
-            if let Some(subagent) = &agent.subagent
+            if let Some(subagent) = &agent.default_subagent_delegation
                 && !names.contains(subagent)
             {
                 return Err(invalid(
-                    format!("agents.{}.subagent", agent.name),
+                    format!("agents.{}.default_subagent_delegation", agent.name),
                     format!("does not name a configured agent: {subagent}"),
                 ));
             }
-            if let Some(subagent) = &agent.subagent
+            if let Some(subagent) = &agent.default_subagent_delegation
                 && !delegates.contains(subagent)
             {
                 return Err(invalid(
-                    format!("agents.{}.subagent", agent.name),
+                    format!("agents.{}.default_subagent_delegation", agent.name),
                     format!("default subagent `{subagent}` must also appear in delegates"),
                 ));
             }
@@ -367,7 +369,7 @@ impl Default for Agent {
             description: None,
             origin_url: None,
             author: None,
-            subagent: None,
+            default_subagent_delegation: None,
             delegates: Vec::new(),
             default_provider: None,
             default_model: None,
@@ -1998,13 +2000,17 @@ mod subagent_tests {
     #[test]
     fn subagent_defaults_to_the_parent_agent() {
         let loaded = Config::from_json("{}").expect("empty config");
-        assert_eq!(loaded.config.subagent, None);
+        assert_eq!(loaded.config.default_subagent_delegation, None);
     }
 
     #[test]
     fn subagent_agent_round_trips() {
-        let loaded = Config::from_json(r#"{"subagent":"research"}"#).expect("config");
-        assert_eq!(loaded.config.subagent.as_deref(), Some("research"));
+        let loaded =
+            Config::from_json(r#"{"default_subagent_delegation":"research"}"#).expect("config");
+        assert_eq!(
+            loaded.config.default_subagent_delegation.as_deref(),
+            Some("research")
+        );
     }
 
     #[test]
@@ -2013,7 +2019,7 @@ mod subagent_tests {
             default_agent: "main".to_owned(),
             agents: vec![Agent {
                 name: "main".to_owned(),
-                subagent: Some("missing".to_owned()),
+                default_subagent_delegation: Some("missing".to_owned()),
                 ..Agent::default()
             }],
             ..ServiceConfig::default()

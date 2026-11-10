@@ -7,8 +7,9 @@
       "description": "Norte Code",
       "origin_url": "https://github.com/JeanVydes/NorteCode/default/service.json",
       "author": "Jean Vides",
-      "subagent": "norte-code-subagent",
-      "delegates": ["norte-code-subagent"],
+      "delegates": [
+        "norte-code-subagent"
+      ],
       "version": 1,
       "default_provider": null,
       "default_model": null,
@@ -68,14 +69,14 @@
         "honor_allowed_tools": false,
         "max_skills": 128
       },
-      "mcpServers": {}
+      "mcpServers": {},
+      "default_subagent_delegation": "norte-code-subagent"
     },
     {
       "name": "norte-code-subagent",
       "description": "Default delegated agent used by norte-code",
       "origin_url": null,
       "author": "Jean Vides",
-      "subagent": null,
       "delegates": [],
       "version": 1,
       "default_provider": null,
@@ -136,7 +137,8 @@
         "honor_allowed_tools": false,
         "max_skills": 128
       },
-      "mcpServers": {}
+      "mcpServers": {},
+      "default_subagent_delegation": null
     }
   ]
 }
