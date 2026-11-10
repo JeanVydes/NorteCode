@@ -3559,6 +3559,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "futures-util",
+ "js-sys",
  "norte-code-wire",
  "raep-types",
  "reqwest",

@@ -650,3 +650,22 @@ pub enum AgentChange {
     /// The skills were rescanned.
     SkillsUpdated,
 }
+
+/// The receipt of one uploaded artifact.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct UploadReceipt {
+    /// The opaque upload id a user input references.
+    pub upload_id: String,
+    /// The MIME type the client sent.
+    #[serde(default)]
+    pub mime_type: String,
+    /// How many bytes were stored.
+    #[serde(default)]
+    pub bytes: u64,
+    /// The digest of the stored bytes.
+    #[serde(default)]
+    pub sha256: String,
+    /// When the upload stops being retained.
+    #[serde(default)]
+    pub expires_at: i64,
+}
