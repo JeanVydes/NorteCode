@@ -162,7 +162,10 @@ pub(super) fn ComposerModel(session_id: String) -> Element {
                     }
                 });
             },
-            if catalogue.is_empty() {
+            if current.is_empty() {
+                option { value: "", selected: true, disabled: true, "No model selected" }
+            }
+            if catalogue.is_empty() && !current.is_empty() {
                 option { value: "{current}", "{current}" }
             }
             // The session may run on a model the catalogue does not list, a
@@ -206,6 +209,16 @@ pub(super) fn send(
     let Some(session) = context.selected_session.read().clone() else {
         return;
     };
+    if session
+        .model
+        .as_ref()
+        .is_none_or(|model| model.id.trim().is_empty())
+    {
+        context.set_page_error(Some(
+            "Choose a model for this session before sending.".to_owned(),
+        ));
+        return;
+    }
     let session_id = session.session_id.clone();
     let queue_mode = *context.queue_mode.read();
     let media = selected_agent(context)
