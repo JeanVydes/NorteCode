@@ -27,6 +27,25 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Reads a capability the server advertises.
+    #[must_use]
+    pub fn from_wire(capability: &str) -> Self {
+        match capability {
+            "transport.ws" => Self::WebSocket,
+            "transport.sse" => Self::ServerSentEvents,
+            "resume" => Self::Resume,
+            "history" => Self::History,
+            "uploads" => Self::Uploads,
+            "output.parts" => Self::OutputParts,
+            "X_NORTECODE_JOBS_BASIC" => Self::JobsBasic,
+            "X_NORTECODE_FORK_TEXT" => Self::ForkText,
+            "X_NORTECODE_COMPACTION_BASIC" => Self::CompactionBasic,
+            "X_NORTECODE_DELEGATION_BASIC" => Self::DelegationBasic,
+            "delegation" => Self::Delegation,
+            _ => Self::Other,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::WebSocket => "WebSocket transport",

@@ -1,4 +1,4 @@
-use crate::api::{ApiClient, Liveness, Readiness};
+use crate::api::{ApiClient, Liveness, Readiness, ServerInfoExt};
 use crate::components::{EmptyState, MetricCard, PageHeader};
 use crate::state::AppContext;
 use dioxus::prelude::*;
@@ -112,7 +112,7 @@ pub fn DeveloperPage() -> Element {
             section { class: "panel", style: "margin-top: 1rem",
                 div { class: "section-heading", h2 { "Negotiated capabilities" } }
                 div { class: "capability-list",
-                    for capability in info.capabilities {
+                    for capability in info.decoded_capabilities() {
                         span { class: "capability-chip", key: "{capability:?}", "{capability.label()}" }
                     }
                 }

@@ -157,10 +157,7 @@ fn export_session(context: &AppContext, session_id: String, mut export_url: Sign
             return;
         };
         match client.export_session(&session_id).await {
-            Ok(export_id) => match client.export_url(&export_id) {
-                Ok(url) => export_url.set(url),
-                Err(error) => context.set_page_error(Some(error.to_string())),
-            },
+            Ok(export_id) => export_url.set(client.export_url(&export_id)),
             Err(error) => {
                 context.set_page_error(Some(format!("Could not export the session: {error}")));
             }
@@ -186,11 +183,11 @@ fn set_budget(context: &AppContext, session_id: String, limit: f64) {
 }
 
 fn delegation_supported(context: &AppContext) -> bool {
-    context
-        .server_info
-        .read()
-        .as_ref()
-        .is_some_and(|info| info.capabilities.contains(&Capability::DelegationBasic))
+    context.server_info.read().as_ref().is_some_and(|info| {
+        info.capabilities
+            .iter()
+            .any(|capability| Capability::from_wire(capability) == Capability::DelegationBasic)
+    })
 }
 
 fn client(context: &AppContext) -> Option<ApiClient> {

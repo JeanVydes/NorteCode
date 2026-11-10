@@ -1,5 +1,5 @@
 use super::*;
-use raep_types::FrameType;
+use raep_types::{Envelope, FrameType, StandardFrameType};
 use serde_json::Value;
 
 fn frame(kind: FrameType, payload: Value) -> Envelope<Value> {

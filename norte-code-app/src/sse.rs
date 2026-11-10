@@ -78,12 +78,10 @@ impl SessionEventStream {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn connect(
-        client: &reqwest::Client,
-        url: &str,
-        bearer_token: Option<&str>,
-    ) -> Result<Self, ApiError> {
-        let mut request = client.get(url).header("Accept", "text/event-stream");
+    pub(crate) async fn connect(url: &str, bearer_token: Option<&str>) -> Result<Self, ApiError> {
+        let mut request = reqwest::Client::new()
+            .get(url)
+            .header("Accept", "text/event-stream");
         if let Some(token) = bearer_token.filter(|token| !token.is_empty()) {
             request = request.bearer_auth(token);
         }
