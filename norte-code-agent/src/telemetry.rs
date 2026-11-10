@@ -40,17 +40,28 @@ pub struct EngineCounters {
     errors: AtomicU64,
 }
 
+/// What the engine counters held at one moment.
+#[derive(serde::Serialize)]
+struct EngineSnapshot {
+    requests: u64,
+    stream_deltas: u64,
+    tool_calls: u64,
+    commits: u64,
+    errors: u64,
+}
+
 impl EngineCounters {
     /// A snapshot for diagnostics.
     #[must_use]
     pub fn snapshot(&self) -> Value {
-        json!({
-            "requests": self.requests.load(Ordering::Relaxed),
-            "stream_deltas": self.stream_deltas.load(Ordering::Relaxed),
-            "tool_calls": self.tool_calls.load(Ordering::Relaxed),
-            "commits": self.commits.load(Ordering::Relaxed),
-            "errors": self.errors.load(Ordering::Relaxed),
+        serde_json::to_value(EngineSnapshot {
+            requests: self.requests.load(Ordering::Relaxed),
+            stream_deltas: self.stream_deltas.load(Ordering::Relaxed),
+            tool_calls: self.tool_calls.load(Ordering::Relaxed),
+            commits: self.commits.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
         })
+        .unwrap_or(Value::Null)
     }
 }
 

@@ -37,6 +37,7 @@ mod sessions;
 mod skill_catalog;
 mod skills;
 mod steering;
+mod subagent_views;
 mod subagents;
 mod tool_rules;
 mod tooling;
