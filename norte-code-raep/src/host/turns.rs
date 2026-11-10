@@ -1206,13 +1206,17 @@ impl NorteCodeRaepHost {
                     .await?,
             );
             if let Some(turn) = finished_tool_turn {
-                let turn_id = self
-                    .state
-                    .lock()
-                    .await
-                    .turn_aliases
-                    .get(&(event_session.clone(), turn))
-                    .cloned();
+                let turn_id = {
+                    let state = self.state.lock().await;
+                    let alias = state
+                        .turn_aliases
+                        .get(&(event_session.clone(), turn))
+                        .cloned();
+                    // A stopped turn has already been released: announcing
+                    // that the provider is being called again would promise a
+                    // request that is not coming.
+                    alias.filter(|id| state.active_turns.get(&event_session) == Some(id))
+                };
                 if let Some(turn_id) = turn_id {
                     output.push(
                         self.emit_with_turn_id(

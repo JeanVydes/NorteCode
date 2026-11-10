@@ -250,6 +250,10 @@ impl QuestionBroker {
             );
         }
         let outcome = tokio::select! {
+            // Cancellation first: `abandon_session` drops the sender in the
+            // same breath, and a random pick reported "the question was
+            // dropped" instead of the cancellation that caused it.
+            biased;
             () = context.cancelled() => {
                 Err("the turn was cancelled while waiting for an answer".to_owned())
             }
