@@ -71,6 +71,11 @@
 - Split app client-data, event, and session-state handling into focused modules;
   split provider catalogue form behavior from the catalogue view.
 - Strict Clippy warnings addressed in the TUI and related client/agent crates.
+- Retry progress: the host's `norte_code.retry_scheduled` / `retry_started`
+  frames decode to `RetryScheduled` / `RetryStarted`, the transcript shows the
+  attempt, the delay and the reason, and a model that refuses a reasoning
+  effort falls back to auto with a clear status line, so a refused turn does
+  not wedge the session or error after retry.
 - Shared client: the host's refusal is read from its error envelope, so a
   refusal reads as a sentence instead of raw JSON, and a session that was
   detached while the client held it is attached again and the request sent once
@@ -123,10 +128,14 @@
 ## Verification
 
 - `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
-Latest results: formatting and strict Clippy passed; 101 TUI, 39 client, 199
+`--all-features` is not a supported verification here: `norte-code-app` builds
+GTK through the `desktop` feature and the system has no GDK, so that command
+fails before it reaches the crates.
+
+Latest results: formatting and strict Clippy passed; 103 TUI, 39 client, 199
 agent, and 71 RAEP tests passed. One agent test and two agent doctests are
 ignored. The RAEP test suite includes export endpoint coverage; the agent suite
 includes budget and manual-compaction coverage.
