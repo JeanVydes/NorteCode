@@ -560,6 +560,9 @@ impl PlanTool {
                 Ok(()) => plan_output(&self.plans, session, id, "Plan rejected.").await,
                 Err(error) => ToolOutput::error(format!("could not reject the plan: {error}")),
             },
+            Ok(feedback) if !feedback.trim().is_empty() => {
+                ToolOutput::text(plan_feedback_message(feedback))
+            }
             Ok(other) => ToolOutput::error(format!(
                 "unexpected plan approval response `{other}`; the plan remains pending"
             )),
@@ -667,6 +670,15 @@ impl FnExecutor<PlanArgs, ToolOutput> for PlanTool {
             },
         })
     }
+}
+
+fn plan_feedback_message(feedback: &str) -> String {
+    let mut message = String::from("The user requested changes to this pending plan:\n");
+    message.push_str(feedback.trim());
+    message.push_str(
+        "\nKeep the plan pending, revise it with the plan tool, then request approval again.",
+    );
+    message
 }
 
 async fn plan_output(
