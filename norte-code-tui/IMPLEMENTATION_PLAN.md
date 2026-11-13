@@ -103,11 +103,13 @@
 4. **Developer mode:** Its value is migrated and persisted, but it does not yet
    gate or change diagnostics; define its intended behavior before treating
    that preference as functional.
-5. **The TUI has no live stream outside a turn:** The TUI now opens one event
-   stream per session and keeps it open, the same way the app does, so it sees
-   the events of the session whether a turn is running or not. The stream is
-   the attachment: the host binds the session to it and releases it when the
-   stream closes, which happens when another session is opened.
+5. **One event stream per session, with reconnection:** The stream is the
+   attachment: the host binds the session to it and releases it when the
+   stream closes. If the connection drops, the interface takes the stream
+   again with backoff and reloads the history, so a dropped turn is filled in
+   instead of lost silently. The chips of a message are visual only; the host
+   does not keep them in the history, so a message that arrives from the
+   history is drawn without chips.
 6. **The app still reads the event stream itself:** `norte-code-app/src/sse.rs`
    holds the app's own platform transport for the event stream. It belongs in
    `norte-code-client`, which already owns the decoder and the endpoint
@@ -124,7 +126,7 @@
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace`
 
-Latest results: formatting and strict Clippy passed; 96 TUI, 39 client, 199
+Latest results: formatting and strict Clippy passed; 101 TUI, 39 client, 199
 agent, and 71 RAEP tests passed. One agent test and two agent doctests are
 ignored. The RAEP test suite includes export endpoint coverage; the agent suite
 includes budget and manual-compaction coverage.

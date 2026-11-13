@@ -39,11 +39,7 @@ impl App {
     pub(super) fn replace_history(&mut self, history: Vec<norte_code_wire::HistoryItem>) {
         self.model.turn_points = turn_points(&history);
         let current = std::mem::take(&mut self.model.transcript);
-        self.model.transcript = super::actions::transcript_with_history(
-            history,
-            current,
-            self.model.turn_state.is_busy(),
-        );
+        self.model.transcript = super::actions::transcript_with_history(history, current, true);
     }
 
     /// Opens a session from a clean state.
@@ -78,7 +74,7 @@ impl App {
         self.model.turn_state = TurnState::Idle;
         self.give_to_session_view(crate::components::ComponentEvent::SessionOpened);
         self.client
-            .resume(session.clone(), self.session_generation, agent_id.clone());
+            .resume(&session, self.session_generation, agent_id.clone());
         self.client
             .load_plans(session.clone(), self.session_generation);
         self.client

@@ -206,6 +206,21 @@ impl TextBuilder {
         Line::from(format!("{}  {error}", Self::error_label()))
     }
 
+    /// The line for a refused request: what the host said and why.
+    #[must_use]
+    pub fn host_error(code: norte_code_wire::ErrorCode, message: &str) -> Line<'static> {
+        let label = match code {
+            norte_code_wire::ErrorCode::InvalidRequest => "request",
+            norte_code_wire::ErrorCode::NotFound => "not found",
+            norte_code_wire::ErrorCode::Conflict => "conflict",
+            norte_code_wire::ErrorCode::Capability => "capability",
+            norte_code_wire::ErrorCode::Budget => "budget",
+            norte_code_wire::ErrorCode::Provider => "provider",
+            _ => "host",
+        };
+        Line::from(format!("{label}  {message}"))
+    }
+
     #[must_use]
     pub fn diff_unavailable() -> Line<'static> {
         Line::from(Self::diff_unavailable_label())
