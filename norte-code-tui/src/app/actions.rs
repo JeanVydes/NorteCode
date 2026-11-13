@@ -9,11 +9,103 @@ use crate::{
 /// The capability a host advertises when it accepts uploads.
 const UPLOADS_CAPABILITY: &str = "uploads";
 
+/// The delta a server event carries, as plain text.
+fn delta_text(event: &norte_code_wire::ServerEvent) -> Option<&str> {
+    match &event.kind {
+        ServerEventKind::Delta {
+            delta:
+                norte_code_wire::Delta::Text { text, .. }
+                | norte_code_wire::Delta::Refusal { text, .. }
+                | norte_code_wire::Delta::Reasoning { text, .. },
+            ..
+        } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// The text a run of deltas adds to.
+fn aggregated_text(items: &[TranscriptItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::ServerEvent(event) => delta_text(event),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The reasoning a run of deltas adds to.
+fn reasoning_text(items: &[TranscriptItem]) -> String {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::ServerEvent(event) => match &event.kind {
+                ServerEventKind::Delta {
+                    delta: norte_code_wire::Delta::Reasoning { text, .. },
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The pieces of a live transcript that a history has replaced.
+pub(super) fn drop_replaced_deltas(
+    history: &[norte_code_wire::HistoryItem],
+    current: Vec<TranscriptItem>,
+) -> Vec<TranscriptItem> {
+    let aggregate = aggregated_text(&current);
+    let reasoning = reasoning_text(&current);
+    let text_replayed = !aggregate.is_empty()
+        && history.iter().any(|item| {
+            item.role == norte_code_wire::HistorySpeaker::Assistant
+                && item.content.contains(&aggregate)
+        });
+    let reasoning_replayed = !reasoning.is_empty()
+        && history
+            .iter()
+            .any(|item| item.kind == "reasoning" && item.content.contains(&reasoning));
+    current
+        .into_iter()
+        .filter(|item| match item {
+            TranscriptItem::ServerEvent(event) => match &event.kind {
+                ServerEventKind::Delta { delta, .. } => {
+                    let text_item = matches!(
+                        delta,
+                        norte_code_wire::Delta::Text { .. }
+                            | norte_code_wire::Delta::Refusal { .. }
+                    );
+                    let reasoning_item = matches!(delta, norte_code_wire::Delta::Reasoning { .. });
+                    if text_item {
+                        return !text_replayed;
+                    }
+                    if reasoning_item {
+                        return !reasoning_replayed;
+                    }
+                    !text_replayed && !reasoning_replayed
+                }
+                ServerEventKind::ToolStarted { .. }
+                | ServerEventKind::ToolOutput { .. }
+                | ServerEventKind::ToolFinished { .. } => !text_replayed,
+                _ => true,
+            },
+            _ => true,
+        })
+        .collect()
+}
+
 pub(super) fn transcript_with_history(
     history: Vec<norte_code_wire::HistoryItem>,
     current: Vec<TranscriptItem>,
     preserve_live: bool,
 ) -> Vec<TranscriptItem> {
+    let current = if preserve_live {
+        drop_replaced_deltas(&history, current)
+    } else {
+        current
+    };
     let mut transcript = history
         .into_iter()
         .map(TranscriptItem::History)

@@ -310,9 +310,9 @@ impl TranscriptRenderer {
                 Self::flush_buffers(lines, assistant, reasoning, options);
                 lines.extend(Self::replayed_lines(*role, *kind, text, width, theme));
             }
-            ServerEventKind::Error { message, .. } => {
+            ServerEventKind::Error { code, message } => {
                 Self::flush_buffers(lines, assistant, reasoning, options);
-                lines.push(TextBuilder::transcript_error(message));
+                lines.push(TextBuilder::host_error(*code, message));
             }
             _ => {}
         }

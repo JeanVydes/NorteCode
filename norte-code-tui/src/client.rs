@@ -21,6 +21,77 @@ mod uploads;
 
 use crate::config::ClientConfig;
 
+/// How long to wait before opening the stream again.
+fn reconnect_delay(attempt: u32) -> u64 {
+    const MAX: u64 = 15_000;
+    const BASE: u64 = 500;
+    BASE.saturating_mul(1_u64 << attempt.min(5)).min(MAX)
+}
+
+/// Reads one stream lifetime.
+///
+/// Returns the attempt counter to use for the next reconnect. A stream that
+/// opened once resets the counter; one that never opened keeps the count so
+/// the wait stays sane.
+#[allow(clippy::too_many_arguments)]
+async fn pump_stream(
+    client: &RemoteClient,
+    api: &RestClient,
+    sender: &tokio::sync::mpsc::Sender<ClientEvent>,
+    session: &SessionKey,
+    generation: u64,
+    mut attempt: u32,
+) -> u32 {
+    match client.open_events(session.as_str()).await {
+        Ok(mut stream) => {
+            attempt = 0;
+            if sender
+                .send(ClientEvent::Attached {
+                    session: session.clone(),
+                    generation,
+                })
+                .await
+                .is_err()
+            {
+                return attempt;
+            }
+            let result = api.history(session.as_str()).await.map(ClientData::History);
+            let _ = sender
+                .send(ClientEvent::Data {
+                    session: Some(session.clone()),
+                    generation,
+                    result: Box::new(result.map_err(Into::into)),
+                })
+                .await;
+            while let Some(event) = stream.next().await {
+                if sender
+                    .send(ClientEvent::Server {
+                        session: session.clone(),
+                        generation,
+                        event: Box::new(event),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return attempt;
+                }
+            }
+            attempt = attempt.saturating_add(1);
+        }
+        Err(error) => {
+            let _ = sender
+                .send(ClientEvent::AttachmentFailure {
+                    session: session.clone(),
+                    generation,
+                    message: error.to_string(),
+                })
+                .await;
+            attempt = attempt.saturating_add(1);
+        }
+    }
+    attempt
+}
+
 /// The queue policy the host spells for a mode.
 fn queue_policy(mode: QueueMode) -> &'static str {
     match mode {
@@ -59,6 +130,11 @@ pub(crate) enum ClientEvent {
         session: SessionKey,
         generation: u64,
         message: String,
+    },
+    StreamClosed {
+        session: SessionKey,
+        generation: u64,
+        attempt: u32,
     },
     Imported {
         session: SessionKey,
@@ -204,7 +280,9 @@ impl ClientRuntime {
     /// The stream is the attachment: the host binds the session to it and
     /// releases it when the stream closes. Keeping it open means the reader
     /// sees every event of the session, whether a turn is running or not.
-    pub(crate) fn resume(&self, session: SessionKey, generation: u64, agent_id: Option<String>) {
+    /// If the stream dies, the task takes it again with backoff until the
+    /// session is closed or another one is opened.
+    pub(crate) fn resume(&self, session: &SessionKey, generation: u64, agent_id: Option<String>) {
         if let Some(agent_id) = agent_id {
             self.client.set_session_agent(session.as_str(), agent_id);
         }
@@ -214,52 +292,31 @@ impl ClientRuntime {
         let api = Arc::clone(&self.api);
         let sender = self.sender.clone();
         let handle = self.runtime.spawn(async move {
-            match client.open_events(request_session.as_str()).await {
-                Ok(mut stream) => {
-                    if sender
-                        .send(ClientEvent::Attached {
-                            session: request_session.clone(),
-                            generation,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let result = api
-                        .history(request_session.as_str())
-                        .await
-                        .map(ClientData::History);
-                    let _ = sender
-                        .send(ClientEvent::Data {
-                            session: Some(request_session.clone()),
-                            generation,
-                            result: Box::new(result.map_err(Into::into)),
-                        })
-                        .await;
-                    while let Some(event) = stream.next().await {
-                        if sender
-                            .send(ClientEvent::Server {
-                                session: request_session.clone(),
-                                generation,
-                                event: Box::new(event),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
+            let mut attempt = 0_u32;
+            loop {
+                let before = attempt;
+                attempt = pump_stream(
+                    &client,
+                    &api,
+                    &sender,
+                    &request_session,
+                    generation,
+                    attempt,
+                )
+                .await;
+                if sender
+                    .send(ClientEvent::StreamClosed {
+                        session: request_session.clone(),
+                        generation,
+                        attempt,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
-                Err(error) => {
-                    let _ = sender
-                        .send(ClientEvent::AttachmentFailure {
-                            session,
-                            generation,
-                            message: error.to_string(),
-                        })
-                        .await;
-                }
+                let delay = reconnect_delay(before);
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
         });
         self.remember_stream(handle);
@@ -488,6 +545,21 @@ impl ClientRuntime {
         let api = Arc::clone(&self.api);
         self.spawn_data(None, generation, async move {
             api.catalog_detail().await.map(ClientData::Catalog)
+        });
+    }
+
+    pub(crate) fn load_history(&self, session: SessionKey, generation: u64) {
+        let api = Arc::clone(&self.api);
+        let sender = self.sender.clone();
+        self.runtime.spawn(async move {
+            let result = api.history(session.as_str()).await.map(ClientData::History);
+            let _ = sender
+                .send(ClientEvent::Data {
+                    session: Some(session),
+                    generation,
+                    result: Box::new(result.map_err(Into::into)),
+                })
+                .await;
         });
     }
 

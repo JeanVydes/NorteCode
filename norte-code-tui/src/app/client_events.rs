@@ -21,6 +21,44 @@ impl App {
         Ok(())
     }
 
+    /// Records a successful attach, and clears the reconnecting notice.
+    fn apply_attached(&mut self) {
+        self.model.attachment_state = SessionAttachmentState::Attached;
+        if self
+            .model
+            .notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("Connection lost"))
+        {
+            self.model.notice = None;
+        }
+    }
+
+    /// Records that the open stream went away.
+    fn apply_reconnecting(&mut self, attempt: u32) {
+        self.model.attachment_state = SessionAttachmentState::Connecting;
+        self.model.notice = Some(format!(
+            "Connection lost; reconnecting (attempt {}).",
+            attempt + 1
+        ));
+    }
+
+    /// Records a rewind that arrived from the host.
+    fn apply_rewind(&mut self, removed: usize) {
+        self.model
+            .transcript
+            .push(TranscriptItem::Status(Self::rewound_message(removed)));
+        self.model.active_turn = None;
+    }
+
+    /// Applies one server event that arrived on the session's stream.
+    fn apply_server_event(&mut self, event: norte_code_wire::ServerEvent) {
+        if matches!(&event.kind, ServerEventKind::MessageReplayed { .. }) {
+            return;
+        }
+        self.handle_server_event(event);
+    }
+
     /// Applies one data event that arrived from the host.
     fn apply_data_event(
         &mut self,
@@ -62,6 +100,20 @@ impl App {
         self.model.transcript.push(TranscriptItem::Error(message));
     }
 
+    /// Restores a supported effort when the model refused one.
+    fn apply_reasoning_error(&mut self, _code: norte_code_wire::ErrorCode, message: &str) {
+        if message.contains("does not support effort")
+            && self.model.reasoning != crate::ui_model::ReasoningLevel::Automatic
+        {
+            let refused = self.model.reasoning;
+            self.model.reasoning = crate::ui_model::ReasoningLevel::Automatic;
+            self.model.transcript.push(TranscriptItem::Status(format!(
+                "Reasoning effort {} is not supported by this model; using auto.",
+                refused.label()
+            )));
+        }
+    }
+
     /// Applies one event that arrived from the host.
     fn apply_client_event(&mut self, client_event: ClientEvent) -> Result<(), super::AppError> {
         self.apply_client_event_inner(client_event)
@@ -76,17 +128,14 @@ impl App {
                 session,
                 generation,
             } if self.is_current_session_event(&session, generation) => {
-                self.model.attachment_state = SessionAttachmentState::Attached;
+                self.apply_attached();
             }
             ClientEvent::Server {
                 session,
                 generation,
                 event,
             } if self.is_current_session_event(&session, generation) => {
-                if matches!(&event.kind, ServerEventKind::MessageReplayed { .. }) {
-                    return Ok(());
-                }
-                self.handle_server_event(*event);
+                self.apply_server_event(*event);
             }
             ClientEvent::Failure {
                 session,
@@ -94,6 +143,13 @@ impl App {
                 message,
             } if self.is_current_session_event(&session, generation) => {
                 self.apply_failure(message, false);
+            }
+            ClientEvent::StreamClosed {
+                session,
+                generation,
+                attempt,
+            } if self.is_current_session_event(&session, generation) => {
+                self.apply_reconnecting(attempt);
             }
             ClientEvent::AttachmentFailure {
                 session,
@@ -107,10 +163,7 @@ impl App {
                 generation,
                 removed,
             } if self.is_current_session_event(&session, generation) => {
-                self.model
-                    .transcript
-                    .push(TranscriptItem::Status(Self::rewound_message(removed.len())));
-                self.model.active_turn = None;
+                self.apply_rewind(removed.len());
             }
             ClientEvent::Pinned {
                 session,
@@ -156,6 +209,7 @@ impl App {
             }
             ClientEvent::Attached { .. }
             | ClientEvent::AttachmentFailure { .. }
+            | ClientEvent::StreamClosed { .. }
             | ClientEvent::Server { .. }
             | ClientEvent::Failure { .. }
             | ClientEvent::Rewound { .. }
@@ -170,6 +224,9 @@ impl App {
     }
 
     fn handle_server_event(&mut self, event: norte_code_wire::ServerEvent) {
+        if let ServerEventKind::Error { code, message } = &event.kind {
+            self.apply_reasoning_error(*code, message);
+        }
         if let ServerEventKind::BudgetExceeded {
             scope,
             unit,
@@ -196,6 +253,14 @@ impl App {
         self.track_todos(&event.kind);
         self.track_model(&event.kind);
         self.track_job(&event.kind);
+        if matches!(
+            &event.kind,
+            ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
+        ) && self.model.active_child.is_none()
+            && let Some(session) = self.model.active_session.clone()
+        {
+            self.client.load_history(session, self.session_generation);
+        }
         if let Some(usage) = Self::usage_summary(&event.kind) {
             self.model.transcript.push(TranscriptItem::Usage(usage));
             return;
