@@ -222,6 +222,38 @@ impl TextBuilder {
     }
 
     #[must_use]
+    pub fn retry_scheduled(attempt: u32, delay_ms: u64, reason: &str) -> Line<'static> {
+        #[allow(clippy::cast_precision_loss)]
+        let seconds = delay_ms as f64 / 1000.0;
+        let reason = reason.trim();
+        let text = if reason.is_empty() {
+            format!("retry  attempt {attempt} in {seconds:.1}s")
+        } else {
+            let reason = Self::truncate_inline(reason, 240);
+            format!("retry  attempt {attempt} in {seconds:.1}s: {reason}")
+        };
+        Line::from(Span::styled(text, Style::default().fg(palette::warning())))
+    }
+
+    #[must_use]
+    pub fn retry_started(attempt: u32) -> Line<'static> {
+        Line::from(Span::styled(
+            format!("retry  attempt {attempt} started"),
+            Style::default().fg(palette::warning()),
+        ))
+    }
+
+    fn truncate_inline(text: &str, max_chars: usize) -> String {
+        let mut chars = text.chars();
+        let taken: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{taken}...")
+        } else {
+            taken
+        }
+    }
+
+    #[must_use]
     pub fn diff_unavailable() -> Line<'static> {
         Line::from(Self::diff_unavailable_label())
     }

@@ -49,19 +49,17 @@ impl RestClient {
         frame.turn_id = Some(turn_id.clone());
         let response = self.post_command(session, &frame).await?;
         accepted(response.clone(), "The message was rejected.")?;
-        let accepted_turn =
-            response
-                .events
-                .iter()
-                .find_map(|event| match crate::decode_frame(event) {
-                    Ok(decoded) => match decoded.event.kind {
-                        norte_code_wire::ServerEventKind::InputAccepted { turn_id, .. } => {
-                            TurnId::new(turn_id).ok()
-                        }
-                        _ => None,
-                    },
-                    Err(_) => None,
-                });
+        let accepted_turn = response.events.iter().find_map(|event| {
+            match crate::decode_frame(event).ok().flatten() {
+                Some(decoded) => match decoded.event.kind {
+                    norte_code_wire::ServerEventKind::InputAccepted { turn_id, .. } => {
+                        TurnId::new(turn_id).ok()
+                    }
+                    _ => None,
+                },
+                None => None,
+            }
+        });
         Ok(accepted_turn.unwrap_or(turn_id))
     }
 
@@ -90,7 +88,7 @@ impl RestClient {
         Ok(response
             .events
             .iter()
-            .filter_map(|event| crate::decode_frame(event).ok())
+            .filter_map(|event| crate::decode_frame(event).ok().flatten())
             .find_map(|decoded| match decoded.event.kind {
                 norte_code_wire::ServerEventKind::HistoryRewound {
                     rewound_turn_ids, ..
@@ -124,7 +122,7 @@ impl RestClient {
         response
             .events
             .iter()
-            .filter_map(|event| crate::decode_frame(event).ok())
+            .filter_map(|event| crate::decode_frame(event).ok().flatten())
             .find(|decoded| {
                 matches!(
                     decoded.event.kind,

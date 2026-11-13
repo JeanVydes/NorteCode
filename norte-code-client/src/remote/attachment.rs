@@ -16,11 +16,24 @@ impl RemoteClient {
     ///
     /// The host is the one that decides whether a session is attached, so the
     /// client drops its belief as soon as the host says otherwise.
-    pub(crate) fn forget_attachment(&self, session_id: &str) {
+    pub fn forget_attachment(&self, session_id: &str) {
         self.attached_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session_id);
+    }
+
+    /// Forgets and re-establishes the session attachment.
+    ///
+    /// Use when the host reports that the session is not attached and the next
+    /// operation must recover before retrying.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the attach request fails.
+    pub async fn recover_attachment(&self, session: &str) -> Result<(), ClientError> {
+        self.forget_attachment(session);
+        self.ensure_attached(session).await
     }
 
     /// Sends a request that needs the session attached, and recovers from a
@@ -39,8 +52,7 @@ impl RemoteClient {
     {
         match request().await {
             Err(error) if error.is_session_not_attached() => {
-                self.forget_attachment(session);
-                self.ensure_attached(session).await?;
+                self.recover_attachment(session).await?;
                 request().await
             }
             other => other,

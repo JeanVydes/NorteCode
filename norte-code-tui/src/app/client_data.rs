@@ -125,11 +125,32 @@ impl App {
 
     fn apply_client_error(&mut self, error: &ClientOperationError, destination: ErrorDestination) {
         let message = error.to_string();
+        let recovered = message.contains("does not support effort")
+            && self.model.reasoning != crate::ui_model::ReasoningLevel::Automatic
+            && {
+                self.model.reasoning = crate::ui_model::ReasoningLevel::Automatic;
+                true
+            };
         match destination {
             ErrorDestination::Transcript => {
+                if recovered {
+                    self.model.transcript.push(TranscriptItem::Status(
+                        "Reasoning effort is not supported by this model; using auto.".to_owned(),
+                    ));
+                }
                 self.model.transcript.push(TranscriptItem::Error(message));
             }
             ErrorDestination::Notice => self.model.notice = Some(message),
+        }
+        if recovered
+            && matches!(destination, ErrorDestination::Transcript)
+            && let Some(session) = self.model.active_session.clone()
+        {
+            self.client.set_reasoning(
+                session,
+                crate::ui_model::ReasoningLevel::Automatic,
+                self.session_generation,
+            );
         }
     }
 }

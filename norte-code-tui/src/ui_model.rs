@@ -81,6 +81,18 @@ impl ReasoningLevel {
         }
     }
 
+    pub(crate) fn from_wire_name(name: &str) -> Option<Self> {
+        let normalized = name.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "auto" | "automatic" => Some(Self::Automatic),
+            "off" | "disabled" | "none" => Some(Self::Disabled),
+            "low" | "minimal" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" | "max" | "xhigh" => Some(Self::High),
+            _ => None,
+        }
+    }
+
     pub(crate) fn to_wire(self) -> norte_code_wire::Reasoning {
         match self {
             Self::Automatic => norte_code_wire::Reasoning::Automatic,

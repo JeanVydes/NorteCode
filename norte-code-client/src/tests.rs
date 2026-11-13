@@ -25,7 +25,9 @@ fn decodes_a_standard_payload() {
         serde_json::json!({"delta": "canonical", "index": 2, "channel": "text"}),
     );
     frame.turn_id = raep_types::TurnId::new("7").ok();
-    let event = server_event_from_frame(&frame).expect("standard token delta");
+    let event = server_event_from_frame(&frame)
+        .expect("standard token delta")
+        .expect("standard token delta event");
     assert!(matches!(
         event.kind,
         norte_code_wire::ServerEventKind::Delta {
@@ -71,7 +73,9 @@ fn decodes_history_pages_with_flat_or_raep_content() {
             "session-1",
             payload,
         );
-        let event = server_event_from_frame(&frame).expect("history page");
+        let event = server_event_from_frame(&frame)
+            .expect("history page")
+            .expect("history page event");
         assert!(matches!(
             event.kind,
             norte_code_wire::ServerEventKind::HistoryPage { ref items, .. }
@@ -105,7 +109,9 @@ fn decodes_a_standard_tool_start() {
         }),
     );
     frame.turn_id = raep_types::TurnId::new("3").ok();
-    let event = server_event_from_frame(&frame).expect("standard tool start");
+    let event = server_event_from_frame(&frame)
+        .expect("standard tool start")
+        .expect("standard tool start event");
     assert!(matches!(
         event.kind,
         norte_code_wire::ServerEventKind::ToolStarted { turn: 3, ref call_id, ref tool, .. }
@@ -190,7 +196,9 @@ fn decodes_a_bare_extension_payload() {
             "multiple": false,
         }),
     );
-    let event = server_event_from_frame(&frame).expect("bare extension payload");
+    let event = server_event_from_frame(&frame)
+        .expect("bare extension payload")
+        .expect("bare extension payload event");
     assert!(matches!(
         event.kind,
         norte_code_wire::ServerEventKind::QuestionAsked {
@@ -217,7 +225,9 @@ fn decodes_canonical_service_data_without_the_compatibility_extension() {
             }]
         }),
     );
-    let event = server_event_from_frame(&frame).expect("canonical service event");
+    let event = server_event_from_frame(&frame)
+        .expect("canonical service event")
+        .expect("canonical service event event");
     assert!(matches!(
         event.kind,
         norte_code_wire::ServerEventKind::ToolList { ref tools }
@@ -242,7 +252,9 @@ fn decodes_canonical_session_stats_and_jobs() {
             "context_window": 100
         }),
     );
-    let event = server_event_from_frame(&stats).expect("canonical stats");
+    let event = server_event_from_frame(&stats)
+        .expect("canonical stats")
+        .expect("canonical stats event");
     assert!(matches!(
         event.kind,
         norte_code_wire::ServerEventKind::SessionStats {
@@ -260,7 +272,9 @@ fn decodes_canonical_session_stats_and_jobs() {
             "jobs": []
         }),
     );
-    let event = server_event_from_frame(&jobs).expect("canonical jobs");
+    let event = server_event_from_frame(&jobs)
+        .expect("canonical jobs")
+        .expect("canonical jobs event");
     assert!(matches!(
         event.kind,
         norte_code_wire::ServerEventKind::JobList { ref jobs } if jobs.is_empty()
@@ -421,5 +435,66 @@ fn keeps_a_multibyte_character_split_across_chunks() {
         drained[0].0.as_ref().unwrap().kind,
         norte_code_wire::ServerEventKind::SessionCreated { title: Some(ref title) }
             if title == "café"
+    ));
+}
+#[test]
+fn decodes_bare_retry_extension_payloads() {
+    let scheduled = frame(
+        FrameType::Extension("norte_code.retry_scheduled".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "turn_id": 4,
+            "attempt": 2,
+            "delay_ms": 1500,
+            "reason": "Rate limit exceeded"
+        }),
+    );
+    let event = server_event_from_frame(&scheduled)
+        .expect("retry scheduled")
+        .expect("retry scheduled event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::RetryScheduled {
+            turn: 4,
+            attempt: 2,
+            delay_ms: 1500,
+            ref reason
+        } if reason == "Rate limit exceeded"
+    ));
+
+    let started = frame(
+        FrameType::Extension("norte_code.retry_started".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "turn_id": 4,
+            "attempt": 2
+        }),
+    );
+    let event = server_event_from_frame(&started)
+        .expect("retry started")
+        .expect("retry started event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::RetryStarted {
+            turn: 4,
+            attempt: 2
+        }
+    ));
+}
+
+#[test]
+fn surfaces_unsupported_bare_extension_as_protocol_error() {
+    let unknown = frame(
+        FrameType::Extension("norte_code.unknown_thing".to_owned()),
+        "session-1",
+        serde_json::json!({ "foo": "bar" }),
+    );
+    let event = server_event_from_frame(&unknown)
+        .expect("protocol error event")
+        .expect("protocol error event value");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::Error { code: norte_code_wire::ErrorCode::Internal, ref message }
+            if message.contains("unsupported RAEP extension event")
     ));
 }

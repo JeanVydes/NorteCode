@@ -82,18 +82,25 @@ pub fn history_items(payload: &Value) -> Result<Vec<norte_code_wire::HistoryItem
 
 /// Decodes one RAEP frame into the protocol event plus envelope metadata.
 ///
+/// Returns `Ok(None)` for a recognized frame that intentionally produces no
+/// client event (for example, a standard control frame this client does not
+/// surface) while still allowing callers to account for its sequence.
+///
 /// # Errors
 ///
-/// Returns [`ClientError`] when the frame is not a valid Norte Code event or
-/// the canonical payload does not match its declared kind.
-pub fn decode_frame(frame: &Envelope<Value>) -> Result<DecodedEvent, ClientError> {
-    Ok(DecodedEvent {
-        event: server_event_from_frame(frame)?,
+/// Returns [`ClientError`] when the envelope itself is invalid for this client
+/// (for example, an unsupported wire version).
+pub fn decode_frame(frame: &Envelope<Value>) -> Result<Option<DecodedEvent>, ClientError> {
+    let Some(event) = server_event_from_frame(frame)? else {
+        return Ok(None);
+    };
+    Ok(Some(DecodedEvent {
+        event,
         seq: frame.seq,
         turn_id: frame.turn_id.as_ref().map(ToString::to_string),
         job_id: frame.job_id.as_ref().map(ToString::to_string),
         timestamp: frame.timestamp,
-    })
+    }))
 }
 
 /// Builds the job summary the wire event carries from the fields a finished
@@ -415,6 +422,24 @@ pub(crate) fn standard_event_from_frame(
     Ok(Some(kind))
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RetryScheduledExtension {
+    #[serde(alias = "turn")]
+    turn_id: u64,
+    attempt: u32,
+    #[serde(default)]
+    delay_ms: u64,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RetryStartedExtension {
+    #[serde(alias = "turn")]
+    turn_id: u64,
+    attempt: u32,
+}
+
 /// Decodes an extension frame the host writes with a standard payload.
 ///
 /// The host sends `norte_code.<event>` frames; when the event has a standard
@@ -491,13 +516,31 @@ fn extension_event(
                 stopped: stopped.stopped,
             }
         }
+        "retry_scheduled" => {
+            let decoded: RetryScheduledExtension = from_payload(payload)?;
+            Kind::RetryScheduled {
+                turn: decoded.turn_id,
+                attempt: decoded.attempt,
+                delay_ms: decoded.delay_ms,
+                reason: decoded.reason,
+            }
+        }
+        "retry_started" => {
+            let decoded: RetryStartedExtension = from_payload(payload)?;
+            Kind::RetryStarted {
+                turn: decoded.turn_id,
+                attempt: decoded.attempt,
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(kind))
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerEvent, ClientError> {
+pub(crate) fn server_event_from_frame(
+    frame: &Envelope<Value>,
+) -> Result<Option<ServerEvent>, ClientError> {
     if frame.version != raep_types::WIRE_VERSION {
         return Err(ClientError::new(format!(
             "unsupported RAEP wire version `{}`; this client speaks {}",
@@ -505,463 +548,487 @@ pub(crate) fn server_event_from_frame(frame: &Envelope<Value>) -> Result<ServerE
             raep_types::WIRE_VERSION
         )));
     }
+    let session = (!frame.session_id.is_empty())
+        .then(|| norte_code_wire::SessionKey::new(frame.session_id.clone()));
+
+    let decode_error = |message: String| {
+        Some(ServerEvent {
+            request_id: 0,
+            session: session.clone(),
+            kind: norte_code_wire::ServerEventKind::Error {
+                code: norte_code_wire::ErrorCode::Internal,
+                message,
+            },
+        })
+    };
+
+    let decode_canonical = || -> Result<norte_code_wire::ServerEventKind, ClientError> {
+        let canonical = CanonicalPayload::from_value(frame.payload.clone())?;
+        let kind = match canonical.kind {
+            CanonicalKind::SessionCreated => {
+                let decoded: CanonicalSessionCreated = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SessionCreated {
+                    title: decoded.title,
+                }
+            }
+            CanonicalKind::SessionList => {
+                let decoded: CanonicalSessionList = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SessionList {
+                    sessions: decoded.sessions,
+                }
+            }
+            CanonicalKind::SessionDeleted => norte_code_wire::ServerEventKind::SessionDeleted,
+            CanonicalKind::SessionForked => {
+                let decoded: CanonicalSessionForked = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SessionForked {
+                    from: norte_code_wire::SessionKey::new(decoded.from),
+                    from_turn_id: decoded.from_turn_id,
+                    title: decoded.title,
+                }
+            }
+            CanonicalKind::TurnStarted => {
+                let decoded: CanonicalTurnStarted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::TurnStarted { turn: decoded.turn }
+            }
+            CanonicalKind::TokenDelta => {
+                let decoded: CanonicalTokenDelta = canonical.decode()?;
+                norte_code_wire::ServerEventKind::Delta {
+                    turn: decoded.turn,
+                    delta: decoded.delta,
+                }
+            }
+            CanonicalKind::Committed => {
+                let decoded: CanonicalCommitted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::Committed {
+                    turn: decoded.turn,
+                    version: decoded.version,
+                }
+            }
+            CanonicalKind::HistoryMessage => {
+                let decoded: CanonicalHistoryMessage = canonical.decode()?;
+                norte_code_wire::ServerEventKind::MessageReplayed {
+                    index: decoded.index,
+                    role: decoded.role,
+                    kind: decoded.kind,
+                    text: decoded.text,
+                }
+            }
+            CanonicalKind::SessionTodos => {
+                let decoded: CanonicalSessionTodos = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SessionTodos {
+                    todos: decoded.todos,
+                }
+            }
+            CanonicalKind::PlanList => {
+                let decoded: CanonicalPlanList = canonical.decode()?;
+                norte_code_wire::ServerEventKind::PlanList {
+                    plans: decoded.plans,
+                }
+            }
+            CanonicalKind::QuestionAsked => {
+                let decoded: CanonicalQuestionAsked = canonical.decode()?;
+                norte_code_wire::ServerEventKind::QuestionAsked {
+                    turn: decoded.turn,
+                    question: decoded.question,
+                    prompt: decoded.prompt,
+                    options: decoded.options,
+                    multiple: decoded.multiple,
+                }
+            }
+            CanonicalKind::ToolCallStarted => {
+                let decoded: CanonicalToolCallStarted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::ToolStarted {
+                    turn: decoded.turn,
+                    call_id: decoded.call_id,
+                    tool: decoded.tool,
+                    arguments: decoded.arguments,
+                    source: decoded.source,
+                }
+            }
+            CanonicalKind::JobProgressDelta => {
+                let decoded: CanonicalJobProgressDelta = canonical.decode()?;
+                norte_code_wire::ServerEventKind::ToolOutput {
+                    turn: decoded.turn,
+                    call_id: decoded.call_id,
+                    tool: decoded.tool,
+                    stream: decoded.stream,
+                    text: decoded.text,
+                    last: decoded.last,
+                }
+            }
+            CanonicalKind::ToolCallFinished => {
+                let decoded: CanonicalToolCallFinished = canonical.decode()?;
+                norte_code_wire::ServerEventKind::ToolFinished {
+                    turn: decoded.turn,
+                    call_id: decoded.call_id,
+                    tool: decoded.tool,
+                    is_error: decoded.is_error,
+                    error: decoded.error,
+                    output: decoded.output,
+                    truncated: decoded.truncated,
+                    detached: decoded.detached,
+                    duration_ms: decoded.duration_ms,
+                }
+            }
+            CanonicalKind::OutputPartFinished => {
+                let decoded: CanonicalOutputPartFinished = canonical.decode()?;
+                norte_code_wire::ServerEventKind::OutputPartFinished {
+                    turn: decoded.turn,
+                    part_id: decoded.part_id,
+                    index: decoded.index,
+                    modality: decoded.modality,
+                    bytes: decoded.bytes,
+                    sha256: decoded.sha256,
+                    blob: decoded.blob,
+                    error: decoded.error,
+                }
+            }
+            CanonicalKind::RequestCompleted => {
+                let decoded: CanonicalRequestCompleted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::RequestReconstructed {
+                    turn: decoded.turn,
+                    index: decoded.index,
+                    usage: decoded.usage,
+                    cost_usd: decoded.cost_usd,
+                    truncated: decoded.truncated,
+                    duration_ms: decoded.duration_ms,
+                    first_token_ms: decoded.first_token_ms,
+                    tokens_per_second: decoded.tokens_per_second,
+                    cache_hit: decoded.cache_hit,
+                    tools: decoded.tools,
+                    provider: decoded.provider,
+                    model: decoded.model,
+                }
+            }
+            CanonicalKind::ApprovalResolved => {
+                let decoded: CanonicalApprovalResolved = canonical.decode()?;
+                norte_code_wire::ServerEventKind::QuestionAnswered {
+                    question: decoded.approval_id,
+                }
+            }
+            CanonicalKind::UserInputAccepted => {
+                let decoded: CanonicalUserInputAccepted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SteerApplied {
+                    ids: decoded.ids,
+                    messages: decoded.messages,
+                }
+            }
+            CanonicalKind::ProviderRetry => {
+                let decoded: CanonicalProviderRetry = canonical.decode()?;
+                match decoded.state {
+                    RetryState::Scheduled => norte_code_wire::ServerEventKind::RetryScheduled {
+                        turn: decoded.turn,
+                        attempt: decoded.attempt,
+                        delay_ms: decoded.delay_ms,
+                        reason: decoded.reason,
+                    },
+                    RetryState::Started => norte_code_wire::ServerEventKind::RetryStarted {
+                        turn: decoded.turn,
+                        attempt: decoded.attempt,
+                    },
+                }
+            }
+            CanonicalKind::AgentChanged => {
+                let decoded: CanonicalAgentChanged = canonical.decode()?;
+                match decoded.change {
+                    AgentChange::ModelChanged => norte_code_wire::ServerEventKind::ModelChanged {
+                        provider: decoded.provider.unwrap_or_default(),
+                        model: decoded.model.unwrap_or_default(),
+                    },
+                    AgentChange::ModelQueued => norte_code_wire::ServerEventKind::ModelQueued {
+                        provider: decoded.provider.unwrap_or_default(),
+                        model: decoded.model.unwrap_or_default(),
+                    },
+                    AgentChange::ReasoningDowngraded => {
+                        let details: ReasoningDowngradedDetails = decoded
+                            .details
+                            .map(serde_json::from_value)
+                            .transpose()
+                            .map_err(|error| {
+                                ClientError::new(format!("invalid reasoning downgrade: {error}"))
+                            })?
+                            .unwrap_or(ReasoningDowngradedDetails {
+                                from: String::new(),
+                                to: String::new(),
+                                reason: String::new(),
+                            });
+                        norte_code_wire::ServerEventKind::ReasoningDowngraded {
+                            from: details.from,
+                            to: details.to,
+                            reason: details.reason,
+                        }
+                    }
+                    AgentChange::CatalogUpdated => {
+                        let count: CatalogCount = decoded
+                            .details
+                            .map(serde_json::from_value)
+                            .transpose()
+                            .map_err(|error| {
+                                ClientError::new(format!("invalid catalogue update: {error}"))
+                            })?
+                            .unwrap_or_default();
+                        norte_code_wire::ServerEventKind::CatalogUpdated {
+                            models: count.models,
+                        }
+                    }
+                    AgentChange::SkillsUpdated => {
+                        let count: CatalogCount = decoded
+                            .details
+                            .map(serde_json::from_value)
+                            .transpose()
+                            .map_err(|error| {
+                                ClientError::new(format!("invalid skills update: {error}"))
+                            })?
+                            .unwrap_or_default();
+                        norte_code_wire::ServerEventKind::SkillsUpdated {
+                            skills: count.skills,
+                        }
+                    }
+                }
+            }
+            CanonicalKind::AgentCatalog => {
+                let decoded: CanonicalAgentCatalog = canonical.decode()?;
+                match decoded.kind {
+                    CatalogKind::Models => norte_code_wire::ServerEventKind::ModelList {
+                        models: serde_json::from_value(decoded.entries).map_err(|error| {
+                            ClientError::new(format!("invalid model list: {error}"))
+                        })?,
+                    },
+                    CatalogKind::Skills => {
+                        let entries: SkillCatalogEntries = serde_json::from_value(decoded.entries)
+                            .map_err(|error| {
+                                ClientError::new(format!("invalid skill list: {error}"))
+                            })?;
+                        norte_code_wire::ServerEventKind::SkillList {
+                            skills: entries.skills,
+                            warnings: entries.warnings,
+                        }
+                    }
+                    CatalogKind::Providers | CatalogKind::Plans => {
+                        return Err(ClientError::new(
+                            "agent_catalog carried a catalogue this client reads elsewhere",
+                        ));
+                    }
+                }
+            }
+            CanonicalKind::SessionRenamed => {
+                let decoded: CanonicalSessionRenamed = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SessionRenamed {
+                    title: decoded.title,
+                }
+            }
+            CanonicalKind::SessionStats => {
+                let decoded: CanonicalSessionStats = canonical.decode()?;
+                norte_code_wire::ServerEventKind::SessionStats {
+                    input_tokens: decoded.input_tokens,
+                    output_tokens: decoded.output_tokens,
+                    cache_read_tokens: decoded.cache_read_tokens,
+                    cache_write_tokens: decoded.cache_write_tokens,
+                    cost_usd: decoded.cost_usd,
+                    requests: decoded.requests,
+                    context_used: decoded.context_used,
+                    context_window: decoded.context_window,
+                }
+            }
+            CanonicalKind::JobList => {
+                let decoded: CanonicalJobList = canonical.decode()?;
+                norte_code_wire::ServerEventKind::JobList { jobs: decoded.jobs }
+            }
+            CanonicalKind::TurnStateChanged => {
+                let decoded: CanonicalTurnStateChanged = canonical.decode()?;
+                match decoded.state {
+                    CanonicalTurnState::Finished => {
+                        norte_code_wire::ServerEventKind::TurnFinished {
+                            turn: decoded.turn,
+                            phase: decoded.phase.unwrap_or(norte_code_wire::Phase::Idle),
+                            committed: decoded.committed.unwrap_or(true),
+                            output_schema_valid: None,
+                        }
+                    }
+                    CanonicalTurnState::Stopped => norte_code_wire::ServerEventKind::TurnStopped {
+                        reason: decoded.reason.unwrap_or_default(),
+                    },
+                }
+            }
+            CanonicalKind::ContextUpdate => {
+                let decoded: CanonicalContextUpdate = canonical.decode()?;
+                match decoded.state {
+                    CanonicalContextState::Started => {
+                        norte_code_wire::ServerEventKind::CompactionStarted {
+                            reason: decoded.reason.unwrap_or_default(),
+                        }
+                    }
+                    CanonicalContextState::Finished => {
+                        norte_code_wire::ServerEventKind::CompactionFinished {
+                            compacted: decoded.compacted.unwrap_or(false),
+                            north_session: decoded.north_session,
+                            summary: decoded.summary,
+                            error: decoded.error,
+                        }
+                    }
+                }
+            }
+            CanonicalKind::BudgetWarning => {
+                let decoded: CanonicalBudgetWarning = canonical.decode()?;
+                norte_code_wire::ServerEventKind::BudgetWarning {
+                    scope: decoded.scope,
+                    unit: decoded.unit,
+                    spent: decoded.spent,
+                    limit: decoded.limit,
+                }
+            }
+            CanonicalKind::BudgetExceeded => {
+                let decoded: CanonicalBudgetExceeded = canonical.decode()?;
+                norte_code_wire::ServerEventKind::BudgetExceeded {
+                    scope: decoded.scope,
+                    unit: decoded.unit,
+                    spent: decoded.spent,
+                    limit: decoded.limit,
+                    action: decoded.action,
+                }
+            }
+            CanonicalKind::BudgetChanged => {
+                let decoded: CanonicalBudgetChanged = canonical.decode()?;
+                norte_code_wire::ServerEventKind::BudgetChanged {
+                    budget: decoded.budget,
+                }
+            }
+            CanonicalKind::CostUpdated => {
+                let decoded: CanonicalCostUpdated = canonical.decode()?;
+                norte_code_wire::ServerEventKind::CostUpdated {
+                    total_usd: decoded.total_usd,
+                    requests: decoded.requests,
+                }
+            }
+            CanonicalKind::CostNotReported => {
+                let decoded: CanonicalCostNotReported = canonical.decode()?;
+                norte_code_wire::ServerEventKind::CostNotReported {
+                    requests: decoded.requests,
+                }
+            }
+            CanonicalKind::PluginList => {
+                let decoded: CanonicalPluginList = canonical.decode()?;
+                norte_code_wire::ServerEventKind::PluginList {
+                    plugins: decoded.plugins,
+                }
+            }
+            CanonicalKind::PluginChanged => {
+                let decoded: CanonicalPluginChanged = canonical.decode()?;
+                norte_code_wire::ServerEventKind::PluginChanged {
+                    operation: decoded.operation,
+                    name: decoded.name,
+                }
+            }
+            CanonicalKind::ServiceData => {
+                let decoded: CanonicalServiceData = canonical.decode()?;
+                match decoded.kind {
+                    ServiceDataKind::Telemetry => norte_code_wire::ServerEventKind::Telemetry {
+                        records: serde_json::from_value(decoded.data).map_err(|error| {
+                            ClientError::new(format!("invalid telemetry payload: {error}"))
+                        })?,
+                    },
+                    ServiceDataKind::ToolList => norte_code_wire::ServerEventKind::ToolList {
+                        tools: serde_json::from_value(decoded.data).map_err(|error| {
+                            ClientError::new(format!("invalid tool list payload: {error}"))
+                        })?,
+                    },
+                    ServiceDataKind::McpList => {
+                        let data: McpListData =
+                            serde_json::from_value(decoded.data).map_err(|error| {
+                                ClientError::new(format!("invalid MCP payload: {error}"))
+                            })?;
+                        norte_code_wire::ServerEventKind::McpList {
+                            servers: data.servers,
+                            failures: data.failures,
+                        }
+                    }
+                }
+            }
+            CanonicalKind::ChildSessionStarted => {
+                let decoded: CanonicalChildSessionStarted = canonical.decode()?;
+                norte_code_wire::ServerEventKind::ChildSessionStarted {
+                    child_session_id: decoded.child_session_id,
+                    agent_id: decoded.agent_id,
+                    tool_call_id: decoded.tool_call_id,
+                    lifetime: decoded.lifetime,
+                    task_summary: decoded.task_summary,
+                }
+            }
+            CanonicalKind::ChildSessionUpdated => {
+                let decoded: CanonicalChildSessionUpdated = canonical.decode()?;
+                norte_code_wire::ServerEventKind::ChildSessionUpdated {
+                    child_session_id: decoded.child_session_id,
+                    state: decoded.state,
+                    reason: decoded.reason,
+                    result: decoded.result,
+                    output_schema_valid: decoded.output_schema_valid,
+                }
+            }
+            CanonicalKind::DelegatorStateChanged => {
+                let decoded: CanonicalDelegatorStateChanged = canonical.decode()?;
+                norte_code_wire::ServerEventKind::DelegatorStateChanged {
+                    child_session_id: decoded.child_session_id,
+                    delegator_suspended: decoded.delegator_suspended,
+                    by: decoded.by,
+                    queued_messages: decoded.queued_messages,
+                }
+            }
+            CanonicalKind::ChildAwaitingInput => {
+                let decoded: CanonicalChildAwaitingInput = canonical.decode()?;
+                norte_code_wire::ServerEventKind::ChildAwaitingInput {
+                    child_session_id: decoded.child_session_id,
+                    question: decoded.question,
+                    prompt: decoded.prompt,
+                }
+            }
+            CanonicalKind::Error => {
+                let decoded: CanonicalError = canonical.decode()?;
+                let code = serde_json::from_value(decoded.code.clone())
+                    .unwrap_or(norte_code_wire::ErrorCode::Internal);
+                norte_code_wire::ServerEventKind::Error {
+                    code,
+                    message: decoded.message,
+                }
+            }
+            CanonicalKind::Other => {
+                return Err(ClientError::new(
+                    "unsupported RAEP canonical event".to_owned(),
+                ));
+            }
+        };
+        Ok(kind)
+    };
+
     // A canonical frame that fails to decode is a wire error, not a reason
     // to fall back to the extension: silently splicing in the compatibility
     // copy would hide a server that stopped following the spec.
-    if let Some(event) = standard_event_from_frame(frame)? {
-        return Ok(event);
+    if matches!(frame.kind, raep_types::FrameType::Standard(_)) {
+        return standard_event_from_frame(frame);
     }
     if let raep_types::FrameType::Extension(name) = &frame.kind
         && let Some(kind) = extension_event(name, frame.payload.clone())?
     {
-        return Ok(ServerEvent {
+        return Ok(Some(ServerEvent {
             request_id: 0,
-            session: (!frame.session_id.is_empty())
-                .then(|| norte_code_wire::SessionKey::new(frame.session_id.clone())),
+            session,
             kind,
-        });
+        }));
     }
-    let session = (!frame.session_id.is_empty())
-        .then(|| norte_code_wire::SessionKey::new(frame.session_id.clone()));
-    let canonical = CanonicalPayload::from_value(frame.payload.clone())?;
-    let kind = match canonical.kind {
-        CanonicalKind::SessionCreated => {
-            let decoded: CanonicalSessionCreated = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SessionCreated {
-                title: decoded.title,
-            }
-        }
-        CanonicalKind::SessionList => {
-            let decoded: CanonicalSessionList = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SessionList {
-                sessions: decoded.sessions,
-            }
-        }
-        CanonicalKind::SessionDeleted => norte_code_wire::ServerEventKind::SessionDeleted,
-        CanonicalKind::SessionForked => {
-            let decoded: CanonicalSessionForked = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SessionForked {
-                from: norte_code_wire::SessionKey::new(decoded.from),
-                from_turn_id: decoded.from_turn_id,
-                title: decoded.title,
-            }
-        }
-        CanonicalKind::TurnStarted => {
-            let decoded: CanonicalTurnStarted = canonical.decode()?;
-            norte_code_wire::ServerEventKind::TurnStarted { turn: decoded.turn }
-        }
-        CanonicalKind::TokenDelta => {
-            let decoded: CanonicalTokenDelta = canonical.decode()?;
-            norte_code_wire::ServerEventKind::Delta {
-                turn: decoded.turn,
-                delta: decoded.delta,
-            }
-        }
-        CanonicalKind::Committed => {
-            let decoded: CanonicalCommitted = canonical.decode()?;
-            norte_code_wire::ServerEventKind::Committed {
-                turn: decoded.turn,
-                version: decoded.version,
-            }
-        }
-        CanonicalKind::HistoryMessage => {
-            let decoded: CanonicalHistoryMessage = canonical.decode()?;
-            norte_code_wire::ServerEventKind::MessageReplayed {
-                index: decoded.index,
-                role: decoded.role,
-                kind: decoded.kind,
-                text: decoded.text,
-            }
-        }
-        CanonicalKind::SessionTodos => {
-            let decoded: CanonicalSessionTodos = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SessionTodos {
-                todos: decoded.todos,
-            }
-        }
-        CanonicalKind::PlanList => {
-            let decoded: CanonicalPlanList = canonical.decode()?;
-            norte_code_wire::ServerEventKind::PlanList {
-                plans: decoded.plans,
-            }
-        }
-        CanonicalKind::QuestionAsked => {
-            let decoded: CanonicalQuestionAsked = canonical.decode()?;
-            norte_code_wire::ServerEventKind::QuestionAsked {
-                turn: decoded.turn,
-                question: decoded.question,
-                prompt: decoded.prompt,
-                options: decoded.options,
-                multiple: decoded.multiple,
-            }
-        }
-        CanonicalKind::ToolCallStarted => {
-            let decoded: CanonicalToolCallStarted = canonical.decode()?;
-            norte_code_wire::ServerEventKind::ToolStarted {
-                turn: decoded.turn,
-                call_id: decoded.call_id,
-                tool: decoded.tool,
-                arguments: decoded.arguments,
-                source: decoded.source,
-            }
-        }
-        CanonicalKind::JobProgressDelta => {
-            let decoded: CanonicalJobProgressDelta = canonical.decode()?;
-            norte_code_wire::ServerEventKind::ToolOutput {
-                turn: decoded.turn,
-                call_id: decoded.call_id,
-                tool: decoded.tool,
-                stream: decoded.stream,
-                text: decoded.text,
-                last: decoded.last,
-            }
-        }
-        CanonicalKind::ToolCallFinished => {
-            let decoded: CanonicalToolCallFinished = canonical.decode()?;
-            norte_code_wire::ServerEventKind::ToolFinished {
-                turn: decoded.turn,
-                call_id: decoded.call_id,
-                tool: decoded.tool,
-                is_error: decoded.is_error,
-                error: decoded.error,
-                output: decoded.output,
-                truncated: decoded.truncated,
-                detached: decoded.detached,
-                duration_ms: decoded.duration_ms,
-            }
-        }
-        CanonicalKind::OutputPartFinished => {
-            let decoded: CanonicalOutputPartFinished = canonical.decode()?;
-            norte_code_wire::ServerEventKind::OutputPartFinished {
-                turn: decoded.turn,
-                part_id: decoded.part_id,
-                index: decoded.index,
-                modality: decoded.modality,
-                bytes: decoded.bytes,
-                sha256: decoded.sha256,
-                blob: decoded.blob,
-                error: decoded.error,
-            }
-        }
-        CanonicalKind::RequestCompleted => {
-            let decoded: CanonicalRequestCompleted = canonical.decode()?;
-            norte_code_wire::ServerEventKind::RequestReconstructed {
-                turn: decoded.turn,
-                index: decoded.index,
-                usage: decoded.usage,
-                cost_usd: decoded.cost_usd,
-                truncated: decoded.truncated,
-                duration_ms: decoded.duration_ms,
-                first_token_ms: decoded.first_token_ms,
-                tokens_per_second: decoded.tokens_per_second,
-                cache_hit: decoded.cache_hit,
-                tools: decoded.tools,
-                provider: decoded.provider,
-                model: decoded.model,
-            }
-        }
-        CanonicalKind::ApprovalResolved => {
-            let decoded: CanonicalApprovalResolved = canonical.decode()?;
-            norte_code_wire::ServerEventKind::QuestionAnswered {
-                question: decoded.approval_id,
-            }
-        }
-        CanonicalKind::UserInputAccepted => {
-            let decoded: CanonicalUserInputAccepted = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SteerApplied {
-                ids: decoded.ids,
-                messages: decoded.messages,
-            }
-        }
-        CanonicalKind::ProviderRetry => {
-            let decoded: CanonicalProviderRetry = canonical.decode()?;
-            match decoded.state {
-                RetryState::Scheduled => norte_code_wire::ServerEventKind::RetryScheduled {
-                    turn: decoded.turn,
-                    attempt: decoded.attempt,
-                    delay_ms: decoded.delay_ms,
-                    reason: decoded.reason,
-                },
-                RetryState::Started => norte_code_wire::ServerEventKind::RetryStarted {
-                    turn: decoded.turn,
-                    attempt: decoded.attempt,
-                },
-            }
-        }
-        CanonicalKind::AgentChanged => {
-            let decoded: CanonicalAgentChanged = canonical.decode()?;
-            match decoded.change {
-                AgentChange::ModelChanged => norte_code_wire::ServerEventKind::ModelChanged {
-                    provider: decoded.provider.unwrap_or_default(),
-                    model: decoded.model.unwrap_or_default(),
-                },
-                AgentChange::ModelQueued => norte_code_wire::ServerEventKind::ModelQueued {
-                    provider: decoded.provider.unwrap_or_default(),
-                    model: decoded.model.unwrap_or_default(),
-                },
-                AgentChange::ReasoningDowngraded => {
-                    let details: ReasoningDowngradedDetails = decoded
-                        .details
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|error| {
-                            ClientError::new(format!("invalid reasoning downgrade: {error}"))
-                        })?
-                        .unwrap_or(ReasoningDowngradedDetails {
-                            from: String::new(),
-                            to: String::new(),
-                            reason: String::new(),
-                        });
-                    norte_code_wire::ServerEventKind::ReasoningDowngraded {
-                        from: details.from,
-                        to: details.to,
-                        reason: details.reason,
-                    }
-                }
-                AgentChange::CatalogUpdated => {
-                    let count: CatalogCount = decoded
-                        .details
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|error| {
-                            ClientError::new(format!("invalid catalogue update: {error}"))
-                        })?
-                        .unwrap_or_default();
-                    norte_code_wire::ServerEventKind::CatalogUpdated {
-                        models: count.models,
-                    }
-                }
-                AgentChange::SkillsUpdated => {
-                    let count: CatalogCount = decoded
-                        .details
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|error| {
-                            ClientError::new(format!("invalid skills update: {error}"))
-                        })?
-                        .unwrap_or_default();
-                    norte_code_wire::ServerEventKind::SkillsUpdated {
-                        skills: count.skills,
-                    }
-                }
-            }
-        }
-        CanonicalKind::AgentCatalog => {
-            let decoded: CanonicalAgentCatalog = canonical.decode()?;
-            match decoded.kind {
-                CatalogKind::Models => norte_code_wire::ServerEventKind::ModelList {
-                    models: serde_json::from_value(decoded.entries).map_err(|error| {
-                        ClientError::new(format!("invalid model list: {error}"))
-                    })?,
-                },
-                CatalogKind::Skills => {
-                    let entries: SkillCatalogEntries = serde_json::from_value(decoded.entries)
-                        .map_err(|error| {
-                            ClientError::new(format!("invalid skill list: {error}"))
-                        })?;
-                    norte_code_wire::ServerEventKind::SkillList {
-                        skills: entries.skills,
-                        warnings: entries.warnings,
-                    }
-                }
-                // The editable catalogue and the plan list have their own
-                // frames; an `agent_catalog` carrying them has nothing to add
-                // to this event stream.
-                CatalogKind::Providers | CatalogKind::Plans => {
-                    return Err(ClientError::new(
-                        "agent_catalog carried a catalogue this client reads elsewhere",
-                    ));
-                }
-            }
-        }
-        CanonicalKind::SessionRenamed => {
-            let decoded: CanonicalSessionRenamed = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SessionRenamed {
-                title: decoded.title,
-            }
-        }
-        CanonicalKind::SessionStats => {
-            let decoded: CanonicalSessionStats = canonical.decode()?;
-            norte_code_wire::ServerEventKind::SessionStats {
-                input_tokens: decoded.input_tokens,
-                output_tokens: decoded.output_tokens,
-                cache_read_tokens: decoded.cache_read_tokens,
-                cache_write_tokens: decoded.cache_write_tokens,
-                cost_usd: decoded.cost_usd,
-                requests: decoded.requests,
-                context_used: decoded.context_used,
-                context_window: decoded.context_window,
-            }
-        }
-        CanonicalKind::JobList => {
-            let decoded: CanonicalJobList = canonical.decode()?;
-            norte_code_wire::ServerEventKind::JobList { jobs: decoded.jobs }
-        }
-        CanonicalKind::TurnStateChanged => {
-            let decoded: CanonicalTurnStateChanged = canonical.decode()?;
-            match decoded.state {
-                CanonicalTurnState::Finished => norte_code_wire::ServerEventKind::TurnFinished {
-                    turn: decoded.turn,
-                    phase: decoded.phase.unwrap_or(norte_code_wire::Phase::Idle),
-                    committed: decoded.committed.unwrap_or(true),
-                    output_schema_valid: None,
-                },
-                CanonicalTurnState::Stopped => norte_code_wire::ServerEventKind::TurnStopped {
-                    reason: decoded.reason.unwrap_or_default(),
-                },
-            }
-        }
-        CanonicalKind::ContextUpdate => {
-            let decoded: CanonicalContextUpdate = canonical.decode()?;
-            match decoded.state {
-                CanonicalContextState::Started => {
-                    norte_code_wire::ServerEventKind::CompactionStarted {
-                        reason: decoded.reason.unwrap_or_default(),
-                    }
-                }
-                CanonicalContextState::Finished => {
-                    norte_code_wire::ServerEventKind::CompactionFinished {
-                        compacted: decoded.compacted.unwrap_or(false),
-                        north_session: decoded.north_session,
-                        summary: decoded.summary,
-                        error: decoded.error,
-                    }
-                }
-            }
-        }
-        CanonicalKind::BudgetWarning => {
-            let decoded: CanonicalBudgetWarning = canonical.decode()?;
-            norte_code_wire::ServerEventKind::BudgetWarning {
-                scope: decoded.scope,
-                unit: decoded.unit,
-                spent: decoded.spent,
-                limit: decoded.limit,
-            }
-        }
-        CanonicalKind::BudgetExceeded => {
-            let decoded: CanonicalBudgetExceeded = canonical.decode()?;
-            norte_code_wire::ServerEventKind::BudgetExceeded {
-                scope: decoded.scope,
-                unit: decoded.unit,
-                spent: decoded.spent,
-                limit: decoded.limit,
-                action: decoded.action,
-            }
-        }
-        CanonicalKind::BudgetChanged => {
-            let decoded: CanonicalBudgetChanged = canonical.decode()?;
-            norte_code_wire::ServerEventKind::BudgetChanged {
-                budget: decoded.budget,
-            }
-        }
-        CanonicalKind::CostUpdated => {
-            let decoded: CanonicalCostUpdated = canonical.decode()?;
-            norte_code_wire::ServerEventKind::CostUpdated {
-                total_usd: decoded.total_usd,
-                requests: decoded.requests,
-            }
-        }
-        CanonicalKind::CostNotReported => {
-            let decoded: CanonicalCostNotReported = canonical.decode()?;
-            norte_code_wire::ServerEventKind::CostNotReported {
-                requests: decoded.requests,
-            }
-        }
-        CanonicalKind::PluginList => {
-            let decoded: CanonicalPluginList = canonical.decode()?;
-            norte_code_wire::ServerEventKind::PluginList {
-                plugins: decoded.plugins,
-            }
-        }
-        CanonicalKind::PluginChanged => {
-            let decoded: CanonicalPluginChanged = canonical.decode()?;
-            norte_code_wire::ServerEventKind::PluginChanged {
-                operation: decoded.operation,
-                name: decoded.name,
-            }
-        }
-        CanonicalKind::ServiceData => {
-            let decoded: CanonicalServiceData = canonical.decode()?;
-            match decoded.kind {
-                ServiceDataKind::Telemetry => norte_code_wire::ServerEventKind::Telemetry {
-                    records: serde_json::from_value(decoded.data).map_err(|error| {
-                        ClientError::new(format!("invalid telemetry payload: {error}"))
-                    })?,
-                },
-                ServiceDataKind::ToolList => norte_code_wire::ServerEventKind::ToolList {
-                    tools: serde_json::from_value(decoded.data).map_err(|error| {
-                        ClientError::new(format!("invalid tool list payload: {error}"))
-                    })?,
-                },
-                ServiceDataKind::McpList => {
-                    let data: McpListData =
-                        serde_json::from_value(decoded.data).map_err(|error| {
-                            ClientError::new(format!("invalid MCP payload: {error}"))
-                        })?;
-                    norte_code_wire::ServerEventKind::McpList {
-                        servers: data.servers,
-                        failures: data.failures,
-                    }
-                }
-            }
-        }
-        CanonicalKind::ChildSessionStarted => {
-            let decoded: CanonicalChildSessionStarted = canonical.decode()?;
-            norte_code_wire::ServerEventKind::ChildSessionStarted {
-                child_session_id: decoded.child_session_id,
-                agent_id: decoded.agent_id,
-                tool_call_id: decoded.tool_call_id,
-                lifetime: decoded.lifetime,
-                task_summary: decoded.task_summary,
-            }
-        }
-        CanonicalKind::ChildSessionUpdated => {
-            let decoded: CanonicalChildSessionUpdated = canonical.decode()?;
-            norte_code_wire::ServerEventKind::ChildSessionUpdated {
-                child_session_id: decoded.child_session_id,
-                state: decoded.state,
-                reason: decoded.reason,
-                result: decoded.result,
-                output_schema_valid: decoded.output_schema_valid,
-            }
-        }
-        CanonicalKind::DelegatorStateChanged => {
-            let decoded: CanonicalDelegatorStateChanged = canonical.decode()?;
-            norte_code_wire::ServerEventKind::DelegatorStateChanged {
-                child_session_id: decoded.child_session_id,
-                delegator_suspended: decoded.delegator_suspended,
-                by: decoded.by,
-                queued_messages: decoded.queued_messages,
-            }
-        }
-        CanonicalKind::ChildAwaitingInput => {
-            let decoded: CanonicalChildAwaitingInput = canonical.decode()?;
-            norte_code_wire::ServerEventKind::ChildAwaitingInput {
-                child_session_id: decoded.child_session_id,
-                question: decoded.question,
-                prompt: decoded.prompt,
-            }
-        }
-        CanonicalKind::Error => {
-            let decoded: CanonicalError = canonical.decode()?;
-            let code = serde_json::from_value(decoded.code.clone())
-                .unwrap_or(norte_code_wire::ErrorCode::Internal);
-            norte_code_wire::ServerEventKind::Error {
-                code,
-                message: decoded.message,
-            }
-        }
-        CanonicalKind::Other => {
-            return Err(ClientError::new(
-                "unsupported RAEP canonical event".to_owned(),
-            ));
-        }
-    };
-    Ok(ServerEvent {
-        request_id: 0,
-        session,
-        kind,
-    })
+    if let raep_types::FrameType::Extension(name) = &frame.kind
+        && frame.payload.get("event").is_none()
+    {
+        return Ok(decode_error(format!(
+            "unsupported RAEP extension event `{name}`"
+        )));
+    }
+    match decode_canonical() {
+        Ok(kind) => Ok(Some(ServerEvent {
+            request_id: 0,
+            session,
+            kind,
+        })),
+        Err(error) => Ok(decode_error(error.to_string())),
+    }
 }
 
 #[cfg(feature = "native")]

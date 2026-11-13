@@ -1,5 +1,6 @@
 #[cfg(feature = "native")]
 use norte_code_wire::ServerEvent;
+use norte_code_wire::{ErrorCode, SessionKey};
 
 use crate::decode::{DecodedEvent, decode_frame};
 
@@ -134,10 +135,26 @@ fn take_sse_frames(buffer: &mut Vec<u8>) -> Vec<SseFrame> {
             continue;
         };
         let frame = frame.into_envelope();
-        events.push(SseFrame {
-            event: decode_frame(&frame).ok(),
-            seq: frame.seq,
-        });
+        let seq = frame.seq;
+        let event = match decode_frame(&frame) {
+            Ok(event) => event,
+            Err(error) => Some(DecodedEvent {
+                event: ServerEvent {
+                    request_id: 0,
+                    session: (!frame.session_id.is_empty())
+                        .then(|| SessionKey::new(frame.session_id.clone())),
+                    kind: norte_code_wire::ServerEventKind::Error {
+                        code: ErrorCode::Internal,
+                        message: error.to_string(),
+                    },
+                },
+                seq,
+                turn_id: frame.turn_id.as_ref().map(ToString::to_string),
+                job_id: frame.job_id.as_ref().map(ToString::to_string),
+                timestamp: frame.timestamp,
+            }),
+        };
+        events.push(SseFrame { event, seq });
     }
     events
 }

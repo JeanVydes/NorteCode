@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use norte_code_wire::ClientRequest;
 use norte_code_wire::QueueMode;
-use raep_types::{Envelope, FrameType, StandardFrameType, TurnId};
+use raep_types::{FrameType, StandardFrameType, TurnId};
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde_json::Value;
 use tokio_stream::iter;
@@ -127,40 +127,8 @@ impl AgentClient for RemoteClient {
                 replay: true,
             },
         };
-        let mut headers = HeaderMap::new();
-        if let Some(token) = &self.bearer_token {
-            headers.insert(AUTHORIZATION, token.clone());
-        }
-        let response = self
-            .http
-            .post(self.command_url(session))
-            .headers(headers)
-            .json(&Envelope::new(
-                FrameType::Extension("norte_code.command".to_owned()),
-                serde_json::to_value(&request)
-                    .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
-                timestamp_millis(),
-            ))
-            .send()
+        self.with_attachment(session, || self.submit_command(request.clone()))
             .await
-            .map_err(|error| ClientError::new(format!("RAEP request failed: {error}")))?;
-        let status = response.status();
-        let response_body: CommandResponseBody = response
-            .json()
-            .await
-            .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
-        if !status.is_success() {
-            return Err(ClientError::new(response_body.error_message()));
-        }
-        for frame in &response_body.events {
-            self.note_frame_seq(frame);
-        }
-        let events = response_body
-            .events
-            .iter()
-            .map(server_event_from_frame)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Box::pin(iter(events)))
     }
 
     async fn open_events(&self, session: &str) -> Result<EventStream, ClientError> {
@@ -182,7 +150,7 @@ impl AgentClient for RemoteClient {
             )
             .await?;
         for frame in events {
-            if let Some(event) = server_event_from_frame(&frame).ok()
+            if let Some(event) = server_event_from_frame(&frame).ok().flatten()
                 && let norte_code_wire::ServerEventKind::SessionForked { .. } = event.kind
                 && let Some(key) = event.session
             {
@@ -207,7 +175,7 @@ impl AgentClient for RemoteClient {
             .await?;
         let events = frames
             .iter()
-            .map(server_event_from_frame)
+            .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Box::pin(iter(events)))
     }
@@ -226,12 +194,13 @@ impl AgentClient for RemoteClient {
             .await?;
         let events = frames
             .iter()
-            .map(server_event_from_frame)
+            .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Box::pin(iter(events)))
     }
 
     async fn compact_session(&self, session: &str) -> Result<EventStream, ClientError> {
+        self.ensure_attached(session).await?;
         // No `agent_override` equivalent: compact goes through the extension
         // command as `ClientRequestKind::Compact`.
         let request = ClientRequest {
@@ -240,37 +209,8 @@ impl AgentClient for RemoteClient {
                 session: norte_code_wire::SessionKey::new(session),
             },
         };
-        let mut headers = HeaderMap::new();
-        if let Some(token) = &self.bearer_token {
-            headers.insert(AUTHORIZATION, token.clone());
-        }
-        let response = self
-            .http
-            .post(self.command_url(session))
-            .headers(headers)
-            .json(&Envelope::new(
-                FrameType::Extension("norte_code.command".to_owned()),
-                serde_json::to_value(&request)
-                    .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
-                timestamp_millis(),
-            ))
-            .send()
+        self.with_attachment(session, || self.submit_command(request.clone()))
             .await
-            .map_err(|error| ClientError::new(format!("RAEP request failed: {error}")))?;
-        let status = response.status();
-        let response_body: CommandResponseBody = response
-            .json()
-            .await
-            .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
-        if !status.is_success() {
-            return Err(ClientError::new(response_body.error_message()));
-        }
-        let events = response_body
-            .events
-            .iter()
-            .map(server_event_from_frame)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Box::pin(iter(events)))
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionSummary>, ClientError> {
@@ -370,9 +310,9 @@ impl AgentClient for RemoteClient {
 
 use super::RemoteClient;
 use crate::agent::{AgentClient, EventStream, SessionSummary};
-use crate::decode::{percent_encode, server_event_from_frame, timestamp_millis};
+use crate::decode::{percent_encode, server_event_from_frame};
 use crate::error::ClientError;
-use crate::frame::{CommandResponseBody, ForkPayload};
+use crate::frame::ForkPayload;
 
 /// A session list body from the RAEP management resource.
 #[derive(Debug, serde::Deserialize)]

@@ -8,8 +8,8 @@ use crate::{
     client::{ClientData, ClientEvent, ClientOperationError},
     components::{ComponentEvent, ComponentId},
     ui_model::{
-        BudgetApprovalRequest, SessionAttachmentState, SessionModel, TranscriptItem, TurnState,
-        UsageSummary,
+        BudgetApprovalRequest, ReasoningLevel, SessionAttachmentState, SessionModel,
+        TranscriptItem, TurnState, UsageSummary,
     },
 };
 
@@ -97,20 +97,61 @@ impl App {
         if attachment_failed {
             self.model.attachment_state = SessionAttachmentState::Failed;
         }
+        let recovered = self.maybe_recover_reasoning_from_message(&message);
         self.model.transcript.push(TranscriptItem::Error(message));
+        if recovered {
+            self.sync_reasoning_with_host();
+        }
+    }
+
+    fn is_unsupported_effort_message(message: &str) -> bool {
+        message.contains("does not support effort")
+    }
+
+    fn maybe_recover_reasoning_from_message(&mut self, message: &str) -> bool {
+        if !Self::is_unsupported_effort_message(message)
+            || self.model.reasoning == ReasoningLevel::Automatic
+        {
+            return false;
+        }
+        let refused = self.model.reasoning;
+        self.model.reasoning = ReasoningLevel::Automatic;
+        self.model.transcript.push(TranscriptItem::Status(format!(
+            "Reasoning effort {} is not supported by this model; using auto.",
+            refused.label()
+        )));
+        true
+    }
+
+    fn sync_reasoning_with_host(&mut self) {
+        let Some(session) = self.model.active_session.clone() else {
+            return;
+        };
+        self.client
+            .set_reasoning(session, ReasoningLevel::Automatic, self.session_generation);
     }
 
     /// Restores a supported effort when the model refused one.
     fn apply_reasoning_error(&mut self, _code: norte_code_wire::ErrorCode, message: &str) {
-        if message.contains("does not support effort")
-            && self.model.reasoning != crate::ui_model::ReasoningLevel::Automatic
-        {
-            let refused = self.model.reasoning;
-            self.model.reasoning = crate::ui_model::ReasoningLevel::Automatic;
+        if self.maybe_recover_reasoning_from_message(message) {
+            self.sync_reasoning_with_host();
+        }
+    }
+
+    fn apply_reasoning_downgrade(&mut self, from: &str, to: &str, reason: &str) {
+        let target = ReasoningLevel::from_wire_name(to).unwrap_or(ReasoningLevel::Automatic);
+        if self.model.reasoning == target {
+            return;
+        }
+        self.model.reasoning = target;
+        if !reason.trim().is_empty() && !Self::is_unsupported_effort_message(reason) {
             self.model.transcript.push(TranscriptItem::Status(format!(
-                "Reasoning effort {} is not supported by this model; using auto.",
-                refused.label()
+                "Reasoning changed from {from} to {}; {reason}.",
+                target.label()
             )));
+        }
+        if target == ReasoningLevel::Automatic && Self::is_unsupported_effort_message(reason) {
+            self.sync_reasoning_with_host();
         }
     }
 
@@ -226,6 +267,9 @@ impl App {
     fn handle_server_event(&mut self, event: norte_code_wire::ServerEvent) {
         if let ServerEventKind::Error { code, message } = &event.kind {
             self.apply_reasoning_error(*code, message);
+        }
+        if let ServerEventKind::ReasoningDowngraded { from, to, reason } = &event.kind {
+            self.apply_reasoning_downgrade(from, to, reason);
         }
         if let ServerEventKind::BudgetExceeded {
             scope,

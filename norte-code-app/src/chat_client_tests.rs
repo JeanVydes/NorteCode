@@ -28,8 +28,8 @@ fn frame_with_event(kind: &str, payload: Value, event: Value) -> Envelope<Value>
 /// then through the page's mapping.
 fn decode_frame(frame: &Envelope<Value>) -> DecodedFrame {
     match norte_code_client::decode_frame(frame) {
-        Ok(decoded) => decode_event(decoded),
-        Err(_) => DecodedFrame::Ignored,
+        Ok(Some(decoded)) => decode_event(decoded),
+        Ok(None) | Err(_) => DecodedFrame::Ignored,
     }
 }
 

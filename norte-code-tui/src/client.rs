@@ -508,20 +508,43 @@ impl ClientRuntime {
         queue_mode: QueueMode,
     ) {
         let api = Arc::clone(&self.api);
+        let client = Arc::clone(&self.client);
         let sender = self.sender.clone();
         self.runtime.spawn(async move {
             let policy = queue_policy(queue_mode);
-            let outcome = if parts.is_empty() {
-                api.send_prompt(session.as_str(), Some(text.as_str()), None, None, policy)
-                    .await
-            } else {
-                let mut content = parts;
-                if !text.is_empty() {
-                    content.insert(0, norte_code_wire::UserInputPart::text(text));
+            let session_id = session.as_str().to_owned();
+            let outcome: Result<(), ClientOperationError> = async {
+                for attempt in 0..2 {
+                    let result = if parts.is_empty() {
+                        api.send_prompt(
+                            session_id.as_str(),
+                            Some(text.as_str()),
+                            None,
+                            None,
+                            policy,
+                        )
+                        .await
+                    } else {
+                        let mut content = parts.clone();
+                        if !text.is_empty() {
+                            content.insert(0, norte_code_wire::UserInputPart::text(text.clone()));
+                        }
+                        api.send_prompt(session_id.as_str(), None, Some(content), None, policy)
+                            .await
+                    };
+                    match result {
+                        Ok(_) => return Ok(()),
+                        Err(error) if error.is_session_not_attached() && attempt == 0 => {
+                            client.recover_attachment(session_id.as_str()).await?;
+                        }
+                        Err(error) => return Err(ClientOperationError::from(error)),
+                    }
                 }
-                api.send_prompt(session.as_str(), None, Some(content), None, policy)
-                    .await
-            };
+                Err(ClientOperationError::Client(ClientError::new(
+                    "Failed to send message: session attachment could not be recovered.".to_owned(),
+                )))
+            }
+            .await;
             if let Err(error) = outcome {
                 let _ = sender
                     .send(ClientEvent::Failure {
@@ -550,9 +573,27 @@ impl ClientRuntime {
 
     pub(crate) fn load_history(&self, session: SessionKey, generation: u64) {
         let api = Arc::clone(&self.api);
+        let client = Arc::clone(&self.client);
         let sender = self.sender.clone();
         self.runtime.spawn(async move {
-            let result = api.history(session.as_str()).await.map(ClientData::History);
+            let session_id = session.as_str().to_owned();
+            let result = async {
+                match api.history(session_id.as_str()).await {
+                    Ok(items) => Ok(items),
+                    Err(error) if error.is_session_not_attached() => {
+                        client
+                            .recover_attachment(session_id.as_str())
+                            .await
+                            .map_err(|recover| {
+                                norte_code_client::ApiError::Request(recover.to_string())
+                            })?;
+                        api.history(session_id.as_str()).await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            .await
+            .map(ClientData::History);
             let _ = sender
                 .send(ClientEvent::Data {
                     session: Some(session),

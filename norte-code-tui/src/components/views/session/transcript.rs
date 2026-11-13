@@ -216,6 +216,52 @@ impl TranscriptRenderer {
         event: &'a norte_code_wire::ServerEvent,
         options: TranscriptOptions,
     ) {
+        let _ = options;
+        match &event.kind {
+            ServerEventKind::RetryScheduled {
+                attempt,
+                delay_ms,
+                reason,
+                ..
+            } => {
+                Self::flush_buffers(lines, assistant, reasoning, options);
+                lines.push(TextBuilder::retry_scheduled(*attempt, *delay_ms, reason));
+            }
+            ServerEventKind::RetryStarted { attempt, .. } => {
+                Self::flush_buffers(lines, assistant, reasoning, options);
+                lines.push(TextBuilder::retry_started(*attempt));
+            }
+            ServerEventKind::ReasoningDowngraded { from, to, reason } => {
+                Self::flush_buffers(lines, assistant, reasoning, options);
+                let detail = if reason.trim().is_empty() {
+                    format!("Reasoning changed from {from} to {to}.")
+                } else {
+                    format!("Reasoning changed from {from} to {to}: {reason}")
+                };
+                lines.push(Line::from(Span::styled(
+                    detail,
+                    Style::default().fg(palette::warning()),
+                )));
+            }
+            other => Self::append_turn_event(
+                lines,
+                assistant,
+                reasoning,
+                calls_with_output,
+                other,
+                options,
+            ),
+        }
+    }
+
+    fn append_turn_event<'a>(
+        lines: &mut Vec<Line<'static>>,
+        assistant: &mut String,
+        reasoning: &mut String,
+        calls_with_output: &mut HashSet<&'a str>,
+        kind: &'a ServerEventKind,
+        options: TranscriptOptions,
+    ) {
         let TranscriptOptions {
             diff_mode,
             width,
@@ -223,7 +269,7 @@ impl TranscriptRenderer {
             theme,
             ..
         } = options;
-        match &event.kind {
+        match kind {
             ServerEventKind::Delta { delta, .. } => match delta {
                 Delta::Text { text, .. } | Delta::Refusal { text, .. } => {
                     Self::flush_reasoning(lines, reasoning, options);
