@@ -184,14 +184,6 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn tool_arguments_delta(call_id: &str, arguments: &str) -> Line<'static> {
-        Line::from(format!(
-            "{} {call_id}  {arguments}",
-            Self::tool_arguments_label()
-        ))
-    }
-
-    #[must_use]
     pub fn media_delta(bytes: u64, last: bool) -> Line<'static> {
         let state = if last {
             Self::media_complete_label()
@@ -385,11 +377,6 @@ impl TextBuilder {
     #[must_use]
     pub const fn unknown_speaker_label() -> &'static str {
         "unknown"
-    }
-
-    #[must_use]
-    pub const fn tool_arguments_label() -> &'static str {
-        "tool args"
     }
 
     #[must_use]
