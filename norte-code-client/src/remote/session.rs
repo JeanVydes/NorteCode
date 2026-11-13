@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use norte_code_wire::ClientRequest;
 use norte_code_wire::QueueMode;
-use raep_types::{Envelope, FrameType, StandardFrameType};
+use raep_types::{Envelope, FrameType, StandardFrameType, TurnId};
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde_json::Value;
 use tokio_stream::iter;
@@ -44,18 +44,42 @@ impl AgentClient for RemoteClient {
         text: &str,
         queue_mode: QueueMode,
     ) -> Result<EventStream, ClientError> {
-        self.post_user_input(session, text, Self::raep_queue_policy(queue_mode))
+        self.submit_user_input_streaming(session, text, Self::raep_queue_policy(queue_mode))
             .await
     }
 
-    async fn cancel_turn(&self, session: &str) -> Result<(), ClientError> {
-        self.post_standard(
-            session,
-            FrameType::Standard(StandardFrameType::CancelTurn),
-            serde_json::to_value(raep_types::CancelTurn { reason: None }).unwrap_or(Value::Null),
-        )
-        .await?;
-        Ok(())
+    async fn cancel_turn(&self, session: &str, turn: &TurnId) -> Result<(), ClientError> {
+        self.cancel(session, turn).await
+    }
+
+    async fn rewind(
+        &self,
+        session: &str,
+        to_turn_id: &str,
+        inclusive: bool,
+    ) -> Result<Vec<String>, ClientError> {
+        self.rewind_to(session, to_turn_id, inclusive).await
+    }
+
+    async fn pin_turns(
+        &self,
+        session: &str,
+        turn_ids: &[String],
+        pinned: bool,
+    ) -> Result<Vec<String>, ClientError> {
+        self.set_pins(session, turn_ids, pinned).await
+    }
+
+    async fn list_jobs(&self, session: &str) -> Result<Vec<norte_code_wire::JobInfo>, ClientError> {
+        self.jobs_of(session).await
+    }
+
+    async fn stop_job(
+        &self,
+        session: &str,
+        job_id: &str,
+    ) -> Result<norte_code_wire::JobInfo, ClientError> {
+        self.stop(session, job_id).await
     }
 
     async fn set_model(
@@ -93,6 +117,7 @@ impl AgentClient for RemoteClient {
     }
 
     async fn resume(&self, session: &str) -> Result<EventStream, ClientError> {
+        self.ensure_attached(session).await?;
         // No `agent_override` equivalent: resume goes through the extension
         // command as a `ClientRequestKind::Resume`.
         let request = ClientRequest {
@@ -127,12 +152,19 @@ impl AgentClient for RemoteClient {
         if !status.is_success() {
             return Err(ClientError::new(response_body.error_message()));
         }
+        for frame in &response_body.events {
+            self.note_frame_seq(frame);
+        }
         let events = response_body
             .events
             .iter()
             .map(server_event_from_frame)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Box::pin(iter(events)))
+    }
+
+    async fn open_events(&self, session: &str) -> Result<EventStream, ClientError> {
+        self.open_events_of(session).await
     }
 
     async fn fork_session(&self, session: &str) -> Result<SessionSummary, ClientError> {

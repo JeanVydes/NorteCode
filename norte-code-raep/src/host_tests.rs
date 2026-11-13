@@ -1107,6 +1107,82 @@ async fn observer_attach_can_read_history_but_cannot_control_session() {
     ));
 }
 
+#[tokio::test]
+async fn observer_attach_can_read_a_cost_report_but_not_change_the_session() {
+    let service = Arc::new(
+        Service::new(
+            norte_code_protocol::config::Config::default(),
+            Arc::new(norte_code_protocol::catalog::Catalog::default()),
+            None,
+            Arc::new(norte_code_agent::VendorModels),
+            Arc::new(norte_code_protocol::InMemoryStore::new()),
+            Arc::new(norte::InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let host = NorteCodeRaepHost::new(service, HostConfig::default()).expect("host");
+    let attached = host
+        .handle(Envelope::new(
+            standard(StandardFrameType::SessionAttach),
+            json!({
+                "agent_id": "norte-code",
+                "create_if_missing": true,
+                "mode": "observer"
+            }),
+            1,
+        ))
+        .await
+        .expect("observer attach");
+    let session_id = attached[0].session_id.clone();
+
+    let mut report = command_frame(
+        &session_id,
+        norte_code_wire::ClientRequestKind::CostReport {
+            session: Some(norte_code_wire::SessionKey::new(session_id.clone())),
+        },
+        2,
+    );
+    report.session_id = session_id.clone();
+    assert!(host.handle(report).await.is_ok());
+
+    let mut budget = command_frame(
+        &session_id,
+        norte_code_wire::ClientRequestKind::SetBudget {
+            session: norte_code_wire::SessionKey::new(session_id.clone()),
+            budget: norte_code_wire::Budget {
+                unit: norte_code_wire::BudgetUnit::Usd,
+                limit: 10.0,
+                action: norte_code_wire::BudgetAction::Warn,
+            },
+        },
+        3,
+    );
+    budget.session_id = session_id;
+    assert!(matches!(
+        host.handle(budget).await,
+        Err(HostError::InvalidFrame(message)) if message.contains("observer")
+    ));
+}
+
+fn command_frame(
+    session_id: &str,
+    kind: norte_code_wire::ClientRequestKind,
+    timestamp: i64,
+) -> Envelope<serde_json::Value> {
+    let request = norte_code_wire::ClientRequest {
+        request_id: u64::try_from(timestamp).unwrap_or(0),
+        kind,
+    };
+    let mut frame = Envelope::new(
+        FrameType::Extension("norte_code.command".to_owned()),
+        serde_json::to_value(request).expect("command payload"),
+        timestamp,
+    );
+    frame.session_id = session_id.to_owned();
+    frame
+}
+
 #[test]
 fn ordinary_tool_output_is_not_mislabeled_as_a_job() {
     let kind = ServerEventKind::ToolOutput {

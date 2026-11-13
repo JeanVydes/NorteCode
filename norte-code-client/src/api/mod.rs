@@ -32,6 +32,8 @@ use raep_types::Envelope;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::host_error::HostError;
+
 /// What went wrong talking to the host.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -44,9 +46,24 @@ pub enum ApiError {
     /// The host answered with a non-success status.
     #[error("Server returned HTTP {0}")]
     HttpStatus(u16),
+    /// The host refused the request and said why.
+    #[error("The host refused the request: {0}")]
+    Host(HostError),
     /// The answer did not match the shape the endpoint declares.
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+}
+
+impl ApiError {
+    /// Whether the host says the session is not attached.
+    ///
+    /// The host answers that way when the session was detached while the
+    /// client still believed it held the attachment. Attaching again and
+    /// sending the request once more recovers from it.
+    #[must_use]
+    pub fn is_session_not_attached(&self) -> bool {
+        matches!(self, Self::Host(error) if error.is_session_not_attached())
+    }
 }
 
 /// The error body the host writes when it rejects a request.

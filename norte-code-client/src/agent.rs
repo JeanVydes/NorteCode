@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use norte_code_wire::QueueMode;
 use norte_code_wire::{ClientRequest, ServerEvent};
+use raep_types::TurnId;
 
 pub use norte_code_wire::SessionSummary;
 use std::pin::Pin;
@@ -61,7 +62,35 @@ pub trait AgentClient: Send + Sync {
     ) -> Result<EventStream, ClientError>;
 
     /// Cancels the session's running turn through `CancelTurn`.
-    async fn cancel_turn(&self, session: &str) -> Result<(), ClientError>;
+    async fn cancel_turn(&self, session: &str, turn: &TurnId) -> Result<(), ClientError>;
+
+    /// Rewinds the session to a turn through `SessionRewind` and reports the
+    /// turns it removed.
+    async fn rewind(
+        &self,
+        session: &str,
+        to_turn_id: &str,
+        inclusive: bool,
+    ) -> Result<Vec<String>, ClientError>;
+
+    /// Pins or unpins turns through `ContextPin` and reports the turns that
+    /// are pinned.
+    async fn pin_turns(
+        &self,
+        session: &str,
+        turn_ids: &[String],
+        pinned: bool,
+    ) -> Result<Vec<String>, ClientError>;
+
+    /// Lists the session's background jobs through `JobList`.
+    async fn list_jobs(&self, session: &str) -> Result<Vec<norte_code_wire::JobInfo>, ClientError>;
+
+    /// Stops one background job through `CancelJob` and reports how it ended.
+    async fn stop_job(
+        &self,
+        session: &str,
+        job_id: &str,
+    ) -> Result<norte_code_wire::JobInfo, ClientError>;
 
     /// Changes the session's model through `SessionConfigure`.
     async fn set_model(
@@ -88,6 +117,14 @@ pub trait AgentClient: Send + Sync {
     /// Replays the session's history through `SessionAttach` with
     /// `resume_from_seq`, instead of a `Resume` command.
     async fn resume(&self, session: &str) -> Result<EventStream, ClientError>;
+
+    /// Opens the session's event stream and keeps it open.
+    ///
+    /// The stream is the attachment: the host binds the session to it and
+    /// releases it when the stream closes. A client that keeps one stream per
+    /// session sees every event of that session, whether a turn is running or
+    /// not.
+    async fn open_events(&self, session: &str) -> Result<EventStream, ClientError>;
 
     /// Forks a session through `SessionFork`.
     async fn fork_session(&self, session: &str) -> Result<SessionSummary, ClientError>;

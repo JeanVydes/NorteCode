@@ -671,7 +671,7 @@ pub struct UploadReceipt {
 }
 
 /// One part of a `USER_INPUT`'s content.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UserInputPart {
     /// What it is.
     #[serde(rename = "type")]
@@ -688,7 +688,7 @@ pub struct UserInputPart {
 }
 
 /// What a content part carries.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputPartKind {
     /// Text.
@@ -704,7 +704,7 @@ pub enum InputPartKind {
 }
 
 /// Where an uploaded part's bytes live.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum UploadSource {
     /// An upload the host already stores.

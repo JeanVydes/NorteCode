@@ -102,6 +102,18 @@ impl FrameIn {
 /// the one SSE reader: every client feeds it bytes and receives protocol
 /// events, so parsing cannot drift between clients.
 pub fn take_sse_events(buffer: &mut Vec<u8>) -> Vec<DecodedEvent> {
+    take_sse_frames(buffer)
+        .into_iter()
+        .filter_map(|frame| frame.event)
+        .collect()
+}
+
+struct SseFrame {
+    event: Option<DecodedEvent>,
+    seq: Option<u64>,
+}
+
+fn take_sse_frames(buffer: &mut Vec<u8>) -> Vec<SseFrame> {
     let mut events = Vec::new();
     while let Some((end, delimiter)) = next_boundary(buffer) {
         let block: Vec<u8> = buffer.drain(..end).collect();
@@ -121,9 +133,11 @@ pub fn take_sse_events(buffer: &mut Vec<u8>) -> Vec<DecodedEvent> {
         let Ok(frame) = serde_json::from_str::<FrameIn>(&data) else {
             continue;
         };
-        if let Ok(decoded) = decode_frame(&frame.into_envelope()) {
-            events.push(decoded);
-        }
+        let frame = frame.into_envelope();
+        events.push(SseFrame {
+            event: decode_frame(&frame).ok(),
+            seq: frame.seq,
+        });
     }
     events
 }
@@ -136,15 +150,21 @@ pub fn take_sse_events(buffer: &mut Vec<u8>) -> Vec<DecodedEvent> {
 pub(crate) fn drain_sse_buffer(
     buffer: &mut Vec<u8>,
 ) -> Vec<(Option<ServerEvent>, bool, Option<u64>)> {
-    take_sse_events(buffer)
+    take_sse_frames(buffer)
         .into_iter()
-        .map(|decoded| {
-            let terminal = matches!(
-                decoded.event.kind,
-                norte_code_wire::ServerEventKind::TurnFinished { .. }
-                    | norte_code_wire::ServerEventKind::TurnStopped { .. }
-            );
-            (Some(decoded.event), terminal, decoded.seq)
+        .map(|frame| {
+            let terminal = frame.event.as_ref().is_some_and(|decoded| {
+                matches!(
+                    decoded.event.kind,
+                    norte_code_wire::ServerEventKind::TurnFinished { .. }
+                        | norte_code_wire::ServerEventKind::TurnStopped { .. }
+                )
+            });
+            (
+                frame.event.map(|decoded| decoded.event),
+                terminal,
+                frame.seq,
+            )
         })
         .collect()
 }

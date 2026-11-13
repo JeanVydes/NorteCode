@@ -56,20 +56,45 @@ pub(crate) struct HistoryPagePayload {
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct HistoryItemPayload {
     #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
     pub(crate) turn_id: Option<String>,
     #[serde(default)]
-    pub(crate) role: String,
+    pub(crate) role: Option<String>,
     #[serde(default)]
     pub(crate) kind: String,
     #[serde(default)]
-    pub(crate) content: String,
+    pub(crate) content: HistoryContentPayload,
     #[serde(default, alias = "created_at")]
     pub(crate) timestamp: i64,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+pub(crate) enum HistoryContentPayload {
+    Text(String),
+    Structured(HistoryContentDetails),
+}
+
+impl Default for HistoryContentPayload {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HistoryContentDetails {
+    pub(crate) role: String,
+    pub(crate) content: String,
+}
+
 impl HistoryItemPayload {
     pub(crate) fn into_wire(self, index: usize) -> norte_code_wire::HistoryItem {
-        let role = match self.role.as_str() {
+        let (speaker, content) = match self.content {
+            HistoryContentPayload::Text(content) => (self.role.unwrap_or_default(), content),
+            HistoryContentPayload::Structured(content) => (content.role, content.content),
+        };
+        let role = match speaker.to_ascii_lowercase().as_str() {
             "user" => norte_code_wire::HistorySpeaker::User,
             "assistant" => norte_code_wire::HistorySpeaker::Assistant,
             "tool" => norte_code_wire::HistorySpeaker::Tool,
@@ -87,12 +112,14 @@ impl HistoryItemPayload {
             self.kind
         };
         norte_code_wire::HistoryItem {
-            id: self.turn_id.as_ref().map_or_else(
-                || format!("history:{index}"),
-                |turn| format!("{turn}:{index}"),
-            ),
+            id: self.id.unwrap_or_else(|| {
+                self.turn_id.as_ref().map_or_else(
+                    || format!("history:{index}"),
+                    |turn| format!("{turn}:{index}"),
+                )
+            }),
             kind,
-            content: self.content,
+            content,
             created_at: self.timestamp,
             turn_id: self.turn_id,
             role,

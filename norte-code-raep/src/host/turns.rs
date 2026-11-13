@@ -102,6 +102,7 @@ impl NorteCodeRaepHost {
             .get(&frame.session_id)
             .is_some_and(|mode| *mode == AttachMode::Observer)
             && !observer_read_only_frame(&frame.kind)
+            && !read_only
         {
             return Err(HostError::InvalidFrame(
                 "FORBIDDEN: observer attachments are read-only".to_owned(),

@@ -1,5 +1,5 @@
 use norte_code_wire::{Budget, ClientRequestKind, Reasoning, ReasoningScope, SessionKey};
-use raep_types::{ClientInfo, FrameType, SessionAttach, StandardFrameType, TurnId};
+use raep_types::{AttachMode, ClientInfo, FrameType, SessionAttach, StandardFrameType, TurnId};
 
 use super::shared::{EmptyPayload, accepted};
 use super::{ApiError, CLIENT_NAME, RestClient};
@@ -33,6 +33,36 @@ impl RestClient {
             )
             .await?;
         accepted(response, "Session attachment was rejected.")
+    }
+
+    /// Attaches to a session without taking control of its running turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport error or the reason the host refused.
+    pub async fn attach_observer(&self, session: &str, agent_id: &str) -> Result<(), ApiError> {
+        let payload = SessionAttach {
+            agent_id: agent_id.to_owned(),
+            agent_override: None,
+            create_if_missing: Some(false),
+            mode: Some(AttachMode::Observer),
+            takeover: None,
+            resume_from_seq: None,
+            capabilities: None,
+            client_info: Some(ClientInfo {
+                name: Some(CLIENT_NAME.to_owned()),
+                version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            }),
+            options: None,
+        };
+        let response = self
+            .post_frame(
+                session,
+                FrameType::Standard(StandardFrameType::SessionAttach),
+                &payload,
+            )
+            .await?;
+        accepted(response, "Observer attachment was rejected.")
     }
 
     /// Detaches from a session.

@@ -1,9 +1,14 @@
+mod attachment;
 mod commands;
+mod jobs;
+#[cfg(test)]
+mod mock_host;
 mod session;
 mod stream;
+mod turns;
 
 use norte_code_wire::{ClientRequest, ServerEvent};
-use raep_types::{ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameType};
+use raep_types::{ClientInfo, Envelope, FrameType, SessionAttach, StandardFrameType, TurnId};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use crate::decode::{percent_encode, session_from_request, timestamp_millis};
 use crate::error::ClientError;
 use crate::frame::CommandResponseBody;
+use crate::host_error::HostError;
 
 /// HTTP client for the `NorteCode` RAEP command endpoint.
 ///
@@ -24,7 +30,8 @@ pub struct RemoteClient {
     pub(crate) bearer_token: Option<HeaderValue>,
     agent_id: String,
     default_session: Option<String>,
-    attached_sessions: Mutex<HashSet<String>>,
+    attached_sessions: Arc<Mutex<HashSet<String>>>,
+    session_agents: Mutex<HashMap<String, String>>,
     session_seq: Arc<Mutex<HashMap<String, u64>>>,
     session_info: Mutex<HashMap<String, norte_code_wire::SessionInfo>>,
     session_reasoning: Mutex<HashMap<String, norte_code_wire::Reasoning>>,
@@ -83,7 +90,8 @@ impl RemoteClient {
             bearer_token,
             agent_id: "norte-code".to_owned(),
             default_session,
-            attached_sessions: Mutex::new(HashSet::new()),
+            attached_sessions: Arc::new(Mutex::new(HashSet::new())),
+            session_agents: Mutex::new(HashMap::new()),
             session_seq: Arc::new(Mutex::new(HashMap::new())),
             session_info: Mutex::new(HashMap::new()),
             session_reasoning: Mutex::new(HashMap::new()),
@@ -98,6 +106,23 @@ impl RemoteClient {
     pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
         self.agent_id = agent_id.into();
         self
+    }
+
+    /// Associates an existing session with its owning agent before attaching.
+    pub fn set_session_agent(&self, session_id: &str, agent_id: impl Into<String>) {
+        self.session_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.to_owned(), agent_id.into());
+    }
+
+    pub(crate) fn agent_for_session(&self, session_id: &str) -> String {
+        self.session_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| self.agent_id.clone())
     }
 
     /// Converts a Norte Code [`norte_code_wire::Reasoning`] into the
@@ -295,13 +320,39 @@ impl RemoteClient {
         kind: FrameType,
         payload: Value,
     ) -> Result<Vec<Envelope<Value>>, ClientError> {
+        self.post_standard_for_turn(session, kind, payload, None)
+            .await
+    }
+
+    /// Posts a standard frame that belongs to a turn.
+    pub(crate) async fn post_standard_for_turn(
+        &self,
+        session: &str,
+        kind: FrameType,
+        payload: Value,
+        turn: Option<&TurnId>,
+    ) -> Result<Vec<Envelope<Value>>, ClientError> {
         self.ensure_attached(session).await?;
+        self.with_attachment(session, || {
+            self.post_standard_frame(session, &kind, payload.clone(), turn)
+        })
+        .await
+    }
+
+    async fn post_standard_frame(
+        &self,
+        session: &str,
+        kind: &FrameType,
+        payload: Value,
+        turn: Option<&TurnId>,
+    ) -> Result<Vec<Envelope<Value>>, ClientError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &self.bearer_token {
             headers.insert(AUTHORIZATION, token.clone());
         }
-        let mut frame = Envelope::new(kind, payload, timestamp_millis());
+        let mut frame = Envelope::new(kind.clone(), payload, timestamp_millis());
         frame.session_id = session.to_owned();
+        frame.turn_id = turn.cloned();
         let response = self
             .http
             .post(self.command_url(session))
@@ -311,14 +362,30 @@ impl RemoteClient {
             .await
             .map_err(|error| ClientError::new(format!("RAEP command failed: {error}")))?;
         let status = response.status();
-        let body: CommandResponseBody = response
-            .json()
+        let body = response
+            .text()
             .await
             .map_err(|error| ClientError::new(format!("invalid RAEP command response: {error}")))?;
         if !status.is_success() {
-            return Err(ClientError::new(body.error_message()));
+            return Err(Self::command_error(&body));
         }
-        Ok(body.events)
+        serde_json::from_str::<CommandResponseBody>(&body)
+            .map(|body| body.events)
+            .map_err(|error| ClientError::new(format!("invalid RAEP command response: {error}")))
+    }
+
+    /// The refusal the host reported, read from a refused command's body.
+    pub(crate) fn command_error(body: &str) -> ClientError {
+        if let Some(refusal) = HostError::parse(body) {
+            return ClientError::from_host(refusal);
+        }
+        let message = serde_json::from_str::<CommandResponseBody>(body)
+            .ok()
+            .and_then(|body| body.error)
+            .map(|error| error.message)
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "RAEP command failed".to_owned());
+        ClientError::new(message)
     }
 
     /// Posts a standard `SESSION_CONFIGURE` frame (RFC 8.1) with an
@@ -439,7 +506,7 @@ impl RemoteClient {
             .json(&Envelope::new(
                 FrameType::Standard(StandardFrameType::SessionAttach),
                 serde_json::to_value(SessionAttach {
-                    agent_id: self.agent_id.clone(),
+                    agent_id: self.agent_for_session(session_id),
                     agent_override: None,
                     create_if_missing: Some(false),
                     mode: None,

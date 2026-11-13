@@ -20,9 +20,11 @@ pub(crate) mod canonical;
 pub(crate) mod decode;
 pub(crate) mod error;
 pub(crate) mod frame;
+pub(crate) mod host_error;
 #[cfg(feature = "native")]
 pub(crate) mod remote;
 pub(crate) mod sse;
+pub(crate) mod upload;
 
 pub use agent::{AgentClient, EventStream, SessionSummary, into_session_info};
 pub use api::{
@@ -33,9 +35,12 @@ pub use api::{
 };
 pub use decode::{DecodedEvent, decode_frame, history_items};
 pub use error::ClientError;
+pub use host_error::HostError;
+pub use raep_types::TurnId;
 #[cfg(feature = "native")]
 pub use remote::{RemoteClient, RemoteSessionStats};
 pub use sse::take_sse_events;
+pub use upload::{input_part_kind, mime_of_path, modality_of, modality_word, upload_part};
 
 #[cfg(test)]
 mod tests;
