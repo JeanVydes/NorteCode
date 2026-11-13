@@ -43,7 +43,7 @@ impl RemoteClient {
             .await?;
         let events = frames
             .iter()
-            .map(server_event_from_frame)
+            .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(events
             .into_iter()
@@ -70,7 +70,7 @@ impl RemoteClient {
             .await?;
         let events = frames
             .iter()
-            .map(server_event_from_frame)
+            .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
         events
             .into_iter()

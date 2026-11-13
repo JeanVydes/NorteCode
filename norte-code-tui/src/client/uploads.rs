@@ -24,6 +24,7 @@ impl ClientRuntime {
         generation: u64,
     ) {
         let api = Arc::clone(&self.api);
+        let client = Arc::clone(&self.client);
         let sender = self.sender.clone();
         self.runtime.spawn(async move {
             let name = path.file_name().map_or_else(
@@ -55,7 +56,32 @@ impl ClientRuntime {
                     .await;
                 return;
             }
-            let receipt = match api.upload(session.as_str(), &mime, bytes).await {
+            let receipt = match api.upload(session.as_str(), &mime, bytes.clone()).await {
+                Err(error) if error.is_session_not_attached() => {
+                    if client.recover_attachment(session.as_str()).await.is_err() {
+                        let _ = sender
+                            .send(ClientEvent::Failure {
+                                session,
+                                generation,
+                                message: format!("Uploading {name} failed: {error}"),
+                            })
+                            .await;
+                        return;
+                    }
+                    match api.upload(session.as_str(), &mime, bytes).await {
+                        Ok(receipt) => receipt,
+                        Err(error) => {
+                            let _ = sender
+                                .send(ClientEvent::Failure {
+                                    session,
+                                    generation,
+                                    message: format!("Uploading {name} failed: {error}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
                 Ok(receipt) => receipt,
                 Err(error) => {
                     let _ = sender

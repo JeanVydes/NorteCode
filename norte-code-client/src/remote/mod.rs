@@ -486,7 +486,12 @@ impl RemoteClient {
         }
     }
 
-    pub(crate) async fn ensure_attached(&self, session_id: &str) -> Result<(), ClientError> {
+    /// Ensures the session has an active attachment for commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the attach command fails.
+    pub async fn ensure_attached(&self, session_id: &str) -> Result<(), ClientError> {
         if self
             .attached_sessions
             .lock()

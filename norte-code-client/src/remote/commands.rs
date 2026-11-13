@@ -28,7 +28,7 @@ impl RemoteClient {
             .await?;
         let events = frames
             .iter()
-            .map(server_event_from_frame)
+            .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Box::pin(iter(events)))
     }
@@ -64,7 +64,10 @@ impl RemoteClient {
         self.submit_command(request).await
     }
 
-    async fn submit_command(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
+    pub(crate) async fn submit_command(
+        &self,
+        request: ClientRequest,
+    ) -> Result<EventStream, ClientError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &self.bearer_token {
             headers.insert(AUTHORIZATION, token.clone());
@@ -95,7 +98,7 @@ impl RemoteClient {
         let events = response_body
             .events
             .iter()
-            .map(server_event_from_frame)
+            .filter_map(|frame| server_event_from_frame(frame).transpose())
             .collect::<Result<Vec<_>, _>>()?;
         for frame in &response_body.events {
             self.note_frame_seq(frame);
