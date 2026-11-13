@@ -94,6 +94,7 @@ pub(crate) enum ComponentAction {
         chips: Vec<crate::chips::Chip>,
     },
     AttachFile(String),
+    ImportSession(String),
     SetQueueMode(QueueMode),
     SetModel {
         provider: String,

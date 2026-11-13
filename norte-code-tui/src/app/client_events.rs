@@ -5,7 +5,7 @@ use norte_code_wire::{
 
 use super::{App, client_data::ErrorDestination};
 use crate::{
-    client::ClientEvent,
+    client::{ClientData, ClientEvent, ClientOperationError},
     components::{ComponentEvent, ComponentId},
     ui_model::{
         BudgetApprovalRequest, SessionAttachmentState, SessionModel, TranscriptItem, TurnState,
@@ -19,6 +19,35 @@ impl App {
             self.apply_client_event(client_event)?;
         }
         Ok(())
+    }
+
+    /// Applies one data event that arrived from the host.
+    fn apply_data_event(
+        &mut self,
+        session: Option<&SessionKey>,
+        result: Box<Result<ClientData, ClientOperationError>>,
+    ) -> Result<(), super::AppError> {
+        let destination = if session.is_some() {
+            ErrorDestination::Transcript
+        } else {
+            ErrorDestination::Notice
+        };
+        self.apply_client_data(*result, destination)
+    }
+
+    /// Keeps a pinned-turns list that arrived from the host.
+    fn apply_pins(&mut self, pinned_turns: Vec<String>) {
+        let count = pinned_turns.len();
+        self.model.pinned_turns = pinned_turns;
+        self.model
+            .transcript
+            .push(TranscriptItem::Status(Self::pinned_message(count)));
+    }
+
+    /// Opens a session that arrived from an import.
+    fn apply_import(&mut self, session_id: String) {
+        self.model.notice = Some("Session imported.".to_owned());
+        self.open_session(norte_code_wire::SessionKey::new(session_id));
     }
 
     /// Records a failure that arrived for the session.
@@ -35,6 +64,13 @@ impl App {
 
     /// Applies one event that arrived from the host.
     fn apply_client_event(&mut self, client_event: ClientEvent) -> Result<(), super::AppError> {
+        self.apply_client_event_inner(client_event)
+    }
+
+    fn apply_client_event_inner(
+        &mut self,
+        client_event: ClientEvent,
+    ) -> Result<(), super::AppError> {
         match client_event {
             ClientEvent::Attached {
                 session,
@@ -81,11 +117,7 @@ impl App {
                 generation,
                 pinned_turns,
             } if self.is_current_session_event(&session, generation) => {
-                let count = pinned_turns.len();
-                self.model.pinned_turns = pinned_turns;
-                self.model
-                    .transcript
-                    .push(TranscriptItem::Status(Self::pinned_message(count)));
+                self.apply_pins(pinned_turns);
             }
             ClientEvent::JobStopped {
                 session,
@@ -108,19 +140,19 @@ impl App {
             } if self.is_current_session_event(&session, generation) => {
                 self.give_to_session_view(ComponentEvent::Uploaded(chip));
             }
+            ClientEvent::Imported {
+                session,
+                generation,
+                session_id,
+            } if self.is_current_session_event(&session, generation) => {
+                self.apply_import(session_id);
+            }
             ClientEvent::Data {
                 session,
                 generation,
                 result,
             } if self.is_current_data_event(session.as_ref(), generation) => {
-                self.apply_client_data(
-                    *result,
-                    if session.is_some() {
-                        ErrorDestination::Transcript
-                    } else {
-                        ErrorDestination::Notice
-                    },
-                )?;
+                self.apply_data_event(session.as_ref(), result)?;
             }
             ClientEvent::Attached { .. }
             | ClientEvent::AttachmentFailure { .. }
@@ -131,6 +163,7 @@ impl App {
             | ClientEvent::Jobs { .. }
             | ClientEvent::JobStopped { .. }
             | ClientEvent::Uploaded { .. }
+            | ClientEvent::Imported { .. }
             | ClientEvent::Data { .. } => {}
         }
         Ok(())

@@ -4,9 +4,7 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyEventKind};
-use norte_code_wire::SessionKey;
 use thiserror::Error;
-
 mod actions;
 mod client_data;
 mod client_events;
@@ -78,7 +76,7 @@ enum RunState {
 impl App {
     fn new() -> Result<Self, AppError> {
         let config = ClientConfig::load()?;
-        let (client, sessions) = ClientRuntime::connect(&config)?;
+        let (client, sessions, fresh) = ClientRuntime::connect(&config)?;
         let mut model = UiModel {
             sessions,
             endpoint: client.endpoint().to_owned(),
@@ -99,9 +97,7 @@ impl App {
             last_session_refresh: Instant::now(),
         };
         app.activate_view(ComponentId::Sessions)?;
-        if let Some(session) = app.model.sessions.first() {
-            app.open_session(SessionKey::new(session.session_id.clone()));
-        }
+        app.open_session(fresh);
         app.client.load_models(app.session_generation);
         app.client.load_catalog(app.session_generation);
         app.client.load_host(app.session_generation);

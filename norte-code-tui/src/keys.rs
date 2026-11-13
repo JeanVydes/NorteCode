@@ -26,6 +26,7 @@ pub const REASONING_CHAR: char = 'r';
 pub const REWIND_CHAR: char = 'R';
 pub const PIN_CHAR: char = 'P';
 pub const STOP_JOB_CHAR: char = 'S';
+pub const IMPORT_CHAR: char = 'I';
 
 pub const SESSION_VIEW: char = '1';
 pub const PLANS_VIEW: char = '2';

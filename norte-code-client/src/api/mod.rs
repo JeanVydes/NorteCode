@@ -13,6 +13,7 @@ mod cost;
 mod discovery;
 mod endpoint;
 mod history;
+mod import;
 mod mcp;
 mod plugins;
 mod sessions;
@@ -26,6 +27,7 @@ pub use endpoint::{
     AgentModelRef, AgentOverride, CreateSessionRequest, Endpoint, RenameSessionRequest,
     SessionEventsRequest, TelemetryQuery,
 };
+pub use import::{ImportPreview, ImportedSession};
 pub use types::*;
 
 use raep_types::Envelope;

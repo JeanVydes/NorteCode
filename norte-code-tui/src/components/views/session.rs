@@ -45,6 +45,8 @@ pub(in crate::components) struct SessionView {
     pending_action: Option<ComponentAction>,
     animation_phase: u16,
     picker: Option<Picker>,
+    /// The path of the bundle being imported, when the reader is typing one.
+    import: Option<String>,
 }
 
 impl Component for SessionView {
@@ -67,7 +69,10 @@ impl Component for SessionView {
     }
 
     fn handle_key(&mut self, key: KeyEvent, model: &UiModel) {
-        if self.handle_budget_approval(key, model) || self.handle_budget_entry(key, model) {
+        if self.handle_budget_approval(key, model)
+            || self.handle_budget_entry(key, model)
+            || self.handle_import_entry(key, model)
+        {
             return;
         }
         if self.handle_picker(key, model) {
@@ -133,8 +138,16 @@ impl Component for SessionView {
                 thinking_phase: self.animation_phase,
             },
         );
-        let input = self.composer.placeholder(model);
-        let hint = Composer::hint(model);
+        let input = if let Some(path) = &self.import {
+            format!("Import bundle: {path}")
+        } else {
+            self.composer.placeholder(model)
+        };
+        let hint = if self.import.is_some() {
+            "Enter import · Esc cancel".to_owned()
+        } else {
+            Composer::hint(model)
+        };
         self.render_picker(frame, content[1], model);
         JobsPanel::render(frame, content[2], &model.jobs, model.preferences.theme);
         todos::TodosPanel::render(frame, content[3], &model.todos, model.preferences.theme);
@@ -197,6 +210,35 @@ impl SessionView {
             KeyCode::Char('d') | keys::CANCEL => Some(ComponentAction::DeclineBudget),
             _ => None,
         };
+        true
+    }
+
+    fn handle_import_entry(&mut self, key: KeyEvent, _model: &UiModel) -> bool {
+        if self.import.is_none() {
+            return false;
+        }
+        match key.code {
+            keys::CANCEL => self.import = None,
+            keys::SUBMIT => {
+                if let Some(path) = self.import.take() {
+                    let path = path.trim().to_owned();
+                    if !path.is_empty() {
+                        self.pending_action = Some(ComponentAction::ImportSession(path));
+                    }
+                }
+            }
+            keys::ERASE => {
+                if let Some(path) = &mut self.import {
+                    path.pop();
+                }
+            }
+            KeyCode::Char(character) => {
+                if let Some(path) = &mut self.import {
+                    path.push(character);
+                }
+            }
+            _ => {}
+        }
         true
     }
 
@@ -301,6 +343,12 @@ impl SessionView {
                 self.pending_action = Some(ComponentAction::SetQueueMode(next_queue_mode(
                     model.queue_mode,
                 )));
+            }
+            KeyCode::Char('n') if model.active_child.is_none() => {
+                self.pending_action = Some(ComponentAction::CreateSession);
+            }
+            KeyCode::Char('I') if model.active_child.is_none() => {
+                self.import = Some(String::new());
             }
             KeyCode::Char(keys::BUDGET_CHAR) if model.active_child.is_none() => {
                 self.composer.budget_entry = Some(String::new());
