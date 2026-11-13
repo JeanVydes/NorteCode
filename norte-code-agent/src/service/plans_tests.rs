@@ -53,6 +53,15 @@ fn title_metadata_comes_from_the_first_markdown_line() {
     assert_eq!(plan_title("###"), None);
 }
 
+#[test]
+fn plan_review_feedback_keeps_the_plan_pending_and_requests_a_revision() {
+    let message = plan_feedback_message("  Add error handling.  ");
+
+    assert!(message.contains("Add error handling."));
+    assert!(message.contains("Keep the plan pending"));
+    assert!(message.contains("request approval again"));
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn plans_are_markdown_files_and_survive_repository_reload() {
