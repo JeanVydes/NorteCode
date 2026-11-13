@@ -335,8 +335,11 @@ impl EventReader {
                                 match seq_step(seqs.get(session.as_str()).copied(), seq) {
                                     SeqStep::Duplicate => continue,
                                     SeqStep::Gap { expected } => {
-                                        drop(seqs);
-                                        finished = true;
+                                        // A gap cannot always be replayed:
+                                        // the host may have pruned the frame.
+                                        // Keep the stream and resync on the
+                                        // next frame, or the reader loses
+                                        // the turn entirely.
                                         pending.push_back((
                                             ServerEvent {
                                                 request_id: 0,
@@ -344,13 +347,12 @@ impl EventReader {
                                                 kind: norte_code_wire::ServerEventKind::Error {
                                                     code: norte_code_wire::ErrorCode::Internal,
                                                     message: format!(
-                                                        "RAEP sequence gap: expected {expected}, received {seq}; stream stopped"
+                                                        "RAEP sequence gap: expected {expected}, received {seq}"
                                                     ),
                                                 },
                                             },
-                                            true,
+                                            false,
                                         ));
-                                        break;
                                     }
                                     SeqStep::Apply => {}
                                 }

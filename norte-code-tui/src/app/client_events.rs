@@ -52,11 +52,16 @@ impl App {
     }
 
     /// Applies one server event that arrived on the session's stream.
-    fn apply_server_event(&mut self, event: norte_code_wire::ServerEvent) {
+    fn apply_server_event(
+        &mut self,
+        session: norte_code_wire::SessionKey,
+        generation: u64,
+        event: norte_code_wire::ServerEvent,
+    ) {
         if matches!(&event.kind, ServerEventKind::MessageReplayed { .. }) {
             return;
         }
-        self.handle_server_event(event);
+        self.handle_server_event(session, generation, event);
     }
 
     /// Applies one data event that arrived from the host.
@@ -176,7 +181,7 @@ impl App {
                 generation,
                 event,
             } if self.is_current_session_event(&session, generation) => {
-                self.apply_server_event(*event);
+                self.apply_server_event(session, generation, *event);
             }
             ClientEvent::Failure {
                 session,
@@ -190,6 +195,8 @@ impl App {
                 generation,
                 attempt,
             } if self.is_current_session_event(&session, generation) => {
+                self.model.turn_state = TurnState::Idle;
+                self.model.active_turn = None;
                 self.apply_reconnecting(attempt);
             }
             ClientEvent::AttachmentFailure {
@@ -264,9 +271,17 @@ impl App {
         Ok(())
     }
 
-    fn handle_server_event(&mut self, event: norte_code_wire::ServerEvent) {
+    fn handle_server_event(
+        &mut self,
+        session: norte_code_wire::SessionKey,
+        generation: u64,
+        event: norte_code_wire::ServerEvent,
+    ) {
         if let ServerEventKind::Error { code, message } = &event.kind {
             self.apply_reasoning_error(*code, message);
+            if message.starts_with("RAEP sequence gap") {
+                self.client.load_history(session, generation);
+            }
         }
         if let ServerEventKind::ReasoningDowngraded { from, to, reason } = &event.kind {
             self.apply_reasoning_downgrade(from, to, reason);
