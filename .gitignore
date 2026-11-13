@@ -44,3 +44,7 @@ REQUIREMENTS.md
 norte-code-replay/
 *.replay/
 norte-code.db*
+
+# Working documents and design scratch (never committed)
+norte-code-tui/CHIPS_PLAN.md
+norte-code-tui/NorteCode*.html
