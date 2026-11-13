@@ -12,6 +12,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 mod catalog;
 mod host;
+mod imports;
 mod jobs;
 mod plugins;
 mod reports;
@@ -58,6 +59,11 @@ pub(crate) enum ClientEvent {
         session: SessionKey,
         generation: u64,
         message: String,
+    },
+    Imported {
+        session: SessionKey,
+        generation: u64,
+        session_id: String,
     },
     Rewound {
         session: SessionKey,
@@ -154,7 +160,7 @@ pub(crate) struct ClientRuntime {
 impl ClientRuntime {
     pub(crate) fn connect(
         config: &ClientConfig,
-    ) -> Result<(Self, Vec<SessionSummary>), ClientRuntimeError> {
+    ) -> Result<(Self, Vec<SessionSummary>, SessionKey), ClientRuntimeError> {
         let base_url = config.service.url.clone();
         let token = config.service.token.as_deref();
         let agent_id = config.agent_id.clone();
@@ -163,10 +169,10 @@ impl ClientRuntime {
             RemoteClient::new(base_url.clone(), token, None)?.with_agent_id(agent_id.clone()),
         );
         let api = Arc::new(RestClient::new(&base_url, token.unwrap_or_default())?);
-        let mut sessions = runtime.block_on(client.list_sessions())?;
-        if sessions.is_empty() {
-            sessions.push(runtime.block_on(client.create_session(None))?);
-        }
+        let sessions = runtime.block_on(client.list_sessions())?;
+        // The reader starts with an empty session of their own, never with one
+        // that was left open before.
+        let fresh = runtime.block_on(client.create_session(None))?;
         let (sender, events) = mpsc::channel(256);
         Ok((
             Self {
@@ -181,6 +187,7 @@ impl ClientRuntime {
                 stream: std::sync::Mutex::new(None),
             },
             sessions,
+            SessionKey::new(fresh.session_id),
         ))
     }
 

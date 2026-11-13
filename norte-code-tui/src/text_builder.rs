@@ -68,6 +68,11 @@ impl TextBuilder {
             Line::from(format!("{}  rewind to a turn", keys::REWIND_CHAR)),
             Line::from(format!("{}  pin or unpin a turn", keys::PIN_CHAR)),
             Line::from(format!("{}  stop a background job", keys::STOP_JOB_CHAR)),
+            Line::from(format!("{}  start a new session", keys::NEW_SESSION_CHAR)),
+            Line::from(format!(
+                "{}  import a session from a bundle",
+                keys::IMPORT_CHAR
+            )),
             Line::from(format!(
                 "{}  cycle message queue mode",
                 keys::QUEUE_MODE_CHAR
@@ -314,7 +319,7 @@ impl TextBuilder {
     pub fn footer_help(view: ComponentId) -> String {
         let controls = match view {
             ComponentId::Session => format!(
-                "{}/{} navigate · {} compose · Esc/Tab focus · {} send · {} diff · {} queue · {} thought · {} budget · {} export · {} compact · {} cancel · {} reasoning · {} rewind · {} pin · {} stop job",
+                "{}/{} navigate · {} compose · Esc/Tab focus · {} send · {} diff · {} queue · {} thought · {} budget · {} export · {} compact · {} cancel · {} reasoning · {} rewind · {} pin · {} stop job · {} new · {} import",
                 keys::NAV_DOWN_CHAR,
                 keys::NAV_UP_CHAR,
                 keys::COMPOSER_CHAR,
@@ -329,7 +334,9 @@ impl TextBuilder {
                 keys::REASONING_CHAR,
                 keys::REWIND_CHAR,
                 keys::PIN_CHAR,
-                keys::STOP_JOB_CHAR
+                keys::STOP_JOB_CHAR,
+                keys::NEW_SESSION_CHAR,
+                keys::IMPORT_CHAR
             ),
             ComponentId::Plans => format!(
                 "{}/{} navigate · Enter details",

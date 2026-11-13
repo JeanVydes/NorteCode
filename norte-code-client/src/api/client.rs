@@ -17,7 +17,7 @@ use crate::host_error::HostError;
 /// the platform's job: the frame decoder is shared, the socket is not.
 #[derive(Clone)]
 pub struct RestClient {
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     base_url: String,
     bearer_token: Option<String>,
 }
@@ -271,7 +271,7 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, A
         .map_err(|error| ApiError::InvalidResponse(error.to_string()))
 }
 
-async fn status_error(response: reqwest::Response) -> ApiError {
+pub(super) async fn status_error(response: reqwest::Response) -> ApiError {
     let status = response.status().as_u16();
     let detail = response.text().await.unwrap_or_default();
     if let Some(error) = HostError::parse(&detail) {

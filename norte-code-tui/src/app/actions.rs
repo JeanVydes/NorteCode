@@ -83,6 +83,7 @@ impl App {
             }
             ComponentAction::SendMessage { text, chips } => self.send_message(text, &chips),
             ComponentAction::AttachFile(path) => self.attach_file(path),
+            ComponentAction::ImportSession(path) => self.import_session(path),
             ComponentAction::SetQueueMode(mode) => {
                 self.model.queue_mode = mode;
             }
@@ -306,6 +307,20 @@ impl App {
             self.client
                 .approve_budget(session, approval.limit, self.session_generation);
         }
+    }
+
+    fn import_session(&mut self, path: String) {
+        let Some(session) = self.model.active_session.clone() else {
+            return;
+        };
+        if self.model.active_child.is_some() {
+            return;
+        }
+        self.client.import_session(
+            session,
+            std::path::PathBuf::from(path),
+            self.session_generation,
+        );
     }
 
     fn decline_budget(&mut self) {
