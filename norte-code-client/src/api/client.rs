@@ -10,6 +10,7 @@ use norte_code_wire::{ClientRequest, ClientRequestKind};
 
 use super::endpoint::SessionEventsRequest;
 use super::{ApiError, CommandResponse, Endpoint, RemoteError, now_millis};
+use crate::host_error::HostError;
 /// The REST side of a Norte Code host.
 ///
 /// It owns the base URL, the bearer token and one HTTP client. Streaming is
@@ -273,6 +274,9 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, A
 async fn status_error(response: reqwest::Response) -> ApiError {
     let status = response.status().as_u16();
     let detail = response.text().await.unwrap_or_default();
+    if let Some(error) = HostError::parse(&detail) {
+        return ApiError::Host(error);
+    }
     let message = serde_json::from_str::<RemoteErrorResponse>(&detail)
         .ok()
         .and_then(|body| body.error)

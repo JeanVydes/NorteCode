@@ -657,10 +657,11 @@ pub enum BudgetUnit {
 }
 
 /// What to do when a budget is exhausted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetAction {
     /// Report it and keep going.
+    #[default]
     Warn,
     /// Park for approval.
     Ask,

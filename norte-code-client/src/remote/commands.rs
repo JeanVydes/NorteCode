@@ -56,7 +56,15 @@ impl RemoteClient {
             ) {
                 return self.submit_streaming(session.as_str(), request).await;
             }
+            let session = session.as_str().to_owned();
+            return self
+                .with_attachment(&session, || self.submit_command(request.clone()))
+                .await;
         }
+        self.submit_command(request).await
+    }
+
+    async fn submit_command(&self, request: ClientRequest) -> Result<EventStream, ClientError> {
         let mut headers = HeaderMap::new();
         if let Some(token) = &self.bearer_token {
             headers.insert(AUTHORIZATION, token.clone());
@@ -67,7 +75,7 @@ impl RemoteClient {
             .headers(headers)
             .json(&Envelope::new(
                 FrameType::Extension("norte_code.command".to_owned()),
-                serde_json::to_value(request)
+                serde_json::to_value(&request)
                     .map_err(|error| ClientError::new(format!("serialize request: {error}")))?,
                 timestamp_millis(),
             ))
@@ -75,13 +83,15 @@ impl RemoteClient {
             .await
             .map_err(|error| ClientError::new(format!("RAEP request failed: {error}")))?;
         let status = response.status();
-        let response_body: CommandResponseBody = response
-            .json()
+        let body = response
+            .text()
             .await
             .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
         if !status.is_success() {
-            return Err(ClientError::new(response_body.error_message()));
+            return Err(RemoteClient::command_error(&body));
         }
+        let response_body: CommandResponseBody = serde_json::from_str(&body)
+            .map_err(|error| ClientError::new(format!("invalid RAEP response: {error}")))?;
         let events = response_body
             .events
             .iter()

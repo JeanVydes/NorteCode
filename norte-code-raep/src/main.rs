@@ -208,6 +208,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(&path, actual_bind.to_string())?;
     }
     eprintln!("norte-code RAEP server listening on {actual_bind}");
-    axum::serve(listener, app).await?;
+    let server = axum::serve(listener, app);
+    tokio::select! {
+        result = server => result?,
+        () = shutdown_signal() => {}
+    }
     Ok(())
+}
+
+/// Stops the server when the process is asked to stop.
+///
+/// The terminal asks with `Ctrl+C` and `kill` asks with `SIGTERM`, and both
+/// are handled here. Handling them matters for a server that was started in
+/// the background: the shell leaves `SIGINT` ignored in a background job, so
+/// without a handler of its own the server would ignore the signal that
+/// usually stops it.
+async fn shutdown_signal() {
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("norte-code: could not listen for Ctrl+C: {error}");
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                eprintln!("norte-code: could not listen for SIGTERM: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+    eprintln!("norte-code: shutting down");
 }

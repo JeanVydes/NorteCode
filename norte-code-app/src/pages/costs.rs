@@ -105,25 +105,12 @@ fn refresh_costs(
         }
         let selected = context.selected_session.read().clone();
         if let Some(session) = selected {
-            let agent_id = session.agent.map_or_else(String::new, |agent| agent.id);
-            if agent_id.trim().is_empty() {
-                context.set_page_error(Some(
-                    "The selected session has no agent id for cost reporting.".to_owned(),
-                ));
-            } else {
-                match api.attach(&session.session_id, &agent_id).await {
-                    Ok(()) => {
-                        let report = api.cost_report(Some(&session.session_id)).await;
-                        let detach = api.detach(&session.session_id).await;
-                        match (report, detach) {
-                            (Ok(report), Ok(())) => session_report.set(Some(report)),
-                            (Err(error), _) | (Ok(_), Err(error)) => {
-                                context.set_page_error(Some(error.to_string()));
-                            }
-                        }
-                    }
-                    Err(error) => context.set_page_error(Some(error.to_string())),
-                }
+            // A cost report only reads state, so the host answers it without
+            // an attachment. Attaching and detaching around it would take the
+            // attachment away from the open conversation.
+            match api.cost_report(Some(&session.session_id)).await {
+                Ok(report) => session_report.set(Some(report)),
+                Err(error) => context.set_page_error(Some(error.to_string())),
             }
         } else {
             session_report.set(None);

@@ -36,6 +36,51 @@ fn decodes_a_standard_payload() {
 }
 
 #[test]
+fn decodes_history_pages_with_flat_or_raep_content() {
+    let payloads = [
+        serde_json::json!({
+            "items": [{
+                "role": "assistant",
+                "kind": "assistant",
+                "content": "flat history content",
+                "turn_id": "turn_1",
+                "timestamp": 10
+            }],
+            "has_more": false
+        }),
+        serde_json::json!({
+            "items": [{
+                "id": "0",
+                "kind": "assistant",
+                "content": {
+                    "role": "ASSISTANT",
+                    "content": "RAEP history content"
+                },
+                "created_at": 10
+            }],
+            "next": null
+        }),
+    ];
+
+    for (payload, expected) in payloads
+        .into_iter()
+        .zip(["flat history content", "RAEP history content"])
+    {
+        let frame = frame(
+            FrameType::Standard(StandardFrameType::HistoryPage),
+            "session-1",
+            payload,
+        );
+        let event = server_event_from_frame(&frame).expect("history page");
+        assert!(matches!(
+            event.kind,
+            norte_code_wire::ServerEventKind::HistoryPage { ref items, .. }
+                if items.len() == 1 && items[0].content == expected
+        ));
+    }
+}
+
+#[test]
 fn rejects_an_unsupported_wire_version() {
     let mut frame = frame(
         FrameType::Standard(StandardFrameType::TokenDelta),
@@ -116,6 +161,17 @@ fn prefixes_bearer_tokens_without_redacting_the_value() {
             .as_ref()
             .and_then(|value| value.to_str().ok()),
         Some("Bearer secret-token")
+    );
+}
+
+#[test]
+fn event_stream_url_uses_the_session_agent() {
+    let client = RemoteClient::new("http://localhost:8787", None, None).expect("client");
+    client.set_session_agent("session 1", "agent/one");
+
+    assert_eq!(
+        client.events_url("session 1"),
+        "http://localhost:8787/raep/v1/sessions/session%201/events?agent_id=agent%2Fone"
     );
 }
 
@@ -305,6 +361,25 @@ fn drains_sse_blocks_in_order_and_reaches_past_the_terminal() {
     assert_eq!(drained[1].2, Some(2));
     // The partial trailing block is left for the next chunk.
     assert!(String::from_utf8_lossy(&buffer).contains("\"seq\":3"));
+}
+
+#[test]
+fn counts_unrecognized_raep_frames_before_checking_known_event_sequences() {
+    let mut buffer = Vec::from(
+        "data: {\"version\":\"1.0\",\"id\":\"frame-1\",\"seq\":1,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"a\",\"index\":0}}\n\n\
+         data: {\"version\":\"1.0\",\"id\":\"frame-2\",\"seq\":2,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"SESSION_ATTACHED\",\"payload\":{}}\n\n\
+         data: {\"version\":\"1.0\",\"id\":\"frame-3\",\"seq\":3,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"b\",\"index\":0}}\n\n"
+            .as_bytes(),
+    );
+
+    let drained = drain_sse_buffer(&mut buffer);
+
+    assert_eq!(drained.len(), 3);
+    assert_eq!(drained[0].2, Some(1));
+    assert!(drained[1].0.is_none());
+    assert_eq!(drained[1].2, Some(2));
+    assert!(drained[2].0.is_some());
+    assert_eq!(drained[2].2, Some(3));
 }
 
 #[test]
