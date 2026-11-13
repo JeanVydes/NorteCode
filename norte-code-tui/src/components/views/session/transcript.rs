@@ -279,11 +279,10 @@ impl TranscriptRenderer {
                     Self::flush_assistant(lines, assistant, options);
                     reasoning.push_str(text);
                 }
-                Delta::ToolArguments {
-                    call_id, arguments, ..
-                } => {
-                    Self::flush_buffers(lines, assistant, reasoning, options);
-                    lines.push(TextBuilder::tool_arguments_delta(call_id, arguments));
+                Delta::ToolArguments { .. } => {
+                    // The start event for this call follows and carries the
+                    // tool name and target; the raw JSON arguments add noise,
+                    // not information.
                 }
                 Delta::Media { bytes, last, .. } => {
                     Self::flush_buffers(lines, assistant, reasoning, options);

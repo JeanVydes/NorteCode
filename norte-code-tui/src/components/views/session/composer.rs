@@ -75,7 +75,7 @@ impl Composer {
             return "Session connection failed; reopen this session to retry".to_owned();
         }
         if self.focus == SessionFocus::Composer
-            && model.turn_state.is_busy()
+            && model.active_turn.is_some()
             && model.queue_mode == norte_code_wire::QueueMode::Reject
         {
             return TextBuilder::composer_busy_placeholder().to_owned();
@@ -180,7 +180,7 @@ impl Composer {
             keys::SUBMIT
                 if (!self.text.trim().is_empty() || !self.chips.is_empty())
                     && model.attachment_state == SessionAttachmentState::Attached
-                    && (model.turn_state == crate::ui_model::TurnState::Idle
+                    && (model.active_turn.is_none()
                         || model.queue_mode != norte_code_wire::QueueMode::Reject) =>
             {
                 let text = std::mem::take(&mut self.text);
