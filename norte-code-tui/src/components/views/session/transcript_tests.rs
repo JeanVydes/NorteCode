@@ -223,6 +223,44 @@ fn the_chips_of_a_message_are_drawn_under_it() {
 }
 
 #[test]
+fn a_provider_retry_names_the_attempt_the_delay_and_the_reason() {
+    let items = [TranscriptItem::ServerEvent(Box::new(ServerEvent {
+        request_id: 1,
+        session: None,
+        kind: ServerEventKind::RetryScheduled {
+            turn: 1,
+            attempt: 2,
+            delay_ms: 10_000,
+            reason: "429 too many requests".to_owned(),
+        },
+    }))];
+    let lines = TranscriptRenderer::lines(&items, DiffMode::Unified, 80);
+
+    let drawn = line_content(&lines[0]);
+    assert!(drawn.contains("attempt 2"));
+    assert!(drawn.contains("10.0s"));
+    assert!(drawn.contains("429 too many requests"));
+}
+
+#[test]
+fn a_reasoning_downgrade_is_shown_as_a_state_change() {
+    let items = [TranscriptItem::ServerEvent(Box::new(ServerEvent {
+        request_id: 1,
+        session: None,
+        kind: ServerEventKind::ReasoningDowngraded {
+            from: "high".to_owned(),
+            to: "medium".to_owned(),
+            reason: "model supports only medium and high".to_owned(),
+        },
+    }))];
+    let lines = TranscriptRenderer::lines(&items, DiffMode::Unified, 80);
+
+    let drawn = line_content(&lines[0]);
+    assert!(drawn.contains("high"));
+    assert!(drawn.contains("medium"));
+}
+
+#[test]
 fn the_usage_footer_names_the_model_the_tokens_and_the_cost() {
     let items = [TranscriptItem::Usage(crate::ui_model::UsageSummary {
         provider: Some("openai".to_owned()),
