@@ -23,6 +23,8 @@ mod emit;
 mod exports;
 mod frames;
 mod history;
+#[cfg(test)]
+pub(crate) use history::{HistoryEntry, order_history};
 mod jobs;
 pub(crate) mod payloads;
 pub(crate) mod replay;

@@ -1,4 +1,4 @@
-use norte_code_wire::{MessageRole, OutputStream, ReplayedKind, ToolStatus};
+use norte_code_wire::{MessageRole, OutputStream, ToolStatus};
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -165,22 +165,6 @@ impl TextBuilder {
             ToolStatus::Cancelled => Self::tool_cancelled_label(),
         };
         Line::from(format!("{name}  {state}"))
-    }
-
-    #[must_use]
-    pub fn replayed_message(role: MessageRole, kind: ReplayedKind, text: &str) -> Line<'static> {
-        let style = match kind {
-            ReplayedKind::Text => Style::default(),
-            ReplayedKind::Reasoning | ReplayedKind::ToolResult => {
-                Style::default().fg(palette::muted())
-            }
-            ReplayedKind::ToolCall => Style::default().fg(palette::warning()),
-            ReplayedKind::Refusal => Style::default().fg(palette::danger()),
-        };
-        Line::from(vec![
-            Span::styled(format!("{role}  "), style),
-            Span::styled(text.to_owned(), style),
-        ])
     }
 
     #[must_use]

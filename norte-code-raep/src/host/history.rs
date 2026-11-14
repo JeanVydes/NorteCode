@@ -59,9 +59,7 @@ impl NorteCodeRaepHost {
                     .map(|item| (item, true, Option::<Value>::None)),
             );
         }
-        history.sort_by_key(|((turn, _, _, _, timestamp), rewound, _)| {
-            (turn.unwrap_or_default(), *timestamp, *rewound)
-        });
+        let history = order_history(history);
         if let Some(before) = before_turn
             && !history
                 .iter()
@@ -262,4 +260,41 @@ impl NorteCodeRaepHost {
             .await?,
         ])
     }
+}
+
+/// One history entry as the host reads it: the message, whether it was
+/// rewound, and where it came from.
+pub(crate) type HistoryEntry = (
+    (
+        Option<u64>,
+        norte_code_wire::MessageRole,
+        norte_code_wire::ReplayedKind,
+        String,
+        i64,
+    ),
+    bool,
+    Option<Value>,
+);
+
+/// Orders a history the way it happened.
+///
+/// The service returns the history in order. A message the host injects
+/// between turns carries no turn of its own, and numbering the turns would
+/// put it before every turn: it belongs to the turn it follows. The list is
+/// walked in order so each message without a turn inherits the turn of the
+/// message before it.
+pub(crate) fn order_history(history: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
+    let mut inherited: Vec<u64> = Vec::with_capacity(history.len());
+    let mut current_turn = 0_u64;
+    for ((turn, ..), ..) in &history {
+        if let Some(turn) = turn {
+            current_turn = *turn;
+        }
+        inherited.push(current_turn);
+    }
+    let mut ordered: Vec<_> = history.into_iter().zip(inherited).collect::<Vec<_>>();
+    ordered.sort_by_key(|(((turn, _, _, _, timestamp), rewound, _), inherited)| {
+        (turn.unwrap_or(*inherited), *timestamp, *rewound)
+    });
+    ordered.into_iter().map(|(item, _)| item).collect()
 }
