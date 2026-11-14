@@ -37,7 +37,7 @@ fn combines_adjacent_text_deltas_into_one_assistant_message() {
 }
 
 #[test]
-fn styles_replayed_tool_calls_from_the_wire_enum() {
+fn draws_a_replayed_tool_call_as_a_tool_call() {
     let items = [TranscriptItem::ServerEvent(Box::new(ServerEvent {
         request_id: 1,
         session: None,
@@ -51,11 +51,7 @@ fn styles_replayed_tool_calls_from_the_wire_enum() {
 
     let lines = TranscriptRenderer::lines(&items, DiffMode::Unified, 80);
 
-    assert_eq!(line_content(&lines[0]), "assistant  edit");
-    assert_eq!(
-        lines[0].spans[0].style.fg,
-        Some(crate::components::palette::warning())
-    );
+    assert_eq!(line_content(&lines[0]), "tool  edit");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use norte_code_wire::ServerEvent;
+use norte_code_wire::{MessageRole, ReplayedKind, ServerEvent};
 use raep_types::{SessionAttach, TurnId};
 
 use raep_types::FrameId;
@@ -964,6 +964,55 @@ async fn history_get_uses_turn_cursor_and_rejects_bad_requests() {
         host.handle(unknown_turn).await,
         Err(HostError::InvalidFrame(message)) if message.contains("TURN_NOT_FOUND")
     ));
+}
+
+#[test]
+fn history_keeps_a_message_without_a_turn_after_the_turn_it_follows() {
+    let entries: Vec<HistoryEntry> = vec![
+        (
+            (
+                Some(1),
+                MessageRole::User,
+                ReplayedKind::Text,
+                "primero".to_owned(),
+                10,
+            ),
+            false,
+            None,
+        ),
+        (
+            (
+                Some(1),
+                MessageRole::Assistant,
+                ReplayedKind::Text,
+                "respuesta".to_owned(),
+                20,
+            ),
+            false,
+            None,
+        ),
+        (
+            (
+                None,
+                MessageRole::User,
+                ReplayedKind::Text,
+                "un job termino".to_owned(),
+                30,
+            ),
+            false,
+            None,
+        ),
+    ];
+
+    let ordered = order_history(entries);
+
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|((_, _, _, text, _), ..)| text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["primero", "respuesta", "un job termino"]
+    );
 }
 
 #[tokio::test]

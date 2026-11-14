@@ -163,6 +163,14 @@ impl TranscriptRenderer {
                         continue;
                     }
                     Self::flush_buffers(&mut lines, &mut assistant, &mut reasoning, options);
+                    if item.kind == "tool_call" {
+                        // The host replays a call as text: the name and its
+                        // JSON, not the call the live stream draws. It is drawn
+                        // the same way the live one is, so the reader sees one
+                        // row per call instead of the JSON the model wrote.
+                        lines.extend(Self::tool_call_lines(&item.content, options));
+                        continue;
+                    }
                     let role = match item.role {
                         HistorySpeaker::User => MessageRole::User,
                         HistorySpeaker::Assistant => MessageRole::Assistant,
@@ -493,6 +501,26 @@ impl TranscriptRenderer {
         lines
     }
 
+    /// The lines a replayed tool call is drawn with.
+    fn tool_call_lines(text: &str, options: TranscriptOptions) -> Vec<Line<'static>> {
+        let Some((name, arguments)) = split_tool_call(text) else {
+            return Self::message_lines(
+                MessageRole::Tool,
+                text,
+                options.width,
+                None,
+                options.theme,
+            );
+        };
+        ToolCallComponent::started(
+            &name,
+            arguments.as_ref(),
+            None,
+            options.diff_mode,
+            options.width.saturating_sub(2),
+        )
+    }
+
     fn replayed_lines(
         role: MessageRole,
         kind: ReplayedKind,
@@ -501,10 +529,43 @@ impl TranscriptRenderer {
         theme: ThemeMode,
     ) -> Vec<Line<'static>> {
         if kind == ReplayedKind::ToolCall {
-            return vec![TextBuilder::replayed_message(role, kind, text)];
+            return Self::tool_call_lines(
+                text,
+                TranscriptOptions {
+                    diff_mode: DiffMode::Unified,
+                    width,
+                    thinking_visibility: ThinkingVisibility::Collapsed,
+                    show_tool_output: true,
+                    show_timestamps: false,
+                    theme,
+                    thinking_phase: 0,
+                },
+            );
         }
         Self::message_lines(role, text, width, None, theme)
     }
+}
+
+/// Splits a replayed call into its name and its arguments.
+fn split_tool_call(text: &str) -> Option<(String, Option<serde_json::Value>)> {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let Some(end) = trimmed.find(char::is_whitespace) else {
+        return Some((trimmed.to_owned(), None));
+    };
+    let name = trimmed[..end].to_owned();
+    let rest = trimmed[end..].trim();
+    if rest.is_empty() {
+        return Some((name, None));
+    }
+    let arguments = if rest.starts_with('{') {
+        serde_json::from_str::<serde_json::Value>(rest).ok()
+    } else {
+        None
+    };
+    Some((name, arguments))
 }
 
 #[cfg(test)]
