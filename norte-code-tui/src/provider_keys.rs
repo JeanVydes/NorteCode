@@ -8,6 +8,8 @@
 
 use norte_code_protocol::keys::{environment_value, read_secret, secrets_path};
 
+use crate::ui_model::UiModel;
+
 /// The outcome of looking up a provider's key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderKeyStatus {
@@ -39,14 +41,15 @@ impl ProviderKeyStatus {
 
 /// Checks the environment and the secrets file for one provider.
 ///
-/// Failures to load the catalogue yield [`ProviderKeyStatus::Unknown`], which
-/// does not block the switch.
+/// The host's catalogue is preferred: it carries every provider the host
+/// knows, including the ones a plugin injected. A provider the host did not
+/// report falls back to the catalogue files; neither yields [`ProviderKeyStatus::Unknown`].
 #[must_use]
-pub(crate) fn check(provider_id: &str) -> ProviderKeyStatus {
-    let keys = match load_environment_keys(provider_id) {
-        Err(()) => return ProviderKeyStatus::Unknown,
-        Ok(None) => return ProviderKeyStatus::Available,
+pub(crate) fn check(model: &UiModel, provider_id: &str) -> ProviderKeyStatus {
+    let keys = match environment_keys_for(model, provider_id) {
         Ok(Some(keys)) => keys,
+        Ok(None) => return ProviderKeyStatus::Available,
+        Err(()) => return ProviderKeyStatus::Unknown,
     };
     match decide(&keys, environment_value, || {
         secrets_path().and_then(|path| read_secret(&path, provider_id))
@@ -59,6 +62,21 @@ pub(crate) fn check(provider_id: &str) -> ProviderKeyStatus {
             environment_keys,
         },
     }
+}
+
+fn environment_keys_for(
+    model: &UiModel,
+    provider_id: &str,
+) -> Result<Option<Vec<String>>, ()> {
+    if let Some(provider) = model
+        .catalog
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == provider_id)
+    {
+        return Ok(Some(provider.environment_keys.clone()));
+    }
+    load_environment_keys(provider_id)
 }
 
 /// The decision, with the two readers injected so it can be tested.

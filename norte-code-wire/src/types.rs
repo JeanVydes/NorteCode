@@ -273,6 +273,10 @@ pub struct CatalogProviderInfo {
     pub from_file: bool,
     /// Whether any of its models is in use by a session.
     pub model_count: usize,
+    /// The environment variables that name this provider's key, first set and
+    /// non-blank wins. A provider with none needs no key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_keys: Vec<String>,
 }
 
 /// One model as the editor shows it.

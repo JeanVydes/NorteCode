@@ -424,6 +424,7 @@ impl Service {
                         .iter()
                         .filter(|model| &model.provider_id == provider_id)
                         .count(),
+                    environment_keys: provider.environment_keys.clone(),
                 },
             )
             .collect();

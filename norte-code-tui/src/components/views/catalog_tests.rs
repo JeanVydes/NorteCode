@@ -57,6 +57,7 @@ fn plugin_provider_entries_are_not_removable() {
                 api: None,
                 from_file: false,
                 model_count: 0,
+                environment_keys: vec![],
             }],
             ..norte_code_client::CatalogDetail::default()
         },
@@ -83,6 +84,7 @@ fn deletion_requires_confirmation() {
                 api: None,
                 from_file: true,
                 model_count: 0,
+                environment_keys: vec![],
             }],
             ..norte_code_client::CatalogDetail::default()
         },
