@@ -2,20 +2,12 @@
 
 //! Plugin management subcommands: `north service plugins …`.
 
-use clap::{Parser, Subcommand};
-use clap::error::ErrorKind;
+use clap::Subcommand;
 
 use norte_code_raep::plugin_manager;
 
-#[derive(Parser)]
-#[command(name = "plugins", about = "Manage installed plugins")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
 #[derive(Subcommand)]
-enum Command {
+pub(crate) enum Command {
     /// Show installed plugins.
     List,
     /// Install a plugin from a git repository.
@@ -46,16 +38,8 @@ enum Command {
     },
 }
 
-pub fn dispatch(rest: &[String]) -> Result<(), String> {
-    let cli = match Cli::try_parse_from(std::iter::once("plugins").chain(rest.iter().map(String::as_str))) {
-        Ok(cli) => cli,
-        Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
-            print!("{}", e);
-            return Ok(());
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    match cli.command.unwrap_or(Command::List) {
+pub(crate) fn run(command: Option<Command>) -> Result<(), String> {
+    match command.unwrap_or(Command::List) {
         Command::List => list(),
         Command::Add { url, package, all: _ } => add(&url, package.as_deref()),
         Command::Remove { name } => remove(&name),
