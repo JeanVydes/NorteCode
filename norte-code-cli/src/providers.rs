@@ -4,21 +4,13 @@
 
 use std::fs;
 
-use clap::{Parser, Subcommand};
-use clap::error::ErrorKind;
+use clap::Subcommand;
 
 use norte_code_protocol::catalog::{load_catalog_raw, save_catalog_files};
 use norte_code_wire::catalog::{Provider, Wire, WireSchema};
 
-#[derive(Parser)]
-#[command(name = "providers", about = "Edit providers.json")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
 #[derive(Subcommand)]
-enum Command {
+pub(crate) enum Command {
     /// Show providers (catalogue files and plugin-injected).
     List,
     /// Add or replace a provider.
@@ -45,16 +37,8 @@ enum Command {
     },
 }
 
-pub fn dispatch(rest: &[String]) -> Result<(), String> {
-    let cli = match Cli::try_parse_from(std::iter::once("providers").chain(rest.iter().map(String::as_str))) {
-        Ok(cli) => cli,
-        Err(e) if e.kind() == ErrorKind::DisplayHelp || e.kind() == ErrorKind::DisplayVersion => {
-            print!("{}", e);
-            return Ok(());
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    match cli.command.unwrap_or(Command::List) {
+pub(crate) fn run(command: Option<Command>) -> Result<(), String> {
+    match command.unwrap_or(Command::List) {
         Command::List => list(),
         Command::Add {
             id,

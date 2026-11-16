@@ -60,18 +60,18 @@ enum ServiceCommand {
     Doctor,
     /// Manage plugins.
     Plugins {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: Option<plugins::Command>,
     },
     /// Manage providers.
     Providers {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: Option<providers::Command>,
     },
     /// Manage MCP servers.
     Mcps {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: Option<mcps::Command>,
     },
     /// Run the RAEP server in this process (internal).
     #[command(hide = true)]
@@ -176,21 +176,21 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
-            ServiceCommand::Plugins { args } => match plugins::dispatch(&args) {
+            ServiceCommand::Plugins { command } => match plugins::run(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{} {}", output::red("✗"), error);
                     ExitCode::FAILURE
                 }
             },
-            ServiceCommand::Providers { args } => match providers::dispatch(&args) {
+            ServiceCommand::Providers { command } => match providers::run(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{} {}", output::red("✗"), error);
                     ExitCode::FAILURE
                 }
             },
-            ServiceCommand::Mcps { args } => match mcps::dispatch(&args) {
+            ServiceCommand::Mcps { command } => match mcps::run(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{} {}", output::red("✗"), error);
