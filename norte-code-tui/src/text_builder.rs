@@ -145,10 +145,9 @@ impl TextBuilder {
     #[must_use]
     pub fn help_lines() -> Vec<Line<'static>> {
         vec![
-            Line::from(format!("1-8/{}  switch views", crate::keys::COSTS_VIEW)),
+            Line::from(format!("1-7/{}  switch views", crate::keys::COSTS_VIEW)),
             Line::from(format!(
-                "{}/{}  sessions · 1-9 expand · Enter open · {} create",
-                ComponentId::Sessions.number(),
+                "{}  sessions · Enter expand/open · {} create",
                 keys::SESSIONS_VIEW_CHAR,
                 keys::NEW_SESSION_CHAR
             )),
@@ -491,7 +490,7 @@ impl TextBuilder {
                 keys::NAV_UP_CHAR
             ),
             ComponentId::Sessions => format!(
-                "1-9 expand · Enter open · {} fold · r rename · d delete · f fork · {}/{} navigate · {} create",
+                "Enter expand/open · {} fold · r rename · d delete · f fork · {}/{} navigate · {} create",
                 keys::CANCEL,
                 keys::NAV_DOWN_CHAR,
                 keys::NAV_UP_CHAR,
@@ -503,7 +502,7 @@ impl TextBuilder {
             ComponentId::PlanReview => "Enter respond".to_owned(),
         };
         format!(
-            "1-8/{} views · v catalog · g settings · s sessions · {controls} · {} quit · {} help",
+            "1-7/{} views · v catalog · g settings · s sessions · {controls} · {} quit · {} help",
             keys::COSTS_VIEW,
             keys::QUIT_CHAR,
             keys::HELP_CHAR

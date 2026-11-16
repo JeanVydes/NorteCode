@@ -3,6 +3,8 @@ use super::ComponentId;
 #[test]
 fn costs_view_uses_a_letter_shortcut_outside_session_number_keys() {
     assert_eq!(ComponentId::from_shortcut('c'), Some(ComponentId::Costs));
-    assert_eq!(ComponentId::from_shortcut('8'), Some(ComponentId::Jobs));
+    assert_eq!(ComponentId::from_shortcut('7'), Some(ComponentId::Jobs));
+    assert_eq!(ComponentId::from_shortcut('8'), None);
+    assert_eq!(ComponentId::from_shortcut('s'), Some(ComponentId::Sessions));
     assert_eq!(ComponentId::from_shortcut('9'), None);
 }

@@ -239,18 +239,6 @@ impl Component for SessionsView {
             KeyCode::Char(keys::NEW_SESSION_CHAR) => {
                 self.pending_action = Some(ComponentAction::CreateSession);
             }
-            KeyCode::Char(number @ '1'..='9') => {
-                if let Some(index) = number.to_digit(10).and_then(|n| n.checked_sub(1)) {
-                    let index = usize::try_from(index).unwrap_or_default();
-                    let rows = self.visible_rows(model);
-                    if let Some(flatten) = rows.iter().position(|row| {
-                        matches!(row, Row::Session(item) | Row::Child(item) if *item == index)
-                    }) {
-                        self.selected = flatten;
-                        self.select_row(model);
-                    }
-                }
-            }
             keys::SUBMIT => self.select_row(model),
             keys::CANCEL | keys::FOCUS_NEXT => {
                 if self.expanded.is_some() {

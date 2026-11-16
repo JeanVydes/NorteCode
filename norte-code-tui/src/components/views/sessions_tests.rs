@@ -68,7 +68,7 @@ fn a_pinned_session_carries_the_pin() {
 }
 
 #[test]
-fn number_keys_open_the_matching_session() {
+fn arrow_keys_open_the_matching_session() {
     let model = UiModel {
         sessions: (1..=3)
             .map(|index| norte_code_wire::SessionSummary {
@@ -80,12 +80,9 @@ fn number_keys_open_the_matching_session() {
     };
     let mut view = SessionsView::default();
 
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
-        &model,
-    );
-    // A number toggles the expansion of the matching session; Enter on one
-    // of the action rows opens it.
+    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
+    // Enter on a session row expands it; Enter on its `open` action opens it.
     view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
     view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
 
