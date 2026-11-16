@@ -1,4 +1,3 @@
-use norte_code_wire::catalog::{Model, Provider};
 use norte_code_wire::{QueueMode, SessionKey};
 
 use crate::tools::DiffMode;
@@ -35,13 +34,6 @@ pub(crate) enum PluginOperation {
     },
 }
 
-pub(crate) enum CatalogOperation {
-    UpsertProvider { id: String, provider: Box<Provider> },
-    RemoveProvider(String),
-    UpsertModel(Box<Model>),
-    RemoveModel { provider: String, model: String },
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum Preference {
     Theme,
@@ -72,8 +64,6 @@ pub(crate) enum ViewAction {
     ToggleTelemetryScope,
     RefreshCosts,
     RefreshJobs,
-    RefreshCatalog,
-    Catalog(Box<CatalogOperation>),
     CompactSession,
     ExportSession,
     TogglePreference(Preference),

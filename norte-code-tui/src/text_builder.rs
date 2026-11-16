@@ -158,10 +158,6 @@ impl TextBuilder {
                 keys::MODEL_SEARCH_CHAR
             )),
             Line::from(format!("{}  focus message composer", keys::COMPOSER_CHAR)),
-            Line::from(format!(
-                "{}  expand/collapse thought",
-                keys::THINKING_TOGGLE_CHAR
-            )),
             Line::from(format!("{}  send message", Self::submit_key_label())),
             Line::from(format!("{}  toggle edit diff mode", keys::DIFF_CHAR)),
             Line::from(format!("{}  stop the running turn", keys::CANCEL_TURN_CHAR)),
@@ -226,7 +222,6 @@ impl TextBuilder {
             ComponentId::Jobs => "jobs",
             ComponentId::PlanReview => "plan review",
             ComponentId::Costs => "costs",
-            ComponentId::Catalog => "catalog",
             ComponentId::Settings => "settings",
         }
     }
@@ -264,7 +259,6 @@ impl TextBuilder {
             ComponentId::Jobs => "Jobs",
             ComponentId::PlanReview => "Plan review",
             ComponentId::Costs => "Costs",
-            ComponentId::Catalog => "Catalog",
             ComponentId::Settings => "Settings",
         }
     }
@@ -320,7 +314,6 @@ impl TextBuilder {
             ComponentId::Jobs => "No jobs in this session",
             ComponentId::PlanReview => "No plan review is active",
             ComponentId::Costs => "No cost reports loaded",
-            ComponentId::Catalog => "No catalogue loaded",
             ComponentId::Settings => "No settings",
         }
     }
@@ -439,14 +432,13 @@ impl TextBuilder {
     pub fn footer_help(view: ComponentId) -> String {
         let controls = match view {
             ComponentId::Session => format!(
-                "{}/{} navigate · {} compose · Esc/Tab focus · {} send · {} diff · {} queue · {} thought · {} budget · {} export · {} compact · {} cancel · {} reasoning · {} new · {} import · {} logs",
+                "{}/{} navigate · {} compose · Esc/Tab focus · {} send · {} diff · {} queue · {} budget · {} export · {} compact · {} cancel · {} reasoning · {} new · {} import · {} logs",
                 keys::NAV_DOWN_CHAR,
                 keys::NAV_UP_CHAR,
                 keys::COMPOSER_CHAR,
                 Self::submit_key_label(),
                 keys::DIFF_CHAR,
                 keys::QUEUE_MODE_CHAR,
-                keys::THINKING_TOGGLE_CHAR,
                 keys::BUDGET_CHAR,
                 keys::EXPORT_CHAR,
                 keys::COMPACT_CHAR,
@@ -497,12 +489,11 @@ impl TextBuilder {
                 keys::NEW_SESSION_CHAR
             ),
             ComponentId::Costs => "r refresh".to_owned(),
-            ComponentId::Catalog => "a provider · m model · d remove · r refresh".to_owned(),
             ComponentId::Settings => "j/k select · Enter toggle · r test connection".to_owned(),
             ComponentId::PlanReview => "Enter respond".to_owned(),
         };
         format!(
-            "1-7/{} views · v catalog · g settings · s sessions · {controls} · {} quit · {} help",
+            "1-7/{} views · v models · g settings · s sessions · {controls} · {} quit · {} help",
             keys::COSTS_VIEW,
             keys::QUIT_CHAR,
             keys::HELP_CHAR

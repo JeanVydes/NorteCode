@@ -1,26 +1,16 @@
+//! Reading the host's live catalogue.
+//!
+//! The catalogue is what lets the picker tell whether a provider has a known
+//! key, and what powers the reasoning-effort guards in the header menus.
 use std::sync::Arc;
 
-use super::{ClientData, ClientRuntime};
-use crate::components::CatalogOperation;
+use crate::client::{ClientData, ClientRuntime};
 
 impl ClientRuntime {
-    pub(crate) fn catalog_operation(&self, operation: CatalogOperation, generation: u64) {
+    /// Refreshes the catalogue in the background.
+    pub(crate) fn load_catalog(&self, generation: u64) {
         let api = Arc::clone(&self.api);
         self.spawn_data(None, generation, async move {
-            match operation {
-                CatalogOperation::UpsertProvider { id, provider } => {
-                    api.upsert_provider(&id, *provider).await?;
-                }
-                CatalogOperation::RemoveProvider(id) => {
-                    api.remove_provider(&id).await?;
-                }
-                CatalogOperation::UpsertModel(model) => {
-                    api.upsert_model(*model).await?;
-                }
-                CatalogOperation::RemoveModel { provider, model } => {
-                    api.remove_model(&provider, &model).await?;
-                }
-            }
             api.catalog_detail().await.map(ClientData::Catalog)
         });
     }

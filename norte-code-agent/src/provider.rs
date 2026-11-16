@@ -64,26 +64,6 @@ pub struct ModelSpec {
     pub headers: BTreeMap<String, String>,
 }
 
-/// The headers Norte Code sends to `OpenRouter` so the app is attributed in
-/// its rankings and analytics.
-///
-/// `HTTP-Referer` is the identifier `OpenRouter` gives the app, and the title
-/// is the name it shows; without both there is no app page. The category is
-/// the one `OpenRouter` lists for a terminal coding assistant.
-fn openrouter_headers() -> BTreeMap<String, String> {
-    BTreeMap::from([
-        (
-            "HTTP-Referer".to_owned(),
-            "https://norte.vyde.dev".to_owned(),
-        ),
-        ("X-OpenRouter-Title".to_owned(), "Norte Code".to_owned()),
-        (
-            "X-OpenRouter-Categories".to_owned(),
-            "cli-agent,cloud-agent".to_owned(),
-        ),
-    ])
-}
-
 impl ModelSpec {
     /// Builds a spec from a catalogue provider and one of its models.
     ///
@@ -112,7 +92,7 @@ impl ModelSpec {
             schema: wire.schema,
             auth: wire.auth,
             capabilities: norte_code_protocol::catalog::capabilities(model, wire.schema),
-            headers: headers_for(&model.provider_id, wire),
+            headers: wire.headers.clone(),
         })
     }
 
@@ -192,18 +172,6 @@ fn select_wire<'a>(
     }
 }
 
-/// The headers a provider's requests carry.
-///
-/// The built-in ones are for the one gateway that asks to be identified;
-/// everybody else gets none.
-fn headers_for(provider: &str, wire: &CatalogWire) -> BTreeMap<String, String> {
-    let base = if provider == "openrouter" {
-        openrouter_headers()
-    } else {
-        BTreeMap::new()
-    };
-    base.into_iter().chain(wire.headers.clone()).collect()
-}
 
 /// Builds a Norte model from a [`ModelSpec`]. Tests implement this to inject a
 /// scripted model.

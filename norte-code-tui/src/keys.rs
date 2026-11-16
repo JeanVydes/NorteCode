@@ -40,12 +40,12 @@ pub const MODELS_VIEW: char = '5';
 pub const HOST_VIEW: char = '6';
 pub const JOBS_VIEW: char = '7';
 pub const COSTS_VIEW: char = 'c';
-pub const CATALOG_VIEW: char = 'v';
 pub const SETTINGS_VIEW: char = 'g';
+pub const MODELS_VIEW_CHAR: char = 'v';
+
 pub const SESSIONS_VIEW_CHAR: char = 's';
 pub const NEW_SESSION_CHAR: char = 'n';
 pub const MODEL_SEARCH_CHAR: char = '/';
-pub const THINKING_TOGGLE_CHAR: char = 't';
 pub const BUDGET_CHAR: char = 'b';
 pub const EXPORT_CHAR: char = 'e';
 pub const COMPACT_CHAR: char = 'x';

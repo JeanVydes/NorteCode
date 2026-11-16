@@ -1,4 +1,3 @@
-pub(super) mod catalog;
 pub(super) mod costs;
 pub(super) mod host;
 pub(super) mod jobs;

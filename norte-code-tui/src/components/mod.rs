@@ -7,8 +7,8 @@ pub(crate) mod rect;
 mod views;
 
 pub(crate) use action::{
-    CatalogOperation, ComponentAction, HeaderModal, McpState, PluginOperation, Preference,
-    ToolRuleAction, ViewAction,
+    ComponentAction, HeaderModal, McpState, PluginOperation, Preference, ToolRuleAction,
+    ViewAction,
 };
 pub(crate) use component::{Component, ComponentEvent, ComponentId, LifecycleComponent};
 pub(crate) use lifecycle::{
@@ -27,7 +27,6 @@ pub(crate) fn create_views() -> Vec<Box<dyn LifecycleComponent>> {
         Box::new(views::models::ModelsView::default()),
         Box::new(views::host::HostView::default()),
         Box::new(views::costs::CostsView::default()),
-        Box::new(views::catalog::CatalogView::default()),
         Box::new(views::settings::SettingsView::default()),
     ]
 }
