@@ -564,13 +564,6 @@ impl ClientRuntime {
         });
     }
 
-    pub(crate) fn load_catalog(&self, generation: u64) {
-        let api = Arc::clone(&self.api);
-        self.spawn_data(None, generation, async move {
-            api.catalog_detail().await.map(ClientData::Catalog)
-        });
-    }
-
     pub(crate) fn load_history(&self, session: SessionKey, generation: u64) {
         let api = Arc::clone(&self.api);
         let client = Arc::clone(&self.client);

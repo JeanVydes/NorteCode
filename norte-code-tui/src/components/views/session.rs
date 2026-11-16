@@ -10,7 +10,7 @@ use ratatui::{
 use crate::{
     components::{
         Component, ComponentAction, ComponentEvent, ComponentId, ComponentLifecycle, HeaderModal,
-        Preference, ViewAction, palette,
+        ViewAction, palette,
     },
     keys,
     tools::DiffMode,
@@ -699,11 +699,6 @@ impl SessionView {
                         DiffMode::Unified => DiffMode::Split,
                         DiffMode::Split => DiffMode::Unified,
                     }));
-            }
-            KeyCode::Char(keys::THINKING_TOGGLE_CHAR) => {
-                self.pending_action = Some(ComponentAction::View(ViewAction::TogglePreference(
-                    Preference::Thinking,
-                )));
             }
             KeyCode::Char(keys::CANCEL_TURN_CHAR) => {
                 self.pending_action = Some(ComponentAction::CancelTurn);

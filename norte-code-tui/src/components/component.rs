@@ -18,7 +18,6 @@ pub(crate) enum ComponentId {
     Jobs,
     PlanReview,
     Costs,
-    Catalog,
     Settings,
 }
 
@@ -36,13 +35,12 @@ impl ComponentId {
             Self::Jobs => crate::keys::JOBS_VIEW,
             Self::PlanReview => '0',
             Self::Costs => crate::keys::COSTS_VIEW,
-            Self::Catalog => crate::keys::CATALOG_VIEW,
             Self::Settings => crate::keys::SETTINGS_VIEW,
         }
     }
 
     #[must_use]
-    pub(crate) const fn all() -> [Self; 11] {
+    pub(crate) const fn all() -> [Self; 10] {
         [
             Self::Session,
             Self::Plans,
@@ -52,7 +50,6 @@ impl ComponentId {
             Self::Host,
             Self::Jobs,
             Self::Costs,
-            Self::Catalog,
             Self::Settings,
             Self::Sessions,
         ]
@@ -65,12 +62,11 @@ impl ComponentId {
             crate::keys::PLANS_VIEW => Some(Self::Plans),
             crate::keys::TELEMETRY_VIEW => Some(Self::Telemetry),
             crate::keys::PLUGINS_VIEW => Some(Self::Plugins),
-            crate::keys::MODELS_VIEW => Some(Self::Models),
+            crate::keys::MODELS_VIEW | crate::keys::MODELS_VIEW_CHAR => Some(Self::Models),
             crate::keys::HOST_VIEW => Some(Self::Host),
             crate::keys::JOBS_VIEW => Some(Self::Jobs),
             crate::keys::SESSIONS_VIEW_CHAR => Some(Self::Sessions),
             crate::keys::COSTS_VIEW => Some(Self::Costs),
-            crate::keys::CATALOG_VIEW => Some(Self::Catalog),
             crate::keys::SETTINGS_VIEW => Some(Self::Settings),
             _ => None,
         }

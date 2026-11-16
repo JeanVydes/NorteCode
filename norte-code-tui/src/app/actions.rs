@@ -311,10 +311,6 @@ impl App {
             }
             ViewAction::RefreshCosts => self.refresh_costs(),
             ViewAction::RefreshJobs => self.refresh_jobs(),
-            ViewAction::RefreshCatalog => self.client.load_catalog(self.session_generation),
-            ViewAction::Catalog(operation) => self
-                .client
-                .catalog_operation(*operation, self.session_generation),
             ViewAction::CompactSession => {
                 if self.model.active_child.is_none()
                     && let Some(session) = self.model.active_session.clone()

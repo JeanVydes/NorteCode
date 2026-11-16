@@ -33,26 +33,38 @@ fn model(id: &str, provider_id: &str) -> CatalogModel {
 }
 
 #[test]
-fn openrouter_is_attributed() {
-    // The one gateway that asks to be identified, so its requests carry the
-    // app's page and its name. Every other provider gets nothing.
-    let wire_idk = CatalogWire { api: "https://openrouter.ai/api/v1".to_owned(), schema: WireSchema::OpenAI, auth: None, headers: std::collections::BTreeMap::new() };
-    let headers = headers_for("openrouter", &wire_idk);
-    assert_eq!(
-        headers.get("HTTP-Referer").map(String::as_str),
-        Some("https://norte.vyde.dev")
-    );
-    assert_eq!(
-        headers.get("X-OpenRouter-Title").map(String::as_str),
-        Some("Norte Code")
-    );
-    assert_eq!(
-        headers.get("X-OpenRouter-Categories").map(String::as_str),
-        Some("cli-agent,cloud-agent")
-    );
+fn wire_headers_are_the_headers_the_wire_names() {
+    // Headers come from the wire, not from a built-in vendor table: what the
+    // provider declares is what goes on the request, and nothing else.
+    let mut wire = CatalogWire {
+        api: "https://example.invalid/v1".to_owned(),
+        schema: WireSchema::OpenAI,
+        auth: None,
+        headers: std::collections::BTreeMap::new(),
+    };
+    let provider = CatalogProvider {
+        name: "Example".to_owned(),
+        doc: None,
+        environment_keys: vec![],
+        wires: vec![wire.clone()],
+    };
+    let model = model("m", "example");
+    let spec = ModelSpec::from_entry(&Config::default(), &provider, &model, None).expect("spec");
+    assert!(spec.headers.is_empty());
 
-    let plain_wire = CatalogWire { api: "https://api.openai.com/v1".to_owned(), schema: WireSchema::OpenAI, auth: None, headers: std::collections::BTreeMap::new() };
-    assert!(headers_for("openai", &plain_wire).is_empty());
+    wire.headers
+        .insert("X-Custom-Header".to_owned(), "value".to_owned());
+    let provider = CatalogProvider {
+        name: "Example".to_owned(),
+        doc: None,
+        environment_keys: vec![],
+        wires: vec![wire],
+    };
+    let spec = ModelSpec::from_entry(&Config::default(), &provider, &model, None).expect("spec");
+    assert_eq!(
+        spec.headers.get("X-Custom-Header").map(String::as_str),
+        Some("value")
+    );
 }
 
 #[test]

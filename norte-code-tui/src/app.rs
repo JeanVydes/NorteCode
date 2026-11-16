@@ -433,9 +433,6 @@ impl App {
             ComponentId::Telemetry => self.model.telemetry.is_some(),
             ComponentId::Plugins => !self.model.plugins.is_empty(),
             ComponentId::Models => !self.model.models.is_empty(),
-            ComponentId::Catalog => {
-                !self.model.catalog.providers.is_empty() || !self.model.catalog.models.is_empty()
-            }
             ComponentId::Settings => true,
             ComponentId::Host => self.model.server.is_some(),
             ComponentId::Sessions => {
