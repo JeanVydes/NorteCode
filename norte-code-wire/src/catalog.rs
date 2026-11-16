@@ -89,6 +89,10 @@ pub struct Wire {
     /// Messages surface reached with `Authorization: Bearer` — names one here,
     /// because the schema says how the body is shaped and not who is paying.
     pub auth: Option<AuthKind>,
+    /// Extra static headers this wire sends on every request, such as a
+    /// Workspace or Account id the vendor requires.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 /// The credential a wire's requests carry.
@@ -129,7 +133,7 @@ impl AuthKind {
     #[must_use]
     pub fn for_schema(schema: WireSchema) -> Self {
         match schema {
-            WireSchema::OpenAI => Self::Bearer,
+            WireSchema::OpenAI | WireSchema::Responses => Self::Bearer,
             WireSchema::Anthropic => Self::XApiKey,
             WireSchema::Google => Self::XGoogApiKey,
         }
@@ -138,15 +142,14 @@ impl AuthKind {
 
 /// The request/answer shape a wire speaks.
 ///
-/// It is the interface and not the vendor: the three are what the ecosystem
+/// It is the interface and not the vendor: these four are what the ecosystem
 /// converges on, and every provider serves one of them. Which Norte wire family
 /// is used is derived from this — the crate of Norte that implements each one is
 /// the authority on the family's name, and this enum only says which applies.
 ///
 /// `OpenAI` is the chat completions surface, the one every compatible vendor
-/// speaks. The Responses wire exists in Norte and is deliberately not reachable
-/// from here: it is another shape entirely, and this host speaks the one the
-/// three schemas share.
+/// speaks. `Responses` is the `OpenAI` Responses API — the same vendor over the
+/// wire Codex and `@ai-sdk/openai` speak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireSchema {
     /// `OpenAI` chat completions, and every compatible vendor.
@@ -161,6 +164,9 @@ pub enum WireSchema {
     /// Google `generateContent`.
     #[serde(rename = "google")]
     Google,
+    /// `OpenAI` Responses (`@ai-sdk/openai`, Codex).
+    #[serde(rename = "responses")]
+    Responses,
 }
 
 impl WireSchema {
@@ -168,14 +174,15 @@ impl WireSchema {
     ///
     /// `OpenAI` first, because it is the surface the largest number of
     /// providers serve and the dialect the others borrow; then Anthropic, then
-    /// Google. A person who cares which is used names it with `--wire`, and
-    /// this is only what happens when nobody said.
+    /// Google, then Responses. A person who cares which is used names it with
+    /// `--wire`, and this is only what happens when nobody said.
     #[must_use]
     fn rank(self) -> u8 {
         match self {
             Self::OpenAI => 0,
             Self::Anthropic => 1,
             Self::Google => 2,
+            Self::Responses => 3,
         }
     }
 
@@ -186,11 +193,12 @@ impl WireSchema {
             Self::OpenAI => "openai",
             Self::Anthropic => "anthropic",
             Self::Google => "google",
+            Self::Responses => "responses",
         }
     }
 
     /// Every schema, in preference order.
-    pub const ALL: [Self; 3] = [Self::OpenAI, Self::Anthropic, Self::Google];
+    pub const ALL: [Self; 4] = [Self::OpenAI, Self::Anthropic, Self::Google, Self::Responses];
 }
 
 impl std::fmt::Display for WireSchema {

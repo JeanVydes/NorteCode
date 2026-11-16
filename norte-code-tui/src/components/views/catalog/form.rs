@@ -94,6 +94,7 @@ impl CatalogView {
                 api: api.trim().to_owned(),
                 schema: WireSchema::OpenAI,
                 auth: None,
+                headers: std::collections::BTreeMap::new(),
             }],
             ..Provider::default()
         };

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use norte::anthropic::AnthropicMessages;
 use norte::gemini::GeminiGenerate;
 use norte::http::{AuthScheme, VendorProfile};
-use norte::openai::OpenAiChat;
+use norte::openai::{OpenAiChat, OpenAiResponses};
 use norte::{Capabilities, Model, ModelId, ModelRef, ProviderId, WireFamily};
 
 use norte_code_protocol::catalog::{Catalog, CatalogError};
@@ -112,7 +112,7 @@ impl ModelSpec {
             schema: wire.schema,
             auth: wire.auth,
             capabilities: norte_code_protocol::catalog::capabilities(model, wire.schema),
-            headers: headers_for(&model.provider_id),
+            headers: headers_for(&model.provider_id, wire),
         })
     }
 
@@ -196,12 +196,13 @@ fn select_wire<'a>(
 ///
 /// The built-in ones are for the one gateway that asks to be identified;
 /// everybody else gets none.
-fn headers_for(provider: &str) -> BTreeMap<String, String> {
-    if provider == "openrouter" {
+fn headers_for(provider: &str, wire: &CatalogWire) -> BTreeMap<String, String> {
+    let base = if provider == "openrouter" {
         openrouter_headers()
     } else {
         BTreeMap::new()
-    }
+    };
+    base.into_iter().chain(wire.headers.clone()).collect()
 }
 
 /// Builds a Norte model from a [`ModelSpec`]. Tests implement this to inject a
@@ -313,6 +314,9 @@ fn build_with_profile(
             Arc::new(AnthropicMessages::new(reference, profile, capabilities)?)
         }
         WireSchema::Google => Arc::new(GeminiGenerate::new(reference, profile, capabilities)?),
+        WireSchema::Responses => {
+            Arc::new(OpenAiResponses::new(reference, profile, capabilities)?)
+        }
     })
 }
 
