@@ -1454,6 +1454,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "norte-code-client",
+ "norte-code-protocol",
  "norte-code-wire",
  "pulldown-cmark",
  "ratatui",

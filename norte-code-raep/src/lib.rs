@@ -66,6 +66,18 @@ use norte_code_protocol::{
     },
     sqlite::{SessionDirectory, SqliteStore},
 };
+
+/// Wires the 0600 `secrets.json` into every agent's config so a key the
+/// client writes there is usable on the host.
+fn install_file_key_store(agents: Vec<Agent>) -> Vec<Agent> {
+    agents
+        .into_iter()
+        .map(|mut agent| {
+            agent.keys = Some(std::sync::Arc::new(norte_code_protocol::keys::FileKeyStore));
+            agent
+        })
+        .collect()
+}
 use norte_code_wire::catalog::{Models, Providers};
 
 /// Moves pins written by the file-based pin store into the session stats.
@@ -262,7 +274,7 @@ pub async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         models: offered.models.clone(),
     };
     let services = build_services(
-        service_config.agents,
+        install_file_key_store(service_config.agents),
         catalog,
         session_store,
         Arc::clone(&blobs),

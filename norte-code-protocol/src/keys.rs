@@ -211,6 +211,61 @@ fn read_secrets(path: &Path) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+/// A key store backed by the 0600 `secrets.json` beside the config.
+///
+/// The environment is tried first — `environment_keys`, first set and
+/// non-blank wins — and the file is the fallback. This is the store a host
+/// installs when it has no OS keyring (or before it talks to one): the file
+/// is the key the catalogue promised to check, and the rest of the chain
+/// behaves exactly as if the environment held the key itself.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FileKeyStore;
+
+impl KeyStore for FileKeyStore {
+    fn resolve(&self, provider: &str, environment_keys: &[String]) -> Result<ApiKey, ConfigError> {
+        if environment_keys.is_empty() {
+            return Ok(ApiKey::new(String::new()));
+        }
+        if let Some(key) = environment_value(environment_keys) {
+            return Ok(key);
+        }
+        if let Some(key) = self.known(provider, environment_keys) {
+            return Ok(key);
+        }
+        Err(ConfigError::Secret {
+            provider: provider.to_owned(),
+            message: format!(
+                "no value in {} and none in secrets.json",
+                environment_keys.join(", ")
+            ),
+        })
+    }
+
+    fn known(&self, provider: &str, environment_keys: &[String]) -> Option<ApiKey> {
+        if environment_keys.is_empty() {
+            return Some(ApiKey::new(String::new()));
+        }
+        if let Some(key) = environment_value(environment_keys) {
+            return Some(key);
+        }
+        let path = secrets_path()?;
+        read_secret(&path, provider)
+    }
+
+    fn save(&self, provider: &str, key: &str) -> Result<KeyStorage, KeyStoreError> {
+        if key.trim().is_empty() {
+            return Err(KeyStoreError::Empty);
+        }
+        let path = secrets_path().ok_or(KeyStoreError::Unsupported)?;
+        save_secret(&path, provider, key).map(|()| KeyStorage::File)
+    }
+
+    fn delete(&self, provider: &str) -> Result<(), KeyStoreError> {
+        let path = secrets_path().ok_or(KeyStoreError::Unsupported)?;
+        delete_secret(&path, provider)
+    }
+}
+
 #[cfg(test)]
 #[path = "keys_tests.rs"]
 mod tests;

@@ -100,6 +100,10 @@ Edit `providers.json` (who serves models, and over which wires).
 When the service is running, the catalogue is refreshed in place; otherwise
 the files are written and picked up on the next start.
 
+Key resolution is environment first, then `secrets.json` beside the config
+(mode 0600). Selecting a model in the TUI checks both; if the provider's key
+is missing, it opens a prompt to paste it and saves it under the provider id.
+
 ### `norte service mcps …`
 
 Edit the MCP servers in `service.json`.

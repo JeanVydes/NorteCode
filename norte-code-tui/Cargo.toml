@@ -18,6 +18,7 @@ ratatui = { version = "0.29", default-features = false, features = [
     "unstable-rendered-line-info",
 ] }
 serde = { workspace = true }
+norte-code-protocol = { path = "../norte-code-protocol" }
 unicode-width = "0.2"
 futures-util = { workspace = true }
 serde_json = { workspace = true }

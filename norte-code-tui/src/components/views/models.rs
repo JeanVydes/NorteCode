@@ -23,6 +23,16 @@ pub(in crate::components) struct ModelsView {
     filtering: bool,
     expanded: HashSet<String>,
     pending_action: Option<ComponentAction>,
+    key_prompt: Option<KeyPrompt>,
+}
+
+enum KeyPrompt {
+    Edit {
+        provider: String,
+        model: String,
+        value: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +97,16 @@ impl ModelsView {
             Some(ModelRow::Model(selected))
                 if model.active_child.is_none() && model.active_session.is_some() =>
             {
+                let missing = crate::provider_keys::check(&selected.provider);
+                if let crate::provider_keys::ProviderKeyStatus::Missing { .. } = missing {
+                    self.key_prompt = Some(KeyPrompt::Edit {
+                        provider: selected.provider.clone(),
+                        model: selected.model.clone(),
+                        value: String::new(),
+                        error: None,
+                    });
+                    return;
+                }
                 self.pending_action = Some(ComponentAction::SetModel {
                     provider: selected.provider.clone(),
                     model: selected.model.clone(),
@@ -96,11 +116,84 @@ impl ModelsView {
         }
     }
 
+    fn handle_key_prompt(&mut self, key: KeyEvent, _model: &UiModel, prompt: KeyPrompt) {
+        let KeyPrompt::Edit {
+            provider,
+            model,
+            mut value,
+            mut error,
+        } = prompt;
+        match key.code {
+            keys::CANCEL => self.key_prompt = None,
+            keys::ERASE => {
+                value.pop();
+                error = None;
+                self.key_prompt = Some(KeyPrompt::Edit {
+                    provider,
+                    model,
+                    value,
+                    error,
+                });
+            }
+            keys::SUBMIT => {
+                let trimmed = value.trim().to_owned();
+                if trimmed.is_empty() {
+                    self.key_prompt = Some(KeyPrompt::Edit {
+                        provider,
+                        model,
+                        value,
+                        error: Some("the key is empty".to_owned()),
+                    });
+                    return;
+                }
+                let saved = save_key(&provider, &trimmed);
+                match saved {
+                    Ok(()) => {
+                        self.key_prompt = None;
+                        self.pending_action = Some(ComponentAction::SetModel { provider, model });
+                    }
+                    Err(failure) => {
+                        self.key_prompt = Some(KeyPrompt::Edit {
+                            provider,
+                            model,
+                            value,
+                            error: Some(format!("could not save: {failure}")),
+                        });
+                    }
+                }
+            }
+            KeyCode::Char(character) => {
+                value.push(character);
+                error = None;
+                self.key_prompt = Some(KeyPrompt::Edit {
+                    provider,
+                    model,
+                    value,
+                    error,
+                });
+            }
+            _ => {
+                self.key_prompt = Some(KeyPrompt::Edit {
+                    provider,
+                    model,
+                    value,
+                    error,
+                });
+            }
+        }
+    }
+
     fn clamp_selection(&mut self, models: &[ModelInfo]) {
         self.selected = self
             .selected
             .min(self.visible_rows(models).len().saturating_sub(1));
     }
+}
+
+fn save_key(provider: &str, key: &str) -> Result<(), String> {
+    let path = norte_code_protocol::keys::secrets_path()
+        .ok_or("could not resolve the secrets.json path".to_owned())?;
+    norte_code_protocol::keys::save_secret(&path, provider, key).map_err(|error| error.to_string())
 }
 
 fn current_model(model: &UiModel) -> Option<(&str, &str)> {
@@ -152,10 +245,14 @@ impl Component for ModelsView {
     }
 
     fn captures_global_keys(&self) -> bool {
-        self.filtering
+        self.key_prompt.is_some() || self.filtering
     }
 
     fn handle_key(&mut self, key: KeyEvent, model: &UiModel) {
+        if let Some(prompt) = self.key_prompt.take() {
+            self.handle_key_prompt(key, model, prompt);
+            return;
+        }
         if self.filtering {
             match key.code {
                 keys::CANCEL => {
@@ -204,6 +301,24 @@ impl Component for ModelsView {
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, model: &UiModel) {
+        if let Some(KeyPrompt::Edit {
+            provider,
+            model: _,
+            value,
+            error,
+        }) = &self.key_prompt
+        {
+            let bullets = "•".repeat(value.chars().count());
+            let body = format!(
+                "{provider} has no key in the environment or secrets.json.\n\nPaste it here and press Enter:\n\n{bullets}\n\nEsc cancels · the key is never shown"
+            );
+            let body = match error {
+                Some(message) => format!("{body}\n\n{message}"),
+                None => body,
+            };
+            panel::render_text(frame, area, "API key required", body, model.preferences.theme);
+            return;
+        }
         let rows = self.visible_rows(&model.models);
         self.selected = self.selected.min(rows.len().saturating_sub(1));
         let areas = Layout::default()
