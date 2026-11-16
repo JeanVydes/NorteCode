@@ -32,7 +32,7 @@ impl ComponentId {
             Self::Plugins => crate::keys::PLUGINS_VIEW,
             Self::Models => crate::keys::MODELS_VIEW,
             Self::Host => crate::keys::HOST_VIEW,
-            Self::Sessions => crate::keys::SESSIONS_VIEW,
+            Self::Sessions => crate::keys::SESSIONS_VIEW_CHAR,
             Self::Jobs => crate::keys::JOBS_VIEW,
             Self::PlanReview => '0',
             Self::Costs => crate::keys::COSTS_VIEW,
@@ -50,11 +50,11 @@ impl ComponentId {
             Self::Plugins,
             Self::Models,
             Self::Host,
-            Self::Sessions,
             Self::Jobs,
             Self::Costs,
             Self::Catalog,
             Self::Settings,
+            Self::Sessions,
         ]
     }
 
@@ -67,8 +67,8 @@ impl ComponentId {
             crate::keys::PLUGINS_VIEW => Some(Self::Plugins),
             crate::keys::MODELS_VIEW => Some(Self::Models),
             crate::keys::HOST_VIEW => Some(Self::Host),
-            crate::keys::SESSIONS_VIEW => Some(Self::Sessions),
             crate::keys::JOBS_VIEW => Some(Self::Jobs),
+            crate::keys::SESSIONS_VIEW_CHAR => Some(Self::Sessions),
             crate::keys::COSTS_VIEW => Some(Self::Costs),
             crate::keys::CATALOG_VIEW => Some(Self::Catalog),
             crate::keys::SETTINGS_VIEW => Some(Self::Settings),

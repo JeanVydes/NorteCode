@@ -299,7 +299,10 @@ impl App {
             return Ok(());
         }
         if self.active_view == ComponentId::Sessions
-            && let Some(event::KeyCode::Char('1'..='9')) = keys.first().map(|key| key.code)
+            && self
+                .views
+                .get(self.view_index(ComponentId::Sessions).unwrap_or(usize::MAX))
+                .is_some_and(|view| view.captures_global_keys())
         {
             self.handle_component_keys(active_index, &keys)?;
             return Ok(());
