@@ -8,12 +8,13 @@ models, MCP servers, plugins — is configured from the same command.
 ## Install
 
 ```sh
-cargo install --git https://github.com/JeanVydes/NorteCode norte-code-cli
+cargo install --git https://github.com/JeanVydes/NorteCode norte-code-cli --force
 ```
 
-The binary installs into `~/.cargo/bin/norte`. Everything else — the background
-service, the TUI, the catalogue, the configuration — is managed from that one
-command.
+`--force` (re)installs the binary, so running the same command is also how you
+update to the latest `dev` build. The binary installs into `~/.cargo/bin/norte`.
+Everything else — the background service, the TUI, the catalogue, the
+configuration — is managed from that one command.
 
 ## Run
 

@@ -11,8 +11,11 @@
 ## Install
 
 ```sh
-cargo install --git https://github.com/JeanVydes/NorteCode norte-code-cli
+cargo install --git https://github.com/JeanVydes/NorteCode norte-code-cli --force
 ```
+
+`--force` (re)installs the binary, so running the same command is also how you
+update to the latest `dev` build.
 
 During development:
 
