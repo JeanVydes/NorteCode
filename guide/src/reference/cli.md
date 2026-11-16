@@ -91,7 +91,10 @@ Edit `providers.json` (who serves models, and over which wires).
 | Form | Meaning |
 | --- | --- |
 | `providers list` | Show providers — the catalogue files and any a plugin injected. |
-| `providers add <ID> --wire SCHEMA --base-url URL [--key ENV_VAR] [--name DISPLAY]` | Add or replace a provider. `--wire` is `openai`, `anthropic` or `google` (repeat for several). `--key` names an environment variable the key comes from (repeat for several); the value is never written to disk. |
+| `providers add <ID> [--name DISPLAY] [--keys KEY1,KEY2,…]` | Add or replace a provider record; `--keys` is a comma-separated list of environment variables the key comes from. Wires are managed separately below. |
+| `providers add-wire <ID> --schema SCHEMA [--base-url URL] [--auth AUTH]` | Add (or replace) a wire. `--schema` is `openai`, `anthropic` or `google`; `--auth` is `bearer`, `x_api_key`, `x_goog_api_key` or `disabled` (default: the schema's own header). |
+| `providers remove-wire <ID> --schema SCHEMA[,SCHEMA…]` | Remove one or more wires. |
+| `providers get-wires <ID>` | Show the wires of a provider. |
 | `providers remove <ID>` | Remove a provider and every model that names it. |
 
 When the service is running, the catalogue is refreshed in place; otherwise

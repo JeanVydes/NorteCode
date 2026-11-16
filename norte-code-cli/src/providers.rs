@@ -17,18 +17,39 @@ pub(crate) enum Command {
     Add {
         /// Provider id.
         id: String,
-        /// Wire schema (repeatable): openai, anthropic, google.
-        #[arg(long, default_value = "openai")]
-        wire: Vec<String>,
-        /// Base URL for the wire(s).
-        #[arg(long)]
-        base_url: Vec<String>,
-        /// Environment variable holding the key (repeatable).
-        #[arg(long = "key")]
-        keys: Vec<String>,
         /// Display name.
         #[arg(long)]
         name: Option<String>,
+        /// Comma-separated environment variables holding the key(s).
+        #[arg(long, value_delimiter = ',')]
+        keys: Vec<String>,
+    },
+    /// Add a wire to a provider.
+    AddWire {
+        /// Provider id.
+        id: String,
+        /// Wire schema(s): openai, anthropic, google (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        schema: Vec<String>,
+        /// Base URL for the wire(s).
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Credential header: bearer, x_api_key, x_goog_api_key or disabled.
+        #[arg(long)]
+        auth: Option<String>,
+    },
+    /// Remove wire(s) from a provider.
+    RemoveWire {
+        /// Provider id.
+        id: String,
+        /// Wire schema(s) to remove (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        schema: Vec<String>,
+    },
+    /// Show the wires of a provider.
+    GetWires {
+        /// Provider id.
+        id: String,
     },
     /// Remove a provider and its models.
     Remove {
@@ -40,14 +61,28 @@ pub(crate) enum Command {
 pub(crate) fn run(command: Option<Command>) -> Result<(), String> {
     match command.unwrap_or(Command::List) {
         Command::List => list(),
-        Command::Add {
+        Command::Add { id, name, keys } => add(&id, name.as_deref(), &keys),
+        Command::AddWire {
             id,
-            wire,
+            schema,
             base_url,
-            keys,
-            name,
-        } => add(&id, &wire, &base_url, &keys, name.as_deref()),
+            auth,
+        } => add_wire(&id, &schema, base_url.as_deref(), auth.as_deref()),
+        Command::RemoveWire { id, schema } => remove_wires(&id, &schema),
+        Command::GetWires { id } => get_wires(&id),
         Command::Remove { id } => remove(&id),
+    }
+}
+
+fn parse_auth(value: &str) -> Result<norte_code_wire::catalog::AuthKind, String> {
+    match value {
+        "bearer" => Ok(norte_code_wire::catalog::AuthKind::Bearer),
+        "x_api_key" | "x-api-key" => Ok(norte_code_wire::catalog::AuthKind::XApiKey),
+        "x_goog_api_key" | "x-goog-api-key" => Ok(norte_code_wire::catalog::AuthKind::XGoogApiKey),
+        "disabled" => Ok(norte_code_wire::catalog::AuthKind::Disabled),
+        other => Err(format!(
+            "unknown auth `{other}`; expected bearer, x_api_key, x_goog_api_key or disabled"
+        )),
     }
 }
 
@@ -70,48 +105,18 @@ fn parse_schema(value: &str) -> Result<WireSchema, String> {
     }
 }
 
-fn add(
-    id: &str,
-    wires_raw: &[String],
-    base_urls: &[String],
-    keys: &[String],
-    name: Option<&str>,
-) -> Result<(), String> {
+fn add(id: &str, name: Option<&str>, keys: &[String]) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err("provider id must not be empty".to_owned());
     }
-    let wires_raw = if wires_raw.is_empty() {
-        vec!["openai".to_owned()]
-    } else {
-        wires_raw.to_vec()
-    };
-    let mut schemas = Vec::new();
-    for value in &wires_raw {
-        schemas.push(parse_schema(value)?);
-    }
-
-    let wires: Vec<Wire> = schemas
-        .iter()
-        .enumerate()
-        .map(|(index, schema)| {
-            let api = if index < base_urls.len() {
-                base_urls[index].clone()
-            } else if !base_urls.is_empty() {
-                base_urls[base_urls.len() - 1].clone()
-            } else {
-                default_base_url(*schema).to_owned()
-            };
-            Wire {
-                api,
-                schema: *schema,
-                auth: None,
-            }
-        })
-        .collect();
-
     norte_code_protocol::catalog::ensure_catalog_files()
         .map_err(|e| format!("{e}"))?;
     let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
+    let wires = providers
+        .providers
+        .get(id)
+        .map(|p| p.wires.clone())
+        .unwrap_or_default();
     providers.providers.insert(
         id.to_owned(),
         Provider {
@@ -144,6 +149,123 @@ fn add(
     }
 
     notify_catalog_if_up();
+    Ok(())
+}
+
+fn add_wire(
+    id: &str,
+    schemas: &[String],
+    base_url: Option<&str>,
+    auth: Option<&str>,
+) -> Result<(), String> {
+    if schemas.is_empty() {
+        return Err("at least one --schema is required (openai, anthropic or google)".to_owned());
+    }
+    norte_code_protocol::catalog::ensure_catalog_files()
+        .map_err(|e| format!("{e}"))?;
+    let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
+    let provider = providers
+        .providers
+        .get_mut(id)
+        .ok_or_else(|| format!("`{id}` is not in providers.json; add it first with `providers add`"))?;
+    let auth = auth.map(parse_auth).transpose()?;
+    for schema in schemas {
+        let schema = parse_schema(schema)?;
+        let api = base_url
+            .map(str::to_owned)
+            .unwrap_or_else(|| default_base_url(schema).to_owned());
+        provider.wires.retain(|wire| wire.schema != schema);
+        provider.wires.push(Wire {
+            api,
+            schema,
+            auth,
+        });
+    }
+    save_catalog_files(&providers, &models).map_err(|e| format!("{e}"))?;
+
+    println!(
+        "  {} added wires to {}",
+        crate::output::ok("✓"),
+        crate::output::accent(id)
+    );
+    notify_catalog_if_up();
+    Ok(())
+}
+
+fn remove_wires(id: &str, schemas: &[String]) -> Result<(), String> {
+    if schemas.is_empty() {
+        return Err("at least one --schema is required".to_owned());
+    }
+    norte_code_protocol::catalog::ensure_catalog_files()
+        .map_err(|e| format!("{e}"))?;
+    let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
+    let provider = providers
+        .providers
+        .get_mut(id)
+        .ok_or_else(|| format!("`{id}` is not in providers.json"))?;
+    let targets: Vec<WireSchema> = schemas.iter().map(|s| parse_schema(s)).collect::<Result<_, _>>()?;
+    let before = provider.wires.len();
+    provider.wires.retain(|wire| !targets.contains(&wire.schema));
+    if before == provider.wires.len() {
+        return Err(format!(
+            "no matching wires found in `{id}`; see them with `providers get-wires {id}`"
+        ));
+    }
+    save_catalog_files(&providers, &models).map_err(|e| format!("{e}"))?;
+
+    println!(
+        "  {} removed wires from {}",
+        crate::output::ok("✓"),
+        crate::output::accent(id)
+    );
+    notify_catalog_if_up();
+    Ok(())
+}
+
+fn auth_label(auth: norte_code_wire::catalog::AuthKind) -> String {
+    match auth {
+        norte_code_wire::catalog::AuthKind::Bearer => "bearer".to_owned(),
+        norte_code_wire::catalog::AuthKind::XApiKey => "x_api_key".to_owned(),
+        norte_code_wire::catalog::AuthKind::XGoogApiKey => "x_goog_api_key".to_owned(),
+        norte_code_wire::catalog::AuthKind::Disabled => "disabled".to_owned(),
+    }
+}
+
+fn get_wires(id: &str) -> Result<(), String> {
+    norte_code_protocol::catalog::ensure_catalog_files()
+        .map_err(|e| format!("{e}"))?;
+    let (providers, _models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
+    let provider = providers
+        .providers
+        .get(id)
+        .ok_or_else(|| format!("`{id}` is not in providers.json"))?;
+    println!(
+        "  {}  {}",
+        crate::output::accent(id),
+        crate::output::muted(&format!("({} wires)", provider.wires.len()))
+    );
+    if provider.wires.is_empty() {
+        println!("  {}", crate::output::muted("(none; add one with `providers add-wire`)"));
+        return Ok(());
+    }
+    for wire in &provider.wires {
+        let auth = wire.auth.map(|a| auth_label(a)).unwrap_or_else(|| {
+            format!(
+                "(schema default: {})",
+                auth_label(norte_code_wire::catalog::AuthKind::for_schema(wire.schema))
+            )
+        });
+        println!(
+            "  {}  {}",
+            crate::output::dim(&format!("{:<10}", wire.schema.label())),
+            crate::output::muted(&wire.api)
+        );
+        println!(
+            "       {}  {}",
+            crate::output::muted("auth:"),
+            crate::output::dim(&auth)
+        );
+    }
     Ok(())
 }
 
