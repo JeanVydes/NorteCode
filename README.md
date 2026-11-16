@@ -8,7 +8,7 @@ models, MCP servers, plugins — is configured from the same command.
 ## Install
 
 ```sh
-cargo install --git https://github.com/JeanVydes/NorteCode --path norte-code-cli
+cargo install --git https://github.com/JeanVydes/NorteCode norte-code-cli
 ```
 
 The binary installs into `~/.cargo/bin/norte`. Everything else — the background
