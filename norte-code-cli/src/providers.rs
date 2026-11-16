@@ -91,6 +91,7 @@ fn default_base_url(schema: WireSchema) -> &'static str {
         WireSchema::OpenAI => "https://api.openai.com/v1",
         WireSchema::Anthropic => "https://api.anthropic.com",
         WireSchema::Google => "https://generativelanguage.googleapis.com",
+        WireSchema::Responses => "https://api.openai.com/v1",
     }
 }
 
@@ -99,8 +100,9 @@ fn parse_schema(value: &str) -> Result<WireSchema, String> {
         "openai" => Ok(WireSchema::OpenAI),
         "anthropic" => Ok(WireSchema::Anthropic),
         "google" => Ok(WireSchema::Google),
+        "responses" => Ok(WireSchema::Responses),
         other => Err(format!(
-            "unknown wire schema `{other}`; expected openai, anthropic or google"
+            "unknown wire schema `{other}`; expected openai, anthropic, google or responses"
         )),
     }
 }
@@ -179,6 +181,7 @@ fn add_wire(
             api,
             schema,
             auth,
+            headers: std::collections::BTreeMap::new(),
         });
     }
     save_catalog_files(&providers, &models).map_err(|e| format!("{e}"))?;

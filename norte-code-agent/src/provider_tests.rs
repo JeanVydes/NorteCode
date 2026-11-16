@@ -12,6 +12,7 @@ fn provider(name: &str, schemas: &[WireSchema]) -> CatalogProvider {
                 api: format!("https://{name}.invalid/v1"),
                 schema: *schema,
                 auth: None,
+                headers: std::collections::BTreeMap::new(),
             })
             .collect(),
     }
@@ -35,7 +36,8 @@ fn model(id: &str, provider_id: &str) -> CatalogModel {
 fn openrouter_is_attributed() {
     // The one gateway that asks to be identified, so its requests carry the
     // app's page and its name. Every other provider gets nothing.
-    let headers = headers_for("openrouter");
+    let wire_idk = CatalogWire { api: "https://openrouter.ai/api/v1".to_owned(), schema: WireSchema::OpenAI, auth: None, headers: std::collections::BTreeMap::new() };
+    let headers = headers_for("openrouter", &wire_idk);
     assert_eq!(
         headers.get("HTTP-Referer").map(String::as_str),
         Some("https://norte.vyde.dev")
@@ -49,7 +51,8 @@ fn openrouter_is_attributed() {
         Some("cli-agent,cloud-agent")
     );
 
-    assert!(headers_for("openai").is_empty());
+    let plain_wire = CatalogWire { api: "https://api.openai.com/v1".to_owned(), schema: WireSchema::OpenAI, auth: None, headers: std::collections::BTreeMap::new() };
+    assert!(headers_for("openai", &plain_wire).is_empty());
 }
 
 #[test]

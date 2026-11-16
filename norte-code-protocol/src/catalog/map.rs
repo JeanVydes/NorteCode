@@ -40,20 +40,20 @@ pub trait WireSchemaExt {
     #[must_use]
     fn cache_mode(self) -> CacheMode;
 }
-
 impl WireSchemaExt for WireSchema {
     fn family(self) -> &'static str {
         match self {
             Self::OpenAI => norte::openai::WIRE_CHAT,
             Self::Anthropic => norte::anthropic::WIRE_MESSAGES,
             Self::Google => norte::gemini::WIRE_GENERATE,
+            Self::Responses => norte::openai::WIRE_RESPONSES,
         }
     }
 
     fn cache_mode(self) -> CacheMode {
         match self {
             Self::Anthropic => CacheMode::Explicit,
-            Self::OpenAI | Self::Google => CacheMode::Automatic,
+            Self::OpenAI | Self::Google | Self::Responses => CacheMode::Automatic,
         }
     }
 }
