@@ -8,18 +8,35 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["native"]
+# The RAEP HTTP adapter. Off for wasm, where the UI supplies its own
+# platform transport and uses only the shared protocol decoding.
+native = [
+    "dep:futures-util",
+    "dep:tokio",
+    "dep:tokio-stream",
+    "reqwest/rustls-tls",
+    "reqwest/stream",
+]
+
 [dependencies]
 async-trait = { workspace = true }
 futures-core = { workspace = true }
-futures-util = { workspace = true }
-norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-wire = { path = "../norte-code-wire" }
 raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio-stream = { workspace = true }
-tokio = { workspace = true }
+futures-util = { workspace = true, optional = true }
+# Not the workspace dependency: the browser build must not pull TLS, and the
+# REST surface compiles for wasm on fetch alone.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tokio-stream = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
 
 [lints]
 workspace = true

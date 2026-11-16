@@ -16,26 +16,6 @@ sandbox to contain writes, process namespaces and the network.
 }
 ```
 
-Or for one run:
-
-```sh
-norte-code new --sandbox
-```
-
-`--sandbox` overrides the config one way, `--no-sandbox` the other. They
-conflict with each other.
-
-## Network
-
-The sandbox denies the network by default. Allow it only when the command
-needs it:
-
-```sh
-norte-code new --sandbox --sandbox-network on
-```
-
-`--sandbox-network` requires the sandbox.
-
 ## Extra writable roots
 
 ```json
@@ -60,11 +40,6 @@ root is a deliberate hole in the write boundary.
   (unless enabled) the network; it is not a virtual machine.
 - `/tmp` is private on Linux.
 - Approval rules see the command the model asked for, not the launcher.
-
-## Check the effective state
-
-`--debug` prints the sandbox and network state, and `norte-code telemetry`
-records it on every request, so a past command can be audited after the fact.
 
 ## Scripts are separate
 

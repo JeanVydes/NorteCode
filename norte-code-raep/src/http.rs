@@ -14,15 +14,18 @@ use axum::{
     },
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
-use raep_types::{Envelope, FrameType, SessionAttach, StandardFrameType};
+use raep_types::{AttachMode, Envelope, FrameId, FrameType, SessionAttach, StandardFrameType};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use std::{convert::Infallible, sync::Arc};
-use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tower_http::{
-    limit::RequestBodyLimitLayer, timeout::RequestBodyTimeoutLayer, trace::TraceLayer,
+    cors::{AllowOrigin, Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
+    timeout::RequestBodyTimeoutLayer,
+    trace::TraceLayer,
 };
 
 use crate::payloads::payload;
@@ -71,6 +74,14 @@ struct SessionListPayload {
     next_cursor: Value,
 }
 
+// The child list is the shared shape, not a second struct with the same fields.
+use norte_code_wire::ChildSessionSummary as ChildSessionPayload;
+
+#[derive(Debug, serde::Serialize)]
+struct ChildSessionListPayload {
+    children: Vec<ChildSessionPayload>,
+}
+
 /// An artifact reference payload.
 #[derive(Debug, serde::Serialize)]
 struct ArtifactRefPayload<'a> {
@@ -93,42 +104,95 @@ struct CommandResponsePayload {
 #[derive(Debug, serde::Serialize)]
 struct ReplayLostPayload {
     lost: u64,
+    close_code: u16,
 }
 
 /// Builds the RAEP HTTP, WebSocket and SSE routes for a host.
 pub fn router(host: Arc<NorteCodeRaepHost>) -> Router {
+    let limits = HostConfigLimits::from_host(&host);
+    let cors_host = Arc::clone(&host);
     Router::new()
         .route("/raep/v1/ws", get(websocket))
         .route("/raep/v1/info", get(info))
         .route("/raep/v1/telemetry", get(telemetry))
-        .route("/raep/v1/artifacts", post(upload_artifact))
+        .route(
+            "/raep/v1/artifacts",
+            post(upload_artifact).layer(RequestBodyLimitLayer::new(limits.max_artifact_bytes)),
+        )
+        .route(
+            "/raep/v1/sessions/{session_id}/uploads",
+            post(upload_session_upload)
+                .layer(RequestBodyLimitLayer::new(limits.max_artifact_bytes)),
+        )
         .route("/raep/v1/artifacts/{artifact_id}", get(download_artifact))
+        .route("/raep/v1/exports/{export_id}", get(download_export))
+        .route(
+            "/raep/v1/imports",
+            post(import_bundle).layer(RequestBodyLimitLayer::new(limits.max_export_bytes)),
+        )
+        .route(
+            "/raep/v1/imports/{import_id}/commit",
+            post(commit_import).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
+        .route(
+            "/raep/v1/imports/{import_id}",
+            axum::routing::delete(delete_import),
+        )
         .route("/raep/v1/health/live", get(health_live))
         .route("/raep/v1/health/ready", get(health_ready))
         .route("/raep/v1/agents", get(list_agents))
         .route("/raep/v1/agents/{agent_id}", get(read_agent))
         .route("/raep/v1/agents/{agent_id}/versions", get(agent_versions))
-        .route("/raep/v1/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/raep/v1/sessions",
+            get(list_sessions)
+                .post(create_session)
+                .layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
         .route(
             "/raep/v1/sessions/{session_id}",
             get(read_session)
                 .patch(patch_session)
-                .delete(delete_session),
+                .delete(delete_session)
+                .layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
+        .route(
+            "/raep/v1/sessions/{session_id}/children",
+            get(list_child_sessions),
         )
         .route("/raep/v1/sessions/{session_id}/events", get(events))
-        .route("/raep/v1/sessions/{session_id}/commands", post(commands))
-        .layer(RequestBodyLimitLayer::new(
-            HostConfigLimits::from_host(&host).max_body_bytes,
-        ))
-        .layer(RequestBodyTimeoutLayer::new(
-            HostConfigLimits::from_host(&host).command_timeout,
-        ))
+        .route(
+            "/raep/v1/sessions/{session_id}/outputs/{output_id}",
+            get(download_session_output),
+        )
+        .route(
+            "/raep/v1/sessions/{session_id}/commands",
+            post(commands).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
+        .route(
+            "/raep/v1/commands",
+            post(agent_commands).layer(RequestBodyLimitLayer::new(limits.max_frame_bytes)),
+        )
+        .route("/raep/v1/quota", get(quota))
+        .layer(RequestBodyTimeoutLayer::new(limits.command_timeout))
         .layer(TraceLayer::new_for_http())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::predicate(move |origin, _| {
+                    origin
+                        .to_str()
+                        .is_ok_and(|origin| cors_host.origin_allowed(origin))
+                }))
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(host)
 }
 
 struct HostConfigLimits {
-    max_body_bytes: usize,
+    max_frame_bytes: usize,
+    max_artifact_bytes: usize,
+    max_export_bytes: usize,
     command_timeout: std::time::Duration,
 }
 
@@ -136,10 +200,12 @@ impl HostConfigLimits {
     fn from_host(host: &NorteCodeRaepHost) -> Self {
         let info = host.info();
         Self {
-            max_body_bytes: info["limits"]["max_frame_bytes"]
+            max_frame_bytes: info["limits"]["max_frame_bytes"]
                 .as_u64()
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or(1024 * 1024),
+            max_artifact_bytes: host.max_artifact_bytes(),
+            max_export_bytes: host.max_export_bytes(),
             command_timeout: host.command_timeout(),
         }
     }
@@ -158,6 +224,14 @@ async fn health_live() -> Json<Value> {
 
 async fn health_ready(State(host): State<Arc<NorteCodeRaepHost>>) -> Json<Value> {
     Json(host.readiness())
+}
+
+async fn quota(State(host): State<Arc<NorteCodeRaepHost>>, headers: HeaderMap) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    Json(host.quota(&principal).await).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -278,6 +352,32 @@ async fn list_sessions(State(host): State<Arc<NorteCodeRaepHost>>, headers: Head
     .into_response()
 }
 
+async fn list_child_sessions(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.child_sessions(&session_id, &principal).await {
+        Some(children) => Json(payload(ChildSessionListPayload {
+            children: children
+                .into_iter()
+                .map(|child| ChildSessionPayload {
+                    session_id: child.session.to_string(),
+                    title: child.title,
+                    state: child.state,
+                    ..ChildSessionPayload::default()
+                })
+                .collect(),
+        }))
+        .into_response(),
+        None => not_found(),
+    }
+}
+
 async fn create_session(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
@@ -288,11 +388,13 @@ async fn create_session(
         Err(response) => return response,
     };
     let body = body.map_or(Value::Null, |Json(value)| value);
-    if let Some(agent) = body.get("agent_id").and_then(Value::as_str)
-        && !agent.is_empty()
-        && agent != host.agent_id()
-    {
-        return invalid(&format!("unknown agent `{agent}`"));
+    let agent_id = body
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .filter(|agent| !agent.is_empty())
+        .unwrap_or_else(|| host.agent_id());
+    if host.agent(agent_id).is_none() {
+        return invalid(&format!("unknown agent `{agent_id}`"));
     }
     if body.get("labels").is_some_and(|value| !value.is_null()) {
         return invalid("labels are not supported by this host");
@@ -311,7 +413,11 @@ async fn create_session(
         };
     }
     let title = body.get("title").and_then(Value::as_str).map(str::to_owned);
-    let session = match host.create_session(title, &principal).await {
+    let agent_override = body.get("agent_override").filter(|value| !value.is_null());
+    let session = match host
+        .create_session(agent_id, title, agent_override, &principal)
+        .await
+    {
         Ok(session) => session,
         Err(error) => return invalid(&error.to_string()),
     };
@@ -438,6 +544,124 @@ async fn upload_artifact(
     }
 }
 
+async fn upload_session_upload(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    if host
+        .session_summary(&session_id, &principal)
+        .await
+        .is_none()
+    {
+        return not_found();
+    }
+    let Some(mime_type) = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return invalid("Content-Type is required for uploads");
+    };
+    if mime_type == "application/json" {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "UPLOAD_MODE_UNSUPPORTED",
+                    message: "resumable uploads are not supported".to_owned(),
+                },
+            })),
+        )
+            .into_response();
+    }
+    match host
+        .put_session_upload_as(&session_id, mime_type, &body, Some(&principal))
+        .await
+    {
+        Ok(receipt) => (StatusCode::CREATED, Json(receipt)).into_response(),
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(payload(RejectedPayload {
+                status: "error",
+                accepted: Some(false),
+                error: ErrorBody {
+                    code: "UPLOAD_REJECTED",
+                    message: error.to_string(),
+                },
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn download_session_output(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path((session_id, output_id)): Path<(String, String)>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Ok((bytes, mime_type)) = host
+        .get_session_output_as(&session_id, &output_id, Some(&principal))
+        .await
+    else {
+        return not_found();
+    };
+    let range = match headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => match parse_byte_range(value, bytes.len()) {
+            Ok(range) => range,
+            Err(()) => {
+                return (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [
+                        ("accept-ranges", "bytes".to_owned()),
+                        ("content-range", format!("bytes */{}", bytes.len())),
+                    ],
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let Ok(content_type) = HeaderValue::from_str(&mime_type) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(axum::http::header::CONTENT_TYPE, content_type);
+    response_headers.insert(
+        axum::http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
+    match range {
+        Some((start, end)) => {
+            response_headers.insert(
+                axum::http::header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{}", bytes.len()))
+                    .expect("numeric content-range is a valid header"),
+            );
+            (
+                StatusCode::PARTIAL_CONTENT,
+                response_headers,
+                Bytes::copy_from_slice(&bytes[start..=end]),
+            )
+                .into_response()
+        }
+        None => (StatusCode::OK, response_headers, Bytes::from(bytes)).into_response(),
+    }
+}
+
 async fn download_artifact(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
@@ -468,11 +692,163 @@ async fn download_artifact(
     }
 }
 
+async fn download_export(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(export_id): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Ok((bytes, _)) = host.get_export_as(&export_id, &principal).await else {
+        return not_found();
+    };
+    let range = match headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(value) => match parse_byte_range(value, bytes.len()) {
+            Ok(range) => range,
+            Err(()) => {
+                return (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [
+                        ("accept-ranges", "bytes".to_owned()),
+                        ("content-range", format!("bytes */{}", bytes.len())),
+                    ],
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.raep.bundle+zip"),
+    );
+    response_headers.insert(
+        axum::http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
+    match range {
+        Some((start, end)) => {
+            response_headers.insert(
+                axum::http::header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{}", bytes.len()))
+                    .expect("numeric content-range is a valid header"),
+            );
+            (
+                StatusCode::PARTIAL_CONTENT,
+                response_headers,
+                Bytes::copy_from_slice(&bytes[start..=end]),
+            )
+                .into_response()
+        }
+        None => (StatusCode::OK, response_headers, Bytes::from(bytes)).into_response(),
+    }
+}
+
+async fn import_bundle(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    match host.preview_import_as(&body, &principal).await {
+        Ok(report) => (StatusCode::CREATED, Json(report)).into_response(),
+        Err(error) => invalid(&error.to_string()),
+    }
+}
+
+async fn commit_import(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(import_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let request = match serde_json::from_value::<crate::host::ImportCommitRequest>(body) {
+        Ok(request) => request,
+        Err(error) => return invalid(&error.to_string()),
+    };
+    match host.commit_import_as(&import_id, request, &principal).await {
+        Ok(result) => Json(result).into_response(),
+        Err(crate::host::HostError::InvalidFrame(message)) if message == "IMPORT_NOT_FOUND" => {
+            not_found_message("import not found or expired")
+        }
+        Err(error) => invalid(&error.to_string()),
+    }
+}
+
+async fn delete_import(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Path(import_id): Path<String>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    if host.delete_import_as(&import_id, &principal).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        not_found_message("import not found or expired")
+    }
+}
+
+fn parse_byte_range(value: &str, total: usize) -> Result<Option<(usize, usize)>, ()> {
+    let Some(range) = value.strip_prefix("bytes=") else {
+        return Err(());
+    };
+    if range.contains(',') || total == 0 {
+        return Err(());
+    }
+    let (start, end) = range.split_once('-').ok_or(())?;
+    let (start, end) = if start.is_empty() {
+        let suffix = end.parse::<usize>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (total.saturating_sub(suffix), total - 1)
+    } else {
+        let start = start.parse::<usize>().map_err(|_| ())?;
+        let end = if end.is_empty() {
+            total - 1
+        } else {
+            end.parse::<usize>().map_err(|_| ())?.min(total - 1)
+        };
+        (start, end)
+    };
+    if start >= total || start > end {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
+
 async fn websocket(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    let supports_raep_v1 = headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|protocol| protocol.trim() == "raep.v1")
+        });
+    if !supports_raep_v1 {
+        return StatusCode::UPGRADE_REQUIRED.into_response();
+    }
     let principal = match principal(&host, &headers) {
         Ok(principal) => principal,
         Err(response) => return response,
@@ -482,6 +858,7 @@ async fn websocket(
     };
     upgrade
         .protocols(["raep.v1"])
+        .max_message_size(host.max_frame_bytes())
         .on_upgrade(move |socket| websocket_session(host, socket, permit, principal))
         .into_response()
 }
@@ -496,39 +873,40 @@ async fn websocket_session(
     if send_frame(&mut socket, host.hello()).await.is_err() {
         return;
     }
-    while let Some(Ok(message)) = socket.recv().await {
-        match message {
+    let mut attached_sessions = std::collections::HashSet::new();
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+        std::time::Duration::from_secs(20),
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_pong = tokio::time::Instant::now();
+    'connection: loop {
+        tokio::select! {
+            message = socket.recv() => {
+                let Some(Ok(message)) = message else { break };
+                match message {
             Message::Text(text) => {
                 if text.len() > host.max_frame_bytes() {
-                    if send_frame(
-                        &mut socket,
-                        error_frame(&HostError::InvalidFrame(
-                            "frame exceeds size limit".to_owned(),
-                        )),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return;
-                    }
-                    continue;
+                    close_socket(&mut socket, 1009, "RAEP frame exceeds size limit").await;
+                    break 'connection;
                 }
-                let frame = match serde_json::from_str::<Envelope<Value>>(&text) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        if send_frame(
-                            &mut socket,
-                            error_frame(&HostError::InvalidFrame(error.to_string())),
-                        )
-                        .await
-                        .is_err()
-                        {
-                            return;
-                        }
-                        continue;
-                    }
+                let Ok(frame) = serde_json::from_str::<Envelope<Value>>(&text) else {
+                    close_socket(&mut socket, 4400, "malformed RAEP JSON frame").await;
+                    break 'connection;
                 };
-                let session_hint = frame.session_id.clone();
+                if frame.version != raep_types::WIRE_VERSION {
+                    close_socket(&mut socket, 4426, "unsupported RAEP wire version").await;
+                    break 'connection;
+                }
+                let mut session_hint = frame.session_id.clone();
+                let request_id = frame.id.clone();
+                let is_attach = frame.kind == FrameType::Standard(StandardFrameType::SessionAttach);
+                let is_detach = matches!(
+                    &frame.kind,
+                    FrameType::Standard(
+                        StandardFrameType::SessionDetach | StandardFrameType::SessionClose
+                    )
+                );
                 let mut live = host.subscribe();
                 let future = tokio::time::timeout(
                     host.command_timeout(),
@@ -542,29 +920,52 @@ async fn websocket_session(
                             match result {
                                 Ok(Ok(frames)) => {
                                     for frame in frames {
+                                        if is_attach
+                                            && frame.kind
+                                                == FrameType::Standard(StandardFrameType::SessionAttached)
+                                        {
+                                            attached_sessions.insert(frame.session_id.clone());
+                                            session_hint.clone_from(&frame.session_id);
+                                        }
                                         if emitted.insert(frame.id.clone())
                                             && send_frame(&mut socket, frame).await.is_err()
                                         {
-                                            return;
+                                            break 'connection;
                                         }
+                                    }
+                                    if is_detach {
+                                        attached_sessions.remove(&session_hint);
                                     }
                                 }
                                 Ok(Err(error)) => {
-                                    if send_frame(&mut socket, error_frame(&error)).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                Err(_) => {
                                     if send_frame(
                                         &mut socket,
-                                        error_frame(&HostError::Service(
-                                            "command timed out".to_owned(),
-                                        )),
+                                        correlated_error_frame(
+                                            &error,
+                                            Some(request_id),
+                                            session_hint.clone(),
+                                        ),
                                     )
                                     .await
                                     .is_err()
                                     {
-                                        return;
+                                        break 'connection;
+                                    }
+                                }
+                                Err(_) => {
+                                    let error = HostError::Service("command timed out".to_owned());
+                                    if send_frame(
+                                        &mut socket,
+                                        correlated_error_frame(
+                                            &error,
+                                            Some(request_id),
+                                            session_hint.clone(),
+                                        ),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break 'connection;
                                     }
                                 }
                             }
@@ -572,11 +973,11 @@ async fn websocket_session(
                         }
                         result = live.recv() => {
                             if let Ok(frame) = result
-                                && (session_hint.is_empty() || frame.session_id == session_hint)
+                                && frame.session_id == session_hint
                                 && emitted.insert(frame.id.clone())
                                 && send_frame(&mut socket, frame).await.is_err()
                             {
-                                return;
+                                break 'connection;
                             }
                         }
                     }
@@ -584,22 +985,48 @@ async fn websocket_session(
             }
             Message::Ping(payload) => {
                 if socket.send(Message::Pong(payload)).await.is_err() {
-                    return;
+                    break 'connection;
                 }
             }
-            Message::Pong(_) => {}
+            Message::Pong(_) => last_pong = tokio::time::Instant::now(),
             Message::Binary(_) => {
-                let _ = socket
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1003,
-                        reason: "RAEP requires text JSON frames".into(),
-                    })))
-                    .await;
-                return;
+                close_socket(&mut socket, 4400, "RAEP requires text JSON frames").await;
+                break 'connection;
             }
-            Message::Close(_) => return,
+            Message::Close(_) => break 'connection,
+                }
+            }
+            _ = heartbeat.tick() => {
+                if last_pong.elapsed() >= std::time::Duration::from_secs(60) {
+                    close_socket(&mut socket, 1001, "websocket heartbeat timed out").await;
+                    break 'connection;
+                }
+                if socket.send(Message::Ping(axum::body::Bytes::new())).await.is_err() {
+                    break 'connection;
+                }
+            }
         }
     }
+    for session_id in attached_sessions {
+        let mut frame = Envelope::new(
+            FrameType::Standard(StandardFrameType::SessionDetach),
+            payload(EmptyPayload {}),
+            0,
+        );
+        frame.session_id = session_id.clone();
+        if let Err(error) = host.handle_as(frame, Some(&principal)).await {
+            tracing::warn!(session = %session_id, %error, "failed to detach closed WebSocket session");
+        }
+    }
+}
+
+async fn close_socket(socket: &mut WebSocket, code: u16, reason: &'static str) {
+    let _ = socket
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
 }
 
 async fn send_frame(socket: &mut WebSocket, frame: Envelope<Value>) -> Result<(), ()> {
@@ -613,14 +1040,61 @@ async fn send_frame(socket: &mut WebSocket, frame: Envelope<Value>) -> Result<()
 #[derive(serde::Deserialize)]
 struct EventsQuery {
     resume_from_seq: Option<u64>,
+    agent_id: Option<String>,
+    mode: Option<AttachMode>,
+    create_if_missing: Option<bool>,
+    takeover: Option<bool>,
+    attach: Option<String>,
 }
 
+#[derive(serde::Serialize)]
+struct EmptyPayload {}
+
+struct StreamAttachmentGuard {
+    host: Arc<NorteCodeRaepHost>,
+    principal: String,
+    session_id: String,
+}
+
+impl Drop for StreamAttachmentGuard {
+    fn drop(&mut self) {
+        let host = Arc::clone(&self.host);
+        let principal = self.principal.clone();
+        let session_id = self.session_id.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut frame = Envelope::new(
+                    FrameType::Standard(StandardFrameType::SessionDetach),
+                    payload(EmptyPayload {}),
+                    0,
+                );
+                frame.session_id = session_id.clone();
+                if let Err(error) = host.handle_as(frame, Some(&principal)).await {
+                    tracing::warn!(session = %session_id, %error, "failed to detach closed SSE session");
+                }
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn events(
     State(host): State<Arc<NorteCodeRaepHost>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Query(query): Query<EventsQuery>,
 ) -> Response {
+    let accepts_event_stream = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|media_type| media_type.trim().starts_with("text/event-stream"))
+        });
+    if !accepts_event_stream {
+        return StatusCode::NOT_ACCEPTABLE.into_response();
+    }
     let principal = match principal(&host, &headers) {
         Ok(principal) => principal,
         Err(response) => return response,
@@ -634,81 +1108,162 @@ async fn events(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .or(query.resume_from_seq);
-    let attach = Envelope {
-        kind: FrameType::Standard(StandardFrameType::SessionAttach),
-        payload: payload(SessionAttach {
-            agent_id: host.agent_id().to_owned(),
+    let attach_payload = if let Some(encoded) = query.attach {
+        let Ok(bytes) = URL_SAFE_NO_PAD.decode(encoded) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error_frame(&HostError::InvalidFrame(
+                    "invalid base64url SESSION_ATTACH payload".to_owned(),
+                ))),
+            )
+                .into_response();
+        };
+        let Ok(attach) = serde_json::from_slice::<SessionAttach>(&bytes) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error_frame(&HostError::InvalidFrame(
+                    "invalid SESSION_ATTACH payload".to_owned(),
+                ))),
+            )
+                .into_response();
+        };
+        attach
+    } else {
+        SessionAttach {
+            agent_id: query.agent_id.unwrap_or_else(|| host.agent_id().to_owned()),
             agent_override: None,
-            create_if_missing: Some(false),
-            mode: None,
-            takeover: None,
+            create_if_missing: query.create_if_missing.or(Some(true)),
+            mode: query.mode,
+            takeover: query.takeover,
             resume_from_seq,
             capabilities: None,
             client_info: None,
             options: None,
-        }),
-        session_id: session_id.clone(),
+        }
+    };
+    let attach = Envelope {
+        kind: FrameType::Standard(StandardFrameType::SessionAttach),
+        payload: payload(attach_payload),
+        session_id: if session_id == "new" {
+            String::new()
+        } else {
+            session_id.clone()
+        },
         ..Envelope::new(
             FrameType::Standard(StandardFrameType::SessionAttach),
             Value::Object(serde_json::Map::new()),
             0,
         )
     };
+    let request_id = attach.id.clone();
+    let request_session_id = attach.session_id.clone();
     let mut initial = vec![host.hello()];
-    initial.extend(match host.handle_as(attach, Some(&principal)).await {
-        Ok(frames) => frames,
-        Err(error) => vec![error_frame(&error)],
-    });
+    match host.handle_as(attach, Some(&principal)).await {
+        Ok(frames) => initial.extend(frames),
+        Err(error) => {
+            return (
+                error_status(&error),
+                Json(correlated_error_frame(
+                    &error,
+                    Some(request_id),
+                    request_session_id,
+                )),
+            )
+                .into_response();
+        }
+    }
+    let stream_session_id = initial
+        .iter()
+        .find(|frame| frame.kind == FrameType::Standard(StandardFrameType::SessionAttached))
+        .map_or(session_id, |frame| frame.session_id.clone());
+    let attachment_guard = initial
+        .iter()
+        .any(|frame| frame.kind == FrameType::Standard(StandardFrameType::SessionAttached))
+        .then(|| StreamAttachmentGuard {
+            host: Arc::clone(&host),
+            principal,
+            session_id: stream_session_id.clone(),
+        });
     let seen = Arc::new(std::sync::Mutex::new(
         initial
             .iter()
             .map(|frame| frame.id.clone())
             .collect::<std::collections::HashSet<_>>(),
     ));
-    let initial_stream = futures_util::stream::iter(
+    let prelude = futures_util::stream::iter([
+        Ok::<Event, Infallible>(Event::default().retry(std::time::Duration::from_secs(2))),
+        Ok::<Event, Infallible>(Event::default().comment("keepalive")),
+    ]);
+    let initial_stream = prelude.chain(futures_util::stream::iter(
         initial
             .into_iter()
             .map(|frame| Ok::<Event, Infallible>(sse_event(frame))),
-    );
-    let live = BroadcastStream::new(receiver).filter_map(move |result| {
-        let _permit = &permit;
-        let session_id = session_id.clone();
-        let seen = Arc::clone(&seen);
-        async move {
-            match result {
-                Ok(frame)
-                    if frame.session_id == session_id
-                        && seen
-                            .lock()
-                            .map_or(true, |mut ids| ids.insert(frame.id.clone())) =>
-                {
-                    Some(Ok::<Event, Infallible>(sse_event(frame)))
-                }
-                Ok(_) => None,
-                Err(BroadcastStreamRecvError::Lagged(lost)) => {
-                    let mut frame = Envelope::new(
-                        FrameType::Standard(StandardFrameType::Error),
-                        payload(raep_types::ErrorPayload {
-                            code: "REPLAY_TRUNCATED".to_owned(),
-                            message: format!(
-                                "the event stream fell behind and dropped {lost} frames; reconnect from the last sequence number"
-                            ),
-                            retryable: Some(true),
-                            details: Some(payload(ReplayLostPayload { lost })),
-                        }),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
-                    );
-                    frame.session_id = session_id;
-                    Some(Ok::<Event, Infallible>(sse_event(frame)))
+    ));
+    let live = futures_util::stream::unfold(
+        (
+            receiver,
+            stream_session_id,
+            seen,
+            permit,
+            attachment_guard,
+            false,
+        ),
+        |(mut receiver, session_id, seen, permit, attachment_guard, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match receiver.recv().await {
+                    Ok(frame)
+                        if frame.session_id == session_id
+                            && seen
+                                .lock()
+                                .map_or(true, |mut ids| ids.insert(frame.id.clone())) =>
+                    {
+                        return Some((
+                            Ok::<Event, Infallible>(sse_event(frame)),
+                            (receiver, session_id, seen, permit, attachment_guard, false),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(lost)) => {
+                        let mut frame = Envelope::new(
+                            FrameType::Standard(StandardFrameType::Error),
+                            payload(raep_types::ErrorPayload {
+                                code: "REPLAY_TRUNCATED".to_owned(),
+                                message: format!(
+                                    "the event stream fell behind and dropped {lost} frames; reconnect from the last sequence number"
+                                ),
+                                retryable: Some(true),
+                                details: Some(payload(ReplayLostPayload {
+                                    lost,
+                                    close_code: 4008,
+                                })),
+                            }),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |elapsed| {
+                                    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+                                }),
+                        );
+                        frame.session_id.clone_from(&session_id);
+                        return Some((
+                            Ok::<Event, Infallible>(sse_event(frame)),
+                            (receiver, session_id, seen, permit, attachment_guard, true),
+                        ));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
-        }
-    });
+        },
+    );
     let stream = initial_stream.chain(live);
     let mut response = Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keepalive"),
+        )
         .into_response();
     response
         .headers_mut()
@@ -746,17 +1301,28 @@ async fn commands(
         )
             .into_response();
     }
-    if matches!(
-        &frame.kind,
-        FrameType::Extension(name) if name == crate::NorteCodeExtension::Command.as_str()
-    ) && serde_json::from_value::<norte_code_protocol::ClientRequest>(frame.payload.clone())
-        .is_ok_and(|request| {
-            matches!(
-                request.kind,
-                norte_code_protocol::ClientRequestKind::SendMessage { .. }
-            )
-        })
-    {
+    let request_id = frame.id.clone();
+    let request_session_id = frame.session_id.clone();
+    // A message starts a turn, and a turn can outlive the request that started
+    // it: a turn parked on `ask_user` does not end until a person answers, so
+    // waiting for it to finish made the client's own request time out while
+    // the turn was running perfectly well. `USER_INPUT` and `SEND_MESSAGE` are
+    // answered the moment the input is accepted; everything after that arrives
+    // on the event stream, which is where the client is already listening.
+    let starts_a_turn = match &frame.kind {
+        FrameType::Standard(StandardFrameType::UserInput) => true,
+        FrameType::Extension(name) if name == crate::NorteCodeExtension::Command.as_str() => {
+            serde_json::from_value::<norte_code_wire::ClientRequest>(frame.payload.clone())
+                .is_ok_and(|request| {
+                    matches!(
+                        request.kind,
+                        norte_code_wire::ClientRequestKind::SendMessage { .. }
+                    )
+                })
+        }
+        _ => false,
+    };
+    if starts_a_turn {
         let host_for_turn = Arc::clone(&host);
         let principal_for_turn = principal.clone();
         tokio::spawn(async move {
@@ -774,12 +1340,45 @@ async fn commands(
         )
             .into_response();
     }
-    match tokio::time::timeout(
+    let result = tokio::time::timeout(
         host.command_timeout(),
         host.handle_as(frame, Some(&principal)),
     )
-    .await
-    {
+    .await;
+    command_reply(result, request_id, request_session_id)
+}
+
+/// Handles a command that is not scoped to a session.
+///
+/// Catalogue writes, plugin operations, skills and MCP listing belong to the
+/// agent, and a client used to reach them through a placeholder session id
+/// that existed nowhere. This route takes the frame as it is: a kind that does
+/// need a session answers with the service's own error.
+async fn agent_commands(
+    State(host): State<Arc<NorteCodeRaepHost>>,
+    headers: HeaderMap,
+    Json(frame): Json<Envelope<Value>>,
+) -> Response {
+    let principal = match principal(&host, &headers) {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let request_id = frame.id.clone();
+    let request_session_id = frame.session_id.clone();
+    let result = tokio::time::timeout(
+        host.command_timeout(),
+        host.handle_as(frame, Some(&principal)),
+    )
+    .await;
+    command_reply(result, request_id, request_session_id)
+}
+
+fn command_reply(
+    result: Result<Result<Vec<Envelope<Value>>, HostError>, tokio::time::error::Elapsed>,
+    request_id: raep_types::FrameId,
+    request_session_id: String,
+) -> Response {
+    match result {
         Ok(Ok(events)) => (
             StatusCode::ACCEPTED,
             Json(payload(CommandResponsePayload {
@@ -789,30 +1388,30 @@ async fn commands(
             })),
         )
             .into_response(),
-        Err(_) => (
-            StatusCode::REQUEST_TIMEOUT,
-            Json(payload(RejectedPayload {
-                status: "error",
-                accepted: Some(false),
-                error: ErrorBody {
-                    code: "TIMEOUT",
-                    message: "command timed out".to_owned(),
-                },
-            })),
-        )
-            .into_response(),
-        Ok(Err(error)) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(payload(RejectedPayload {
-                status: "error",
-                accepted: Some(false),
-                error: ErrorBody {
-                    code: "INVALID_FRAME",
-                    message: error.to_string(),
-                },
-            })),
-        )
-            .into_response(),
+        Err(_) => {
+            let error = HostError::Service("command timed out".to_owned());
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(correlated_error_frame(
+                    &error,
+                    Some(request_id),
+                    request_session_id,
+                )),
+            )
+                .into_response()
+        }
+        Ok(Err(error)) => {
+            let status = error_status(&error);
+            (
+                status,
+                Json(correlated_error_frame(
+                    &error,
+                    Some(request_id),
+                    request_session_id,
+                )),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -832,16 +1431,71 @@ fn sse_event(frame: Envelope<Value>) -> Event {
 }
 
 fn error_frame(error: &HostError) -> Envelope<Value> {
-    Envelope::new(
+    correlated_error_frame(error, None, String::new())
+}
+
+fn correlated_error_frame(
+    error: &HostError,
+    reference: Option<FrameId>,
+    session_id: String,
+) -> Envelope<Value> {
+    let code = error_code(error);
+    let retryable = matches!(error, HostError::SessionBusy);
+    let mut frame = Envelope::new(
         FrameType::Standard(StandardFrameType::Error),
         payload(raep_types::ErrorPayload {
-            code: "INVALID_FRAME".to_owned(),
+            code: code.to_owned(),
             message: error.to_string(),
-            retryable: Some(false),
+            retryable: Some(retryable),
             details: None,
         }),
         0,
-    )
+    );
+    frame.reference = reference;
+    frame.session_id = session_id;
+    frame
+}
+
+fn error_code(error: &HostError) -> &'static str {
+    match error {
+        HostError::UnknownType(_) => "UNKNOWN_TYPE",
+        HostError::IdempotencyConflict(_) => "IDEMPOTENCY_CONFLICT",
+        HostError::SessionBusy => "SESSION_BUSY",
+        HostError::TurnNotActive => "TURN_NOT_ACTIVE",
+        HostError::InvalidFrame(message) if message.starts_with("SESSION_BUSY:") => "SESSION_BUSY",
+        HostError::InvalidFrame(message) if message.starts_with("TURN_NOT_ACTIVE:") => {
+            "TURN_NOT_ACTIVE"
+        }
+        HostError::InvalidFrame(message) if message == "JOB_NOT_FOUND" => "JOB_NOT_FOUND",
+        HostError::InvalidFrame(message) if message == "JOB_NOT_RUNNING" => "JOB_NOT_RUNNING",
+        HostError::InvalidFrame(message) if message == "JOB_OUTPUT_EXPIRED" => "JOB_OUTPUT_EXPIRED",
+        HostError::InvalidFrame(message) if message == "session not found" => "SESSION_NOT_FOUND",
+        HostError::InvalidFrame(message) if message.contains("wire version") => {
+            "UNSUPPORTED_VERSION"
+        }
+        HostError::InvalidFrame(_) => "INVALID_FRAME",
+        HostError::Service(_) => "UNAVAILABLE",
+        HostError::Replay(_) | HostError::ReplayJournal(_) => "REPLAY_TRUNCATED",
+        HostError::Serialization(_) | HostError::Artifact(_) => "INTERNAL",
+    }
+}
+
+fn error_status(error: &HostError) -> StatusCode {
+    match error {
+        HostError::UnknownType(_) => StatusCode::BAD_REQUEST,
+        HostError::IdempotencyConflict(_) | HostError::SessionBusy | HostError::TurnNotActive => {
+            StatusCode::CONFLICT
+        }
+        HostError::InvalidFrame(message) if message.starts_with("SESSION_BUSY:") => {
+            StatusCode::CONFLICT
+        }
+        HostError::InvalidFrame(message) if message.contains("wire version") => {
+            StatusCode::UPGRADE_REQUIRED
+        }
+        HostError::InvalidFrame(message) if message == "session not found" => StatusCode::NOT_FOUND,
+        HostError::Service(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNPROCESSABLE_ENTITY,
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -894,599 +1548,5 @@ fn principal(host: &NorteCodeRaepHost, headers: &HeaderMap) -> Result<String, Re
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::HostConfig;
-    use axum::body::Body;
-    use axum::http::Request;
-    use norte_code_agent::Service;
-    use norte_code_protocol::{ClientRequest, ClientRequestKind, InMemoryStore};
-    use std::sync::Arc;
-    use tower::ServiceExt;
-
-    fn test_service() -> Arc<Service> {
-        Arc::new(
-            Service::new(
-                norte_code_protocol::config::Config::default(),
-                Arc::new(norte_code_protocol::catalog::Catalog::default()),
-                None,
-                Arc::new(norte_code_agent::VendorModels),
-                Arc::new(InMemoryStore::new()),
-                Arc::new(norte::InMemoryBlobStore::new()),
-                "system",
-            )
-            .expect("service"),
-        )
-    }
-
-    fn test_host(token: Option<&str>) -> Arc<NorteCodeRaepHost> {
-        Arc::new(
-            NorteCodeRaepHost::new(
-                test_service(),
-                HostConfig {
-                    auth_token: token.map(str::to_owned),
-                    ..HostConfig::default()
-                },
-            )
-            .expect("host"),
-        )
-    }
-
-    #[tokio::test]
-    async fn health_and_info_are_public_when_authentication_is_enabled() {
-        let app = router(test_host(Some("secret")));
-        let health = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/health/live")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(health.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(health.into_body(), 1024)
-            .await
-            .expect("health body");
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).expect("health"),
-            json!({"status": "live"})
-        );
-
-        let info = app
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/info")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(info.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn protected_artifact_routes_require_the_configured_token() {
-        let app = router(test_host(Some("secret")));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/artifacts")
-                    .header("content-type", "text/plain")
-                    .body(Body::from("hello"))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn extension_commands_return_remote_telemetry_and_tools() {
-        let app = router(test_host(None));
-        let request = ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::ListTelemetry { session: None },
-        };
-        let frame = Envelope::new(
-            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
-            serde_json::to_value(request).expect("request"),
-            1,
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions/unused/commands")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let body: Value = serde_json::from_slice(&body).expect("json");
-        let events = body["events"].as_array().expect("events");
-        assert_eq!(events[0]["payload"]["event"], "service_data");
-        assert_eq!(events[0]["payload"]["kind"], "telemetry");
-
-        let request = ClientRequest {
-            request_id: 2,
-            kind: ClientRequestKind::ListTools { session: None },
-        };
-        let frame = Envelope::new(
-            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
-            serde_json::to_value(request).expect("request"),
-            2,
-        );
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions/unused/commands")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let body: Value = serde_json::from_slice(&body).expect("json");
-        let events = body["events"].as_array().expect("events");
-        assert_eq!(events[0]["payload"]["kind"], "tool_list");
-    }
-
-    #[tokio::test]
-    async fn browser_origin_must_be_on_the_allow_list() {
-        let host = Arc::new(
-            NorteCodeRaepHost::new(
-                test_service(),
-                HostConfig {
-                    allowed_origins: vec!["https://app.example".to_owned()],
-                    ..HostConfig::default()
-                },
-            )
-            .expect("host"),
-        );
-        let app = router(host);
-        let denied = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/raep/v1/info")
-                    .header("origin", "https://evil.example")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-
-        let allowed = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/raep/v1/info")
-                    .header("origin", "https://app.example")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(allowed.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn events_stream_starts_with_hello_and_reads_last_event_id() {
-        let app = router(test_host(None));
-        let session = create_session(&app).await;
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/raep/v1/sessions/{session}/events"))
-                    .header("last-event-id", "0")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body = response.into_body().into_data_stream();
-        let mut text = String::new();
-        for _ in 0..10 {
-            let chunk = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                futures_util::StreamExt::next(&mut body),
-            )
-            .await
-            .expect("frame timed out")
-            .expect("body ended early")
-            .expect("body error");
-            text.push_str(&String::from_utf8_lossy(&chunk));
-            if text.contains("event: HELLO") && text.contains("event: SESSION_ATTACHED") {
-                break;
-            }
-        }
-        assert!(
-            text.contains("event: HELLO"),
-            "stream must open with HELLO: {text}"
-        );
-        assert!(
-            text.contains("event: SESSION_ATTACHED"),
-            "stream must attach after HELLO: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn events_stream_accepts_resume_from_seq() {
-        let app = router(test_host(None));
-        let session = create_session(&app).await;
-
-        // A known cursor is accepted and the stream opens; reading the body
-        // is not needed to prove the query was understood.
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!(
-                        "/raep/v1/sessions/{session}/events?resume_from_seq=0"
-                    ))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!(
-                        "/raep/v1/sessions/{session}/events?resume_from_seq=abc"
-                    ))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn agent_resource_lists_reads_and_versions() {
-        let app = router(test_host(None));
-        let list = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/agents")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let list: Value = serde_json::from_slice(&body).expect("json");
-        assert!(
-            list["agents"]
-                .as_array()
-                .expect("agents")
-                .iter()
-                .any(|agent| agent["id"] == "norte-code")
-        );
-
-        let read = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/agents/norte-code")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(read.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(read.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let agent: Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(agent["agent"]["id"], "norte-code");
-
-        let versions = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/agents/norte-code/versions")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(versions.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(versions.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let versions: Value = serde_json::from_slice(&body).expect("json");
-        assert_ne!(versions["versions"].as_array().expect("versions").len(), 0);
-
-        let missing = app
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/agents/absent")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn session_resource_lists_reads_updates_and_deletes() {
-        let app = router(test_host(None));
-        let create = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions")
-                    .header("content-type", "application/json")
-                    .header("idempotency-key", "create-1")
-                    .body(Body::from(
-                        r#"{"agent_id":"norte-code","title":"resource harness"}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(create.status(), StatusCode::CREATED);
-        let body = axum::body::to_bytes(create.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let summary: Value = serde_json::from_slice(&body).expect("json");
-        let session = summary["session_id"]
-            .as_str()
-            .expect("session id")
-            .to_owned();
-        assert_eq!(summary["title"], "resource harness");
-        assert_eq!(summary["status"], "ACTIVE");
-        assert!(summary["created_at"].as_i64().is_some());
-
-        let repeat = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions")
-                    .header("content-type", "application/json")
-                    .header("idempotency-key", "create-1")
-                    .body(Body::from(r#"{"agent_id":"norte-code"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(repeat.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(repeat.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let repeat: Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(repeat["session_id"], session);
-
-        let list = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/sessions")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let list: Value = serde_json::from_slice(&body).expect("json");
-        assert!(
-            list["sessions"]
-                .as_array()
-                .expect("sessions")
-                .iter()
-                .any(|entry| entry["session_id"] == session)
-        );
-
-        let read = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/raep/v1/sessions/{session}"))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(read.status(), StatusCode::OK);
-
-        let patch = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(format!("/raep/v1/sessions/{session}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"title":"renamed"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(patch.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(patch.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let patched: Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(patched["title"], "renamed");
-
-        let unsupported = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri(format!("/raep/v1/sessions/{session}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"pinned":true}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(unsupported.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        let delete = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/raep/v1/sessions/{session}"))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
-
-        let missing = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/raep/v1/sessions/{session}"))
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn a_session_is_hidden_from_another_principal() {
-        let host = Arc::new(
-            NorteCodeRaepHost::new(
-                test_service(),
-                HostConfig {
-                    auth_principals: std::collections::HashMap::from([
-                        ("token-a".to_owned(), "alice".to_owned()),
-                        ("token-b".to_owned(), "bob".to_owned()),
-                    ]),
-                    ..HostConfig::default()
-                },
-            )
-            .expect("host"),
-        );
-        let app = router(host);
-        let created = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions")
-                    .header("authorization", "Bearer token-a")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"agent_id":"norte-code"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(created.status(), StatusCode::CREATED);
-        let body = axum::body::to_bytes(created.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let summary: Value = serde_json::from_slice(&body).expect("json");
-        let session = summary["session_id"]
-            .as_str()
-            .expect("session id")
-            .to_owned();
-
-        let stolen = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/raep/v1/sessions/{session}"))
-                    .header("authorization", "Bearer token-b")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(stolen.status(), StatusCode::NOT_FOUND);
-
-        let list = app
-            .oneshot(
-                Request::builder()
-                    .uri("/raep/v1/sessions")
-                    .header("authorization", "Bearer token-b")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(list.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let list: Value = serde_json::from_slice(&body).expect("json");
-        assert!(
-            list["sessions"].as_array().expect("sessions").is_empty(),
-            "a principal must not see another principal's sessions"
-        );
-    }
-
-    async fn create_session(app: &Router) -> String {
-        let request = ClientRequest {
-            request_id: 1,
-            kind: ClientRequestKind::CreateSession {
-                title: Some("event harness".to_owned()),
-            },
-        };
-        let frame = Envelope::new(
-            FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
-            serde_json::to_value(request).expect("request"),
-            1,
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/raep/v1/sessions/unused/commands")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&frame).expect("frame")))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("body");
-        let body: Value = serde_json::from_slice(&body).expect("json");
-        body["events"][0]["session_id"]
-            .as_str()
-            .expect("session id")
-            .to_owned()
-    }
-}
+#[path = "http_tests.rs"]
+mod tests;

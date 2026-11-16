@@ -7,11 +7,64 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use norte::{FnExecutor, Result, SessionId, ToolContext, ToolOutput};
-use norte_code_protocol::SessionKey;
-use norte_code_protocol::plans::{Plan, PlanStatus, parse_plan, read_plan_header};
+use norte_code_protocol::plans::{Plan, parse_plan, read_plan_header};
 use norte_code_protocol::sqlite::{SessionDirectory, StoredSession};
+use norte_code_wire::PlanStatus;
+use norte_code_wire::{ServerEventKind, SessionKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use super::mapping::single;
+use super::{EventStream, Service, ServiceError};
+
+/// A failure reading or writing a session's plans.
+#[derive(Debug, thiserror::Error)]
+pub enum PlanError {
+    /// The local artifacts directory has no location because HOME is unset.
+    #[error("HOME is not set, so the local session artifacts directory has no location")]
+    NoHome,
+    /// A session or plan id is not a safe path component.
+    #[error("invalid {description} `{value}`")]
+    InvalidName {
+        /// What the value was supposed to be.
+        description: &'static str,
+        /// The value that failed.
+        value: String,
+    },
+    /// The session the plans belong to is not stored.
+    #[error("session `{0}` is not stored")]
+    UnknownSession(String),
+    /// A plan with that id already exists.
+    #[error("plan `{0}` already exists")]
+    Exists(String),
+    /// There is no plan with that id in the session.
+    #[error("no plan `{0}` in this session")]
+    Missing(String),
+    /// A plan document could not be parsed.
+    #[error(transparent)]
+    Document(#[from] norte_code_protocol::plans::PlanError),
+    /// A filesystem operation failed.
+    #[error("{action} {}: {source}", path.display())]
+    Io {
+        /// What was being done.
+        action: &'static str,
+        /// The file or directory involved.
+        path: PathBuf,
+        /// The operating system error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl PlanError {
+    fn io(action: &'static str, path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> Self {
+        move |source| Self::Io {
+            action,
+            path: path.into(),
+            source,
+        }
+    }
+}
 
 /// Filesystem access to plans. Session records remain in the database; plans
 /// live separately so they can be opened and edited as Markdown.
@@ -26,6 +79,38 @@ impl std::fmt::Debug for PlanRepository {
         formatter
             .debug_struct("PlanRepository")
             .finish_non_exhaustive()
+    }
+}
+
+impl Service {
+    /// The session's plans, newest first.
+    pub(super) async fn list_plans_event(
+        &self,
+        request_id: u64,
+        session: SessionKey,
+    ) -> std::result::Result<EventStream, ServiceError> {
+        let (nid, _, _) = self.require_record(&session)?;
+        let mut plans = self
+            .plans
+            .list(nid)
+            .await
+            .map_err(ServiceError::Plan)?
+            .into_iter()
+            .map(|(plan, _)| norte_code_wire::PlanInfo {
+                id: plan.id,
+                content: plan.content,
+                status: plan.status,
+                title: plan.title,
+                revision: plan.revision,
+                model: plan.model,
+            })
+            .collect::<Vec<_>>();
+        plans.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(single(
+            request_id,
+            Some(session),
+            ServerEventKind::PlanList { plans },
+        ))
     }
 }
 
@@ -55,34 +140,35 @@ impl PlanRepository {
     pub(super) async fn ensure_session_folder(
         &self,
         session: &SessionKey,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let root = self.root()?;
         validate_component(session.as_str(), "session id")?;
         tokio::fs::create_dir_all(root.join(session.as_str()))
             .await
-            .map_err(|error| format!("could not create the session directory: {error}"))
+            .map_err(PlanError::io(
+                "could not create the session directory",
+                root.join(session.as_str()),
+            ))
     }
 
-    fn root(&self) -> std::result::Result<&Path, String> {
-        self.root.as_deref().ok_or_else(|| {
-            "HOME is not set, so the local session artifacts directory has no location".to_owned()
-        })
+    fn root(&self) -> std::result::Result<&Path, PlanError> {
+        self.root.as_deref().ok_or(PlanError::NoHome)
     }
 
     async fn stored_session(
         &self,
         session: SessionId,
-    ) -> std::result::Result<StoredSession, String> {
+    ) -> std::result::Result<StoredSession, PlanError> {
         self.directory
             .sessions()
             .await
-            .map_err(|error| format!("could not find the session for its plans: {error}"))?
+            .map_err(|error| PlanError::UnknownSession(error.to_string()))?
             .into_iter()
             .find(|stored| stored.north == session)
-            .ok_or_else(|| format!("session `{session}` is not stored"))
+            .ok_or_else(|| PlanError::UnknownSession(session.to_string()))
     }
 
-    async fn plan_directory(&self, session: SessionId) -> std::result::Result<PathBuf, String> {
+    async fn plan_directory(&self, session: SessionId) -> std::result::Result<PathBuf, PlanError> {
         let stored = self.stored_session(session).await?;
         validate_component(&stored.key, "session id")?;
         Ok(self.root()?.join(stored.key).join("plans"))
@@ -91,15 +177,14 @@ impl PlanRepository {
     pub(super) async fn list(
         &self,
         session: SessionId,
-    ) -> std::result::Result<Vec<(Plan, PathBuf)>, String> {
+    ) -> std::result::Result<Vec<(Plan, PathBuf)>, PlanError> {
         let directory = self.plan_directory(session).await?;
         let mut entries = match tokio::fs::read_dir(&directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
-                return Err(format!(
-                    "could not read plan directory {}: {error}",
-                    directory.display()
+                return Err(PlanError::io("could not read plan directory", &directory)(
+                    error,
                 ));
             }
         };
@@ -107,12 +192,12 @@ impl PlanRepository {
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|error| format!("could not list plans: {error}"))?
+            .map_err(PlanError::io("could not list plans", &directory))?
         {
             let file_type = entry
                 .file_type()
                 .await
-                .map_err(|error| format!("could not inspect plan file: {error}"))?;
+                .map_err(PlanError::io("could not inspect plan file", entry.path()))?;
             if !file_type.is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
                 continue;
             }
@@ -120,11 +205,9 @@ impl PlanRepository {
                 .path()
                 .file_stem()
                 .and_then(std::ffi::OsStr::to_str)
-                .ok_or_else(|| {
-                    format!(
-                        "plan filename is not valid UTF-8: {}",
-                        entry.path().display()
-                    )
+                .ok_or_else(|| PlanError::InvalidName {
+                    description: "plan filename",
+                    value: entry.path().display().to_string(),
                 })?
                 .to_owned();
             validate_component(&id, "plan id")?;
@@ -145,14 +228,12 @@ impl PlanRepository {
         &self,
         session: SessionId,
         id: &str,
-    ) -> std::result::Result<Option<Plan>, String> {
+    ) -> std::result::Result<Option<Plan>, PlanError> {
         let path = self.plan_path(session, id).await?;
         match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => parse_plan(id, &contents)
-                .map(Some)
-                .map_err(|error| format!("could not read plan {}: {error}", path.display())),
+            Ok(contents) => parse_plan(id, &contents).map(Some).map_err(PlanError::from),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!("could not read plan {}: {error}", path.display())),
+            Err(error) => Err(PlanError::io("could not read plan", &path)(error)),
         }
     }
 
@@ -160,7 +241,7 @@ impl PlanRepository {
         &self,
         session: SessionId,
         id: &str,
-    ) -> std::result::Result<PathBuf, String> {
+    ) -> std::result::Result<PathBuf, PlanError> {
         validate_component(id, "plan id")?;
         Ok(self.plan_directory(session).await?.join(format!("{id}.md")))
     }
@@ -169,10 +250,10 @@ impl PlanRepository {
         &self,
         session: SessionId,
         plan: &Plan,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let _guard = self.writes.lock().await;
         if self.get(session, &plan.id).await?.is_some() {
-            return Err(format!("plan `{}` already exists", plan.id));
+            return Err(PlanError::Exists(plan.id.clone()));
         }
         let stored = self.stored_session(session).await?;
         let now = Utc::now();
@@ -189,12 +270,12 @@ impl PlanRepository {
         session: SessionId,
         id: &str,
         status: PlanStatus,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let _guard = self.writes.lock().await;
         let mut plan = self
             .get(session, id)
             .await?
-            .ok_or_else(|| format!("no plan `{id}` in this session"))?;
+            .ok_or_else(|| PlanError::Missing(id.to_owned()))?;
         plan.status = status;
         plan.updated_at = Some(Utc::now());
         self.write(session, &plan).await
@@ -205,12 +286,12 @@ impl PlanRepository {
         session: SessionId,
         id: &str,
         content: String,
-    ) -> std::result::Result<Plan, String> {
+    ) -> std::result::Result<Plan, PlanError> {
         let _guard = self.writes.lock().await;
         let mut plan = self
             .get(session, id)
             .await?
-            .ok_or_else(|| format!("no plan `{id}` in this session"))?;
+            .ok_or_else(|| PlanError::Missing(id.to_owned()))?;
         plan.content = content;
         plan.title = plan_title(&plan.content).map(str::to_owned);
         plan.status = PlanStatus::Pending;
@@ -224,13 +305,13 @@ impl PlanRepository {
         &self,
         session: SessionId,
         id: &str,
-    ) -> std::result::Result<bool, String> {
+    ) -> std::result::Result<bool, PlanError> {
         let _guard = self.writes.lock().await;
         let path = self.plan_path(session, id).await?;
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(format!("could not delete plan {}: {error}", path.display())),
+            Err(error) => Err(PlanError::io("could not delete plan", &path)(error)),
         }
     }
 
@@ -238,33 +319,36 @@ impl PlanRepository {
         &self,
         from: SessionId,
         to: SessionId,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         let source = self.plan_directory(from).await?;
         let destination = self.plan_directory(to).await?;
         let mut entries = match tokio::fs::read_dir(&source).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(format!("could not read source plans: {error}")),
+            Err(error) => return Err(PlanError::io("could not read source plans", &source)(error)),
         };
         tokio::fs::create_dir_all(&destination)
             .await
-            .map_err(|error| format!("could not create destination plan directory: {error}"))?;
+            .map_err(PlanError::io(
+                "could not create destination plan directory",
+                &destination,
+            ))?;
         while let Some(entry) = entries
             .next_entry()
             .await
-            .map_err(|error| format!("could not list source plans: {error}"))?
+            .map_err(PlanError::io("could not list source plans", &source))?
         {
             if entry
                 .file_type()
                 .await
-                .map_err(|error| format!("could not inspect source plan: {error}"))?
+                .map_err(PlanError::io("could not inspect source plan", entry.path()))?
                 .is_file()
                 && entry.path().extension().is_some_and(|ext| ext == "md")
             {
                 let name = entry.file_name();
                 tokio::fs::copy(entry.path(), destination.join(name))
                     .await
-                    .map_err(|error| format!("could not copy a plan: {error}"))?;
+                    .map_err(PlanError::io("could not copy a plan", entry.path()))?;
             }
         }
         Ok(())
@@ -273,45 +357,54 @@ impl PlanRepository {
     pub(super) async fn remove_session_folder(
         &self,
         session: &SessionKey,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), PlanError> {
         validate_component(session.as_str(), "session id")?;
         let path = self.root()?.join(session.as_str());
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "could not remove local session artifacts {}: {error}",
-                path.display()
-            )),
+            Err(error) => Err(PlanError::io(
+                "could not remove local session artifacts",
+                &path,
+            )(error)),
         }
     }
 
-    async fn write(&self, session: SessionId, plan: &Plan) -> std::result::Result<(), String> {
+    async fn write(&self, session: SessionId, plan: &Plan) -> std::result::Result<(), PlanError> {
         let directory = self.plan_directory(session).await?;
         tokio::fs::create_dir_all(&directory)
             .await
-            .map_err(|error| format!("could not create plan directory: {error}"))?;
+            .map_err(PlanError::io("could not create plan directory", &directory))?;
         let path = self.plan_path(session, &plan.id).await?;
         let temporary = directory.join(format!(".{}.{}.tmp", plan.id, uuid::Uuid::new_v4()));
         let document = plan_markdown(plan);
         if let Err(error) = tokio::fs::write(&temporary, document).await {
-            return Err(format!("could not write temporary plan file: {error}"));
+            return Err(PlanError::io(
+                "could not write temporary plan file",
+                &temporary,
+            )(error));
         }
         if let Err(error) = tokio::fs::rename(&temporary, &path).await {
             let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(format!("could not save plan {}: {error}", path.display()));
+            return Err(PlanError::io("could not save plan", &path)(error));
         }
         Ok(())
     }
 }
 
-fn validate_component(value: &str, description: &str) -> std::result::Result<(), String> {
+fn validate_component(
+    value: &str,
+    description: &'static str,
+) -> std::result::Result<(), PlanError> {
     if value.is_empty()
         || !value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
     {
-        return Err(format!("invalid {description} `{value}`"));
+        return Err(PlanError::InvalidName {
+            description,
+            value: value.to_owned(),
+        });
     }
     Ok(())
 }
@@ -467,6 +560,9 @@ impl PlanTool {
                 Ok(()) => plan_output(&self.plans, session, id, "Plan rejected.").await,
                 Err(error) => ToolOutput::error(format!("could not reject the plan: {error}")),
             },
+            Ok(feedback) if !feedback.trim().is_empty() => {
+                ToolOutput::text(plan_feedback_message(feedback))
+            }
             Ok(other) => ToolOutput::error(format!(
                 "unexpected plan approval response `{other}`; the plan remains pending"
             )),
@@ -558,7 +654,7 @@ impl FnExecutor<PlanArgs, ToolOutput> for PlanTool {
                         Ok(()) => {
                             plan_output(&self.plans, session, id, "Plan status updated.").await
                         }
-                        Err(error) => ToolOutput::error(error),
+                        Err(error) => ToolOutput::error(error.to_string()),
                     }
                 }
                 (None, _) => ToolOutput::error("`set_status` needs an `id`"),
@@ -574,6 +670,15 @@ impl FnExecutor<PlanArgs, ToolOutput> for PlanTool {
             },
         })
     }
+}
+
+fn plan_feedback_message(feedback: &str) -> String {
+    let mut message = String::from("The user requested changes to this pending plan:\n");
+    message.push_str(feedback.trim());
+    message.push_str(
+        "\nKeep the plan pending, revise it with the plan tool, then request approval again.",
+    );
+    message
 }
 
 async fn plan_output(
@@ -596,182 +701,5 @@ async fn plan_output(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use norte_code_protocol::Phase;
-    use norte_code_protocol::sqlite::{InMemoryDirectory, SessionDirectory};
-
-    fn stored_session(session: SessionId, key: &str) -> StoredSession {
-        StoredSession {
-            key: key.to_owned(),
-            north: session,
-            title: None,
-            provider: "test".to_owned(),
-            model: "test-model".to_owned(),
-            created_at: chrono::Utc::now(),
-            phase: Phase::Idle,
-            stats: serde_json::json!({}),
-            denied_tools: Vec::new(),
-            allowed_tools: Vec::new(),
-            compacted_from: None,
-            workdir: None,
-        }
-    }
-
-    fn temp_root() -> PathBuf {
-        std::env::temp_dir().join(format!("norte-code-plans-{}", uuid::Uuid::new_v4()))
-    }
-
-    #[test]
-    fn markdown_round_trip_preserves_content_and_status() {
-        let mut plan = Plan::pending("plan-1", "# Plan\n\nInspect, implement, test.\n");
-        plan.created_at = Some(Utc::now());
-        plan.updated_at = Some(Utc::now());
-        plan.provider = Some("test".to_owned());
-        plan.model = Some("model/with:punctuation".to_owned());
-        plan.title = Some("Plan".to_owned());
-        let document = plan_markdown(&plan);
-        assert_eq!(parse_plan(&plan.id, &document).expect("valid plan"), plan);
-        assert!(plan_front_matter(&plan).contains("title: \"Plan\""));
-        assert!(plan_front_matter(&plan).contains("created_at: "));
-        assert!(plan_front_matter(&plan).contains("provider: \"test\""));
-        assert!(plan_front_matter(&plan).contains("model: \"model/with:punctuation\""));
-    }
-
-    #[test]
-    fn title_metadata_comes_from_the_first_markdown_line() {
-        assert_eq!(
-            plan_title("### A plan title\n\nDetails"),
-            Some("A plan title")
-        );
-        assert_eq!(
-            plan_title("A plain title\n\nDetails"),
-            Some("A plain title")
-        );
-        assert_eq!(plan_title("\n# Title"), None);
-        assert_eq!(plan_title("###"), None);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)]
-    async fn plans_are_markdown_files_and_survive_repository_reload() {
-        let directory = Arc::new(InMemoryDirectory::new());
-        let session = SessionId::new();
-        let logical_id = "session-key";
-        directory
-            .save_session(&stored_session(session, logical_id))
-            .await
-            .expect("save session");
-        let root = temp_root();
-        let plans = PlanRepository::with_root(directory.clone(), root.clone());
-        plans
-            .ensure_session_folder(&SessionKey::new(logical_id))
-            .await
-            .expect("create session artifact folder");
-        let plan = Plan::pending("plan-1", "# Inspect\n\nImplement and test.");
-        plans.add(session, &plan).await.expect("save plan");
-
-        let path = root.join(logical_id).join("plans").join("plan-1.md");
-        let saved_markdown = tokio::fs::read_to_string(&path)
-            .await
-            .expect("read Markdown plan");
-        assert!(saved_markdown.contains("# Inspect"));
-        let metadata = parse_plan("plan-1", &saved_markdown).expect("plan metadata");
-        assert!(metadata.created_at.is_some());
-        assert!(metadata.updated_at.is_some());
-        assert_eq!(metadata.provider.as_deref(), Some("test"));
-        assert_eq!(metadata.model.as_deref(), Some("test-model"));
-        assert_eq!(metadata.revision, 0);
-        let created_at = metadata.created_at.expect("creation timestamp");
-        let revised = plans
-            .revise(
-                session,
-                "plan-1",
-                "# Revised\n\nImplement the updated approach.".to_owned(),
-            )
-            .await
-            .expect("revise plan");
-        assert_eq!(revised.revision, 1);
-        assert_eq!(revised.status, PlanStatus::Pending);
-        assert_eq!(revised.created_at, Some(created_at));
-        assert_eq!(revised.provider.as_deref(), Some("test"));
-        assert_eq!(revised.model.as_deref(), Some("test-model"));
-        plans
-            .set_status(session, "plan-1", PlanStatus::Active)
-            .await
-            .expect("update plan status");
-        let updated = plans
-            .get(session, "plan-1")
-            .await
-            .expect("read updated plan")
-            .expect("plan exists");
-        assert_eq!(updated.created_at, Some(created_at));
-        assert!(updated.updated_at.expect("modification timestamp") >= created_at);
-        assert_eq!(updated.provider.as_deref(), Some("test"));
-        assert_eq!(updated.model.as_deref(), Some("test-model"));
-        assert!(
-            !directory.sessions().await.expect("list sessions")[0]
-                .stats
-                .to_string()
-                .contains("plan_state")
-        );
-
-        tokio::fs::write(
-            &path,
-            "---\nstatus: pending\n---\n# User-edited plan\n\nEdited outside Norte Code.",
-        )
-        .await
-        .expect("edit Markdown plan");
-        let restarted = PlanRepository::with_root(directory, root.clone());
-        let edited = restarted
-            .get(session, "plan-1")
-            .await
-            .expect("read plan")
-            .expect("plan exists");
-        assert_eq!(
-            edited.content,
-            "# User-edited plan\n\nEdited outside Norte Code."
-        );
-        restarted
-            .set_status(session, "plan-1", PlanStatus::Active)
-            .await
-            .expect("persist status");
-        assert_eq!(
-            restarted
-                .get(session, "plan-1")
-                .await
-                .expect("read status")
-                .unwrap()
-                .status,
-            PlanStatus::Active
-        );
-        assert_eq!(
-            restarted
-                .get(session, "plan-1")
-                .await
-                .expect("read edited body")
-                .unwrap()
-                .content,
-            edited.content
-        );
-        assert!(
-            restarted
-                .delete(session, "plan-1")
-                .await
-                .expect("delete plan")
-        );
-        assert_eq!(restarted.list(session).await.expect("list plans").len(), 0);
-
-        tokio::fs::remove_dir_all(root.join(logical_id))
-            .await
-            .expect("simulate removed session folder");
-        restarted
-            .ensure_session_folder(&SessionKey::new(logical_id))
-            .await
-            .expect("recreate folder when resuming session");
-        assert!(root.join(logical_id).is_dir());
-        tokio::fs::remove_dir_all(root)
-            .await
-            .expect("remove test files");
-    }
-}
+#[path = "plans_tests.rs"]
+mod tests;

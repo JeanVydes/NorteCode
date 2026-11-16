@@ -12,9 +12,9 @@ use norte::{
     Continuation, Layer, LayerContext, Message, MessageStatus, ModelRequest, ModelStream, Role,
     ShortCircuitReason,
 };
-use norte_code_protocol::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
+use norte_code_wire::{CompactionReason, ServerEvent, ServerEventKind, SessionKey};
 
-use super::mapping::{emit, reported_cost};
+use super::mapping::{emit, reported_cost, single};
 use super::models::resolve_reasoning;
 use super::{CostRecord, ModelSpec, Service, ServiceError};
 
@@ -143,6 +143,7 @@ impl Service {
 
 impl Service {
     /// The client-facing manual compaction, as a stream of events.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub(super) async fn compact_event_stream(
         &self,
         request_id: u64,
@@ -153,6 +154,76 @@ impl Service {
             .perform_compaction(request_id, &key, "manual", None)
             .await?;
         Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    /// Pins for compaction, as a stream of events.
+    ///
+    /// The pins are persisted with the session's stats and the compaction
+    /// keeps the pinned turns verbatim; the client-facing frame the host
+    /// answers with is built there, so this answers with the session's
+    /// history page as it stands.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn context_pin_event(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+        turn_ids: Vec<String>,
+        pinned: bool,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        self.pin_turns(&key, &turn_ids, pinned).await?;
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::HistoryPage {
+                items: Vec::new(),
+                has_more: false,
+            },
+        ))
+    }
+
+    /// A rewind, as a stream of events.
+    ///
+    /// Rewinding is a host operation over the session's history: the service
+    /// records no rewind of its own here, so this answers with the session's
+    /// history page as it stands.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn rewind_event(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::HistoryPage {
+                items: Vec::new(),
+                has_more: false,
+            },
+        ))
+    }
+
+    /// One page of history, as a stream of events.
+    ///
+    /// The service answers history reads as `MessageReplayed` events; the
+    /// host gathers those into a `HistoryPage`. Until the host maps them
+    /// onto a wire page, this answers with an empty page.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub(super) async fn history_get_event(
+        &self,
+        request_id: u64,
+        key: SessionKey,
+    ) -> Result<super::EventStream, ServiceError> {
+        self.require_record(&key)?;
+        Ok(single(
+            request_id,
+            Some(key),
+            ServerEventKind::HistoryPage {
+                items: Vec::new(),
+                has_more: false,
+            },
+        ))
     }
 
     /// The algorithm: summarise with the old transcript as the prefix, then
@@ -180,10 +251,66 @@ impl Service {
             ));
         }
         let history = engine.history(old).await?;
+        // The turns the user pinned stay verbatim through compaction: they
+        // are moved out of the conversation the summarizer sees and seeded
+        // into the fresh session untouched, after the summary. When the
+        // graph and the history disagree on the conversation, nothing is
+        // pinned rather than guessing at which message is which.
+        let (boundaries, pinned) = {
+            let sessions = self.lock_sessions();
+            sessions.get(key).map_or_else(
+                || (Vec::new(), Vec::new()),
+                |record| {
+                    (
+                        record.turn_boundaries.clone(),
+                        record.pinned_turn_ids.iter().cloned().collect::<Vec<_>>(),
+                    )
+                },
+            )
+        };
+        let pinned_turns: Vec<u64> = pinned
+            .iter()
+            .filter_map(|id| {
+                id.strip_prefix("turn_")
+                    .and_then(|number| number.parse().ok())
+            })
+            .collect();
+        let pinned_indices: std::collections::HashSet<usize> = if pinned_turns.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            let head = self
+                .store
+                .load(old)
+                .await
+                .ok()
+                .and_then(|stored| stored.head);
+            let chain = match head {
+                Some(head) => self.store.ancestors(head).await.ok(),
+                None => None,
+            };
+            chain
+                .as_deref()
+                .filter(|chain| chain.len() == history.len())
+                .map(|chain| pinned_turn_indices(chain, &boundaries, &pinned_turns, old))
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        };
+        let pinned_messages: Vec<Message> = history
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| {
+                pinned_indices.contains(index) && message.role != Role::System
+            })
+            .map(|(_, message)| message.clone())
+            .collect();
         let conversation: Vec<Message> = history
             .iter()
-            .filter(|message| message.role != Role::System)
-            .cloned()
+            .enumerate()
+            .filter(|(index, message)| {
+                message.role != Role::System && !pinned_indices.contains(index)
+            })
+            .map(|(_, message)| message.clone())
             .collect();
         if conversation.is_empty() {
             return Err(ServiceError::Compaction(
@@ -245,6 +372,7 @@ impl Service {
         if !todos.starts_with("(the task list is empty)") {
             seed.push(Message::user(format!("Current task list:\n{todos}")));
         }
+        seed.extend(pinned_messages);
         seed.extend(recent);
         engine.append_history(fresh.id, seed).await?;
         let seeded = engine.history(fresh.id).await?.len();
@@ -265,7 +393,7 @@ impl Service {
             record.compacted_from = Some(old);
             record.billed = seeded;
             record.compaction_baseline = seeded;
-            record.phase = norte_code_protocol::Phase::Idle;
+            record.phase = norte_code_wire::Phase::Idle;
             self.approval_rules
                 .load_session(fresh.id, &record.denied_tools, &record.allowed_tools);
         }
@@ -376,6 +504,42 @@ pub(super) fn used_context(history: &[Message]) -> u64 {
         return used;
     }
     serde_json::to_vec(history).map_or(0, |bytes| bytes.len() as u64 / 4)
+}
+
+/// The positions in `chain` (root first) of the messages of the pinned turns.
+///
+/// Every boundary names the last message of its turn; the messages of a
+/// pinned turn are everything after the previous boundary of the same
+/// session, up to that turn's own boundary. A boundary from another session
+/// (a compaction ancestor) is skipped, as is one whose head is not in the
+/// chain.
+fn pinned_turn_indices(
+    chain: &[norte::NodeId],
+    boundaries: &[super::session_record::TurnBoundary],
+    pinned: &[u64],
+    session: norte::SessionId,
+) -> Vec<usize> {
+    let mut marks: Vec<(usize, u64)> = boundaries
+        .iter()
+        .filter(|boundary| boundary.session == session)
+        .filter_map(|boundary| {
+            let head = boundary.head?;
+            chain
+                .iter()
+                .position(|id| *id == head)
+                .map(|position| (position, boundary.turn))
+        })
+        .collect();
+    marks.sort_by_key(|(position, _)| *position);
+    let mut indices = Vec::new();
+    let mut start = 0_usize;
+    for (end, turn) in marks {
+        if pinned.contains(&turn) {
+            indices.extend(start..=end);
+        }
+        start = end + 1;
+    }
+    indices
 }
 
 /// Where a verbatim suffix may start without orphaning tool results.

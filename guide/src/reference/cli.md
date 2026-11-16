@@ -1,182 +1,115 @@
 # CLI
 
-The binary is `norte-code`. Run with no arguments it opens a session: a menu
-of the saved sessions, then the editor.
+The binary is `norte`. It is the only entry point for Norte Code: it
+manages the background service and, when asked, opens the terminal
+interface. The service is what owns sessions, execution, catalogues and
+plugins; `norte` talks to it over HTTP.
 
 ```text
-norte-code [OPTIONS] [DIR] [COMMAND]
+norte [COMMAND]
 ```
-
-## The directory
-
-A leading directory is where the work happens:
-
-```sh
-norte-code ~/src/thing
-```
-
-It is a positional, not a flag. The process moves there before reading
-config, so the project config that applies is that directory's own. A
-directory that does not exist is refused with its path. The footer names it
-in front of the session line.
 
 ## Global options
 
 | Option | Meaning |
 | --- | --- |
-| `--cli-config PATH` | Use this client config file instead of the platform path. |
-| `--verbose LEVEL` | `low` (answer alone), `medium` (default), `high` (reasoning, tool arguments and results). |
-| `--debug` | Print startup details, model metadata, paths and extensions. |
+| `--version`, `-V` | Print the version and exit. |
+| `--help`, `-h` | Show this help. |
 
-## `new`
+## Subcommands
 
-```text
-norte-code new [OPTIONS]
-```
+### `norte` (no subcommand)
 
-Creates a session and stays in it: the first line typed is the first message.
-There is no prompt argument — a session is read, not handed a message.
+Starts the service if it is not already running (detached, in the
+background) and then opens the terminal interface in the current terminal.
+Ctrl-C in that terminal closes the interface; the service keeps running.
 
-| Option | Meaning |
+### `norte tui`
+
+Opens only the terminal interface in the current terminal, without touching
+the service.
+
+### `norte service up`
+
+Starts the service detached. Prints the PID and the log path; if the
+service is already up it says so and does nothing.
+
+### `norte service down`
+
+Stops the running service with `SIGTERM` and waits for it to exit.
+
+### `norte service restart`
+
+`down` followed by `up`.
+
+### `norte service status`
+
+Prints the endpoint, PID, liveness, readiness, default agent, number of
+agents loaded, replay state, and the pidfile and log paths, with colour.
+
+### `norte service catalog`
+
+Prints the providers and models the host knows, grouped by provider, with
+colour.
+
+### `norte service config`
+
+Prints the service configuration — agents (delegates, model, provider,
+reasoning, approvals, skills, MCP servers), plus the client configuration
+(service URL, agent id, verbosity).
+
+### `norte service logs`
+
+Prints the service log. With `--live` (or `-f`/`--follow`) it follows new
+lines until interrupted.
+
+### `norte service doctor`
+
+Checks paths, files, the service and the pidfile, and prints a summary
+(`N ok · M warn · K fail`) with the recommended next step.
+
+### `norte service plugins …`
+
+Manage plugins installed on this machine (a git repository is cloned, built
+as a cdylib and copied into the plugin directory).
+
+| Form | Meaning |
 | --- | --- |
-| `-m, --model MODEL` | Model id, overriding `default_model`. Opaque; may contain slashes. |
-| `--provider PROVIDER` | Override the provider id. |
-| `--system-prompt TEXT` | Replace the base system prompt for this session. |
-| `--endpoint URL` | Override the provider endpoint. |
-| `--wire SCHEMA` | `openai`, `anthropic` or `google`. Default: the provider's preferred. |
-| `--budget LIMIT` | A limit for the first message. |
-| `--budget-unit usd\|tokens\|requests` | What the limit measures. Default `usd`. |
-| `--budget-action warn\|ask\|stop` | What to do at the limit. |
-| `--compaction-threshold FRACTION` | Override the compaction threshold in `(0, 1]`. |
-| `--sandbox` / `--no-sandbox` | Override `tools.confinement.sandbox.enabled`. |
-| `--sandbox-network on\|off` | Override sandbox networking; requires the sandbox. |
-| `--reasoning SETTING` | `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `budget:<tokens>`. |
-| `--max-iterations N` | Cap model iterations for this session. |
-| `--extension KEY=JSON` | Vendor request field; repeatable. |
-| `--jsonl` | Read newline-delimited messages from stdin and emit service events plus client diagnostics as JSONL. |
+| `plugins list` | Show installed plugins, enabled/disabled, and their recorded source. |
+| `plugins add <URL> [--package NAME] [--all]` | Install from a git repository. With no `--package`, every plugin package the workspace can build is installed. |
+| `plugins remove <NAME>` | Remove an installed plugin. |
+| `plugins disable <NAME>` | Disable a plugin (rename to `.disabled`). |
+| `plugins enable <NAME>` | Re-enable a disabled plugin. |
 
-Without `--model`/`--provider`, the session opens on the config defaults —
-and if those are unset, startup asks once and writes the answer to the config.
+Plugins are loaded when the service starts, so restart it (`norte service
+restart`) after installing, enabling or disabling.
 
-## The startup menu
+### `norte service providers …`
 
-A bare `norte-code` and `resume` with no key open the same menu: *New
-session*, *Last session*, then saved sessions newest first. Arrow keys walk
-it, `Enter` opens, `Escape` leaves, typing narrows.
+Edit `providers.json` (who serves models, and over which wires).
 
-## `resume`
-
-```text
-norte-code resume [OPTIONS] [SESSION]
-```
-
-Continues a session (key or prefix). With no `SESSION`, the menu asks.
-
-| Option | Meaning |
+| Form | Meaning |
 | --- | --- |
-| `--system-prompt TEXT` | Replace the base prompt for this resume. |
-| `--model MODEL` | Resume with this model. |
-| `--budget LIMIT` | Replace the session budget before resuming. |
-| `--budget-unit`, `--budget-action` | Unit and action for that budget. |
-| `--compaction-threshold FRACTION` | Override the threshold for this resume. |
-| `--sandbox`, `--no-sandbox`, `--sandbox-network` | Sandbox overrides. |
-| `--max-iterations N` | Iteration cap. |
-| `--extension KEY=JSON` | Vendor request field; repeatable. |
-| `-i, --interactive` | Keep the session open after each turn. |
+| `providers list` | Show providers — the catalogue files and any a plugin injected. |
+| `providers add <ID> --wire SCHEMA --base-url URL [--key ENV_VAR] [--name DISPLAY]` | Add or replace a provider. `--wire` is `openai`, `anthropic` or `google` (repeat for several). `--key` names an environment variable the key comes from (repeat for several); the value is never written to disk. |
+| `providers remove <ID>` | Remove a provider and every model that names it. |
 
-A resume whose turn is over replays the transcript; an interrupted one
-continues where it stopped.
+When the service is running, the catalogue is refreshed in place; otherwise
+the files are written and picked up on the next start.
 
-## `models`
+### `norte service mcps …`
 
-```text
-norte-code models [--provider ID] [--tools] [--reasoning] [--json]
-```
+Edit the MCP servers in `service.json`.
 
-Lists what the catalogue knows. `--tools`/`--reasoning` filter to models
-that call tools / reason.
+| Form | Meaning |
+| --- | --- |
+| `mcps list [--agent NAME]` | Show configured servers, plus the live view when the service is up. |
+| `mcps add <NAME> --command CMD [--arg A] [--env K=V] [--allow T] [--deny T] [--agent NAME] [--disabled]` | Add a local (stdio) server. |
+| `mcps add <NAME> --url URL [--header K=V] …` | Add a remote (Streamable HTTP) server. |
+| `mcps remove <NAME> [--agent NAME]` | Remove a server. |
 
-## `service`
-
-```text
-norte-code service start [-f|--follow]
-norte-code service stop|restart|status|catalog [--json]
-```
-
-`start`, `stop` and `restart` manage only a local service and are rejected
-when `cli.json` has `service_type: "remote"`. `status` and `catalog` query the
-configured RAEP service. The local process writes its PID and log under the
-platform state directory.
-
-## `skills`
-
-```text
-norte-code skills list [--json]
-norte-code skills check
-```
-
-`list` prints valid skills; `check` validates every skill and reports the
-skipped ones and why.
-
-## `sessions`
-
-```text
-norte-code sessions [--json]
-```
-
-Lists logical sessions: key, title, model, creation time and phase.
-
-## `cost`
-
-```text
-norte-code cost [--session KEY] [--daily] [--json]
-```
-
-The provider-reported cost ledger. `--session` adds the session's turns;
-`--daily` groups by UTC day.
-
-## `telemetry`
-
-```text
-norte-code telemetry [--session KEY] [--provider ID] [--model ID] [--bucket hour|day|week|month|year|total] [--json]
-```
-
-Local request data — counts, tokens, cache, tools, latency, status. Not the
-money ledger. Default bucket is `day`.
-
-## `mcp`
-
-```text
-norte-code mcp list
-norte-code mcp add NAME COMMAND [ARGS...]
-norte-code mcp enable NAME
-norte-code mcp disable NAME
-norte-code mcp remove NAME
-```
-
-Manages the MCP servers in the config file: list them, add or replace one
-by name, switch one on/off, or remove it.
-
-## `plugins`
-
-Plugins are shared libraries under `~/.config/norte-code/plugins/` (or
-`$NORTE_CODE_PLUGINS`). A plugin adds slash commands, a status line, or
-providers and models to the catalogue. Installing a plugin clones and
-builds untrusted repository code — including its `build.rs` — before
-loading the resulting library. That is explicit by design: only do it for
-sources you trust.
-
-```text
-norte-code plugins list
-norte-code plugins add URL [--package PACKAGE]
-norte-code plugins rm NAME
-norte-code plugins update [NAME]
-norte-code plugins enable NAME
-norte-code plugins disable NAME
-```
-
-Changes take effect at the next start; plugins load once, before the
-catalogue is read. The chat has the same commands under `/plugins …`.
+MCP servers are connected when the service starts, so restart it
+(`norte service restart`) after adding or removing.
 
 ## Chat commands
 
@@ -205,7 +138,7 @@ as soon as it starts with `/`; anything else is a message.
 | `/telemetry` | Request ledger: this session, and every provider. |
 | `/menu`, `/back` | Every provider and its models, the session's own marked. |
 | `/plans` | List the session's saved plans. |
-| `/plugins …` | The plugin commands, same as the subcommands above. |
+| `/plugins …` | Plugin commands, same as the subcommands above. |
 | `/delete` | Delete this session, with cost and telemetry, and leave. |
 | `/exit`, `/quit` | Leave the chat. |
 
@@ -217,5 +150,4 @@ is steered into the running turn.
 
 ## Exit status
 
-`0` success, `1` failed turn (`skills check` also exits `1` on warnings),
-`2` usage or configuration error.
+`0` success, `1` failed turn, `2` usage or configuration error.
