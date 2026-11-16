@@ -94,6 +94,7 @@ impl Service {
     /// Returns [`ServiceError::Config`] when the file cannot be read, parsed or
     /// validated, and [`ServiceError::Provider`] when the default model it names
     /// cannot be built. Nothing is replaced in either case.
+    #[allow(clippy::too_many_lines)]
     pub fn reload_config(&self) -> Result<ReloadedConfig, ServiceError> {
         let path = self
             .config_path
@@ -108,12 +109,18 @@ impl Service {
         let current_agent = self.lock_config().name.clone();
         let service =
             norte_code_protocol::config::ServiceConfig::load(path.as_deref(), project.as_deref())?;
-        let agent_profiles: BTreeMap<String, Config> = service
+        let mut agent_profiles: BTreeMap<String, Config> = service
             .agents
             .iter()
             .cloned()
             .map(|agent| (agent.name.clone(), agent))
             .collect();
+        // Every profile a subagent opens must carry the same key source the
+        // host installed, or a key in secrets.json stops working after /refresh.
+        let current_keys = self.lock_config().keys.clone();
+        for profile in agent_profiles.values_mut() {
+            profile.keys.clone_from(&current_keys);
+        }
         let mut warnings = Vec::new();
         let config = service
             .agents

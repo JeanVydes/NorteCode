@@ -13,6 +13,7 @@ mod client;
 mod components;
 mod config;
 mod keys;
+mod provider_keys;
 mod signals;
 mod terminal;
 mod text_builder;

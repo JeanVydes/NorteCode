@@ -91,6 +91,10 @@ enabling or disabling.
 - `AGENTS.md` — the crate layout and the rules that keep it that way.
 - `guide/` — the user guide.
 
+Selecting a model in the TUI checks the provider's `environment_keys`, then
+`secrets.json`. If no key is available, a prompt asks for one; it is saved
+to `secrets.json` (mode 0600) and the model switch continues.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
