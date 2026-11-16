@@ -414,9 +414,15 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn model_provider_row(name: &str, model_count: usize, expanded: bool) -> Line<'static> {
+    pub fn model_provider_row(
+        name: &str,
+        model_count: usize,
+        expanded: bool,
+        signed_in: bool,
+    ) -> Line<'static> {
         let marker = if expanded { "▾" } else { "▸" };
-        Line::from(format!("{marker} {name}  ·  {model_count} models"))
+        let key = if signed_in { "✓ " } else { "  " };
+        Line::from(format!("{marker}{key}{name}  ·  {model_count} models"))
     }
 
     #[must_use]

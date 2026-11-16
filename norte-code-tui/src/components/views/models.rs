@@ -30,10 +30,19 @@ pub(in crate::components) struct ModelsView {
 enum KeyPrompt {
     Edit {
         provider: String,
-        model: String,
         value: String,
         error: Option<String>,
+        intent: KeyPromptIntent,
     },
+}
+
+enum KeyPromptIntent {
+    /// After saving the key, switch to this model.
+    SwitchModel {
+        model: String,
+    },
+    /// After saving the key, expand the provider's list of models.
+    Expand,
 }
 
 enum ErasePrompt {
@@ -108,6 +117,17 @@ impl ModelsView {
     fn select_row(&mut self, model: &UiModel) {
         match self.visible_rows(&model.models).get(self.selected).copied() {
             Some(ModelRow::Provider { name, .. }) => {
+                let provider = name;
+                let known = crate::provider_keys::check(model, provider);
+                if let crate::provider_keys::ProviderKeyStatus::Missing { .. } = known {
+                    self.key_prompt = Some(KeyPrompt::Edit {
+                        provider: provider.to_owned(),
+                        value: String::new(),
+                        error: None,
+                        intent: KeyPromptIntent::Expand,
+                    });
+                    return;
+                }
                 if !self.expanded.remove(name) {
                     self.expanded.insert(name.to_owned());
                 }
@@ -120,9 +140,11 @@ impl ModelsView {
                 if let crate::provider_keys::ProviderKeyStatus::Missing { .. } = missing {
                     self.key_prompt = Some(KeyPrompt::Edit {
                         provider: selected.provider.clone(),
-                        model: selected.model.clone(),
                         value: String::new(),
                         error: None,
+                        intent: KeyPromptIntent::SwitchModel {
+                            model: selected.model.clone(),
+                        },
                     });
                     return;
                 }
@@ -176,11 +198,12 @@ impl ModelsView {
         });
     }
 
-    fn handle_key_prompt(&mut self, key: KeyEvent, _model: &UiModel, prompt: KeyPrompt) {        let KeyPrompt::Edit {
+    fn handle_key_prompt(&mut self, key: KeyEvent, model: &UiModel, prompt: KeyPrompt) {
+        let KeyPrompt::Edit {
             provider,
-            model,
             mut value,
             mut error,
+            intent,
         } = prompt;
         match key.code {
             keys::CANCEL => self.key_prompt = None,
@@ -189,9 +212,9 @@ impl ModelsView {
                 error = None;
                 self.key_prompt = Some(KeyPrompt::Edit {
                     provider,
-                    model,
                     value,
                     error,
+                    intent,
                 });
             }
             keys::SUBMIT => {
@@ -199,9 +222,9 @@ impl ModelsView {
                 if trimmed.is_empty() {
                     self.key_prompt = Some(KeyPrompt::Edit {
                         provider,
-                        model,
                         value,
                         error: Some("the key is empty".to_owned()),
+                        intent,
                     });
                     return;
                 }
@@ -209,14 +232,27 @@ impl ModelsView {
                 match saved {
                     Ok(()) => {
                         self.key_prompt = None;
-                        self.pending_action = Some(ComponentAction::SetModel { provider, model });
+                        match intent {
+                            KeyPromptIntent::SwitchModel { model } => {
+                                self.pending_action = Some(ComponentAction::SetModel {
+                                    provider,
+                                    model,
+                                });
+                            }
+                            KeyPromptIntent::Expand => {
+                                if !self.expanded.remove(&provider) {
+                                    self.expanded.insert(provider);
+                                }
+                                self.clamp_selection(&model.models);
+                            }
+                        }
                     }
                     Err(failure) => {
                         self.key_prompt = Some(KeyPrompt::Edit {
                             provider,
-                            model,
                             value,
                             error: Some(format!("could not save: {failure}")),
+                            intent,
                         });
                     }
                 }
@@ -226,17 +262,17 @@ impl ModelsView {
                 error = None;
                 self.key_prompt = Some(KeyPrompt::Edit {
                     provider,
-                    model,
                     value,
                     error,
+                    intent,
                 });
             }
             _ => {
                 self.key_prompt = Some(KeyPrompt::Edit {
                     provider,
-                    model,
                     value,
                     error,
+                    intent,
                 });
             }
         }
@@ -247,6 +283,12 @@ impl ModelsView {
             .selected
             .min(self.visible_rows(models).len().saturating_sub(1));
     }
+}
+
+/// Whether the provider shows its ✓: the picker is honest about which
+/// providers are usable without asking the person to find out the hard way.
+fn provider_signed_in(model: &UiModel, provider: &str) -> bool {
+    !crate::provider_keys::check(model, provider).blocks()
 }
 
 fn save_key(provider: &str, key: &str) -> Result<(), String> {
@@ -412,12 +454,7 @@ impl Component for ModelsView {
                 }
             }
         }
-        if let Some(KeyPrompt::Edit {
-            provider,
-            model: _,
-            value,
-            error,
-        }) = &self.key_prompt
+        if let Some(KeyPrompt::Edit { value, provider, error, .. }) = &self.key_prompt
         {
             let bullets = "•".repeat(value.chars().count());
             let body = format!(
@@ -460,7 +497,12 @@ impl Component for ModelsView {
                     name,
                     model_count,
                     expanded,
-                } => TextBuilder::model_provider_row(name, *model_count, *expanded),
+                } => TextBuilder::model_provider_row(
+                    name,
+                    *model_count,
+                    *expanded,
+                    provider_signed_in(model, name),
+                ),
                 ModelRow::Model(model) => TextBuilder::model_option_row(
                     model,
                     model_marker(model, current_model, queued_model),

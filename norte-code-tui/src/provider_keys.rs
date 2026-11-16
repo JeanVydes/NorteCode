@@ -32,7 +32,6 @@ impl ProviderKeyStatus {
     /// The status as every reader of it treats it.
     ///
     /// Only [`ProviderKeyStatus::Missing`] blocks the switch.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn blocks(&self) -> bool {
         matches!(self, Self::Missing { .. })
