@@ -24,6 +24,7 @@ pub(in crate::components) struct ModelsView {
     expanded: HashSet<String>,
     pending_action: Option<ComponentAction>,
     key_prompt: Option<KeyPrompt>,
+    erase_prompt: Option<ErasePrompt>,
 }
 
 enum KeyPrompt {
@@ -32,6 +33,24 @@ enum KeyPrompt {
         model: String,
         value: String,
         error: Option<String>,
+    },
+}
+
+enum ErasePrompt {
+    FromEnvironment {
+        provider: String,
+        variable: String,
+    },
+    Removed {
+        provider: String,
+        path: String,
+    },
+    Missing {
+        provider: String,
+    },
+    Error {
+        provider: String,
+        message: String,
     },
 }
 
@@ -116,8 +135,48 @@ impl ModelsView {
         }
     }
 
-    fn handle_key_prompt(&mut self, key: KeyEvent, _model: &UiModel, prompt: KeyPrompt) {
-        let KeyPrompt::Edit {
+    fn handle_erase_prompt(&mut self, key: KeyEvent, _model: &UiModel, prompt: ErasePrompt) {
+        match key.code {
+            keys::CANCEL | keys::SUBMIT => self.erase_prompt = None,
+            _ => self.erase_prompt = Some(prompt),
+        }
+    }
+
+    fn erase_key(&mut self, model: &UiModel) {
+        let selected = match self.visible_rows(&model.models).get(self.selected).copied() {
+            Some(ModelRow::Provider { name, .. }) => name.to_owned(),
+            Some(ModelRow::Model(selected)) => selected.provider.clone(),
+            None => return,
+        };
+        let outcome = crate::provider_keys::erase(model, &selected);
+        self.erase_prompt = Some(match outcome {
+            crate::provider_keys::ProviderKeyEraseOutcome::FromEnvironment { variable } => {
+                ErasePrompt::FromEnvironment {
+                    provider: selected,
+                    variable,
+                }
+            }
+            crate::provider_keys::ProviderKeyEraseOutcome::Removed { path } => {
+                ErasePrompt::Removed {
+                    provider: selected,
+                    path,
+                }
+            }
+            crate::provider_keys::ProviderKeyEraseOutcome::Missing => {
+                ErasePrompt::Missing {
+                    provider: selected,
+                }
+            }
+            crate::provider_keys::ProviderKeyEraseOutcome::Error { message } => {
+                ErasePrompt::Error {
+                    provider: selected,
+                    message,
+                }
+            }
+        });
+    }
+
+    fn handle_key_prompt(&mut self, key: KeyEvent, _model: &UiModel, prompt: KeyPrompt) {        let KeyPrompt::Edit {
             provider,
             model,
             mut value,
@@ -245,10 +304,14 @@ impl Component for ModelsView {
     }
 
     fn captures_global_keys(&self) -> bool {
-        self.key_prompt.is_some() || self.filtering
+        self.erase_prompt.is_some() || self.key_prompt.is_some() || self.filtering
     }
 
     fn handle_key(&mut self, key: KeyEvent, model: &UiModel) {
+        if let Some(prompt) = self.erase_prompt.take() {
+            self.handle_erase_prompt(key, model, prompt);
+            return;
+        }
         if let Some(prompt) = self.key_prompt.take() {
             self.handle_key_prompt(key, model, prompt);
             return;
@@ -292,6 +355,7 @@ impl Component for ModelsView {
                 panel::move_selection(&mut self.selected, count, false);
             }
             keys::SUBMIT => self.select_row(model),
+            KeyCode::Delete | keys::ERASE => self.erase_key(model),
             _ => {}
         }
     }
@@ -300,7 +364,54 @@ impl Component for ModelsView {
         self.pending_action.take()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, model: &UiModel) {
+        if let Some(prompt) = &self.erase_prompt {
+            match prompt {
+                ErasePrompt::FromEnvironment { provider, variable } => {
+                    panel::render_text(
+                        frame,
+                        area,
+                        "Key comes from the environment",
+                        format!(
+                            "{provider}: the key is published by ${variable}.\n\nThe TUI does not unset environment variables. Unset it in your shell (or your shell profile) to remove it:\n\n    unset {variable}\n\nPress Esc to close."
+                        ),
+                        model.preferences.theme,
+                    );
+                    return;
+                }
+                ErasePrompt::Removed { provider, path } => {
+                    panel::render_text(
+                        frame,
+                        area,
+                        "API key deleted",
+                        format!("The key for {provider} was removed from\n{path}\n\nPress Esc to close."),
+                        model.preferences.theme,
+                    );
+                    return;
+                }
+                ErasePrompt::Missing { provider } => {
+                    panel::render_text(
+                        frame,
+                        area,
+                        "No stored key",
+                        format!("No key is stored for {provider}.\n\nPress Esc to close."),
+                        model.preferences.theme,
+                    );
+                    return;
+                }
+                ErasePrompt::Error { provider, message } => {
+                    panel::render_text(
+                        frame,
+                        area,
+                        "Could not delete key",
+                        format!("The key for {provider} could not be deleted.\n\n{message}\n\nPress Esc to close."),
+                        model.preferences.theme,
+                    );
+                    return;
+                }
+            }
+        }
         if let Some(KeyPrompt::Edit {
             provider,
             model: _,

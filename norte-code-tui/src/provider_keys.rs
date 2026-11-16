@@ -39,6 +39,78 @@ impl ProviderKeyStatus {
     }
 }
 
+/// What happened to a key that was erased.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderKeyEraseOutcome {
+    /// The key is published through `$VAR`; the TUI does not unset environment
+    /// variables.
+    FromEnvironment {
+        /// The variable that holds the key.
+        variable: String,
+    },
+    /// A saved key was removed from the secrets file.
+    Removed {
+        /// The file it was removed from.
+        path: String,
+    },
+    /// No key was stored for this provider.
+    Missing,
+    /// The removal could not be carried out.
+    ///
+    /// The message is shown as-is; nothing was changed.
+    Error {
+        /// Why the removal failed.
+        message: String,
+    },
+}
+
+/// The outcome of erasing a provider's key.
+///
+/// The environment is checked first, matching how the host resolves keys,
+/// then the secrets file. An environment variable is never removed; the
+/// reader is told which one holds the key instead.
+#[must_use]
+pub(crate) fn erase(model: &UiModel, provider_id: &str) -> ProviderKeyEraseOutcome {
+    let environment_keys = match environment_keys_for(model, provider_id) {
+        Err(()) => {
+            return ProviderKeyEraseOutcome::Error {
+                message: "could not read the catalogue; cannot tell where the key comes from"
+                    .to_owned(),
+            }
+        }
+        Ok(None) => {
+            return ProviderKeyEraseOutcome::Missing;
+        }
+        Ok(Some(keys)) => keys,
+    };
+    if let Some(variable) = first_set_env_var(&environment_keys) {
+        return ProviderKeyEraseOutcome::FromEnvironment { variable };
+    }
+    let Some(path) = secrets_path() else {
+        return ProviderKeyEraseOutcome::Error {
+            message: "could not resolve the secrets.json path".to_owned(),
+        };
+    };
+    if read_secret(&path, provider_id).is_none() {
+        return ProviderKeyEraseOutcome::Missing;
+    }
+    match norte_code_protocol::keys::delete_secret(&path, provider_id) {
+        Ok(()) => ProviderKeyEraseOutcome::Removed {
+            path: path.display().to_string(),
+        },
+        Err(error) => ProviderKeyEraseOutcome::Error {
+            message: error.to_string(),
+        },
+    }
+}
+
+/// The first environment variable of `members` that is set and non-blank.
+fn first_set_env_var(members: &[String]) -> Option<String> {
+    members.iter().find(|name| {
+        std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+    }).cloned()
+}
+
 /// Checks the environment and the secrets file for one provider.
 ///
 /// The host's catalogue is preferred: it carries every provider the host
