@@ -3,7 +3,7 @@
 //! A rule is a static gate, applied where the call runs: a tool named in `deny`
 //! is refused before it does anything, and the refusal reaches the model as a
 //! tool result it reads exactly like a failure, so it can adapt. There is no
-//! prompt and no parked turn — the engine has no phase to wait for a person in —
+//! prompt and no parked turn: the engine has no phase to wait for a person in -
 //! and therefore no grant to issue either: what a person allows is written down
 //! as a rule, and a rule outlives the turn that asked for it.
 //!

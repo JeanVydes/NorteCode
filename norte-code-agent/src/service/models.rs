@@ -7,8 +7,11 @@
 use std::sync::Arc;
 
 use norte::{Reasoning as ReasoningCapability, ReasoningEffort, ReasoningRequest, ToolKind};
-use norte_code_protocol::catalog::{Catalog, load_catalog_files};
-use norte_code_protocol::{
+use norte_code_protocol::catalog::{
+    Catalog, load_catalog_files, load_catalog_raw, save_catalog_files,
+};
+use norte_code_wire::catalog::{Model, Provider};
+use norte_code_wire::{
     Modality, ModelInfo, Reasoning as ProtocolReasoning, ReasoningInfo, ServerEvent,
     ServerEventKind, SessionKey,
 };
@@ -21,8 +24,8 @@ use super::{EventStream, Service};
 
 /// Flattens a catalogue for a picker.
 ///
-/// The capabilities come from the provider's preferred wire — the one a session
-/// opens on when nobody named another — because the list is what a person picks
+/// The capabilities come from the provider's preferred wire: the one a session
+/// opens on when nobody named another: because the list is what a person picks
 /// from and the entry has to describe what picking it will get.
 #[must_use]
 pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
@@ -73,20 +76,20 @@ pub fn model_list(catalog: &Catalog) -> Vec<ModelInfo> {
                 max_budget: capabilities.reasoning.max_budget,
             },
             deprecated: entry.model.status
-                == Some(norte_code_protocol::catalog::ModelStatus::Deprecated),
+                == Some(norte_code_wire::catalog::ModelStatus::Deprecated),
         });
     }
     models
 }
 
 /// The wire's name for a catalogue modality.
-fn modality_of(modality: norte_code_protocol::catalog::Modality) -> Modality {
+fn modality_of(modality: norte_code_wire::catalog::Modality) -> Modality {
     match modality {
-        norte_code_protocol::catalog::Modality::Text => Modality::Text,
-        norte_code_protocol::catalog::Modality::Image => Modality::Image,
-        norte_code_protocol::catalog::Modality::Audio => Modality::Audio,
-        norte_code_protocol::catalog::Modality::Video => Modality::Video,
-        norte_code_protocol::catalog::Modality::File => Modality::File,
+        norte_code_wire::catalog::Modality::Text => Modality::Text,
+        norte_code_wire::catalog::Modality::Image => Modality::Image,
+        norte_code_wire::catalog::Modality::Audio => Modality::Audio,
+        norte_code_wire::catalog::Modality::Video => Modality::Video,
+        norte_code_wire::catalog::Modality::File => Modality::File,
     }
 }
 
@@ -111,7 +114,7 @@ pub fn effective_reasoning(
     let setting = if let Some(setting) = requested {
         setting.clone()
     } else {
-        let configured = parse_configured_reasoning(configured).map_err(ServiceError::Reasoning)?;
+        let configured = parse_configured_reasoning(configured)?;
         // The implicit default is medium: it leaves room for a useful answer
         // without asking every model for its most expensive effort. When a
         // model does not declare medium, prefer the closest effort below it
@@ -158,10 +161,64 @@ fn implicit_effort(capabilities: &ReasoningCapability) -> Option<ReasoningEffort
     .find(|effort| capabilities.efforts.contains(effort))
 }
 
+/// A reasoning setting that cannot be read.
+#[derive(Debug, thiserror::Error)]
+pub enum ReasoningError {
+    /// A budget is not a positive integer.
+    #[error("a reasoning budget must be a positive integer")]
+    Budget,
+    /// An effort object carries no effort.
+    #[error("`reasoning.effort` must be a string")]
+    Effort,
+    /// The settings object names no recognised form.
+    #[error("expected `auto`, `off`, an effort object or a budget object")]
+    Shape,
+    /// The value is not a string, number or object.
+    #[error("expected a string, a number or an object")]
+    Value,
+    /// The setting names something this build does not know.
+    #[error("unknown reasoning setting `{0}`; use `auto`, `off` an effort or a budget")]
+    Unknown(String),
+    /// The model does not allow turning reasoning off.
+    #[error("the model does not allow turning reasoning off")]
+    CannotDisable,
+    /// The model has no reasoning at all.
+    #[error("the model does not support reasoning; omit the setting or use `auto`")]
+    Unsupported,
+    /// The effort is not one this build knows.
+    #[error("unknown effort `{effort}`; the model supports {supported}")]
+    UnknownEffort {
+        /// The effort that was asked for.
+        effort: String,
+        /// The efforts the model supports.
+        supported: String,
+    },
+    /// The model does not accept a token budget.
+    #[error("the model does not accept a reasoning token budget")]
+    UnsupportedBudget,
+    /// A budget of zero cannot be applied.
+    #[error("the reasoning budget must be at least one token")]
+    EmptyBudget,
+    /// The budget is above the model's ceiling.
+    #[error("the model accepts at most {max} reasoning tokens")]
+    BudgetTooLarge {
+        /// The ceiling.
+        max: u32,
+    },
+    /// The model does not offer that effort.
+    #[error("the model does not support effort `{effort}`; it supports {supported}")]
+    UnavailableEffort {
+        /// The effort that was asked for.
+        effort: &'static str,
+        /// The efforts the model supports.
+        supported: String,
+    },
+}
+
 /// Parses `reasoning.default` from the config.
 pub(super) fn parse_configured_reasoning(
     value: &serde_json::Value,
-) -> Result<ProtocolReasoning, String> {
+) -> Result<ProtocolReasoning, ReasoningError> {
     match value {
         serde_json::Value::Null => Ok(ProtocolReasoning::Automatic),
         serde_json::Value::String(text) => parse_reasoning_name(text),
@@ -170,7 +227,7 @@ pub(super) fn parse_configured_reasoning(
                 .as_u64()
                 .and_then(|value| u32::try_from(value).ok())
                 .filter(|value| *value > 0)
-                .ok_or_else(|| "a reasoning budget must be a positive integer".to_owned())?;
+                .ok_or(ReasoningError::Budget)?;
             Ok(ProtocolReasoning::Budget { tokens })
         }
         serde_json::Value::Object(map) => {
@@ -182,7 +239,7 @@ pub(super) fn parse_configured_reasoning(
                         let effort = map
                             .get("effort")
                             .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| "`reasoning.effort` must be a string".to_owned())?;
+                            .ok_or(ReasoningError::Effort)?;
                         return parse_reasoning_name(effort);
                     }
                     "budget" => {
@@ -191,15 +248,11 @@ pub(super) fn parse_configured_reasoning(
                             .and_then(serde_json::Value::as_u64)
                             .and_then(|value| u32::try_from(value).ok())
                             .filter(|value| *value > 0)
-                            .ok_or_else(|| {
-                                "`reasoning.tokens` must be a positive integer".to_owned()
-                            })?;
+                            .ok_or(ReasoningError::Budget)?;
                         return Ok(ProtocolReasoning::Budget { tokens });
                     }
                     other => {
-                        return Err(format!(
-                            "unknown reasoning setting `{other}`; use `auto`, `off`, an effort or a budget"
-                        ));
+                        return Err(ReasoningError::Unknown(other.to_string()));
                     }
                 }
             }
@@ -208,20 +261,20 @@ pub(super) fn parse_configured_reasoning(
                     .as_u64()
                     .and_then(|value| u32::try_from(value).ok())
                     .filter(|value| *value > 0)
-                    .ok_or_else(|| "`reasoning.budget` must be a positive integer".to_owned())?;
+                    .ok_or(ReasoningError::Budget)?;
                 return Ok(ProtocolReasoning::Budget { tokens });
             }
             if let Some(effort) = map.get("effort").and_then(serde_json::Value::as_str) {
                 return parse_reasoning_name(effort);
             }
-            Err("expected `auto`, `off`, an effort object or a budget object".to_owned())
+            Err(ReasoningError::Shape)
         }
-        _ => Err("expected a string, a number or an object".to_owned()),
+        _ => Err(ReasoningError::Value),
     }
 }
 
 /// Parses `auto`, `off` or one of Norte's effort names.
-fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
+fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, ReasoningError> {
     let normalized = text.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "auto" | "automatic" => Ok(ProtocolReasoning::Automatic),
@@ -230,11 +283,7 @@ fn parse_reasoning_name(text: &str) -> Result<ProtocolReasoning, String> {
             .map(|effort| ProtocolReasoning::Effort {
                 effort: effort_name(effort).to_owned(),
             })
-            .ok_or_else(|| {
-                format!(
-                    "unknown reasoning setting `{text}`; use `auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`"
-                )
-            }),
+            .ok_or_else(|| ReasoningError::Unknown(text.to_owned())),
     }
 }
 
@@ -260,51 +309,41 @@ fn validate_reasoning(
         ProtocolReasoning::Automatic => Ok(ReasoningRequest::Automatic),
         ProtocolReasoning::Disabled => {
             if capabilities.supported && !capabilities.can_disable {
-                return Err(ServiceError::Reasoning(
-                    "the model does not allow turning reasoning off".to_owned(),
-                ));
+                return Err(ReasoningError::CannotDisable.into());
             }
             Ok(ReasoningRequest::Disabled)
         }
         ProtocolReasoning::Effort { effort } => {
             if !capabilities.supported {
-                return Err(ServiceError::Reasoning(
-                    "the model does not support reasoning; omit the setting or use `auto`"
-                        .to_owned(),
-                ));
+                return Err(ReasoningError::Unsupported.into());
             }
             let Some(effort) = parse_reasoning_effort(effort) else {
-                return Err(ServiceError::Reasoning(format!(
-                    "unknown effort `{effort}`; the model supports {}",
-                    effort_choices(capabilities)
-                )));
+                return Err(ReasoningError::UnknownEffort {
+                    effort: effort.clone(),
+                    supported: effort_choices(capabilities),
+                }
+                .into());
             };
             if !capabilities.efforts.contains(&effort) {
-                return Err(ServiceError::Reasoning(format!(
-                    "the model does not support effort `{}`; it supports {}",
-                    effort_name(effort),
-                    effort_choices(capabilities)
-                )));
+                return Err(ReasoningError::UnavailableEffort {
+                    effort: effort_name(effort),
+                    supported: effort_choices(capabilities),
+                }
+                .into());
             }
             Ok(ReasoningRequest::Effort(effort))
         }
         ProtocolReasoning::Budget { tokens } => {
             if !capabilities.supported || !capabilities.supports_budget {
-                return Err(ServiceError::Reasoning(
-                    "the model does not accept a reasoning token budget".to_owned(),
-                ));
+                return Err(ReasoningError::UnsupportedBudget.into());
             }
             if *tokens == 0 {
-                return Err(ServiceError::Reasoning(
-                    "the reasoning budget must be at least one token".to_owned(),
-                ));
+                return Err(ReasoningError::EmptyBudget.into());
             }
             if let Some(max) = capabilities.max_budget
                 && *tokens > max
             {
-                return Err(ServiceError::Reasoning(format!(
-                    "the model accepts at most {max} reasoning tokens"
-                )));
+                return Err(ReasoningError::BudgetTooLarge { max }.into());
             }
             Ok(ReasoningRequest::Budget(*tokens))
         }
@@ -349,9 +388,174 @@ impl Service {
         )
     }
 
+    /// The catalogue with its origin, for the editor.
+    pub(super) fn catalog_detail_event(&self, request_id: u64) -> EventStream {
+        let catalog = self.catalog();
+        let (plugin_providers, plugin_models) = self.lock_plugin_catalogue().clone();
+        let file_providers: std::collections::BTreeSet<String> = load_catalog_raw()
+            .map(|(providers, _)| providers.providers.into_keys().collect())
+            .unwrap_or_default();
+        let file_models: std::collections::BTreeSet<(String, String)> = load_catalog_raw()
+            .map(|(_, models)| {
+                models
+                    .models
+                    .into_iter()
+                    .map(|model| (model.provider_id, model.id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let _ = (&plugin_providers, &plugin_models);
+
+        let providers = catalog
+            .provider_entries()
+            .iter()
+            .map(
+                |(provider_id, provider)| norte_code_wire::CatalogProviderInfo {
+                    provider_id: provider_id.clone(),
+                    name: if provider.name.is_empty() {
+                        provider_id.clone()
+                    } else {
+                        provider.name.clone()
+                    },
+                    api: provider.wires.first().map(|wire| wire.api.clone()),
+                    from_file: file_providers.contains(provider_id),
+                    model_count: catalog
+                        .model_entries()
+                        .iter()
+                        .filter(|model| &model.provider_id == provider_id)
+                        .count(),
+                },
+            )
+            .collect();
+        let models = catalog
+            .model_entries()
+            .iter()
+            .map(|model| norte_code_wire::CatalogModelInfo {
+                provider: model.provider_id.clone(),
+                model: model.id.clone(),
+                name: model.name.clone(),
+                from_file: file_models.contains(&(model.provider_id.clone(), model.id.clone())),
+            })
+            .collect();
+        single(
+            request_id,
+            None,
+            ServerEventKind::CatalogDetail { providers, models },
+        )
+    }
+
     /// Flattens the catalogue for a picker, applying the config overrides.
     pub(super) fn list_models(&self) -> Vec<ModelInfo> {
         model_list(&self.catalog())
+    }
+
+    /// Adds or replaces a provider in `providers.json`.
+    ///
+    /// A provider that a plugin injected is not in the file, so it is refused:
+    /// writing it here would either duplicate it or be overwritten on the next
+    /// start, and neither is what the person meant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the entry is not a well-formed
+    /// provider or the file cannot be written.
+    pub(super) fn upsert_provider(
+        &self,
+        request_id: u64,
+        provider_id: &str,
+        provider: Provider,
+    ) -> Result<EventStream, ServiceError> {
+        if provider_id.trim().is_empty() {
+            return Err(ServiceError::History("a provider needs an id".to_owned()));
+        }
+        if provider.wires.is_empty() {
+            return Err(ServiceError::History(format!(
+                "provider `{provider_id}` needs at least one wire"
+            )));
+        }
+        let (mut providers, models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        providers.providers.insert(provider_id.to_owned(), provider);
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
+    }
+
+    /// Removes a provider and every model that names it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the provider is not in the file or
+    /// the file cannot be written.
+    pub(super) fn remove_provider(
+        &self,
+        request_id: u64,
+        provider_id: &str,
+    ) -> Result<EventStream, ServiceError> {
+        let (mut providers, mut models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        if providers.providers.remove(provider_id).is_none() {
+            return Err(ServiceError::History(format!(
+                "`{provider_id}` is not in providers.json; a plugin's providers are the \
+                 plugin's to remove"
+            )));
+        }
+        models
+            .models
+            .retain(|model| model.provider_id != provider_id);
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
+    }
+
+    /// Adds or replaces a model in `models.json`, keyed by provider and id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the entry is malformed or names a
+    /// provider the file does not have.
+    pub(super) fn upsert_model(
+        &self,
+        request_id: u64,
+        model: Model,
+    ) -> Result<EventStream, ServiceError> {
+        if model.id.trim().is_empty() {
+            return Err(ServiceError::History("a model needs an id".to_owned()));
+        }
+        let (providers, mut models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        if !providers.providers.contains_key(&model.provider_id) {
+            return Err(ServiceError::History(format!(
+                "`{}` is not in providers.json",
+                model.provider_id
+            )));
+        }
+        models.models.retain(|existing| {
+            !(existing.provider_id == model.provider_id && existing.id == model.id)
+        });
+        models.models.push(model);
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
+    }
+
+    /// Removes one model from `models.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::Catalog`] when the model is not in the file.
+    pub(super) fn remove_model(
+        &self,
+        request_id: u64,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<EventStream, ServiceError> {
+        let (providers, mut models) = load_catalog_raw().map_err(ServiceError::Catalog)?;
+        let before = models.models.len();
+        models
+            .models
+            .retain(|model| !(model.provider_id == provider_id && model.id == model_id));
+        if models.models.len() == before {
+            return Err(ServiceError::History(format!(
+                "`{provider_id}/{model_id}` is not in models.json"
+            )));
+        }
+        save_catalog_files(&providers, &models).map_err(ServiceError::Catalog)?;
+        self.reload_catalog(request_id)
     }
 
     /// Re-reads the two catalogue files.
@@ -366,7 +570,19 @@ impl Service {
     /// The catalogue already in memory is left alone in that case: a file being
     /// edited is not a reason to lose the models the session can already use.
     pub(super) fn reload_catalog(&self, request_id: u64) -> Result<EventStream, ServiceError> {
-        let mut catalog = load_catalog_files()?;
+        // The files are the source, and the plugin catalogue is folded over
+        // them: a plugin's providers and models are as real as a person's
+        // and must survive a reload instead of dropping out of the picker.
+        let mut catalog = match load_catalog_files() {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let (providers, models) = self.lock_plugin_catalogue().clone();
+                if providers.providers.is_empty() && models.models.is_empty() {
+                    return Err(error.into());
+                }
+                Catalog::default()
+            }
+        };
         let (providers, models) = self.lock_plugin_catalogue().clone();
         for skipped in catalog.extend(providers.providers, models.models) {
             tracing::warn!("skipping plugin catalogue entry during reload: {skipped}");
@@ -430,8 +646,8 @@ impl Service {
     ) -> Result<ModelSpec, ServiceError> {
         // The catalogue first, a configured provider second, which is how a run
         // resolves the same pair. Going straight to the catalogue failed on
-        // every provider the catalogue does not list — `exa`, `river`, any
-        // private endpoint declared in the config and nowhere else — so
+        // every provider the catalogue does not list: `exa`, `river`, any
+        // private endpoint declared in the config and nowhere else: so
         // `/model exa/…` said the provider was unknown while `--provider exa`
         // worked.
         let spec = self.default_spec_for(&self.lock_config(), &self.catalog(), provider, model)?;
@@ -472,7 +688,7 @@ impl Service {
         spec: ModelSpec,
     ) -> Result<(), ServiceError> {
         let (nid, _, phase) = self.require_record(key)?;
-        if phase != norte_code_protocol::Phase::Idle {
+        if phase != norte_code_wire::Phase::Idle {
             return Err(ServiceError::Unsupported(
                 "switch the model at a turn boundary",
             ));

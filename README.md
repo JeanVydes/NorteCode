@@ -1,38 +1,53 @@
 # Norte Code
 
-A terminal client for the Norte service. The server owns sessions, execution,
-catalogues and plugins; the CLI connects to it through RAEP.
+Norte Code is the RAEP server for the Norte agent, plus a Dioxus client that
+talks to it over the same protocol any other client does. The server owns
+sessions, execution, catalogues and plugins; a client attaches to a session
+and sends the next user input.
 
-## Install
+## Build
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/JeanVydes/NorteCode/dev/scripts/install.sh | sh
-```
-
-Or build it from source (Rust 1.88+):
+Rust 1.88+:
 
 ```sh
 cargo build --release
 ```
 
-## Quick start
+The server binary is `target/release/norte-code-server`. It listens on
+`127.0.0.1:8787` and keeps its sessions database in `NORTE_CODE_DATABASE`
+(default `$XDG_DATA_HOME/norte-code/sessions.db`, or the platform equivalent).
+
+## Install
 
 ```sh
-norte-code service start
-norte-code
+cargo install --git https://github.com/JeanVydes/NorteCode --path norte-code-cli
 ```
 
-Pick or create a session and start typing. Configure the client endpoint in
-`cli.json`; use `service_type: "remote"` for a server on another machine.
-A few things worth knowing:
+Both install into `~/.cargo/bin/`. The only command you type afterwards is `norte`.
 
-- **Approvals** — tools run only under your rules. `/allow` and `/deny`
-  decide per tool, per session or globally.
-- **Plans** — the model proposes work as a Markdown file and asks your
-  approval before it becomes active. `/plans` lists them.
-- **Budgets** — cap spend in USD, tokens or requests: `--budget` on the
-  command line or `budgets` in the config.
-- **Sandbox** — opt-in OS containment for `shell` (`--sandbox`).
+The service runs in the background once started (`norte service up`); it is
+not tied to the terminal that started it.
+
+## Run
+
+```sh
+# start the service in the background (if it is not already running) and
+# open the terminal interface in the current terminal:
+norte
+
+# manage the service:
+norte service up
+norte service down
+norte service restart
+norte service status
+norte service catalog
+norte service config
+norte service logs [--live]
+norte service doctor
+
+# open only the terminal interface:
+norte tui
+```
 
 ## Providers and models
 
@@ -92,15 +107,15 @@ The server translates that frame to a NorteCode `SendMessage` request. The
 result is streamed as RAEP events, including text deltas, tool calls,
 approvals, questions, jobs, usage and completion. To recover events after a
 disconnect, the client attaches with `resume_from_seq`; it does not resend the
-conversation history. The server binary persists the RAEP frame journal beside
-`NORTE_CODE_DATABASE` with the `.raep.jsonl` suffix, so sequence replay also
-survives a server restart. Artifact uploads go directly into Norte's
+conversation history. Each session's frames are kept in
+`<database stem>.replay/<session>.jsonl`, capped by bytes, so sequence replay
+survives a server restart; an attach whose sequence is older than what the file
+still holds comes back truncated and the client reloads history. Artifact uploads go directly into Norte's
 content-addressed BlobStore; no second artifact directory is created. The
-common event families use canonical RAEP payloads (`turn`, tools, jobs,
-questions, budget, usage, retries and errors). The original NorteCode event is
-kept under envelope `ext.norte_code` for lossless compatibility while the
-session, history, compaction, agent/catalogue and cost events are normalized
-as well.
+common event families use standard RAEP payloads (`turn`, tools, jobs,
+questions, budget, usage, retries and errors); events with no standard shape
+travel as `norte_code.<event>` frames, and each event has exactly one encoding
+on the wire.
 `norte_code.command` extension is available when a
 client needs the complete NorteCode command surface, including model, budget,
 steering, jobs and session operations.
@@ -118,10 +133,11 @@ can be read back with authenticated `GET /raep/v1/artifacts/{artifact_id}`.
 
 ## Documentation
 
-- **[Guide](https://jeanvydes.github.io/NorteCode/)** — getting started,
-  sessions, plans, approvals, budgets, sandbox, plugins and the full CLI
-  and config reference. Run `mdbook serve guide` to read it locally.
-- **[CONFIG.md](CONFIG.md)** — the full configuration schema.
+- **[CONFIG.md](CONFIG.md)**: the full configuration schema.
+- **[AGENTS.md](AGENTS.md)**: the crate layout and the rules that keep it
+  that way.
+- **`guide/`**: written for the terminal client that no longer ships; it is
+  being rewritten for the app and the protocol.
 
 ## License
 

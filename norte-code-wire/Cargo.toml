@@ -1,0 +1,21 @@
+[package]
+name = "norte-code-wire"
+description = "The shapes that travel on the Norte Code wire, shared by every client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# No I/O and no runtime: this crate is the shapes alone, so the browser client
+# and the terminal client can share exactly what the server speaks. Anything
+# that needs a socket, a database or a clock belongs in a crate that uses them.
+[dependencies]
+base64 = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

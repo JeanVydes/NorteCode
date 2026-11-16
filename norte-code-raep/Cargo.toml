@@ -8,30 +8,30 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "norte-code-server"
-path = "src/main.rs"
-
 [dependencies]
 axum = { workspace = true }
+base64 = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 norte-code-agent = { path = "../norte-code-agent" }
 norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-wire = { path = "../norte-code-wire" }
 norte-code-plugin-host = { path = "../norte-code-plugin-host" }
 norte = { workspace = true }
 raep-types = { git = "https://github.com/JeanVydes/RAEP.git", rev = "b34b5b5863082b27f308d02f7ae06074a9fa5dae", package = "raep-types" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

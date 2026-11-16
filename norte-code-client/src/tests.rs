@@ -1,0 +1,534 @@
+use raep_types::{Envelope, FrameType, StandardFrameType};
+use serde_json::Value;
+
+use norte_code_wire::ClientRequest;
+
+use crate::decode::*;
+use crate::remote::*;
+use crate::sse::*;
+
+use norte_code_wire::{ClientRequestKind, SessionKey};
+
+/// A typed frame fixture: the envelope is built as `Envelope<Value>`
+/// with a typed payload, never as raw JSON.
+fn frame(kind: FrameType, session_id: &str, payload: serde_json::Value) -> Envelope<Value> {
+    let mut frame = Envelope::new(kind, payload, 0);
+    frame.session_id = session_id.to_owned();
+    frame
+}
+
+#[test]
+fn decodes_a_standard_payload() {
+    let mut frame = frame(
+        FrameType::Standard(StandardFrameType::TokenDelta),
+        "session-1",
+        serde_json::json!({"delta": "canonical", "index": 2, "channel": "text"}),
+    );
+    frame.turn_id = raep_types::TurnId::new("7").ok();
+    let event = server_event_from_frame(&frame)
+        .expect("standard token delta")
+        .expect("standard token delta event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::Delta {
+            turn: 7,
+            delta: norte_code_wire::Delta::Text { index: 2, ref text }
+        } if text == "canonical"
+    ));
+}
+
+#[test]
+fn decodes_history_pages_with_flat_or_raep_content() {
+    let payloads = [
+        serde_json::json!({
+            "items": [{
+                "role": "assistant",
+                "kind": "assistant",
+                "content": "flat history content",
+                "turn_id": "turn_1",
+                "timestamp": 10
+            }],
+            "has_more": false
+        }),
+        serde_json::json!({
+            "items": [{
+                "id": "0",
+                "kind": "assistant",
+                "content": {
+                    "role": "ASSISTANT",
+                    "content": "RAEP history content"
+                },
+                "created_at": 10
+            }],
+            "next": null
+        }),
+    ];
+
+    for (payload, expected) in payloads
+        .into_iter()
+        .zip(["flat history content", "RAEP history content"])
+    {
+        let frame = frame(
+            FrameType::Standard(StandardFrameType::HistoryPage),
+            "session-1",
+            payload,
+        );
+        let event = server_event_from_frame(&frame)
+            .expect("history page")
+            .expect("history page event");
+        assert!(matches!(
+            event.kind,
+            norte_code_wire::ServerEventKind::HistoryPage { ref items, .. }
+                if items.len() == 1 && items[0].content == expected
+        ));
+    }
+}
+
+#[test]
+fn rejects_an_unsupported_wire_version() {
+    let mut frame = frame(
+        FrameType::Standard(StandardFrameType::TokenDelta),
+        "",
+        serde_json::json!({"delta": "hi", "index": 0}),
+    );
+    frame.version = "2.0".to_owned();
+    let error = server_event_from_frame(&frame).expect_err("unsupported version");
+    assert!(error.to_string().contains("wire version"), "{error}");
+}
+
+#[test]
+fn decodes_a_standard_tool_start() {
+    let mut frame = frame(
+        FrameType::Standard(StandardFrameType::ToolCallStarted),
+        "session-1",
+        serde_json::json!({
+            "tool_call_id": "call-1",
+            "tool_name": "shell",
+            "arguments": {"command": "ls"},
+            "requires_approval": false
+        }),
+    );
+    frame.turn_id = raep_types::TurnId::new("3").ok();
+    let event = server_event_from_frame(&frame)
+        .expect("standard tool start")
+        .expect("standard tool start event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::ToolStarted { turn: 3, ref call_id, ref tool, .. }
+            if call_id == "call-1" && tool == "shell"
+    ));
+}
+
+#[test]
+fn classifies_sequence_steps() {
+    assert_eq!(seq_step(None, 1), SeqStep::Apply);
+    assert_eq!(seq_step(Some(4), 5), SeqStep::Apply);
+    assert_eq!(seq_step(Some(4), 4), SeqStep::Duplicate);
+    assert_eq!(seq_step(Some(4), 3), SeqStep::Duplicate);
+    assert_eq!(seq_step(Some(4), 6), SeqStep::Gap { expected: 5 });
+    assert_eq!(seq_step(Some(u64::MAX), u64::MAX), SeqStep::Duplicate);
+}
+
+#[test]
+fn encodes_session_path_segments_without_reinterpreting_slashes() {
+    assert_eq!(
+        percent_encode("provider/session 1"),
+        "provider%2Fsession%201"
+    );
+}
+
+#[test]
+fn extracts_session_from_session_scoped_requests() {
+    let request = ClientRequest {
+        request_id: 1,
+        kind: ClientRequestKind::CancelTurn {
+            session: SessionKey::new("session-1"),
+        },
+    };
+    assert_eq!(session_from_request(&request).as_deref(), Some("session-1"));
+}
+
+#[test]
+fn leaves_connection_scoped_requests_without_a_session() {
+    let request = ClientRequest {
+        request_id: 1,
+        kind: ClientRequestKind::ListSessions,
+    };
+    assert_eq!(session_from_request(&request), None);
+}
+
+#[test]
+fn prefixes_bearer_tokens_without_redacting_the_value() {
+    let client = RemoteClient::new("http://localhost:8080", Some("secret-token"), None)
+        .expect("valid bearer token");
+    assert_eq!(
+        client
+            .bearer_token
+            .as_ref()
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer secret-token")
+    );
+}
+
+#[test]
+fn event_stream_url_uses_the_session_agent() {
+    let client = RemoteClient::new("http://localhost:8787", None, None).expect("client");
+    client.set_session_agent("session 1", "agent/one");
+
+    assert_eq!(
+        client.events_url("session 1"),
+        "http://localhost:8787/raep/v1/sessions/session%201/events?agent_id=agent%2Fone"
+    );
+}
+
+#[test]
+fn decodes_the_legacy_model_changed_extension() {
+    let frame = frame(
+        FrameType::Extension("norte_code.model_changed".to_owned()),
+        "session-1",
+        serde_json::json!({ "from_agent": {"id": ""}, "to_agent": {"id": "tokenlab", "version": "MiniCPM-V-4.7-35B-A3B"} }),
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("legacy model changed event")
+        .expect("legacy model changed event payload");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::ModelChanged { provider, model }
+            if provider == "tokenlab" && model == "MiniCPM-V-4.7-35B-A3B"
+    ));
+}
+
+#[test]
+fn decodes_the_legacy_model_queued_extension() {
+    let frame = frame(
+        FrameType::Extension("norte_code.model_queued".to_owned()),
+        "session-1",
+        serde_json::json!({ "from_agent": {"id": ""}, "to_agent": {"id": "tokenlab", "version": "Qwen3.8-27B"} }),
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("legacy model queued event")
+        .expect("legacy model queued event payload");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::ModelQueued { provider, model }
+            if provider == "tokenlab" && model == "Qwen3.8-27B"
+    ));
+}
+
+#[test]
+fn decodes_a_bare_extension_payload() {
+    // The host writes `norte_code.question_asked` with the event's standard
+    // shape and nothing else: no mirrored event, no canonical tag.
+    let frame = frame(
+        FrameType::Extension("norte_code.question_asked".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "turn_id": 4,
+            "question": "q-1",
+            "prompt": "Which color?",
+            "options": ["red", "blue"],
+            "multiple": false,
+        }),
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("bare extension payload")
+        .expect("bare extension payload event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::QuestionAsked {
+            turn: 4,
+            ref question,
+            ref options,
+            ..
+        } if question == "q-1" && options == &vec!["red".to_owned(), "blue".to_owned()]
+    ));
+}
+
+#[test]
+fn decodes_canonical_service_data_without_the_compatibility_extension() {
+    let frame = frame(
+        FrameType::Extension("norte_code".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "event": "service_data",
+            "kind": "tool_list",
+            "data": [{
+                "name": "read",
+                "allowed": true,
+                "scope": "default"
+            }]
+        }),
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("canonical service event")
+        .expect("canonical service event event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::ToolList { ref tools }
+            if tools[0].name == "read"
+    ));
+}
+
+#[test]
+fn decodes_canonical_session_stats_and_jobs() {
+    let stats = frame(
+        FrameType::Extension("norte_code".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "event": "session_stats",
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cache_read_tokens": 2,
+            "cache_write_tokens": 1,
+            "cost_usd": 0.25,
+            "requests": 2,
+            "context_used": 14,
+            "context_window": 100
+        }),
+    );
+    let event = server_event_from_frame(&stats)
+        .expect("canonical stats")
+        .expect("canonical stats event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::SessionStats {
+            context_used: 14,
+            context_window: Some(100),
+            ..
+        }
+    ));
+
+    let jobs = frame(
+        FrameType::Extension("norte_code".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "event": "job_list",
+            "jobs": []
+        }),
+    );
+    let event = server_event_from_frame(&jobs)
+        .expect("canonical jobs")
+        .expect("canonical jobs event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::JobList { ref jobs } if jobs.is_empty()
+    ));
+}
+
+#[test]
+fn serializes_remote_service_requests_with_protocol_tags() {
+    let request = ClientRequest {
+        request_id: 7,
+        kind: ClientRequestKind::ListTelemetry { session: None },
+    };
+    let value = serde_json::to_value(request).expect("request serializes");
+    assert_eq!(value["kind"]["type"], "list_telemetry");
+}
+
+#[test]
+fn tracks_last_sequence_per_session_and_keeps_the_maximum() {
+    let client = RemoteClient::new("http://localhost:8080", None, None).expect("client creates");
+    assert_eq!(client.last_seq("session-1"), None);
+    client.note_seq("session-1", 7);
+    assert_eq!(client.last_seq("session-1"), Some(7));
+    client.note_seq("session-1", 4);
+    assert_eq!(
+        client.last_seq("session-1"),
+        Some(7),
+        "an older frame must not move the cursor backwards"
+    );
+    client.note_seq("session-1", 9);
+    assert_eq!(client.last_seq("session-1"), Some(9));
+    client.note_seq("session-2", 3);
+    assert_eq!(client.last_seq("session-2"), Some(3));
+    assert_eq!(client.last_seq("session-1"), Some(9));
+}
+
+#[test]
+fn records_sequence_from_raw_frames_only() {
+    let client = RemoteClient::new("http://localhost:8080", None, None).expect("client creates");
+    let mut first = frame(
+        FrameType::Extension("norte_code".to_owned()),
+        "session-1",
+        serde_json::json!({}),
+    );
+    first.seq = Some(12);
+    client.note_frame_seq(&first);
+    assert_eq!(client.last_seq("session-1"), Some(12));
+    let without_seq = frame(
+        FrameType::Extension("norte_code".to_owned()),
+        "session-1",
+        serde_json::json!({}),
+    );
+    client.note_frame_seq(&without_seq);
+    assert_eq!(client.last_seq("session-1"), Some(12));
+    let empty_session = frame(
+        FrameType::Extension("norte_code".to_owned()),
+        "",
+        serde_json::json!({}),
+    );
+    let mut empty_session = empty_session;
+    empty_session.seq = Some(99);
+    client.note_frame_seq(&empty_session);
+    assert_eq!(client.last_seq(""), None);
+}
+
+#[test]
+fn drains_sse_blocks_in_order_and_reaches_past_the_terminal() {
+    // Real envelopes: version, id, timestamp, kind and payload, as the
+    // server emits them through `Envelope::new`.
+    let frame = |kind: &str, seq: u64, payload: &str| -> String {
+        format!(
+            "{{\"version\":\"1.0\",\"id\":\"frame-{seq}\",\"seq\":{seq},\"session_id\":\"session-1\",\"timestamp\":0,\"type\":\"{kind}\",\"payload\":{payload}}}"
+        )
+    };
+    let mut buffer = concat!(
+        "event: turn_state_changed\n",
+        "data: ",
+        "{\"session_id\":\"session-1\",\"seq\":1,\"payload\":{\"event\":\"turn_state_changed\",\"state\":\"finished\",\"turn\":1,\"phase\":\"idle\",\"committed\":true}}\n",
+        "\n",
+        "event: SESSION_STATS\n",
+        "data: {\"session_id\":\"session-1\",\"seq\":2,\"payload\":{\"event\":\"session_stats\",\"input_tokens\":10,\"output_tokens\":4,\"cache_read_tokens\":2,\"cache_write_tokens\":1,\"cost_usd\":0.25,\"requests\":2,\"context_used\":14,\"context_window\":100}}\n",
+        "\n",
+        "data: {\"session_id\":\"session-1\",\"seq\":3,\"payload\":{\"event\":\"session_stats\",\"input_tokens\":11,\"output_tokens\":5,\"cache_read_tokens\":2,\"cache_write_tokens\":1,\"cost_usd\":0.26,\"requests\":3,\"context_used\":15,\"context_window\":100}}"
+    )
+    .to_owned()
+    .into_bytes();
+    // The fixtures above are canonical-only frames (no envelope `kind`):
+    // they still decode through the canonical path, which is the path
+    // `drain_sse_buffer` exercises.
+    let _ = frame;
+    let drained = drain_sse_buffer(&mut buffer);
+    assert_eq!(drained.len(), 2);
+    assert!(drained[0].1, "the terminal event is flagged");
+    assert_eq!(drained[0].2, Some(1));
+    assert!(
+        !drained[1].1,
+        "the event after the terminal is not terminal but still drains"
+    );
+    assert_eq!(drained[1].2, Some(2));
+    // The partial trailing block is left for the next chunk.
+    assert!(String::from_utf8_lossy(&buffer).contains("\"seq\":3"));
+}
+
+#[test]
+fn counts_unrecognized_raep_frames_before_checking_known_event_sequences() {
+    let mut buffer = Vec::from(
+        "data: {\"version\":\"1.0\",\"id\":\"frame-1\",\"seq\":1,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"a\",\"index\":0}}\n\n\
+         data: {\"version\":\"1.0\",\"id\":\"frame-2\",\"seq\":2,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"SESSION_ATTACHED\",\"payload\":{}}\n\n\
+         data: {\"version\":\"1.0\",\"id\":\"frame-3\",\"seq\":3,\"session_id\":\"s\",\"timestamp\":0,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"b\",\"index\":0}}\n\n"
+            .as_bytes(),
+    );
+
+    let drained = drain_sse_buffer(&mut buffer);
+
+    assert_eq!(drained.len(), 3);
+    assert_eq!(drained[0].2, Some(1));
+    assert!(drained[1].0.is_none());
+    assert_eq!(drained[1].2, Some(2));
+    assert!(drained[2].0.is_some());
+    assert_eq!(drained[2].2, Some(3));
+}
+
+#[test]
+fn reads_a_standard_frame_by_its_wire_type() {
+    // The envelope spells the frame kind `type`; a reader that looks for
+    // `kind` treats every standard frame as an unknown canonical one and
+    // drops it, which is how an answer streamed into nothing while the
+    // usage footer still arrived.
+    let mut buffer = Vec::from(
+        "event: TOKEN_DELTA\ndata: {\"version\":\"1.0\",\"session_id\":\"s\",\"timestamp\":1,\"type\":\"TOKEN_DELTA\",\"payload\":{\"channel\":\"text\",\"delta\":\"hi\",\"index\":0}}\n\n"
+            .as_bytes(),
+    );
+    let events = take_sse_events(&mut buffer);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].event.kind,
+        norte_code_wire::ServerEventKind::Delta {
+            delta: norte_code_wire::Delta::Text { ref text, .. },
+            ..
+        } if text == "hi"
+    ));
+}
+
+#[test]
+fn keeps_a_multibyte_character_split_across_chunks() {
+    let text = "data: {\"session_id\":\"s\",\"payload\":{\"event\":\"session_created\",\"title\":\"café\"}}\n\n";
+    let bytes = text.as_bytes();
+    let split = text.find('é').expect("accented character") + 1;
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(&bytes[..split]);
+    assert!(
+        drain_sse_buffer(&mut buffer).is_empty(),
+        "a partial block must wait for the rest"
+    );
+    buffer.extend_from_slice(&bytes[split..]);
+    let drained = drain_sse_buffer(&mut buffer);
+    assert_eq!(drained.len(), 1);
+    assert!(matches!(
+        drained[0].0.as_ref().unwrap().kind,
+        norte_code_wire::ServerEventKind::SessionCreated { title: Some(ref title) }
+            if title == "café"
+    ));
+}
+#[test]
+fn decodes_bare_retry_extension_payloads() {
+    let scheduled = frame(
+        FrameType::Extension("norte_code.retry_scheduled".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "turn_id": 4,
+            "attempt": 2,
+            "delay_ms": 1500,
+            "reason": "Rate limit exceeded"
+        }),
+    );
+    let event = server_event_from_frame(&scheduled)
+        .expect("retry scheduled")
+        .expect("retry scheduled event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::RetryScheduled {
+            turn: 4,
+            attempt: 2,
+            delay_ms: 1500,
+            ref reason
+        } if reason == "Rate limit exceeded"
+    ));
+
+    let started = frame(
+        FrameType::Extension("norte_code.retry_started".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "turn_id": 4,
+            "attempt": 2
+        }),
+    );
+    let event = server_event_from_frame(&started)
+        .expect("retry started")
+        .expect("retry started event");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::RetryStarted {
+            turn: 4,
+            attempt: 2
+        }
+    ));
+}
+
+#[test]
+fn surfaces_unsupported_bare_extension_as_protocol_error() {
+    let unknown = frame(
+        FrameType::Extension("norte_code.unknown_thing".to_owned()),
+        "session-1",
+        serde_json::json!({ "foo": "bar" }),
+    );
+    let event = server_event_from_frame(&unknown)
+        .expect("protocol error event")
+        .expect("protocol error event value");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::Error { code: norte_code_wire::ErrorCode::Internal, ref message }
+            if message.contains("unsupported RAEP extension event")
+    ));
+}

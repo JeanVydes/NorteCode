@@ -23,7 +23,10 @@ use std::process::Command;
 const BUILD_ERROR_LINES: usize = 6;
 
 /// The directory where plugin libraries live.
-pub(crate) fn plugin_dir() -> PathBuf {
+///
+/// `NORTE_CODE_PLUGINS` wins when set; otherwise `$HOME/.config/norte-code/plugins`.
+#[must_use]
+pub fn plugin_dir() -> PathBuf {
     if let Ok(value) = std::env::var("NORTE_CODE_PLUGINS") {
         return PathBuf::from(value);
     }
@@ -159,7 +162,11 @@ pub(crate) fn installed_libraries() -> Vec<PathBuf> {
 /// The name is either the one the plugin answers with or the one its file has:
 /// the list shows both, and a person removing a plugin types the one they
 /// read.
-pub(crate) fn remove_plugin(name: &str) -> Result<(), String> {
+///
+/// # Errors
+///
+/// Returns an error when the plugin is not installed or the file cannot be removed.
+pub fn remove_plugin(name: &str) -> Result<(), String> {
     let path = library_named(name).ok_or_else(|| format!("plugin {name} not found"))?;
     std::fs::remove_file(&path).map_err(|e| format!("could not remove {name}: {e}"))?;
     if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
@@ -186,7 +193,7 @@ pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Install a plugin from a git URL.
+/// Install one plugin package from a git URL.
 ///
 /// Clones the repository into a temporary directory, builds it as a cdylib, and
 /// copies the resulting shared library into the plugin directory. Returns the
@@ -194,11 +201,18 @@ pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
 ///
 /// The clone never asks for credentials: a build that stops to ask is a build
 /// a person cannot get out of, and the answer to a private repository is to
-/// use one that can be read.
+/// use one that can be read. The build installs one package; a workspace with
+/// several plugin packages reports which ones exist — pass one with
+/// `package` or use [`install_all_plugins`].
 ///
 /// `on_progress` is called with the step number, the total step count and a
 /// short label, so a caller can show where the install stands.
-pub(crate) fn install_plugin(
+///
+/// # Errors
+///
+/// Returns an error when the repository has no plugin package, the named package
+/// does not exist, or the build fails. The failed build's last lines are kept.
+pub fn install_plugin(
     url: &str,
     package: Option<&str>,
     on_progress: &dyn Fn(usize, usize, &str),
@@ -227,7 +241,7 @@ pub(crate) fn install_plugin(
 ///
 /// Returns an error when the workspace has no plugin package, or when every
 /// package failed to install.
-pub(crate) fn install_all_plugins(
+pub fn install_all_plugins(
     url: &str,
     on_progress: &dyn Fn(usize, usize, &str),
 ) -> Result<Vec<String>, String> {
@@ -646,7 +660,12 @@ pub(crate) fn installed_entries() -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn plugin_info() -> Vec<norte_code_protocol::PluginInfo> {
+/// The installed plugins, in file order.
+///
+/// `loaded` is always `false`: what the running service has loaded in memory
+/// is the service's business; this reports what is on disk.
+#[must_use]
+pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
     installed_entries()
         .into_iter()
         .filter_map(|path| {
@@ -657,7 +676,7 @@ pub(crate) fn plugin_info() -> Vec<norte_code_protocol::PluginInfo> {
                 .to_str()?
                 .trim_end_matches(".disabled")
                 .to_owned();
-            Some(norte_code_protocol::PluginInfo {
+            Some(norte_code_wire::PluginInfo {
                 name,
                 enabled: !disabled,
                 loaded: false,
@@ -674,7 +693,7 @@ pub(crate) fn plugin_info() -> Vec<norte_code_protocol::PluginInfo> {
 /// # Errors
 ///
 /// Returns an error when the plugin is not installed or the rename fails.
-pub(crate) fn set_plugin_enabled(name: &str, enabled: bool) -> Result<(), String> {
+pub fn set_plugin_enabled(name: &str, enabled: bool) -> Result<(), String> {
     let path = installed_entries()
         .into_iter()
         .find(|path| {
@@ -773,107 +792,19 @@ fn tail(output: &[u8], lines: usize) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plugin_dir_defaults_to_home_config() {
-        let dir = plugin_dir();
-        assert!(dir.to_string_lossy().contains(".config/norte-code/plugins"));
-    }
-
-    #[test]
-    fn list_plugins_returns_only_library_stems() {
-        let names = list_plugins();
-        assert!(names.iter().all(|name| !name.is_empty()));
-    }
-
-    #[test]
-    fn a_workspace_requires_a_package_when_it_contains_multiple_plugins() {
-        let metadata = serde_json::json!({
-            "packages": [
-                {"id": "path+file:///repo#first@0.1.0", "name": "first", "targets": [
-                    {"name": "first", "crate_types": ["cdylib"]}
-                ]},
-                {"id": "path+file:///repo#second@0.1.0", "name": "second", "targets": [
-                    {"name": "second", "crate_types": ["cdylib"]}
-                ]},
-                {"id": "path+file:///repo#helper@0.1.0", "name": "helper", "targets": [
-                    {"name": "helper", "crate_types": ["lib"]}
-                ]}
-            ]
-        });
-        let packages = plugin_packages(&metadata).expect("workspace packages");
-        let error = select_plugin_package(&packages, None).expect_err("ambiguous workspace");
-        assert!(error.contains("first, second"), "{error}");
-
-        let selected = select_plugin_package(&packages, Some("second")).expect("selected package");
-        assert_eq!(selected.name, "second");
-        assert_eq!(selected.id, "path+file:///repo#second@0.1.0");
-    }
-
-    #[test]
-    fn a_single_workspace_plugin_is_selected_without_a_package_name() {
-        let metadata = serde_json::json!({
-            "packages": [
-                {"id": "path+file:///repo#plugin@0.1.0", "name": "plugin", "targets": [
-                    {"name": "plugin", "crate_types": ["cdylib"]}
-                ]},
-                {"id": "path+file:///repo#helper@0.1.0", "name": "helper", "targets": [
-                    {"name": "helper", "crate_types": ["lib"]}
-                ]}
-            ]
-        });
-        let packages = plugin_packages(&metadata).expect("workspace packages");
-        assert_eq!(
-            select_plugin_package(&packages, None)
-                .expect("unique plugin")
-                .name,
-            "plugin"
-        );
-    }
-
-    #[test]
-    fn recorded_sources_keep_legacy_urls_and_workspace_packages() {
-        let sources = parse_sources(
-            r#"{"old":"https://example.invalid/old","new":{"url":"https://example.invalid/repo","package":"new-plugin"}}"#,
-        )
-        .expect("sources");
-        assert_eq!(sources["old"].url, "https://example.invalid/old");
-        assert_eq!(sources["old"].package, None);
-        assert_eq!(sources["new"].package.as_deref(), Some("new-plugin"));
-    }
-
-    #[test]
-    fn the_cdylib_is_read_out_of_the_cargo_messages() {
-        // The directory holds every dependency's library too, and one of
-        // those is not a plugin.
-        let messages = br#"{"reason":"compiler-artifact","package_id":"path+file:///repo#plugin@0.1.0","target":{"kind":["cdylib"]},"filenames":["/tmp/target/release/libplugin.so"]}
-{"reason":"compiler-artifact","package_id":"path+file:///repo#helper@0.1.0","target":{"kind":["cdylib"]},"filenames":["/tmp/target/release/libhelper.so"]}
-{"reason":"compiler-artifact","package_id":"path+file:///repo#plugin@0.1.0","target":{"kind":["lib"]},"filenames":["/tmp/target/release/libplugin.rlib"]}
-"#;
-        assert_eq!(
-            cdylib(messages, "path+file:///repo#plugin@0.1.0"),
-            Some(PathBuf::from("/tmp/target/release/libplugin.so"))
-        );
-    }
-
-    #[test]
-    fn a_build_without_a_cdylib_has_no_library() {
-        let messages = br#"{"reason":"compiler-artifact","package_id":"path+file:///repo#plugin@0.1.0","target":{"kind":["lib"]},"filenames":["/tmp/target/release/libplugin.rlib"]}
-"#;
-        assert_eq!(cdylib(messages, "path+file:///repo#plugin@0.1.0"), None);
-    }
-
-    #[test]
-    fn the_error_keeps_the_last_lines_and_not_the_whole_log() {
-        let output = b"one\ntwo\nthree\nfour\nfive\n";
-        assert_eq!(tail(output, 2), "four\nfive");
-    }
-
-    #[test]
-    fn an_error_without_output_still_says_something() {
-        assert_eq!(tail(b"", 4), "no output");
-    }
+/// The recorded source (URL, and package when it came from a workspace) for
+/// every installed plugin that has one.
+///
+/// A plugin installed before the source sidecar existed, or installed without
+/// recording, is not in the map — it shows up in the list with no source.
+#[must_use]
+pub fn recorded_sources() -> std::collections::BTreeMap<String, (String, Option<String>)> {
+    load_sources()
+        .into_iter()
+        .map(|(stem, source)| (stem, (source.url, source.package)))
+        .collect()
 }
+
+#[cfg(test)]
+#[path = "plugin_manager_tests.rs"]
+mod tests;

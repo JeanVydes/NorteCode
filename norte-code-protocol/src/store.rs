@@ -14,24 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-/// Durable position of a session in the turn loop.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum SessionPhase {
-    #[default]
-    Idle,
-    Streaming,
-    AwaitingTool,
-}
-
-impl SessionPhase {
-    #[must_use]
-    pub fn is_idle(self) -> bool {
-        matches!(self, SessionPhase::Idle)
-    }
-}
-
 /// An immutable node in the conversation graph.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
@@ -85,7 +67,7 @@ pub struct Session {
     pub id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<NodeId>,
-    pub phase: SessionPhase,
+    pub phase: norte_code_wire::Phase,
     pub version: u64,
     pub turn: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -101,7 +83,7 @@ impl Session {
         Self {
             id: SessionId::new(),
             head: None,
-            phase: SessionPhase::Idle,
+            phase: norte_code_wire::Phase::Idle,
             version: 0,
             turn: 0,
             metadata: BTreeMap::new(),
@@ -130,7 +112,7 @@ pub struct Commit {
     pub nodes: Vec<Node>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<NodeId>,
-    pub phase: SessionPhase,
+    pub phase: norte_code_wire::Phase,
     pub turn: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<BTreeMap<String, Value>>,

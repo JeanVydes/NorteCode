@@ -6,8 +6,102 @@ follows [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Session-scoped controls live in the session header: the model the session
+  runs on, and tabs for Transcript, Subagents, Jobs and Telemetry. The
+  Providers page no longer switches a session's model, the Subagents page is
+  no longer a global destination, and "Connect / refresh" moved to Host.
+  Switching sessions is never blocked by a running turn.
+- Replies stream token by token again: the conversation effect depended on the
+  chat state, so every delta restarted it, tore the stream down and reloaded
+  the history — the answer only appeared when the turn ended.
+- A prompt sent with an attachment travels as `content` with the text as its
+  first part; sending `prompt` and `content` together is rejected by the wire
+  as `INVALID_FRAME`, which is what made attaching a PDF fail.
+- Tool calls replayed from history keep their name and summarised target
+  instead of dumping the argument document as a path, and the full arguments
+  stay folded until the row is opened.
+- Telemetry, cost and job reads no longer require an attachment, so a session's
+  panes can be read while its conversation stream is open.
+- The conversation page keeps one event stream open per session, so opening a
+  session loads its history and live turns over that same attachment. A
+  re-attach on a session the host still considers attached now takes over
+  instead of answering `SESSION_BUSY`, which is what a browser reload does.
+- The conversation is a single timeline: no per-message cards, no page header
+  above it, no "Load history" button and no `Unix <seconds>` label. Each turn
+  shows what answered it under the answer — provider/model, total latency,
+  tokens per second, TTFT, token counts, cache hits and cost — from the
+  `request_completed` frame.
+- Tool calls collapse to one line and open on demand; the plan is a folded
+  summary above the conversation.
+- A message carries its own actions: rewind to it, edit and resend (rewind plus
+  replace in one step), pin the turn so compaction keeps it, and fork from
+  there. Sending while a turn runs steers it with the chosen queue mode
+  (wait, queue or stop the turn), and the whole conversation can be compacted
+  from its header.
+- Sessions can be created pinned to a provider/model through `agent_override`,
+  so the first turn already runs on the chosen model.
+- The system prompt is no longer part of `HISTORY_GET`: it is the agent's
+  preamble, not something either side said, so a client no longer draws it
+  before the first message.
+
+### Fixed
+
+- The conversation stream now renders what it receives: the client keyed each
+  token delta by its own placeholder turn id instead of the turn the server
+  names in `USER_INPUT_ACCEPTED`, so every delta was discarded and the answer
+  only appeared after reopening the session. A frame whose turn id differs now
+  adopts that id instead of dropping the frame.
+- Assistant text is drawn with the `markdown-body` styles again; a bare
+  `markdown` class left every answer invisible and the blank space under each
+  message.
+- A provider's answer is one bubble: deltas were keyed by the provider's part
+  index, which splits a single answer into several when it starts a new part.
+- Rewinding across a turn that ran a tool no longer fails with
+  `REWIND_BLOCKED: tool side-effect metadata is unavailable`. The rewind
+  proceeds and `HISTORY_REWOUND.side_effects` names the calls it removed, so
+  the person can see what happened outside the conversation.
+- `SESSION_FORK` no longer rejects a payload that repeats the session id from
+  the envelope.
+- A catalogue that only exists in memory — a catalogue plugin offering its
+  providers and models — now resolves like one read from the files, and
+  `REFRESH_CATALOG` folds the plugin entries back over the files instead of
+  dropping them.
+- An empty catalogue says which step is missing (a provider in
+  `providers.json` or a catalogue plugin) instead of naming an unknown
+  provider.
+- Per-request usage travels as its own `request_completed` event rather than
+  as an `output_part_finished`, which made clients read a usage row as a media
+  part. It carries the provider and model that answered, so a turn's footer
+  names what actually ran it.
+- The provider catalogue lists each provider's models behind a fold instead of
+  printing every model at once.
+
 ### Added
 
+- The Dioxus chat now shows sent messages immediately, streams assistant and
+  tool events over authenticated SSE, renders Markdown safely, presents file
+  tools as concise activity with available edit diffs, and pins the session's
+  current TODO list above the conversation.
+- The Dioxus app now exposes host-backed provider/model selection, plugin
+  lifecycle controls, skills/MCP/tool-approval management, session rename and
+  delete, question answers, detachable tool jobs with live output, cost
+  reports, and expandable reasoning. Media upload controls now follow the
+  selected agent's advertised modalities, MIME types and size/item limits.
+- RAEP history now persists turn-to-conversation boundaries, keeps turn ids
+  monotonic across compaction, and pages `HISTORY_GET` by `before_turn_id` with
+  timestamps and `has_more`.
+- `SESSION_FORK` can branch at a named terminal turn, include or exclude that
+  turn, and carry the source session's usage counters by default.
+- `SESSION_REWIND` now removes text-only turns from the active model context
+  while retaining them for `HISTORY_GET` with `include_rewound`; rewinds that
+  cross tool calls are rejected until side-effect metadata is available.
+- Delegation can select child agent profiles through each agent's `delegates`
+  allow-list. Detached child runs execute as background jobs, and parents can
+  message, wait for, inspect, list and stop their children. Existing service
+  configurations that set `subagent` must also list that profile in
+  `delegates`.
 - `ui.queue_mode` in `cli.json` chooses what a message typed while a turn runs does: `reject` starts a new turn, `queue` steers into the running one, and `interrupt` cancels the turn first. `Steer` now carries the policy, and the RAEP host maps `USER_INPUT.queue_policy` onto it.
 - A steering message that reached the request in flight is now also reported as a standard `USER_INPUT_ACCEPTED` frame, with the accepted `content` and an `origin` (`kind: "user"`); the queued-input limit (`limits.max_queued_inputs`, default 8) now fails with `SESSION_BUSY` instead of growing the queue without bound.
 - Browser requests are checked against a new `allowed_origins` list: a request that carries an `Origin` header is rejected unless the origin is listed. A non-browser client sends no `Origin` and is unaffected.
