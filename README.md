@@ -1,21 +1,9 @@
 # Norte Code
 
-Norte Code is the RAEP server for the Norte agent, plus a Dioxus client that
-talks to it over the same protocol any other client does. The server owns
-sessions, execution, catalogues and plugins; a client attaches to a session
-and sends the next user input.
-
-## Build
-
-Rust 1.88+:
-
-```sh
-cargo build --release
-```
-
-The server binary is `target/release/norte-code-server`. It listens on
-`127.0.0.1:8787` and keeps its sessions database in `NORTE_CODE_DATABASE`
-(default `$XDG_DATA_HOME/norte-code/sessions.db`, or the platform equivalent).
+Norte Code is a single-binary agent host. One command, `norte`, manages a
+background service (sessions, execution, catalogues, plugins) and, when asked,
+opens the terminal interface that talks to it. Everything else — providers,
+models, MCP servers, plugins — is configured from the same command.
 
 ## Install
 
@@ -23,121 +11,84 @@ The server binary is `target/release/norte-code-server`. It listens on
 cargo install --git https://github.com/JeanVydes/NorteCode --path norte-code-cli
 ```
 
-Both install into `~/.cargo/bin/`. The only command you type afterwards is `norte`.
-
-The service runs in the background once started (`norte service up`); it is
-not tied to the terminal that started it.
+The binary installs into `~/.cargo/bin/norte`. Everything else — the background
+service, the TUI, the catalogue, the configuration — is managed from that one
+command.
 
 ## Run
 
 ```sh
-# start the service in the background (if it is not already running) and
-# open the terminal interface in the current terminal:
+# start the service if needed and open the terminal interface:
 norte
 
-# manage the service:
+# open only the terminal interface:
+norte tui
+
+# manage the background service:
 norte service up
 norte service down
 norte service restart
 norte service status
 norte service catalog
 norte service config
-norte service logs [--live]
+norte service logs [--live|-f|--follow]
 norte service doctor
-
-# open only the terminal interface:
-norte tui
 ```
 
-## Providers and models
+The service runs detached: closing the terminal interface does not stop it.
 
-The server reads two files beside its configuration — `providers.json` and
-`models.json`. They are empty by default: nothing is fetched or bundled. Keys
-come from the environment or a private `secrets.json` (mode 0600); the
-stateless CLI never reads them.
+## Configure providers
 
-Install the OpenRouter catalogue through the trusted
-[catalog-plugin](https://github.com/JeanVydes/catalog-plugin) instead of
-maintaining those files:
+Providers and models live in two files beside the configuration
+(`providers.json`, `models.json`). They are empty by default — nothing is
+fetched or bundled. Manage them from the CLI:
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
+norte service providers add openrouter \
+  --wire openai --base-url https://openrouter.ai/api/v1 \
+  --key OPENROUTER_API_KEY
+
+norte service providers list
+norte service providers remove openrouter
 ```
 
-## RAEP server
+`--key` names an environment variable; the value is never written to disk.
+Keys can also come from a private `secrets.json` (mode 0600) beside the config.
 
-The RAEP server keeps the NorteCode harness on the server. A client does not
-send the provider request or rebuild the model history; it attaches to a
-session and sends the next user input. The server loads that session's
-durable history, appends the input, and runs the internal `generate` operation.
+## MCP servers
 
-An attach frame creates or opens a session:
-
-```json
-{
-  "version": "1.0",
-  "id": "attach-001",
-  "session_id": "",
-  "timestamp": 1730000000000,
-  "type": "session_attach",
-  "payload": {
-    "agent_id": "norte-code",
-    "create_if_missing": true,
-    "mode": "controller"
-  }
-}
+```sh
+norte service mcps add fs --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /tmp
+norte service mcps add remote --url https://mcp.example.com/mcp --header 'Authorization=Bearer x'
+norte service mcps list
+norte service mcps remove fs
 ```
 
-The client then sends the user message on the returned session:
+MCP servers are connected when the service starts, so restart it after adding
+or removing one.
 
-```json
-{
-  "version": "1.0",
-  "id": "input-001",
-  "session_id": "session-123",
-  "timestamp": 1730000001000,
-  "type": "user_input",
-  "payload": {
-    "prompt": "Explícame cómo funciona RAEP"
-  }
-}
+## Plugins
+
+Plugins are git repositories built as cdylibs and copied into the plugin
+directory:
+
+```sh
+norte service plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
+norte service plugins list
+norte service plugins disable <name>
+norte service plugins enable <name>
+norte service plugins remove <name>
 ```
 
-The server translates that frame to a NorteCode `SendMessage` request. The
-result is streamed as RAEP events, including text deltas, tool calls,
-approvals, questions, jobs, usage and completion. To recover events after a
-disconnect, the client attaches with `resume_from_seq`; it does not resend the
-conversation history. Each session's frames are kept in
-`<database stem>.replay/<session>.jsonl`, capped by bytes, so sequence replay
-survives a server restart; an attach whose sequence is older than what the file
-still holds comes back truncated and the client reloads history. Artifact uploads go directly into Norte's
-content-addressed BlobStore; no second artifact directory is created. The
-common event families use standard RAEP payloads (`turn`, tools, jobs,
-questions, budget, usage, retries and errors); events with no standard shape
-travel as `norte_code.<event>` frames, and each event has exactly one encoding
-on the wire.
-`norte_code.command` extension is available when a
-client needs the complete NorteCode command surface, including model, budget,
-steering, jobs and session operations.
-Common session operations use the standard `SESSION_CONFIGURE` frame with an
-`operation` enum (`list_jobs`, `stop_jobs`, `set_model`, `set_reasoning`,
-`set_budget`, `answer_question`, `resume`, or `compact`), so clients do not
-need the NorteCode extension for those controls.
+Plugins are loaded when the service starts, so restart it after installing,
+enabling or disabling.
 
-Set `NORTE_CODE_AUTH_TOKEN` to require a bearer `Authorization` header on
-WebSocket, SSE, artifact upload and session-command routes. Health and
-discovery endpoints remain public for orchestration probes. Upload binary
-content with `POST /raep/v1/artifacts` and use the returned `id` as
-`content[].source.artifact_id` in a multimodal `USER_INPUT`. An uploaded blob
-can be read back with authenticated `GET /raep/v1/artifacts/{artifact_id}`.
+## Configuration
 
-## Documentation
-
-- **[CONFIG.md](CONFIG.md)**: the full configuration schema.
-- **[AGENTS.md](AGENTS.md)**: the crate layout and the rules that keep it
-  that way.
-- **`guide/`**: written for the terminal client that no longer ships; it is
-  being rewritten for the app and the protocol.
+- `CONFIG.md` — the full configuration schema (`service.json`, `cli.json`,
+  catalogue files, secrets).
+- `AGENTS.md` — the crate layout and the rules that keep it that way.
+- `guide/` — the user guide.
 
 ## License
 
