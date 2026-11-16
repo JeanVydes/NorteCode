@@ -97,7 +97,7 @@ impl ModelsView {
             Some(ModelRow::Model(selected))
                 if model.active_child.is_none() && model.active_session.is_some() =>
             {
-                let missing = crate::provider_keys::check(&selected.provider);
+                let missing = crate::provider_keys::check(model, &selected.provider);
                 if let crate::provider_keys::ProviderKeyStatus::Missing { .. } = missing {
                     self.key_prompt = Some(KeyPrompt::Edit {
                         provider: selected.provider.clone(),
