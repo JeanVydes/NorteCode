@@ -71,21 +71,12 @@ pub(crate) enum ProviderKeyEraseOutcome {
 /// reader is told which one holds the key instead.
 #[must_use]
 pub(crate) fn erase(model: &UiModel, provider_id: &str) -> ProviderKeyEraseOutcome {
-    let environment_keys = match environment_keys_for(model, provider_id) {
-        Err(()) => {
-            return ProviderKeyEraseOutcome::Error {
-                message: "could not read the catalogue; cannot tell where the key comes from"
-                    .to_owned(),
-            }
-        }
-        Ok(None) => {
-            return ProviderKeyEraseOutcome::Missing;
-        }
-        Ok(Some(keys)) => keys,
-    };
+    let environment_keys = find_environment_keys(model, provider_id);
     if let Some(variable) = first_set_env_var(&environment_keys) {
         return ProviderKeyEraseOutcome::FromEnvironment { variable };
     }
+    // The file is always attempted, plugin-injected providers included,
+    // because this is where a saved key lives.
     let Some(path) = secrets_path() else {
         return ProviderKeyEraseOutcome::Error {
             message: "could not resolve the secrets.json path".to_owned(),
@@ -102,6 +93,26 @@ pub(crate) fn erase(model: &UiModel, provider_id: &str) -> ProviderKeyEraseOutco
             message: error.to_string(),
         },
     }
+}
+
+/// The environment keys of one provider, from wherever we can learn them.
+///
+/// The live catalogue is tried first (it carries plugin-injected providers
+/// too), then the catalogue files. A provider found nowhere returns no keys:
+/// no environment variable can hold the key, so the secrets file is attempted.
+fn find_environment_keys(model: &UiModel, provider_id: &str) -> Vec<String> {
+    if let Some(provider) = model
+        .catalog
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == provider_id)
+    {
+        return provider.environment_keys.clone();
+    }
+    load_environment_keys(provider_id)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 /// The first environment variable of `members` that is set and non-blank.
