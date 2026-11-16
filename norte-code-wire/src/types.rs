@@ -259,8 +259,11 @@ pub enum Modality {
 }
 
 /// One provider as the editor shows it.
+///
+/// The wire is additive: a host may carry fields this build does not know
+/// yet, and a client that refuses them is a client that crashes on upgrade
+/// while the rest of the session keeps working. Unknown fields are ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CatalogProviderInfo {
     /// The provider id.
     pub provider_id: String,
