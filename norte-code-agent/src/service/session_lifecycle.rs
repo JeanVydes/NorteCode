@@ -50,7 +50,18 @@ impl Service {
                 &entry.denied_tools,
                 &entry.allowed_tools,
             );
-            let record = record_from(entry, Some(spec), phase);
+            let mut record = record_from(entry, Some(spec), phase);
+            // The stored stats never recorded a last-activity moment before
+            // that existed, so `activity_at_ms` is None for every session
+            // resumed from one of those rows. The north store keeps the
+            // session itself, and its `updated_at` is what the conversation
+            // last touched — a real signal, not the pretense this used to
+            // emit.
+            if record.activity_at_ms.is_none()
+                && let Ok(session) = self.store.load(record.id).await
+            {
+                record.activity_at_ms = Some(session.updated_at.timestamp_millis());
+            }
             records.push((key.clone(), record));
             if needs_repair {
                 repaired.push(key);
@@ -181,6 +192,7 @@ impl Service {
                 input_tokens: record.input_tokens,
                 context_used: record.context_used,
                 last_turn: record.last_turn,
+                activity_at_ms: record.activity_at_ms,
                 turn_boundaries: record.turn_boundaries.clone(),
                 rewound_history: record
                     .rewound_history

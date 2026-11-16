@@ -620,7 +620,7 @@ impl ListAgents {
     pub(crate) fn into_declaration(self) -> norte::ToolDeclaration<ListArgs> {
         norte::ToolDeclaration::new(
             "list_agents",
-            "List the child sessions this session has spawned, with their state. Use it when you have lost a child id; the ids come from `spawn_agent`.",
+            "List the child sessions this session has spawned, with their state, plus the agent profiles this session may delegate to. Use it to find a lost child id (the ids come from `spawn_agent`) and to learn which `agent_id` values `spawn_agent` accepts for this session's profile.",
             Arc::new(self),
         )
     }
@@ -664,8 +664,10 @@ impl FnExecutor<ListArgs, ToolOutput> for ListAgents {
                 break;
             }
         }
+        let delegates = service.delegates_for(&parent_key);
         Ok(ToolOutput::text(answer(&ListedChildren {
             children: items,
+            delegates,
         })))
     }
 }

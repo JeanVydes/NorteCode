@@ -31,7 +31,7 @@ impl NorteCodeRaepHost {
         self.require_attached(&frame.session_id).await?;
         let request: ExportRequest = serde_json::from_value(frame.payload)?;
         validate_export_request(&request)?;
-        let service = self.service_for_session(&frame.session_id).await?;
+        let service = self.service_for_session(&frame.session_id)?;
         let bytes = self.build_text_bundle(&service, &frame.session_id).await?;
         let (export_id, expires_at, byte_count, digest) =
             self.store_export(bytes, principal).await?;
@@ -78,14 +78,7 @@ impl NorteCodeRaepHost {
                 "SESSION_EXPORT cannot preserve rewound history on this host".to_owned(),
             ));
         }
-        let session_agent_id = self
-            .state
-            .lock()
-            .await
-            .session_agents
-            .get(session_id)
-            .cloned()
-            .unwrap_or_else(|| self.config.agent_id.clone());
+        let session_agent_id = self.session_owner(session_id);
         let history = service
             .session_history_with_provenance(&key)
             .await

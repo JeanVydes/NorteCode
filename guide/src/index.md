@@ -10,12 +10,9 @@ communicates with the service over RAEP.
    first prompt.
 2. [Configure a provider](guides/configure-a-provider.md) — the two catalogue
    files and where your API key goes.
-3. [Start a session](guides/run-a-prompt.md) — the flags that shape a run.
 
 ## Everyday use
 
-- [Continue a session](guides/continue-a-session.md) — resume, the chat
-  commands, Ctrl-C, compaction.
 - [Plans](plans.md) — how the model proposes work for your approval, and how
   to read and edit those proposals.
 - [Approve a tool](guides/approve-a-tool.md) — `/allow`, `/deny`, and what
@@ -30,13 +27,11 @@ communicates with the service over RAEP.
 - [CLI](reference/cli.md) — every subcommand and flag.
 - [Configuration](reference/configuration.md) — every config key.
 - [Protocol](reference/protocol.md) — the request/event stream.
-- [Script with JSONL](guides/script-with-jsonl.md) — drive the CLI headlessly
-  and inspect every service event.
 - [FAQ](faq.md) — server, TUI, costs, sandbox defaults.
 
 ## What it is not
 
-- The CLI is stateless: start the local service with `norte-code service start`,
+- The CLI is stateless: start the local service with `norte service up`,
   or point `cli.json` at a remote service.
 - Not a model catalogue of its own: models come from two files you own,
   `providers.json` and `models.json`. Nothing is fetched or baked in.

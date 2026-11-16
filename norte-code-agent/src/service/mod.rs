@@ -30,6 +30,7 @@ mod models;
 pub use models::ReasoningError;
 mod plans;
 pub use plans::PlanError;
+pub mod pins;
 mod prompt;
 mod questions;
 mod sandbox;
@@ -364,8 +365,13 @@ impl Service {
                 .iter()
                 .any(|delegate| delegate == &target_name)
             {
+                let allowed = if parent_config.delegates.is_empty() {
+                    "none (delegation is disabled for this profile; `delegates` in the agent profile enables it)".to_owned()
+                } else {
+                    format!("[{}]", parent_config.delegates.join(", "))
+                };
                 return Err(ServiceError::Delegation(format!(
-                    "DELEGATE_NOT_ALLOWED: agent `{target_name}` is not in `{parent_profile}`'s delegates"
+                    "DELEGATE_NOT_ALLOWED: agent `{target_name}` is not in `{parent_profile}`'s delegates; allowed: {allowed}"
                 )));
             }
             let target_config = profiles.get(&target_name).cloned().ok_or_else(|| {
@@ -410,6 +416,26 @@ impl Service {
             .clone()
             .unwrap_or_else(|| self.subagent_system_prompt.clone());
         Ok((target_name.clone(), spec, disabled, budget, system_prompt))
+    }
+
+    /// The parent profile's `delegates` list, resolved the same way
+    /// `subagent_settings` resolves the child, so tools can show the model
+    /// exactly which profiles it may spawn.
+    pub(super) fn delegates_for(&self, parent: &SessionKey) -> Vec<String> {
+        let root_config = self.config();
+        let profiles = self
+            .agent_profiles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let parent_profile = self
+            .lock_sessions()
+            .get(parent)
+            .and_then(|record| record.agent_profile.clone())
+            .unwrap_or_else(|| root_config.name.clone());
+        profiles.get(&parent_profile).map_or_else(
+            || root_config.delegates.clone(),
+            |config| config.delegates.clone(),
+        )
     }
 
     pub(super) async fn delegation_context_summary(

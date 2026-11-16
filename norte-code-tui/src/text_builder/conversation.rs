@@ -1,15 +1,14 @@
-use norte_code_wire::{MessageRole, OutputStream, ToolStatus};
+use norte_code_wire::{OutputStream, ToolStatus};
 use ratatui::{
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
 use super::TextBuilder;
 use crate::{
     components::palette,
-    ui_model::{ReasoningLevel, SessionAttachmentState, SessionModel, TurnState, UsageSummary},
+    ui_model::{SessionAttachmentState, SessionModel, TurnState, UsageSummary},
 };
-use norte_code_wire::QueueMode;
 
 /// A token count short enough to read.
 fn human_count(value: u64) -> String {
@@ -32,6 +31,8 @@ impl TextBuilder {
         turn_state: TurnState,
         attachment_state: SessionAttachmentState,
         model: Option<&SessionModel>,
+        queued_model: Option<&SessionModel>,
+        theme: crate::ui_model::ThemeMode,
     ) -> Line<'static> {
         let label = session.map_or_else(
             || Self::no_active_session().to_owned(),
@@ -50,29 +51,22 @@ impl TextBuilder {
             },
         };
         let mut spans = vec![Span::raw(label)];
-        if let Some(model) = model {
-            spans.push(Span::raw(" · "));
-            spans.push(Span::raw(format!("{}/{}", model.provider, model.model)));
-        }
         spans.push(Span::raw(" · "));
         spans.push(Span::raw(state));
+        if let Some(model) = model {
+            spans.push(Span::raw(" · "));
+            spans.push(Span::styled(
+                format!("{}/{}", model.provider, model.model),
+                Style::default().fg(palette::muted()),
+            ));
+            if let Some(queued) = queued_model {
+                spans.push(Span::styled(
+                    format!(" → {}/{}", queued.provider, queued.model),
+                    Style::default().fg(palette::accent(theme)),
+                ));
+            }
+        }
         Line::from(spans)
-    }
-
-    #[must_use]
-    pub fn speaker_label(speaker: MessageRole, text: &str) -> Line<'static> {
-        let label = match speaker {
-            MessageRole::User => Self::user_speaker_label(),
-            MessageRole::Assistant => Self::assistant_speaker_label(),
-            MessageRole::Tool => Self::tool_call_label(),
-            MessageRole::System => Self::system_speaker_label(),
-            MessageRole::Developer => Self::developer_speaker_label(),
-            MessageRole::Unknown => Self::unknown_speaker_label(),
-        };
-        Line::from(vec![
-            Span::raw(format!("{label}  ")),
-            Span::raw(text.to_owned()),
-        ])
     }
 
     #[must_use]
@@ -102,7 +96,7 @@ impl TextBuilder {
             parts.push(format!("{} cached", human_count(cache)));
         }
         if let Some(duration) = usage.duration_ms {
-            parts.push(format!("{duration} ms"));
+            parts.push(Self::human_duration(duration));
         }
         if let Some(speed) = usage.tokens_per_second {
             parts.push(format!("{speed:.1} tok/s"));
@@ -119,25 +113,43 @@ impl TextBuilder {
         )))
     }
 
-    /// The line under the input: what the session is set to.
+    /// A duration short enough to read: milliseconds under a second,
+    /// seconds after that, so an accumulated turn does not read "9632 ms".
     #[must_use]
-    pub fn composer_status(queue_mode: QueueMode, reasoning: ReasoningLevel) -> String {
-        format!(
-            "{} · {} change · reasoning {} · {} change",
-            Self::queue_mode_description(queue_mode),
-            crate::keys::QUEUE_MODE_CHAR,
-            reasoning.label(),
-            crate::keys::REASONING_CHAR
-        )
+    pub fn human_duration(ms: u64) -> String {
+        if ms >= 1000 {
+            #[allow(clippy::cast_precision_loss)]
+            let seconds = ms as f64 / 1000.0;
+            format!("{seconds:.1} s")
+        } else {
+            format!("{ms} ms")
+        }
     }
 
     #[must_use]
-    pub fn tool_call_header(name: &str, target: Option<&str>) -> Line<'static> {
-        let call = match target {
-            Some(target) => format!("{}  {name}  {target}", Self::tool_call_label()),
-            None => format!("{}  {name}", Self::tool_call_label()),
-        };
-        Line::from(call)
+    pub fn tool_call_header(icon: &str, name: &str, target: Option<&str>) -> Line<'static> {
+        let mut spans = vec![
+            Span::styled(
+                format!("{icon} "),
+                Style::default()
+                    .fg(palette::accent(crate::ui_model::ThemeMode::Dark))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                name.to_owned(),
+                Style::default()
+                    .fg(palette::brand())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if let Some(target) = target {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                target.to_owned(),
+                Style::default().fg(palette::muted()),
+            ));
+        }
+        Line::from(spans)
     }
 
     #[must_use]
@@ -164,7 +176,16 @@ impl TextBuilder {
             ToolStatus::Error => Self::tool_failed_label(),
             ToolStatus::Cancelled => Self::tool_cancelled_label(),
         };
-        Line::from(format!("{name}  {state}"))
+        let color = match status {
+            ToolStatus::Ok => palette::muted(),
+            ToolStatus::Error => palette::danger(),
+            ToolStatus::Cancelled => palette::warning(),
+        };
+        Line::from(vec![
+            Span::styled(name.to_owned(), Style::default().fg(palette::muted())),
+            Span::raw("  "),
+            Span::styled(state.to_owned(), Style::default().fg(color)),
+        ])
     }
 
     #[must_use]
@@ -230,30 +251,6 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn diff_unavailable() -> Line<'static> {
-        Line::from(Self::diff_unavailable_label())
-    }
-
-    #[must_use]
-    pub fn diff_too_large() -> Line<'static> {
-        Line::from(Self::diff_too_large_label())
-    }
-
-    #[must_use]
-    pub fn unified_diff_label() -> Line<'static> {
-        Line::from(Self::unified_diff_title())
-    }
-
-    #[must_use]
-    pub fn split_diff_label() -> Line<'static> {
-        Line::from(format!(
-            "{}  {}",
-            Self::split_diff_title(),
-            Self::split_diff_column_titles()
-        ))
-    }
-
-    #[must_use]
     pub const fn no_active_session() -> &'static str {
         "no session"
     }
@@ -289,11 +286,6 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub const fn tool_call_label() -> &'static str {
-        "tool"
-    }
-
-    #[must_use]
     pub const fn tool_done_label() -> &'static str {
         "done"
     }
@@ -313,54 +305,47 @@ impl TextBuilder {
         "error"
     }
 
+    /// The line that opens a turn: its number and what it holds.
     #[must_use]
-    pub const fn diff_unavailable_label() -> &'static str {
-        "edit diff unavailable"
+    pub fn turn_separator(
+        label: &str,
+        tools: usize,
+        messages: usize,
+        duration_ms: Option<u64>,
+        folded: bool,
+    ) -> Line<'static> {
+        let mut parts = vec![label.to_owned()];
+        if tools > 0 {
+            parts.push(format!("{tools} tools"));
+        }
+        if messages > 0 {
+            parts.push(format!("{messages} messages"));
+        }
+        if let Some(duration_ms) = duration_ms {
+            if duration_ms < 1000 {
+                parts.push(format!("{duration_ms}ms"));
+            } else {
+                let rounded = (duration_ms + 50) / 100;
+                parts.push(format!("{}.{}s", rounded / 10, rounded % 10));
+            }
+        }
+        Line::from(vec![
+            Span::styled(
+                if folded { "▸ " } else { "▾ " },
+                Style::default().fg(palette::brand()),
+            ),
+            Span::styled(parts.join(" · "), Style::default().fg(palette::muted())),
+        ])
     }
 
     #[must_use]
-    pub const fn diff_too_large_label() -> &'static str {
-        "edit diff exceeds the display limit"
+    pub fn tool_detached_output() -> Line<'static> {
+        Line::from(Span::raw("output hidden: detached job"))
     }
 
     #[must_use]
-    pub const fn unified_diff_title() -> &'static str {
-        "unified"
-    }
-
-    #[must_use]
-    pub const fn split_diff_title() -> &'static str {
-        "split"
-    }
-
-    #[must_use]
-    pub const fn split_diff_column_titles() -> &'static str {
-        "before | after"
-    }
-
-    #[must_use]
-    pub const fn user_speaker_label() -> &'static str {
-        "you"
-    }
-
-    #[must_use]
-    pub const fn assistant_speaker_label() -> &'static str {
-        "norte"
-    }
-
-    #[must_use]
-    pub const fn system_speaker_label() -> &'static str {
-        "system"
-    }
-
-    #[must_use]
-    pub const fn developer_speaker_label() -> &'static str {
-        "developer"
-    }
-
-    #[must_use]
-    pub const fn unknown_speaker_label() -> &'static str {
-        "unknown"
+    pub fn write_target(path: &str, count: usize) -> String {
+        format!("{path} · {count} lines")
     }
 
     #[must_use]

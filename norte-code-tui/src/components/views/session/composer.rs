@@ -17,6 +17,9 @@ use crate::{
 /// How much text the composer shows inline before it becomes a chip.
 pub(crate) const INLINE_LIMIT: usize = 120;
 
+/// How many input lines the composer keeps visible.
+const VISIBLE_INPUT_LINES: usize = 5;
+
 #[cfg(test)]
 #[path = "composer_tests.rs"]
 mod tests;
@@ -86,12 +89,15 @@ impl Composer {
         TextBuilder::composer_mode_placeholder(keys::COMPOSER_CHAR)
     }
 
-    /// The line under the input.
-    pub(super) fn hint(model: &UiModel) -> String {
-        if model.budget_approval.is_some() {
-            return "a approve · d decline".to_owned();
-        }
-        TextBuilder::composer_status(model.queue_mode, model.reasoning)
+    /// The line under the input, when it has something only it can say.
+    ///
+    /// The queue mode and the reasoning level live in the header now, so the
+    /// only statuses left here are the ones no other view carries.
+    pub(super) fn hint(model: &UiModel) -> Option<String> {
+        model
+            .budget_approval
+            .is_some()
+            .then(|| "a approve · d decline".to_owned())
     }
 
     /// The style of the line under the input.
@@ -99,10 +105,33 @@ impl Composer {
         Style::default().fg(palette::muted())
     }
 
-    /// How many rows the composer needs: the input, the chips and the hint.
-    pub(super) fn height(&self) -> u16 {
-        let chips = u16::try_from(self.chips.len()).unwrap_or(u16::MAX);
-        2 + chips
+    /// The input lines that fit in the composer, keeping the newest ones.
+    pub(super) fn visible_lines(&self, model: &UiModel) -> Vec<Line<'static>> {
+        if self.text.is_empty() {
+            return vec![Line::from(self.placeholder(model))];
+        }
+        self.text
+            .lines()
+            .rev()
+            .take(VISIBLE_INPUT_LINES)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|line| Line::from(line.to_owned()))
+            .collect()
+    }
+
+    /// How many rows the composer needs: a rule on top, the vertical air
+    /// of `py-1`, the input, one line per chip and the hint line when it shows.
+    pub(super) fn height(&self, hint: bool) -> u16 {
+        let chips = u16::try_from(self.all_chips().len()).unwrap_or(u16::MAX);
+        let input = if self.text.is_empty() {
+            1_usize
+        } else {
+            self.text.lines().count().clamp(1, VISIBLE_INPUT_LINES)
+        };
+        let input = u16::try_from(input).unwrap_or(u16::MAX);
+        1 + 1 + input + chips + u16::from(hint) + 1
     }
 
     /// The chips the composer holds, in the order they were added.
@@ -174,6 +203,16 @@ impl Composer {
         if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.attach = Some(String::new());
             return None;
+        }
+        if key.code == keys::SUBMIT && key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.text.push('\n');
+            return None;
+        }
+        if key.code == KeyCode::Up {
+            return Some(ComponentAction::ScrollTranscript(2));
+        }
+        if key.code == KeyCode::Down {
+            return Some(ComponentAction::ScrollTranscript(-2));
         }
         match key.code {
             keys::CANCEL | keys::FOCUS_NEXT => self.focus = SessionFocus::Transcript,

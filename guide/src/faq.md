@@ -3,14 +3,8 @@
 ## Is there a server to start?
 
 Yes. The CLI is a stateless client. Start the local service with
-`norte-code service start`, or set `service_type` to `remote` and
+`norte service up`, or set `service_type` to `remote` and
 `service_url` in `cli.json`.
-
-## Can I use it from a script?
-
-Yes. Pipe newline-delimited messages to `norte-code new --jsonl`; it emits
-service events and client diagnostics as JSONL. See
-[Script with JSONL](guides/script-with-jsonl.md).
 
 ## Is there a TUI?
 
@@ -27,12 +21,6 @@ through `--extension 'openai.chat:provider.order=["deepinfra"]'`.
 No. It only reports what the provider reported. A request the provider did
 not price stays unpriced — it is not treated as free, and a USD budget skips
 it instead of guessing.
-
-## Why did a session stop?
-
-It may be waiting on a question, stopped by a budget, or interrupted by
-Ctrl-C. `norte-code sessions` shows the phase; `norte-code resume <key>`
-continues a parked or stopped session.
 
 ## Is my code sent anywhere else?
 

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "norte-code-agent",
+    "norte-code-cli",
     "norte-code-app",
     "norte-code-client",
     "norte-code-protocol",

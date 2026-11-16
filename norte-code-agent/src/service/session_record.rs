@@ -89,6 +89,9 @@ pub(super) struct SessionRecord {
     pub(super) context_used: u64,
     /// Highest RAEP turn id assigned to this logical session.
     pub(super) last_turn: u64,
+    /// When the session last finished a turn, in milliseconds since the
+    /// epoch. The honest "update" the session list shows.
+    pub(super) activity_at_ms: Option<i64>,
     /// Durable turn-to-conversation boundaries, including compacted ancestors.
     pub(super) turn_boundaries: Vec<TurnBoundary>,
     /// History items retained after their turns leave the active model context.
@@ -195,6 +198,7 @@ pub(super) fn record_from(
         input_tokens: stats.input_tokens,
         context_used: stats.context_used,
         last_turn: stats.last_turn,
+        activity_at_ms: stats.activity_at_ms,
         turn_boundaries: stats.turn_boundaries,
         rewound_history: stats.rewound_history.into_iter().map(Into::into).collect(),
         imported_from: stats.imported_from,

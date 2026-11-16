@@ -68,16 +68,34 @@ fn a_model_change_names_the_model_the_session_runs_on() {
 
 #[test]
 fn a_model_change_that_waits_for_the_turn_is_announced() {
-    let message = App::model_change_pending(&ServerEventKind::ModelQueued {
+    let (_, message) = App::model_change_pending(&ServerEventKind::ModelQueued {
         provider: "openai".to_owned(),
         model: "gpt-5".to_owned(),
-    });
+    })
+    .expect("queued model change");
 
-    assert!(
-        message
-            .expect("queued model change")
-            .contains("after this turn")
-    );
+    assert!(message.contains("after this turn"));
+}
+
+#[test]
+fn an_error_kills_a_live_turn_but_not_an_idle_one() {
+    let error = ServerEventKind::Error {
+        code: norte_code_wire::ErrorCode::Provider,
+        message: "rate limit".to_owned(),
+    };
+
+    assert!(App::is_turn_ending_error(
+        &error,
+        crate::ui_model::TurnState::Thinking
+    ));
+    assert!(App::is_turn_ending_error(
+        &error,
+        crate::ui_model::TurnState::Streaming
+    ));
+    assert!(!App::is_turn_ending_error(
+        &error,
+        crate::ui_model::TurnState::Idle
+    ));
 }
 
 #[test]
@@ -121,4 +139,39 @@ fn a_reconstructed_request_becomes_a_usage_footer() {
     assert_eq!(usage.output_tokens, Some(340));
     assert_eq!(usage.provider.as_deref(), Some("openai"));
     assert_eq!(usage.duration_ms, Some(820));
+}
+
+#[test]
+fn the_transport_notice_names_the_host_the_request_was_for() {
+    let message = "RAEP event stream failed: error sending request for url (http://127.0.0.1:8787/raep/v1/sessions/15ff4519-fd9a-4050-8b50-522bb5f3f394/events?agent_id=norte-code)";
+
+    assert_eq!(
+        App::transport_notice(message),
+        "Service unreachable (127.0.0.1:8787); retrying in the background."
+    );
+}
+
+#[test]
+fn the_transport_notice_stands_without_a_host_in_the_message() {
+    assert_eq!(
+        App::transport_notice("error sending request for url"),
+        "Service unreachable; retrying in the background."
+    );
+}
+
+#[test]
+fn a_transport_failure_is_a_request_that_never_left() {
+    let down = [
+        "RAEP event stream failed: error sending request for url (http://127.0.0.1:8787/events)",
+        "Request failed: error sending request for url (http://127.0.0.1:8787/children)",
+        "RAEP attach failed: error sending request for url (http://127.0.0.1:8787/commands)",
+        "RAEP command failed: error sending request for url (http://127.0.0.1:8787/commands)",
+    ];
+    for message in down {
+        assert!(App::is_transport_failure(message), "{message}");
+    }
+    assert!(!App::is_transport_failure(
+        "The host refused the request: no such session"
+    ));
+    assert!(!App::is_transport_failure("Server returned HTTP 503"));
 }

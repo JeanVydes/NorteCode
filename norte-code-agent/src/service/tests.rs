@@ -2185,6 +2185,92 @@ async fn a_failed_turn_leaves_the_session_able_to_switch_models() {
 }
 
 #[tokio::test]
+async fn a_reopened_session_keeps_the_turn_count_and_the_last_activity_it_earned() {
+    // The stats from the directory only recorded the count; the updated_at
+    // of the session could not come from them, so a reopen emitted `now`
+    // for every session regardless of what it had really done. The north
+    // store keeps the session, and its `updated_at` is what the conversation
+    // last touched.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(ScriptedModel::new(reference).turn_text("done"));
+    let store = Arc::new(SqliteStore::in_memory().expect("store"));
+    let build = |store: Arc<SqliteStore>| {
+        let model = Arc::clone(&model) as Arc<dyn Model>;
+        async move {
+            Service::with_directory(
+                config(),
+                catalog(),
+                Some(spec("scripted")),
+                Arc::new(ScriptedFactory { model }),
+                store.clone(),
+                store.clone(),
+                store,
+                "system",
+            )
+            .await
+            .expect("service")
+        }
+    };
+    let service = Arc::new(build(store.clone()).await);
+    let created = drain(
+        &service,
+        ClientRequestKind::CreateSession {
+            title: Some("tasks".to_owned()),
+        },
+    )
+    .await;
+    let key = created[0].session.clone().expect("session");
+    drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: Some(key.clone()),
+            text: "hi".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+
+    // A fresh service over the same store is what a relaunch looks like;
+    // before the back-fill this row read `now` and `turn_count: 0`.
+    let reopened = Arc::new(build(store).await);
+    let records = reopened.sessions();
+    let summary = records
+        .iter()
+        .find(|session| session.session == key)
+        .expect("the session reopens");
+    assert_eq!(
+        summary.turn_count,
+        Some(1),
+        "the turns this session has run survive a relaunch"
+    );
+    let milestone = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .expect("RFC 3339 milestone")
+            .timestamp_millis()
+    };
+    let created = milestone(summary.created_at.as_deref().expect("created_at"));
+    let updated = milestone(
+        summary
+            .updated_at
+            .as_deref()
+            .expect("the reopened session reports when it last ran"),
+    );
+    assert!(
+        updated >= created,
+        "an activity moment no earlier than creation: {updated} < {created}"
+    );
+}
+
+#[tokio::test]
 async fn a_session_left_streaming_by_a_kill_is_settled_when_it_reopens() {
     // A process that dies mid-turn leaves `Phase::Streaming` in the store, and
     // no process is streaming a session it just loaded. The repair commits the
@@ -8581,6 +8667,170 @@ async fn a_parent_delegates_one_turn_and_gets_the_child_answer() {
 }
 
 #[tokio::test]
+async fn delegating_to_an_agent_the_profile_does_not_allow_names_the_allowed_list() {
+    // The model may not guess the allow-list: when `spawn_agent` names an
+    // agent the parent profile does not delegate to, the error tells it
+    // exactly which agents are allowed.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            // Turn 1 (parent): try to delegate to an agent the profile
+            // does not allow.
+            .turn(vec![
+                norte::StreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: call,
+                    name: "spawn_agent".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 0,
+                    call_id: call,
+                    name: None,
+                    arguments: serde_json::json!({
+                        "task": "What is 2 + 2?",
+                        "agent_id": "analyst"
+                    })
+                    .to_string(),
+                },
+                norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
+            ])
+            // Turn 2 (parent): read the refusal and finish.
+            .turn_text("the delegation was refused"),
+    );
+    let service = Arc::new(
+        Service::new(
+            subagent_config(),
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.install_subagent_runner();
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "delegate".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: true,
+                ref error,
+                ..
+            } if tool == "spawn_agent"
+                && error.as_deref().is_some_and(|error| {
+                    error.contains("DELEGATE_NOT_ALLOWED") && error.contains("analyst")
+                        && error.contains(subagent_config().name.as_str())
+                })
+        )),
+        "the error names the allowed agents: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_agents_shows_the_profiles_this_session_may_delegate_to() {
+    // The model learns the allow-list from `list_agents` itself, with no
+    // help from the system prompt: the tool answers with the profiles the
+    // session may spawn.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            // Turn 1 (parent): list what it may delegate to.
+            .turn(vec![
+                norte::StreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: call,
+                    name: "list_agents".to_owned(),
+                },
+                norte::StreamEvent::ToolCallDelta {
+                    index: 0,
+                    call_id: call,
+                    name: None,
+                    arguments: serde_json::json!({}).to_string(),
+                },
+                norte::StreamEvent::Finish(norte::FinishReason::ToolCalls),
+            ])
+            // Turn 2 (parent): reads the list and finishes.
+            .turn_text("the delegates are listed"),
+    );
+    let service = Arc::new(
+        Service::new(
+            subagent_config(),
+            catalog(),
+            Some(spec("scripted")),
+            Arc::new(ScriptedFactory {
+                model: Arc::clone(&model) as Arc<dyn Model>,
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    service.install_subagent_runner();
+
+    let events = drain(
+        &service,
+        ClientRequestKind::SendMessage {
+            session: None,
+            text: "what can I delegate?".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    )
+    .await;
+    let name = subagent_config().name;
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind,
+            ServerEventKind::ToolFinished {
+                ref tool,
+                is_error: false,
+                ref output,
+                ..
+            } if tool == "list_agents"
+                && output.as_deref().is_some_and(|text| {
+                    text.parse::<serde_json::Value>()
+                        .is_ok_and(|json| json["delegates"] == serde_json::json!([name]))
+                })
+        )),
+        "list_agents names the allowed profiles: {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_detached_subagent_is_a_job_that_reports_and_can_be_stopped() {
     // With `detach: true` the tool returns while the child is still running,
     // then the job retains the child's result.
@@ -9037,4 +9287,206 @@ async fn a_rewind_that_crosses_a_tool_call_succeeds() {
         calls.iter().any(|call| call.tool_name == "shell"),
         "the removed tool call is reported: {calls:?}"
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_pinned_turn_stays_verbatim_through_compaction() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(80, 10, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "pinned answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(80, 10, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "recent answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn_text("the user wants a compacted handoff"),
+    );
+    let mut config = config();
+    config.compaction.threshold = 1.0;
+    config.compaction.keep_recent = 1;
+    let (service, store) = persistent_service_with_config(config, model).await;
+
+    let first = drain(&service, send_message(None, "question one")).await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    drain(
+        &service,
+        ClientRequestKind::ContextPin {
+            session: key.clone(),
+            turn_ids: vec!["turn_1".to_owned()],
+            pinned: true,
+        },
+    )
+    .await;
+    drain(&service, send_message(Some(key.clone()), "question two")).await;
+
+    let events = drain(
+        &service,
+        ClientRequestKind::Compact {
+            session: key.clone(),
+        },
+    )
+    .await;
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        ServerEventKind::CompactionFinished {
+            compacted: true,
+            ..
+        }
+    )));
+
+    let (nid, _, _) = service.require_record(&key).expect("fresh record");
+    let fresh = store.load(nid).await.expect("fresh session");
+    let head = fresh.head.expect("fresh head");
+    let chain = store.ancestors(head).await.expect("fresh chain");
+    let mut seed_texts = Vec::new();
+    for id in chain {
+        let node = store.node(id).await.expect("seed node");
+        for part in &node.message.parts {
+            if let norte::Part::Text(text) = part {
+                seed_texts.push(text.text.clone());
+            }
+        }
+    }
+
+    assert!(
+        seed_texts.iter().any(|text| text == "question one"),
+        "the pinned user message is in the fresh session: {seed_texts:?}"
+    );
+    assert!(
+        seed_texts.iter().any(|text| text == "pinned answer"),
+        "the pinned assistant message is in the fresh session: {seed_texts:?}"
+    );
+    assert!(
+        seed_texts
+            .iter()
+            .any(|text| text.contains("the user wants a compacted handoff")),
+        "the summary is in the fresh session: {seed_texts:?}"
+    );
+    assert!(
+        seed_texts.iter().any(|text| text == "recent answer"),
+        "the recent suffix is in the fresh session: {seed_texts:?}"
+    );
+    assert!(
+        !seed_texts.iter().any(|text| text == "question two"),
+        "the unpinned turn was summarized away: {seed_texts:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unpinned_compaction_summarizes_the_whole_prefix() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(80, 10, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "first answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn(vec![
+                norte::StreamEvent::Usage(usage(80, 10, Some(0.01))),
+                norte::StreamEvent::TextDelta {
+                    index: 0,
+                    text: "second answer".to_owned(),
+                },
+                norte::StreamEvent::Finish(FinishReason::Stop),
+            ])
+            .turn_text("the user wants a compacted handoff"),
+    );
+    let mut config = config();
+    config.compaction.threshold = 1.0;
+    config.compaction.keep_recent = 1;
+    let (service, store) = persistent_service_with_config(config, model).await;
+
+    let first = drain(&service, send_message(None, "question one")).await;
+    let key = first
+        .iter()
+        .find_map(|event| event.session.clone())
+        .expect("session");
+    drain(&service, send_message(Some(key.clone()), "question two")).await;
+
+    let events = drain(
+        &service,
+        ClientRequestKind::Compact {
+            session: key.clone(),
+        },
+    )
+    .await;
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        ServerEventKind::CompactionFinished {
+            compacted: true,
+            ..
+        }
+    )));
+
+    let (nid, _, _) = service.require_record(&key).expect("fresh record");
+    let fresh = store.load(nid).await.expect("fresh session");
+    let head = fresh.head.expect("fresh head");
+    let chain = store.ancestors(head).await.expect("fresh chain");
+    let mut seed_texts = Vec::new();
+    for id in chain {
+        let node = store.node(id).await.expect("seed node");
+        for part in &node.message.parts {
+            if let norte::Part::Text(text) = part {
+                seed_texts.push(text.text.clone());
+            }
+        }
+    }
+
+    assert!(
+        !seed_texts.iter().any(|text| text == "question one"),
+        "the first turn was summarized away: {seed_texts:?}"
+    );
+    assert!(
+        seed_texts
+            .iter()
+            .any(|text| text.contains("the user wants a compacted handoff")),
+        "the summary is in the fresh session: {seed_texts:?}"
+    );
+    assert!(
+        !seed_texts.iter().any(|text| text == "question two"),
+        "the second turn was summarized away: {seed_texts:?}"
+    );
+    assert!(
+        seed_texts.iter().any(|text| text == "second answer"),
+        "the recent suffix is in the fresh session: {seed_texts:?}"
+    );
+}
+
+fn send_message(session: Option<SessionKey>, text: &str) -> ClientRequestKind {
+    ClientRequestKind::SendMessage {
+        session,
+        text: text.to_owned(),
+        attachments: Vec::new(),
+        budget: None,
+        reasoning: None,
+        output: Vec::new(),
+        response_format: None,
+        metadata: None,
+        replay: false,
+    }
 }

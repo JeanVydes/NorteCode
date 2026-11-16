@@ -119,7 +119,7 @@ impl HostView {
         panel::render_list(
             frame,
             area,
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Host,
@@ -147,7 +147,7 @@ impl HostView {
         panel::render_list(
             frame,
             area,
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Host,
@@ -164,7 +164,7 @@ impl HostView {
     }
 
     fn render_approvals(&self, frame: &mut Frame<'_>, area: Rect, model: &UiModel) {
-        let entries = model
+        let entries: Vec<ratatui::text::Line<'static>> = model
             .tool_rules
             .iter()
             .map(TextBuilder::tool_rule_row)
@@ -172,7 +172,7 @@ impl HostView {
         panel::render_list(
             frame,
             area,
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Host,

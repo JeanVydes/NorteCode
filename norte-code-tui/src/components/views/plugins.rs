@@ -142,11 +142,12 @@ impl Component for PluginsView {
             }
             PluginMode::Listing => {}
         }
-        let entries = model.plugins.iter().map(TextBuilder::plugin_row).collect();
+        let entries: Vec<ratatui::text::Line<'static>> =
+            model.plugins.iter().map(TextBuilder::plugin_row).collect();
         panel::render_list(
             frame,
             area,
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Plugins,

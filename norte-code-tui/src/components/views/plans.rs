@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -16,6 +16,7 @@ pub(in crate::components) struct PlansView {
     lifecycle: ComponentLifecycle,
     selected: usize,
     detail_mode: PlanDetailMode,
+    detail_scroll: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -42,15 +43,28 @@ impl Component for PlansView {
         match key.code {
             keys::NAV_DOWN | keys::NAV_DOWN_ARROW => {
                 panel::move_selection(&mut self.selected, model.plans.len(), true);
+                self.detail_scroll = 0;
             }
             keys::NAV_UP | keys::NAV_UP_ARROW => {
                 panel::move_selection(&mut self.selected, model.plans.len(), false);
+                self.detail_scroll = 0;
             }
             keys::SUBMIT => {
                 self.detail_mode = match self.detail_mode {
                     PlanDetailMode::Summary => PlanDetailMode::Full,
                     PlanDetailMode::Full => PlanDetailMode::Summary,
                 };
+                self.detail_scroll = 0;
+            }
+            KeyCode::PageDown => {
+                let max_scroll = model
+                    .plans
+                    .get(self.selected)
+                    .map_or(0, |plan| plan.content.lines().count().saturating_sub(1));
+                self.detail_scroll = self.detail_scroll.saturating_add(8).min(max_scroll);
+            }
+            KeyCode::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(8);
             }
             _ => {}
         }
@@ -69,7 +83,7 @@ impl Component for PlansView {
         panel::render_list(
             frame,
             columns[0],
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Plans,
@@ -83,12 +97,13 @@ impl Component for PlansView {
             || TextBuilder::plan_selection_hint().to_owned(),
             |plan| TextBuilder::plan_detail(plan, self.detail_mode == PlanDetailMode::Full),
         );
-        panel::render_text(
+        panel::render_text_scrolled(
             frame,
             columns[1],
             TextBuilder::details_title(),
             body,
             model.preferences.theme,
+            self.detail_scroll,
         );
     }
 }

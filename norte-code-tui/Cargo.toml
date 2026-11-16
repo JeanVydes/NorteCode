@@ -13,7 +13,10 @@ crossterm = "0.28"
 norte-code-client = { path = "../norte-code-client", default-features = false, features = ["native"] }
 norte-code-wire = { path = "../norte-code-wire" }
 pulldown-cmark = "0.13"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+    "unstable-rendered-line-info",
+] }
 serde = { workspace = true }
 unicode-width = "0.2"
 futures-util = { workspace = true }
@@ -23,3 +26,11 @@ thiserror = { workspace = true }
 
 [lints]
 workspace = true
+
+[lib]
+name = "norte_code_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "norte-code-tui"
+path = "src/main.rs"

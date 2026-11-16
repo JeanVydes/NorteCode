@@ -177,7 +177,7 @@ impl Component for CatalogView {
         }
         let rows = Self::rows(model);
         self.selected = self.selected.min(rows.len().saturating_sub(1));
-        let entries = rows
+        let entries: Vec<ratatui::text::Line<'static>> = rows
             .iter()
             .map(|row| match row {
                 CatalogRow::Provider(index) => {
@@ -206,7 +206,7 @@ impl Component for CatalogView {
         panel::render_list(
             frame,
             area,
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Catalog,

@@ -119,7 +119,9 @@ the list of configured agent names it is allowed to spawn. An empty
 `delegates` list disables delegation; a configured `subagent` must also appear
 in `delegates`. `spawn_agent.agent_id` may select another profile from that
 allow-list. The selected profile supplies the child's model, system prompt
-and disabled-tool policy.
+and disabled-tool policy. The allow-list is observable at runtime: the error
+for an unallowed `agent_id` names the allowed profiles, and `list_agents`
+also reports the allow-list for the session alongside the spawned children.
 
 The child starts with the task only. `context_mode: "summary"` adds a bounded,
 redacted excerpt of the parent's history. Children can spawn further children

@@ -109,6 +109,10 @@ pub(super) struct StoredStats {
     /// Turn ids pinned verbatim through compaction.
     #[serde(default)]
     pub(super) pinned_turn_ids: HashSet<String>,
+    /// When the session last finished a turn, in milliseconds since the
+    /// epoch. The honest "última interacción" the session list shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) activity_at_ms: Option<i64>,
 }
 
 impl StoredStats {

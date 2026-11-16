@@ -152,6 +152,8 @@ pub fn into_session_info(summary: SessionSummary) -> norte_code_wire::SessionInf
         provider: None,
         model: None,
         created_at: None,
+        updated_at: None,
+        turn_count: None,
         phase: norte_code_wire::Phase::Idle,
         reasoning: None,
         parent: None,

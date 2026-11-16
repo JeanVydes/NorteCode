@@ -147,6 +147,9 @@ pub(super) struct ListedChild {
 pub(super) struct ListedChildren {
     /// One entry per child.
     pub(super) children: Vec<ListedChild>,
+    /// The agent profiles this session may spawn with `spawn_agent`'s
+    /// `agent_id`, in the order the parent profile lists them.
+    pub(super) delegates: Vec<String>,
 }
 
 /// The answer to `ask_delegator`.

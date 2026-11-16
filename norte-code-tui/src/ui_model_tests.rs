@@ -1,6 +1,6 @@
-use norte_code_wire::{Delta, ServerEventKind};
+use norte_code_wire::{Delta, ReasoningInfo, ServerEventKind};
 
-use super::TurnState;
+use super::{ReasoningLevel, ReasoningRecovery, TurnState};
 
 #[test]
 fn connecting_turn_enters_thinking_on_reasoning_delta() {
@@ -54,4 +54,81 @@ fn marks_a_turn_as_waiting_while_a_question_needs_an_answer() {
         question: "question-1".to_owned(),
     });
     assert_eq!(state, TurnState::Thinking);
+}
+
+#[test]
+fn automatic_is_always_a_supported_reasoning_choice() {
+    let capabilities = ReasoningInfo::default();
+
+    assert_eq!(
+        ReasoningLevel::Automatic.incompatible_with(&capabilities),
+        None
+    );
+}
+
+#[test]
+fn an_effort_named_by_the_model_is_allowed() {
+    let capabilities = ReasoningInfo {
+        supported: true,
+        efforts: vec!["medium".to_owned(), "high".to_owned()],
+        ..ReasoningInfo::default()
+    };
+
+    assert_eq!(ReasoningLevel::High.incompatible_with(&capabilities), None);
+}
+
+#[test]
+fn an_effort_the_model_does_not_name_is_refused() {
+    let capabilities = ReasoningInfo {
+        supported: true,
+        efforts: vec!["medium".to_owned(), "high".to_owned()],
+        ..ReasoningInfo::default()
+    };
+
+    let message = ReasoningLevel::Low
+        .incompatible_with(&capabilities)
+        .expect("unsupported effort");
+
+    assert!(message.contains("does not support effort `low`"));
+    assert!(message.contains("medium, high"));
+}
+
+#[test]
+fn a_refusal_is_lowered_at_most_once_per_effort_and_generation() {
+    let mut recovery = ReasoningRecovery::default();
+
+    assert!(recovery.claim(7, ReasoningLevel::Low));
+    assert!(!recovery.claim(7, ReasoningLevel::Low));
+}
+
+#[test]
+fn a_different_generation_or_effort_may_clear_once() {
+    let mut recovery = ReasoningRecovery::default();
+
+    assert!(recovery.claim(7, ReasoningLevel::Low));
+    assert!(recovery.claim(8, ReasoningLevel::Low));
+    assert!(recovery.claim(8, ReasoningLevel::Medium));
+}
+
+#[test]
+fn a_clear_accepts_a_new_refusal() {
+    let mut recovery = ReasoningRecovery::default();
+
+    assert!(recovery.claim(7, ReasoningLevel::Low));
+    recovery.clear();
+    assert!(recovery.claim(7, ReasoningLevel::Low));
+}
+
+#[test]
+fn a_host_reasoning_setting_restores_the_local_level() {
+    assert_eq!(
+        ReasoningLevel::from_wire(&norte_code_wire::Reasoning::Effort {
+            effort: "high".to_owned(),
+        }),
+        ReasoningLevel::High
+    );
+    assert_eq!(
+        ReasoningLevel::from_wire(&norte_code_wire::Reasoning::Budget { tokens: 128 }),
+        ReasoningLevel::Automatic
+    );
 }

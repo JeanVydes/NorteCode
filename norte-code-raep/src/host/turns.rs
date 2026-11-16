@@ -290,7 +290,7 @@ impl NorteCodeRaepHost {
             );
         }
         if let Some(policy) = job_turn_policy {
-            let service = self.service_for_session(&session_id).await?;
+            let service = self.service_for_session(&session_id)?;
             if !service.set_job_turn_policy(&session, policy) {
                 return Err(HostError::InvalidFrame(
                     "session not found while applying job_turn_policy".to_owned(),
@@ -353,7 +353,7 @@ impl NorteCodeRaepHost {
             }
         };
         let session = SessionKey::new(frame.session_id.clone());
-        let service = self.service_for_session(&frame.session_id).await?;
+        let service = self.service_for_session(&frame.session_id)?;
         let owner = if let Some(principal) = principal {
             Some(principal.to_owned())
         } else {
@@ -1280,7 +1280,7 @@ impl NorteCodeRaepHost {
         let service = if session_id.is_empty() {
             Arc::clone(&self.service)
         } else {
-            self.service_for_session(&session_id).await?
+            self.service_for_session(&session_id)?
         };
         self.collect_service_events(
             &session_id,

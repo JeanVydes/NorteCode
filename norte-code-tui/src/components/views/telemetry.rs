@@ -88,14 +88,14 @@ impl Component for TelemetryView {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
-        let entries = visible_records
+        let entries: Vec<ratatui::text::Line<'static>> = visible_records
             .iter()
             .map(|record| TextBuilder::telemetry_row(record))
             .collect();
         panel::render_list(
             frame,
             columns[0],
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Telemetry,

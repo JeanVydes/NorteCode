@@ -118,14 +118,14 @@ impl Component for SettingsView {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(area);
-        let entries = PREFERENCES
+        let entries: Vec<ratatui::text::Line<'static>> = PREFERENCES
             .into_iter()
             .map(|preference| Self::preference_row(preference, model))
             .collect();
         panel::render_list(
             frame,
             columns[0],
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Settings,

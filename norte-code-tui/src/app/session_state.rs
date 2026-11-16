@@ -36,10 +36,15 @@ fn preview(content: &str) -> String {
 }
 
 impl App {
-    pub(super) fn replace_history(&mut self, history: Vec<norte_code_wire::HistoryItem>) {
+    pub(super) fn replace_history(
+        &mut self,
+        history: Vec<norte_code_wire::HistoryItem>,
+        preserve_live: bool,
+    ) {
         self.model.turn_points = turn_points(&history);
         let current = std::mem::take(&mut self.model.transcript);
-        self.model.transcript = super::actions::transcript_with_history(history, current, true);
+        self.model.transcript =
+            super::actions::transcript_with_history(history, current, preserve_live);
     }
 
     /// Opens a session from a clean state.
@@ -48,13 +53,18 @@ impl App {
     /// starts with nothing but the session they asked for.
     pub(super) fn open_session(&mut self, session: SessionKey) {
         self.session_generation = self.session_generation.saturating_add(1);
-        let agent_id = self
+        let summary = self
             .model
             .sessions
             .iter()
-            .find(|summary| summary.session_id == session.as_str())
+            .find(|summary| summary.session_id == session.as_str());
+        let agent_id = summary
             .and_then(|summary| summary.agent.as_ref())
             .map(|agent| agent.id.clone());
+        let reasoning = summary
+            .and_then(|summary| summary.reasoning.as_ref())
+            .map(crate::ui_model::ReasoningLevel::from_wire)
+            .unwrap_or_default();
         self.model.active_session = Some(session.clone());
         self.model.active_child = None;
         self.model.attachment_state = SessionAttachmentState::Connecting;
@@ -70,8 +80,11 @@ impl App {
         self.model.session_model = None;
         self.model.session_costs = None;
         self.model.notice = None;
-        self.model.reasoning = crate::ui_model::ReasoningLevel::default();
+        self.model.reasoning = reasoning;
+        self.model.queued_model = None;
         self.model.turn_state = TurnState::Idle;
+        self.model.service_down = false;
+        self.reasoning_recovery.clear();
         self.give_to_session_view(crate::components::ComponentEvent::SessionOpened);
         self.client
             .resume(&session, self.session_generation, agent_id.clone());

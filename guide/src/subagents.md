@@ -37,6 +37,11 @@ idle expiry and parent-close descendant cleanup are not implemented yet.
 Inspection of child events, approval routing, client-tool access, and
 delegation idempotency are also not implemented.
 
+`list_agents` also reports the agent profiles this session may spawn
+(`delegates`), so a parent does not need to guess which `agent_id` values are
+allowed. If it names an unallowed one anyway, the error names the allowed
+list too.
+
 ## Handoff and takeover
 
 `handoff_agent` is present but does not switch profiles: requests for another

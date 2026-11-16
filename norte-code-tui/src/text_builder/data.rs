@@ -1,4 +1,7 @@
-use ratatui::text::Line;
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 
 use norte_code_client::{CostReport, PluginSummary, ServerInfo, ToolRule};
 use norte_code_wire::{
@@ -7,29 +10,150 @@ use norte_code_wire::{
 };
 
 use super::TextBuilder;
-use crate::ui_model::{TelemetryScope, UiModel};
+use crate::{
+    components::palette,
+    ui_model::{TelemetryScope, UiModel},
+};
+
+/// How far indented the meta line sits under a numbered title.
+const META_INDENT: &str = "      ";
+
+/// Days after the epoch, as a civil date `YYYY-MM-DD`.
+///
+/// The calendar math is Howard Hinnant's civil-from-days; no date library is
+/// pulled in for one line of text.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let doe = shifted.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// The civil date a moment belongs to, `YYYY-MM-DD`.
+fn civil_date(milliseconds: i64) -> String {
+    const DAY_MS: i64 = 86_400_000;
+    let (year, month, day) = civil_from_days(milliseconds.div_euclid(DAY_MS));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// How long ago a moment is, as `just now`, `5m ago`, `3h ago`, `2d ago` or,
+/// past a month, its civil date.
+fn relative_time(milliseconds: i64, now_milliseconds: i64) -> String {
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let elapsed = (now_milliseconds - milliseconds).max(0);
+    match elapsed {
+        delta if delta < MINUTE => "just now".to_owned(),
+        delta if delta < HOUR => format!("{}m ago", delta / MINUTE),
+        delta if delta < DAY => format!("{}h ago", delta / HOUR),
+        delta if delta < 30 * DAY => format!("{}d ago", delta / DAY),
+        _ => civil_date(milliseconds),
+    }
+}
+
+/// The clock the renderer reads, in milliseconds since the epoch.
+fn now_milliseconds() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis()),
+    )
+    .unwrap_or(i64::MAX)
+}
 
 impl TextBuilder {
+    /// The entry a session takes in the list: its title, then one muted
+    /// line with what the meta line is for — how many turns, when it was
+    /// created and when it last did some work. A collapsed row carries the
+    /// expand marker; an expanded row carries the collapse marker.
     #[must_use]
-    pub fn numbered_session_row(number: usize, session: &SessionSummary) -> Line<'static> {
-        Line::from(format!(
-            "{number:>2}.  {}  {}",
-            session.title.as_deref().unwrap_or("Untitled session"),
-            session.session_id
-        ))
+    pub fn numbered_session_row(
+        number: usize,
+        session: &SessionSummary,
+        expanded: bool,
+    ) -> Vec<Line<'static>> {
+        let title = session.title.as_deref().unwrap_or("Untitled session");
+        let mut head = vec![Span::styled(
+            format!("{number:>2}."),
+            Style::default().fg(palette::brand()),
+        )];
+        head.push(Span::raw(if session.pinned { " ★" } else { "  " }));
+        head.push(Span::raw(format!(
+            "{title}{}",
+            if expanded { " ▾" } else { "" }
+        )));
+        let mut meta: Vec<Span<'static>> = vec![Span::raw(META_INDENT)];
+        let mut pieces: Vec<String> = Vec::with_capacity(3);
+        if let Some(turns) = session.turn_count {
+            pieces.push(format!("{turns} turns"));
+        }
+        let now = now_milliseconds();
+        if let Some(created_at) = session.created_at {
+            pieces.push(format!("created {}", civil_date(created_at)));
+        }
+        if let Some(updated_at) = session.updated_at {
+            pieces.push(format!("updated {}", relative_time(updated_at, now)));
+        }
+        meta.push(Span::styled(
+            pieces.join(" · "),
+            Style::default().fg(palette::muted()),
+        ));
+        vec![Line::from(head), Line::from(meta)]
     }
 
+    /// The entry a subagent's session takes: one line, like the sessions
+    /// the host runs itself, without the meta line. The expanded state is
+    /// shown in a trailing marker.
     #[must_use]
     pub fn numbered_child_session_row(
         number: usize,
         session: &ChildSessionSummary,
-    ) -> Line<'static> {
-        Line::from(format!(
-            "{number:>2}.  {}  {}  {}",
-            session.title.as_deref().unwrap_or("subagent"),
-            session.state.label(),
-            session.task.as_deref().unwrap_or(&session.session_id)
-        ))
+        expanded: bool,
+    ) -> Vec<Line<'static>> {
+        vec![Line::from(vec![
+            Span::styled(
+                format!("{number:>2}."),
+                Style::default().fg(palette::brand()),
+            ),
+            Span::raw(format!(
+                " {}{}",
+                session.title.as_deref().unwrap_or("subagent"),
+                if expanded { " ▾" } else { "" }
+            )),
+            Span::styled(
+                format!(
+                    "  {} · {}",
+                    session.state.label(),
+                    session.task.as_deref().unwrap_or(&session.session_id)
+                ),
+                Style::default().fg(palette::muted()),
+            ),
+        ])]
+    }
+
+    /// The line an action of an expanded session takes: an indented marker
+    /// and the action, in accent when it is the selected one.
+    #[must_use]
+    pub fn session_action_row(
+        label: &str,
+        selected: bool,
+        theme: crate::ui_model::ThemeMode,
+    ) -> Vec<Line<'static>> {
+        let style = if selected {
+            Style::default()
+                .fg(palette::accent(theme))
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Style::default().fg(palette::muted())
+        };
+        vec![Line::from(Span::styled(format!("      ▸ {label}"), style))]
     }
 
     #[must_use]
@@ -45,7 +169,11 @@ impl TextBuilder {
     #[must_use]
     pub fn plan_detail(plan: &PlanSummary, show_details: bool) -> String {
         if show_details {
-            plan.content.clone()
+            format!(
+                "{}\n\nPageUp/PageDown scroll · {} toggles summary",
+                plan.content,
+                Self::submit_key_label()
+            )
         } else {
             format!(
                 "{}\n\nPress {} to toggle full plan text",
@@ -292,8 +420,13 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn model_option_row(model: &ModelInfo) -> Line<'static> {
-        let suffix = if model.deprecated { "  deprecated" } else { "" };
+    pub fn model_option_row(model: &ModelInfo, marker: Option<&str>) -> Line<'static> {
+        let suffix = match (marker, model.deprecated) {
+            (Some(marker), true) => format!("  {marker}  deprecated"),
+            (Some(marker), false) => format!("  {marker}"),
+            (None, true) => "  deprecated".to_owned(),
+            (None, false) => String::new(),
+        };
         Line::from(format!("    {}  ({}){suffix}", model.name, model.model))
     }
 

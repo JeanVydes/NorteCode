@@ -14,31 +14,40 @@ cargo build --release
 ```
 
 The server binary is `target/release/norte-code-server`. It listens on
-`127.0.0.1:8787` and keeps its state beside `NORTE_CODE_DATABASE` (default
-`norte-code.db`).
+`127.0.0.1:8787` and keeps its sessions database in `NORTE_CODE_DATABASE`
+(default `$XDG_DATA_HOME/norte-code/sessions.db`, or the platform equivalent).
+
+## Install
+
+```sh
+cargo install --git https://github.com/JeanVydes/NorteCode --path norte-code-cli
+```
+
+Both install into `~/.cargo/bin/`. The only command you type afterwards is `norte`.
+
+The service runs in the background once started (`norte service up`); it is
+not tied to the terminal that started it.
 
 ## Run
 
 ```sh
-NORTE_CODE_DATABASE=./norte-code.db cargo run -p norte-code-raep
+# start the service in the background (if it is not already running) and
+# open the terminal interface in the current terminal:
+norte
+
+# manage the service:
+norte service up
+norte service down
+norte service restart
+norte service status
+norte service catalog
+norte service config
+norte service logs [--live]
+norte service doctor
+
+# open only the terminal interface:
+norte tui
 ```
-
-The client is a Dioxus app:
-
-```sh
-cd norte-code-app && dx serve
-```
-
-A few things worth knowing:
-
-- **Approvals**: tools run only under your rules; a client answers each
-  approval over the protocol, per tool, per session or globally.
-- **Plans**: the model proposes work as a Markdown file and asks your
-  approval before it becomes active.
-- **Budgets**: cap spend in USD, tokens or requests per session or turn.
-- **Sandbox**: opt-in OS containment for `shell`.
-- **Compaction, forks and rewind**: history is a node graph, so a session can
-  branch, rewind to a turn, or replace its history with a summary.
 
 ## Providers and models
 

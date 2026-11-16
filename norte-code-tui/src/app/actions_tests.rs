@@ -100,6 +100,8 @@ fn replays_are_not_repeated_after_a_reload() {
 fn live_user_messages_are_deduped_against_history() {
     let history = vec![user_item("u1", "hola", Some("1"))];
     let current = vec![TranscriptItem::UserMessage {
+        queued: false,
+        turn_id: None,
         text: "hola".to_owned(),
         chips: Vec::new(),
     }];
@@ -107,6 +109,40 @@ fn live_user_messages_are_deduped_against_history() {
     let merged = transcript_with_history(history, current, true);
 
     assert_eq!(merged.len(), 1);
+}
+
+#[test]
+fn live_user_messages_are_deduped_against_history_by_turn_id() {
+    let history = vec![user_item("u1", "hola", Some("turn_3"))];
+    let current = vec![TranscriptItem::UserMessage {
+        queued: false,
+        turn_id: Some("turn_3".to_owned()),
+        text: "distinto del texto canónico".to_owned(),
+        chips: Vec::new(),
+    }];
+
+    let merged = transcript_with_history(history, current, true);
+
+    // The live copy is the canonical page's own message: same turn, one
+    // item, whatever the text.
+    assert_eq!(merged.len(), 1);
+}
+
+#[test]
+fn live_user_messages_survive_without_a_turn_id() {
+    let history = vec![user_item("u1", "hola", Some("turn_1"))];
+    let current = vec![TranscriptItem::UserMessage {
+        queued: false,
+        turn_id: None,
+        text: "un mensaje todavía sin turno aceptado".to_owned(),
+        chips: Vec::new(),
+    }];
+
+    let merged = transcript_with_history(history, current, true);
+
+    // Without a turn id the text fallback decides; the optimistic message
+    // still survives for lack of one it matches.
+    assert_eq!(merged.len(), 2);
 }
 
 #[test]
@@ -122,6 +158,8 @@ fn history_replaces_replayed_messages_without_losing_live_deltas() {
     }];
     let current = vec![
         TranscriptItem::UserMessage {
+            queued: false,
+            turn_id: None,
             text: "hi".to_owned(),
             chips: Vec::new(),
         },
@@ -181,4 +219,29 @@ fn committed_reasoning_is_not_repeated_after_a_reload() {
     let merged = transcript_with_history(history.to_vec(), current, true);
 
     assert_eq!(merged.len(), 1);
+}
+
+#[test]
+fn a_fresh_history_replaces_the_whole_transcript_after_compaction() {
+    let history = vec![
+        user_item("seed", "Summary of the earlier conversation", None),
+        assistant_item("a1", "continuando con la tarea", Some("3")),
+    ];
+    let current = vec![
+        TranscriptItem::History(user_item("u1", "lo que se compactó", Some("1"))),
+        TranscriptItem::History(assistant_item("a2", "respuesta reemplazada", Some("2"))),
+        TranscriptItem::Status("Session compacted.".to_owned()),
+        TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
+            request_id: 0,
+            session: None,
+            kind: delta("token a medio escribir", 0),
+        })),
+    ];
+
+    let merged = transcript_with_history(history, current, false);
+
+    assert_eq!(merged.len(), 3);
+    assert!(matches!(&merged[0], TranscriptItem::History(item) if item.id == "seed"));
+    assert!(matches!(&merged[1], TranscriptItem::History(item) if item.id == "a1"));
+    assert!(matches!(&merged[2], TranscriptItem::Status(status) if status == "Session compacted."));
 }

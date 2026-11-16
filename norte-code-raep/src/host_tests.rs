@@ -1355,3 +1355,90 @@ fn questions_use_a_namespaced_server_frame() {
         FrameType::Extension("norte_code.question_asked".to_owned())
     );
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn context_pin_pins_and_unpins_turns() {
+    let service = Arc::new(
+        Service::new(
+            norte_code_protocol::config::Config::default(),
+            Arc::new(norte_code_protocol::catalog::Catalog::default()),
+            None,
+            Arc::new(norte_code_agent::VendorModels),
+            Arc::new(norte_code_protocol::InMemoryStore::new()),
+            Arc::new(norte::InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let host = NorteCodeRaepHost::new(service, HostConfig::default()).expect("host");
+    let attach = Envelope::new(
+        standard(StandardFrameType::SessionAttach),
+        payload(SessionAttach {
+            agent_id: "norte-code".to_owned(),
+            agent_override: None,
+            create_if_missing: Some(true),
+            mode: None,
+            takeover: None,
+            resume_from_seq: None,
+            capabilities: None,
+            client_info: None,
+            options: None,
+        }),
+        1,
+    );
+    let attached = host.handle(attach).await.expect("attach");
+    let session_id = attached[0].session_id.clone();
+
+    let mut pin = Envelope::new(
+        standard(StandardFrameType::ContextPin),
+        json!({"turn_ids": ["turn_2", "turn_1"], "pinned": true}),
+        2,
+    );
+    pin.session_id = session_id.clone();
+    let frames = host.handle(pin).await.expect("pin");
+    let updated = frames
+        .iter()
+        .find(|frame| frame.kind == standard(StandardFrameType::ContextUpdated))
+        .expect("context updated");
+    assert_eq!(
+        updated.payload["pinned_turn_ids"],
+        json!(["turn_1", "turn_2"])
+    );
+
+    let mut unpin = Envelope::new(
+        standard(StandardFrameType::ContextPin),
+        json!({"turn_ids": ["turn_1"], "pinned": false}),
+        3,
+    );
+    unpin.session_id = session_id.clone();
+    let frames = host.handle(unpin).await.expect("unpin");
+    let updated = frames
+        .iter()
+        .find(|frame| frame.kind == standard(StandardFrameType::ContextUpdated))
+        .expect("context updated");
+    assert_eq!(updated.payload["pinned_turn_ids"], json!(["turn_2"]));
+
+    // The pin cap is enforced all-or-nothing: a request that would grow the
+    // list past it pins none of the new turns.
+    let turn_ids: Vec<String> = (3..=22).map(|turn| format!("turn_{turn}")).collect();
+    let mut overflow = Envelope::new(
+        standard(StandardFrameType::ContextPin),
+        json!({"turn_ids": turn_ids, "pinned": true}),
+        4,
+    );
+    overflow.session_id = session_id.clone();
+    assert!(host.handle(overflow).await.is_err());
+    let mut check = Envelope::new(
+        standard(StandardFrameType::ContextPin),
+        json!({"turn_ids": ["turn_2"], "pinned": true}),
+        5,
+    );
+    check.session_id = session_id.clone();
+    let frames = host.handle(check).await.expect("re-pin is idempotent");
+    let updated = frames
+        .iter()
+        .find(|frame| frame.kind == standard(StandardFrameType::ContextUpdated))
+        .expect("context updated");
+    assert_eq!(updated.payload["pinned_turn_ids"], json!(["turn_2"]));
+}
