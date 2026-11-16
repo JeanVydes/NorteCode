@@ -41,7 +41,7 @@ impl NorteCodeRaepHost {
                 std::time::Duration::from_millis,
             );
         let session = SessionKey::new(frame.session_id.clone());
-        let service = self.service_for_session(&frame.session_id).await?;
+        let service = self.service_for_session(&frame.session_id)?;
         let job = service
             .stop_session_job_with_grace(&session, &job_id, Some(grace))
             .await
@@ -161,7 +161,7 @@ impl NorteCodeRaepHost {
             .get("from_index")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let service = self.service_for_session(&frame.session_id).await?;
+        let service = self.service_for_session(&frame.session_id)?;
         let job = service
             .session_job_with_output_retention(&SessionKey::new(frame.session_id.clone()), &job_id)
             .ok_or_else(|| HostError::InvalidFrame("JOB_NOT_FOUND".to_owned()))?;

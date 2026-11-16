@@ -2,33 +2,27 @@ use norte_code_wire::{QueueMode, ServerEventKind};
 
 use super::App;
 use crate::{
-    components::{ComponentAction, McpState, Preference, ViewAction},
+    components::{ComponentAction, ComponentId, McpState, Preference, ViewAction},
     ui_model::{SessionAttachmentState, ThemeMode, ThinkingVisibility, TranscriptItem, TurnState},
 };
 
 /// The capability a host advertises when it accepts uploads.
 const UPLOADS_CAPABILITY: &str = "uploads";
 
-/// The delta a server event carries, as plain text.
-fn delta_text(event: &norte_code_wire::ServerEvent) -> Option<&str> {
-    match &event.kind {
-        ServerEventKind::Delta {
-            delta:
-                norte_code_wire::Delta::Text { text, .. }
-                | norte_code_wire::Delta::Refusal { text, .. }
-                | norte_code_wire::Delta::Reasoning { text, .. },
-            ..
-        } => Some(text.as_str()),
-        _ => None,
-    }
-}
-
-/// The text a run of deltas adds to.
+/// The text a run of deltas adds to, leaving reasoning out.
 fn aggregated_text(items: &[TranscriptItem]) -> String {
     items
         .iter()
         .filter_map(|item| match item {
-            TranscriptItem::ServerEvent(event) => delta_text(event),
+            TranscriptItem::ServerEvent(event) => match &event.kind {
+                ServerEventKind::Delta {
+                    delta:
+                        norte_code_wire::Delta::Text { text, .. }
+                        | norte_code_wire::Delta::Refusal { text, .. },
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            },
             _ => None,
         })
         .collect()
@@ -51,6 +45,68 @@ fn reasoning_text(items: &[TranscriptItem]) -> String {
         .collect()
 }
 
+/// Who spoke, the way a history page would record a replayed message.
+fn replayed_speaker(role: norte_code_wire::MessageRole) -> norte_code_wire::HistorySpeaker {
+    match role {
+        norte_code_wire::MessageRole::User => norte_code_wire::HistorySpeaker::User,
+        norte_code_wire::MessageRole::Assistant => norte_code_wire::HistorySpeaker::Assistant,
+        norte_code_wire::MessageRole::Tool => norte_code_wire::HistorySpeaker::Tool,
+        norte_code_wire::MessageRole::System
+        | norte_code_wire::MessageRole::Developer
+        | norte_code_wire::MessageRole::Unknown => norte_code_wire::HistorySpeaker::SystemEvent,
+    }
+}
+
+/// The kind the host gives a replayed message in a history page.
+fn replayed_kind(
+    speaker: norte_code_wire::HistorySpeaker,
+    kind: norte_code_wire::ReplayedKind,
+) -> &'static str {
+    match kind {
+        norte_code_wire::ReplayedKind::Text => match speaker {
+            norte_code_wire::HistorySpeaker::User => "user",
+            norte_code_wire::HistorySpeaker::Assistant => "assistant",
+            norte_code_wire::HistorySpeaker::Tool => "tool",
+            norte_code_wire::HistorySpeaker::SystemEvent => "system_event",
+        },
+        norte_code_wire::ReplayedKind::Reasoning => "reasoning",
+        norte_code_wire::ReplayedKind::ToolCall => "tool_call",
+        norte_code_wire::ReplayedKind::ToolResult => "tool_result",
+        norte_code_wire::ReplayedKind::Refusal => "refusal",
+    }
+}
+
+/// Whether a history page covers one live item exactly.
+fn history_covers(history: &[norte_code_wire::HistoryItem], item: &TranscriptItem) -> bool {
+    match item {
+        TranscriptItem::UserMessage { text, turn_id, .. } => {
+            let by_id = turn_id.as_deref().is_some_and(|id| {
+                history.iter().any(|entry| {
+                    entry.role == norte_code_wire::HistorySpeaker::User
+                        && entry.turn_id.as_deref() == Some(id)
+                })
+            });
+            by_id
+                || history.iter().any(|entry| {
+                    entry.role == norte_code_wire::HistorySpeaker::User && entry.content == *text
+                })
+        }
+        TranscriptItem::ServerEvent(event) => match &event.kind {
+            ServerEventKind::MessageReplayed {
+                role, kind, text, ..
+            } => {
+                let speaker = replayed_speaker(*role);
+                let kind = replayed_kind(speaker, *kind);
+                history.iter().any(|entry| {
+                    entry.role == speaker && entry.kind == kind && entry.content == *text
+                })
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// The pieces of a live transcript that a history has replaced.
 pub(super) fn drop_replaced_deltas(
     history: &[norte_code_wire::HistoryItem],
@@ -61,6 +117,7 @@ pub(super) fn drop_replaced_deltas(
     let text_replayed = !aggregate.is_empty()
         && history.iter().any(|item| {
             item.role == norte_code_wire::HistorySpeaker::Assistant
+                && item.kind != "reasoning"
                 && item.content.contains(&aggregate)
         });
     let reasoning_replayed = !reasoning.is_empty()
@@ -70,28 +127,20 @@ pub(super) fn drop_replaced_deltas(
     current
         .into_iter()
         .filter(|item| match item {
+            TranscriptItem::Status(_) | TranscriptItem::History(_) => true,
             TranscriptItem::ServerEvent(event) => match &event.kind {
-                ServerEventKind::Delta { delta, .. } => {
-                    let text_item = matches!(
-                        delta,
-                        norte_code_wire::Delta::Text { .. }
-                            | norte_code_wire::Delta::Refusal { .. }
-                    );
-                    let reasoning_item = matches!(delta, norte_code_wire::Delta::Reasoning { .. });
-                    if text_item {
-                        return !text_replayed;
-                    }
-                    if reasoning_item {
-                        return !reasoning_replayed;
-                    }
-                    !text_replayed && !reasoning_replayed
-                }
+                ServerEventKind::Delta { delta, .. } => match delta {
+                    norte_code_wire::Delta::Text { .. }
+                    | norte_code_wire::Delta::Refusal { .. } => !text_replayed,
+                    norte_code_wire::Delta::Reasoning { .. } => !reasoning_replayed,
+                    _ => !text_replayed && !reasoning_replayed,
+                },
                 ServerEventKind::ToolStarted { .. }
                 | ServerEventKind::ToolOutput { .. }
                 | ServerEventKind::ToolFinished { .. } => !text_replayed,
-                _ => true,
+                _ => !history_covers(history, item),
             },
-            _ => true,
+            _ => !history_covers(history, item),
         })
         .collect()
 }
@@ -101,40 +150,42 @@ pub(super) fn transcript_with_history(
     current: Vec<TranscriptItem>,
     preserve_live: bool,
 ) -> Vec<TranscriptItem> {
-    let current = if preserve_live {
-        drop_replaced_deltas(&history, current)
-    } else {
-        current
-    };
-    let mut transcript = history
+    if !preserve_live {
+        let mut seen = std::collections::HashSet::with_capacity(history.len());
+        let mut transcript: Vec<TranscriptItem> = history
+            .into_iter()
+            .filter(|item| seen.insert(item.id.clone()))
+            .map(TranscriptItem::History)
+            .collect();
+        // The compaction notice and any error are not part of the history
+        // page, so they are the only things that survive a replacement.
+        transcript.extend(
+            current.into_iter().filter(|item| {
+                matches!(item, TranscriptItem::Status(_) | TranscriptItem::Error(_))
+            }),
+        );
+        return transcript;
+    }
+
+    // De-duplicate the history page by stable id, keeping first occurrence.
+    let mut seen = std::collections::HashSet::with_capacity(history.len());
+    let history: Vec<_> = history
         .into_iter()
-        .map(TranscriptItem::History)
-        .collect::<Vec<_>>();
-    for item in current {
-        if matches!(&item, TranscriptItem::Status(_)) {
-            transcript.push(item);
+        .filter(|item| seen.insert(item.id.clone()))
+        .collect();
+    let history_ids: std::collections::HashSet<String> =
+        history.iter().map(|item| item.id.clone()).collect();
+    let live = drop_replaced_deltas(&history, current);
+
+    // The history page is the committed record and forms the base; live
+    // items the page does not cover follow it, keeping their order.
+    let mut transcript = Vec::with_capacity(history.len() + live.len());
+    transcript.extend(history.into_iter().map(TranscriptItem::History));
+    for item in live {
+        if let TranscriptItem::History(item) = &item
+            && history_ids.contains(item.id.as_str())
+        {
             continue;
-        }
-        if !preserve_live {
-            continue;
-        }
-        match &item {
-            TranscriptItem::History(_) => continue,
-            TranscriptItem::ServerEvent(event)
-                if matches!(&event.kind, ServerEventKind::MessageReplayed { .. }) =>
-            {
-                continue;
-            }
-            TranscriptItem::UserMessage { text, .. }
-                if transcript.iter().any(|entry| {
-                    matches!(entry, TranscriptItem::History(history)
-                        if history.role == norte_code_wire::HistorySpeaker::User
-                            && history.content == *text)
-                }) =>
-            {
-                continue;
-            }
-            _ => {}
         }
         transcript.push(item);
     }
@@ -176,6 +227,13 @@ impl App {
             ComponentAction::SendMessage { text, chips } => self.send_message(text, &chips),
             ComponentAction::AttachFile(path) => self.attach_file(path),
             ComponentAction::ImportSession(path) => self.import_session(path),
+            ComponentAction::ScrollTranscript(lines) => {
+                if let Some(index) = self.view_index(ComponentId::Session)
+                    && let Some(component) = self.views.get_mut(index)
+                {
+                    component.scroll_transcript(lines);
+                }
+            }
             ComponentAction::SetQueueMode(mode) => {
                 self.model.queue_mode = mode;
             }
@@ -183,6 +241,9 @@ impl App {
                 if let Some(session) = self.model.active_session.clone()
                     && self.model.active_child.is_none()
                 {
+                    self.model.notice = Some(format!(
+                        "Model change requested: {provider}/{model}. It applies at the next turn boundary."
+                    ));
                     self.client
                         .set_model(session, self.session_generation, provider, model);
                 }
@@ -191,6 +252,13 @@ impl App {
             ComponentAction::ApproveBudget => self.approve_budget(),
             ComponentAction::DeclineBudget => self.decline_budget(),
             ComponentAction::CancelTurn => self.cancel_turn(),
+            ComponentAction::OpenHeaderModal(kind) => {
+                self.header_select = Some(super::HeaderSelectState::new(
+                    kind,
+                    &self.model,
+                    self.catalog_capabilities(),
+                ));
+            }
             ComponentAction::SetReasoning(level) => self.set_reasoning(level),
             ComponentAction::Rewind { turn_id } => self.rewind(turn_id),
             ComponentAction::PinTurn { turn_id, pinned } => self.pin_turn(turn_id, pinned),
@@ -242,6 +310,7 @@ impl App {
                 self.refresh_telemetry();
             }
             ViewAction::RefreshCosts => self.refresh_costs(),
+            ViewAction::RefreshJobs => self.refresh_jobs(),
             ViewAction::RefreshCatalog => self.client.load_catalog(self.session_generation),
             ViewAction::Catalog(operation) => self
                 .client
@@ -280,9 +349,12 @@ impl App {
             return;
         };
         let parts = crate::chips::parts(chips);
+        let queued = self.model.turn_state.is_busy();
         self.model.transcript.push(TranscriptItem::UserMessage {
+            queued,
             text: text.clone(),
             chips: chips.to_vec(),
+            turn_id: None,
         });
         self.model.turn_state = TurnState::Connecting;
         self.client.send_message(
@@ -446,9 +518,48 @@ impl App {
         if self.model.active_child.is_some() {
             return;
         }
+        if let Some(message) = self
+            .current_model_info()
+            .and_then(|model| level.incompatible_with(&model.reasoning))
+        {
+            self.model.notice = Some(format!("{message}; not changing reasoning."));
+            return;
+        }
+        self.reasoning_recovery.clear();
         self.model.reasoning = level;
         self.client
             .set_reasoning(session, level, self.session_generation);
+    }
+
+    /// The reasoning capabilities of the selected model, when the client
+    /// knows them.
+    pub(super) fn catalog_capabilities(&self) -> Option<&norte_code_wire::ReasoningInfo> {
+        self.current_model_info().map(|info| &info.reasoning)
+    }
+
+    /// The catalogue entry for the selected model, when the client knows it.
+    fn current_model_info(&self) -> Option<&norte_code_wire::ModelInfo> {
+        let (provider, model) = self.model.session_model.as_ref().map_or_else(
+            || {
+                self.model
+                    .active_session
+                    .as_ref()
+                    .and_then(|session| {
+                        self.model
+                            .sessions
+                            .iter()
+                            .find(|summary| summary.session_id == session.as_str())
+                    })
+                    .and_then(|summary| {
+                        Some((summary.provider.clone()?, summary.model.clone()?.id))
+                    })
+            },
+            |model| Some((model.provider.clone(), model.model.clone())),
+        )?;
+        self.model
+            .models
+            .iter()
+            .find(|info| info.provider == provider && info.model == model)
     }
 
     fn rewind(&mut self, turn_id: String) {
@@ -566,6 +677,14 @@ impl App {
         if let Some(session) = self.model.active_session.clone() {
             self.client
                 .load_costs(Some(session.clone()), self.session_generation);
+        }
+    }
+
+    /// Asks the host for the session's jobs, the way a page opened on them
+    /// would like to see them fresh.
+    fn refresh_jobs(&self) {
+        if let Some(session) = self.model.active_session.clone() {
+            self.client.load_jobs(session, self.session_generation);
         }
     }
 }

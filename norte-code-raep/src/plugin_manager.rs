@@ -23,7 +23,10 @@ use std::process::Command;
 const BUILD_ERROR_LINES: usize = 6;
 
 /// The directory where plugin libraries live.
-pub(crate) fn plugin_dir() -> PathBuf {
+///
+/// `NORTE_CODE_PLUGINS` wins when set; otherwise `$HOME/.config/norte-code/plugins`.
+#[must_use]
+pub fn plugin_dir() -> PathBuf {
     if let Ok(value) = std::env::var("NORTE_CODE_PLUGINS") {
         return PathBuf::from(value);
     }
@@ -159,7 +162,11 @@ pub(crate) fn installed_libraries() -> Vec<PathBuf> {
 /// The name is either the one the plugin answers with or the one its file has:
 /// the list shows both, and a person removing a plugin types the one they
 /// read.
-pub(crate) fn remove_plugin(name: &str) -> Result<(), String> {
+///
+/// # Errors
+///
+/// Returns an error when the plugin is not installed or the file cannot be removed.
+pub fn remove_plugin(name: &str) -> Result<(), String> {
     let path = library_named(name).ok_or_else(|| format!("plugin {name} not found"))?;
     std::fs::remove_file(&path).map_err(|e| format!("could not remove {name}: {e}"))?;
     if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
@@ -186,7 +193,7 @@ pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Install a plugin from a git URL.
+/// Install one plugin package from a git URL.
 ///
 /// Clones the repository into a temporary directory, builds it as a cdylib, and
 /// copies the resulting shared library into the plugin directory. Returns the
@@ -194,11 +201,18 @@ pub(crate) fn library_named(name: &str) -> Option<PathBuf> {
 ///
 /// The clone never asks for credentials: a build that stops to ask is a build
 /// a person cannot get out of, and the answer to a private repository is to
-/// use one that can be read.
+/// use one that can be read. The build installs one package; a workspace with
+/// several plugin packages reports which ones exist — pass one with
+/// `package` or use [`install_all_plugins`].
 ///
 /// `on_progress` is called with the step number, the total step count and a
 /// short label, so a caller can show where the install stands.
-pub(crate) fn install_plugin(
+///
+/// # Errors
+///
+/// Returns an error when the repository has no plugin package, the named package
+/// does not exist, or the build fails. The failed build's last lines are kept.
+pub fn install_plugin(
     url: &str,
     package: Option<&str>,
     on_progress: &dyn Fn(usize, usize, &str),
@@ -227,7 +241,7 @@ pub(crate) fn install_plugin(
 ///
 /// Returns an error when the workspace has no plugin package, or when every
 /// package failed to install.
-pub(crate) fn install_all_plugins(
+pub fn install_all_plugins(
     url: &str,
     on_progress: &dyn Fn(usize, usize, &str),
 ) -> Result<Vec<String>, String> {
@@ -646,7 +660,12 @@ pub(crate) fn installed_entries() -> Vec<PathBuf> {
     paths
 }
 
-pub(crate) fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
+/// The installed plugins, in file order.
+///
+/// `loaded` is always `false`: what the running service has loaded in memory
+/// is the service's business; this reports what is on disk.
+#[must_use]
+pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
     installed_entries()
         .into_iter()
         .filter_map(|path| {
@@ -674,7 +693,7 @@ pub(crate) fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
 /// # Errors
 ///
 /// Returns an error when the plugin is not installed or the rename fails.
-pub(crate) fn set_plugin_enabled(name: &str, enabled: bool) -> Result<(), String> {
+pub fn set_plugin_enabled(name: &str, enabled: bool) -> Result<(), String> {
     let path = installed_entries()
         .into_iter()
         .find(|path| {
@@ -771,6 +790,19 @@ fn tail(output: &[u8], lines: usize) -> String {
     } else {
         kept.join("\n")
     }
+}
+
+/// The recorded source (URL, and package when it came from a workspace) for
+/// every installed plugin that has one.
+///
+/// A plugin installed before the source sidecar existed, or installed without
+/// recording, is not in the map — it shows up in the list with no source.
+#[must_use]
+pub fn recorded_sources() -> std::collections::BTreeMap<String, (String, Option<String>)> {
+    load_sources()
+        .into_iter()
+        .map(|(stem, source)| (stem, (source.url, source.package)))
+        .collect()
 }
 
 #[cfg(test)]

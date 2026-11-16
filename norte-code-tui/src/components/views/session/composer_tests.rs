@@ -131,3 +131,47 @@ fn the_attach_prompt_can_be_left_without_attaching_anything() {
     assert!(action.is_none());
     assert!(composer.attach.is_none());
 }
+
+#[test]
+fn shift_enter_inserts_a_newline_instead_of_sending() {
+    let mut composer = Composer::default();
+    composer.paste("first line");
+
+    let action = composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), &model());
+
+    assert!(action.is_none());
+    assert_eq!(composer.text, "first line\n");
+}
+
+#[test]
+fn the_composer_reserves_a_row_for_every_chip_it_draws() {
+    let mut composer = Composer::default();
+    composer.paste("hola");
+    composer.add_chip(Chip::text("a".to_owned()));
+    composer.add_chip(Chip::text("b".to_owned()));
+
+    assert_eq!(composer.chip_lines().len(), 2);
+    assert_eq!(composer.height(false), 6);
+}
+
+#[test]
+fn the_composer_keeps_only_five_visible_lines() {
+    let mut composer = Composer::default();
+    composer.paste("one\ntwo\nthree\nfour\nfive\nsix\nseven");
+
+    assert_eq!(composer.height(false), 8);
+    assert_eq!(composer.height(true), 9);
+    assert_eq!(composer.visible_lines(&model()).len(), 5);
+    assert_eq!(line_content(&composer.visible_lines(&model())[0]), "three");
+    assert_eq!(
+        line_content(composer.visible_lines(&model()).last().expect("a line")),
+        "seven"
+    );
+}
+
+fn line_content(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}

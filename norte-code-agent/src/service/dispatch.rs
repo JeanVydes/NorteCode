@@ -471,9 +471,12 @@ impl Service {
             }
             Kind::ContextPin {
                 session,
-                turn_ids: _,
-                pinned: _,
-            } => self.context_pin_event(request_id, session).await,
+                turn_ids,
+                pinned,
+            } => {
+                self.context_pin_event(request_id, session, turn_ids, pinned)
+                    .await
+            }
             Kind::SessionRewind { session, .. } => self.rewind_event(request_id, session).await,
             Kind::HistoryGet { session, .. } => self.history_get_event(request_id, session).await,
             Kind::SessionExport {

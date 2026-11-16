@@ -52,7 +52,7 @@ impl MarkdownRenderer {
             Event::Code(code) => {
                 self.start_style(
                     Style::default()
-                        .fg(palette::warning())
+                        .fg(palette::brand())
                         .add_modifier(Modifier::BOLD),
                 );
                 self.append_text(&code);
@@ -103,7 +103,7 @@ impl MarkdownRenderer {
             }
             Tag::CodeBlock(_) => {
                 self.start_block();
-                self.start_style(Style::default().fg(palette::warning()));
+                self.start_style(Style::default().fg(palette::brand()));
             }
             Tag::BlockQuote(_) => {
                 self.start_block();

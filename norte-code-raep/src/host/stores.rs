@@ -1,11 +1,10 @@
-//! The stores the host keeps: pins, artifacts, uploads and replay.
+//! The stores the host keeps: artifacts, uploads and replay.
 
 use async_trait::async_trait;
 
 use raep_types::{AttachMode, Envelope, FrameId, TurnId};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[allow(clippy::wildcard_imports)]
@@ -20,73 +19,6 @@ pub struct ArtifactRef {
     pub mime_type: String,
     /// Number of stored bytes.
     pub bytes: u64,
-}
-
-/// Durable pin storage for `CONTEXT_PIN` (RFC 18.5).
-///
-/// Pins are session-scoped sets of turn ids. The host persists them here
-/// so they survive a restart; the in-memory map in `HostState` is only a
-/// cache.
-#[async_trait]
-pub trait PinStore: Send + Sync {
-    /// Reads all pins for one session.
-    async fn load(&self, session_id: &str) -> Result<Vec<String>, HostError>;
-    /// Replaces all pins for one session.
-    async fn save(&self, session_id: &str, pins: &[String]) -> Result<(), HostError>;
-}
-
-/// JSON-file pin storage for the RAEP server.
-///
-/// One file per session: `pins/<session_id>.json` with a JSON array of
-/// turn ids. Writes are atomic (tmp + rename); reads tolerate a missing
-/// file as `[]`.
-#[derive(Clone, Debug)]
-pub struct FilePinStore {
-    dir: PathBuf,
-}
-
-impl FilePinStore {
-    /// Opens a pin store rooted at `dir` (created on first write).
-    #[must_use]
-    pub fn new(dir: impl AsRef<Path>) -> Self {
-        Self {
-            dir: dir.as_ref().to_owned(),
-        }
-    }
-
-    fn path(&self, session_id: &str) -> PathBuf {
-        self.dir.join(format!("{session_id}.json"))
-    }
-}
-
-#[async_trait]
-impl PinStore for FilePinStore {
-    async fn load(&self, session_id: &str) -> Result<Vec<String>, HostError> {
-        let path = self.path(session_id);
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(HostError::ReplayJournal(error.to_string())),
-        };
-        serde_json::from_str::<Vec<String>>(&content)
-            .map_err(|error| HostError::ReplayJournal(format!("pin file: {error}")))
-    }
-
-    async fn save(&self, session_id: &str, pins: &[String]) -> Result<(), HostError> {
-        tokio::fs::create_dir_all(&self.dir)
-            .await
-            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-        let path = self.path(session_id);
-        let tmp = path.with_extension("json.tmp");
-        let content = serde_json::to_string(pins).map_err(HostError::Serialization)?;
-        tokio::fs::write(&tmp, content)
-            .await
-            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-        tokio::fs::rename(&tmp, &path)
-            .await
-            .map_err(|error| HostError::ReplayJournal(error.to_string()))?;
-        Ok(())
-    }
 }
 
 /// Durable storage for client-uploaded artifacts.
@@ -158,9 +90,6 @@ pub(super) struct HostState {
     pub(super) turn_request_fingerprints: HashMap<(String, TurnId), String>,
     pub(super) turn_request_frames: HashMap<(String, TurnId), Envelope<Value>>,
     pub(super) turn_request_order: VecDeque<(String, TurnId)>,
-    /// Pinned turns per session (RFC 18.5). Held in-memory; the service
-    /// has no pin table yet, so pins do not survive a restart.
-    pub(super) pinned_turns: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone)]

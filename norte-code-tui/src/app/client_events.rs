@@ -14,6 +14,17 @@ use crate::{
 };
 
 impl App {
+    /// Whether this error killed the turn in progress: the turn was alive
+    /// before it and died now. The happy path reloads the page when the
+    /// turn finishes; the failing path deserves the same truth from the
+    /// store when its turn dies.
+    pub(super) fn is_turn_ending_error(
+        kind: &ServerEventKind,
+        state: crate::ui_model::TurnState,
+    ) -> bool {
+        matches!(kind, ServerEventKind::Error { .. }) && state.is_busy()
+    }
+
     pub(super) fn drain_client_events(&mut self) -> Result<(), super::AppError> {
         while let Some(client_event) = self.client.try_recv() {
             self.apply_client_event(client_event)?;
@@ -24,6 +35,13 @@ impl App {
     /// Records a successful attach, and clears the reconnecting notice.
     fn apply_attached(&mut self) {
         self.model.attachment_state = SessionAttachmentState::Attached;
+        let was_down = self.model.service_down;
+        self.model.service_down = false;
+        if was_down {
+            self.model
+                .transcript
+                .push(TranscriptItem::Status("Service is back.".to_owned()));
+        }
         if self
             .model
             .notice
@@ -102,6 +120,18 @@ impl App {
         if attachment_failed {
             self.model.attachment_state = SessionAttachmentState::Failed;
         }
+        if Self::is_transport_failure(&message) {
+            // The request never reached a host: one line tells the reader
+            // why the transcript went quiet, and the retries that keep
+            // failing while the service is down stay out of it.
+            if !self.model.service_down {
+                self.model.service_down = true;
+                self.model
+                    .transcript
+                    .push(TranscriptItem::Error(Self::transport_notice(&message)));
+            }
+            return;
+        }
         let recovered = self.maybe_recover_reasoning_from_message(&message);
         self.model.transcript.push(TranscriptItem::Error(message));
         if recovered {
@@ -113,14 +143,47 @@ impl App {
         message.contains("does not support effort")
     }
 
-    fn maybe_recover_reasoning_from_message(&mut self, message: &str) -> bool {
-        if !Self::is_unsupported_effort_message(message)
-            || self.model.reasoning == ReasoningLevel::Automatic
-        {
+    /// Whether the failure is the transport being down: the request never
+    /// reached a host, so nothing about the session decided it.
+    pub(super) fn is_transport_failure(message: &str) -> bool {
+        message.contains("error sending request for url")
+    }
+
+    /// The one line a transport failure tells the reader, naming the host
+    /// the request was meant for when the message carries its URL.
+    pub(super) fn transport_notice(message: &str) -> String {
+        let rest = message
+            .split_once("url (")
+            .map(|(_, rest)| rest.trim_end_matches(')'));
+        let authority = rest
+            .and_then(|url| url.split_once("://"))
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split(['/', '?']).next())
+            .filter(|authority| !authority.is_empty());
+        match authority {
+            Some(host) => format!("Service unreachable ({host}); retrying in the background."),
+            None => "Service unreachable; retrying in the background.".to_owned(),
+        }
+    }
+
+    pub(super) fn maybe_recover_reasoning_from_message(&mut self, message: &str) -> bool {
+        if !Self::is_unsupported_effort_message(message) {
             return false;
         }
         let refused = self.model.reasoning;
+        if !self
+            .reasoning_recovery
+            .claim(self.session_generation, refused)
+        {
+            return false;
+        }
         self.model.reasoning = ReasoningLevel::Automatic;
+        if refused == ReasoningLevel::Automatic {
+            self.model.transcript.push(TranscriptItem::Status(
+                "The stored effort is not supported by this model; using auto.".to_owned(),
+            ));
+            return true;
+        }
         self.model.transcript.push(TranscriptItem::Status(format!(
             "Reasoning effort {} is not supported by this model; using auto.",
             refused.label()
@@ -128,7 +191,7 @@ impl App {
         true
     }
 
-    fn sync_reasoning_with_host(&mut self) {
+    pub(super) fn sync_reasoning_with_host(&mut self) {
         let Some(session) = self.model.active_session.clone() else {
             return;
         };
@@ -283,6 +346,19 @@ impl App {
                 self.client.load_history(session, generation);
             }
         }
+        if let ServerEventKind::Error { message, .. } = &event.kind
+            && Self::is_transport_failure(message)
+        {
+            // A command that never reached the host: told once, like every
+            // other transport failure, and quiet while the retries fail.
+            if !self.model.service_down {
+                self.model.service_down = true;
+                self.model
+                    .transcript
+                    .push(TranscriptItem::Error(Self::transport_notice(message)));
+            }
+            return;
+        }
         if let ServerEventKind::ReasoningDowngraded { from, to, reason } = &event.kind {
             self.apply_reasoning_downgrade(from, to, reason);
         }
@@ -306,16 +382,18 @@ impl App {
         self.open_question(&event.kind, event.session.as_ref());
         let refresh_plans = matches!(&event.kind, ServerEventKind::TurnFinished { .. })
             && self.model.active_child.is_none();
+        let error_kills_the_turn = App::is_turn_ending_error(&event.kind, self.model.turn_state);
         self.model.turn_state.apply_event(&event.kind);
         self.update_child_state(&event.kind);
         self.track_turn(&event.kind);
         self.track_todos(&event.kind);
         self.track_model(&event.kind);
         self.track_job(&event.kind);
-        if matches!(
+        if (matches!(
             &event.kind,
             ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
-        ) && self.model.active_child.is_none()
+        ) || error_kills_the_turn)
+            && self.model.active_child.is_none()
             && let Some(session) = self.model.active_session.clone()
         {
             self.client.load_history(session, self.session_generation);
@@ -340,6 +418,29 @@ impl App {
         match kind {
             ServerEventKind::InputAccepted { turn_id, .. } => {
                 self.model.active_turn = Some(turn_id.clone());
+                // The live copy of the message gets the same turn id the
+                // history will use for it, so the optimistic transcript and
+                // the canonical page can recognize each other.
+                if let Some(position) = self.model.transcript.iter().position(|item| {
+                    matches!(
+                        item,
+                        crate::ui_model::TranscriptItem::UserMessage { turn_id: None, .. }
+                    )
+                }) && let crate::ui_model::TranscriptItem::UserMessage { turn_id: tag, .. } =
+                    &mut self.model.transcript[position]
+                {
+                    *tag = Some(turn_id.clone());
+                }
+            }
+            ServerEventKind::TurnStarted { .. } => {
+                // The next queued message just left the queue: what the
+                // reader typed is being answered now, so it is not pending
+                // anymore.
+                self.model.transcript.iter_mut().for_each(|item| {
+                    if let crate::ui_model::TranscriptItem::UserMessage { queued, .. } = item {
+                        *queued = false;
+                    }
+                });
             }
             ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. } => {
                 self.model.active_turn = None;
@@ -357,8 +458,10 @@ impl App {
     fn track_model(&mut self, kind: &ServerEventKind) {
         if let Some((model, message)) = Self::model_change(kind) {
             self.model.session_model = Some(model);
+            self.model.queued_model = None;
             self.model.transcript.push(TranscriptItem::Status(message));
-        } else if let Some(message) = Self::model_change_pending(kind) {
+        } else if let Some((model, message)) = Self::model_change_pending(kind) {
+            self.model.queued_model = Some(model);
             self.model.transcript.push(TranscriptItem::Status(message));
         }
     }
@@ -386,15 +489,22 @@ impl App {
     }
 
     /// The notice for a model change that waits for the turn to end.
-    fn model_change_pending(kind: &ServerEventKind) -> Option<String> {
+    fn model_change_pending(kind: &ServerEventKind) -> Option<(SessionModel, String)> {
         let ServerEventKind::ModelQueued { provider, model } = kind else {
             return None;
         };
-        Some(Self::model_queued_message(provider, model))
+        Some((
+            SessionModel {
+                provider: provider.clone(),
+                model: model.clone(),
+            },
+            Self::model_queued_message(provider, model),
+        ))
     }
 
     fn usage_summary(kind: &ServerEventKind) -> Option<UsageSummary> {
         let ServerEventKind::RequestReconstructed {
+            turn,
             usage,
             cost_usd,
             duration_ms,
@@ -407,6 +517,7 @@ impl App {
             return None;
         };
         Some(UsageSummary {
+            turn: Some(*turn),
             provider: provider.clone(),
             model: model.clone(),
             input_tokens: usage.input_tokens,

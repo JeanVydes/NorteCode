@@ -1,10 +1,10 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use norte_code_wire::{JobInfo, JobState, SessionKey, SessionSummary};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use norte_code_wire::{SessionKey, SessionSummary};
 
 use super::{SessionView, active_session_label, session_regions};
 use crate::{
     components::{Component, ComponentAction, ViewAction},
-    ui_model::{ReasoningLevel, SessionAttachmentState, TurnPoint, UiModel},
+    ui_model::{SessionAttachmentState, UiModel},
 };
 use norte_code_wire::{BudgetAction, BudgetScope, BudgetUnit};
 
@@ -40,24 +40,20 @@ fn untitled_session_uses_the_sidebar_fallback_label() {
 #[test]
 fn session_content_keeps_the_composer_below_the_transcript() {
     for height in 3..=6 {
-        let [transcript, picker, jobs, todos, composer] =
-            session_regions(ratatui::layout::Rect::new(0, 0, 80, height), 0, 0, 0, 2);
-        assert!(transcript.y + transcript.height <= picker.y);
-        assert!(picker.y + picker.height <= jobs.y);
-        assert!(jobs.y + jobs.height <= todos.y);
+        let [transcript, todos, composer] =
+            session_regions(ratatui::layout::Rect::new(0, 0, 80, height), 0, 2);
+        assert!(transcript.y + transcript.height <= todos.y);
         assert!(todos.y + todos.height <= composer.y);
         assert!(composer.y + composer.height <= height);
     }
 }
 
 #[test]
-fn the_panels_sit_between_the_transcript_and_the_composer() {
-    let [transcript, picker, jobs, todos, composer] =
-        session_regions(ratatui::layout::Rect::new(0, 0, 80, 14), 2, 3, 4, 2);
+fn the_todos_sit_between_the_transcript_and_the_composer() {
+    let [transcript, todos, composer] =
+        session_regions(ratatui::layout::Rect::new(0, 0, 80, 14), 4, 2);
 
-    assert!(transcript.y + transcript.height <= picker.y);
-    assert_eq!(picker.height, 2);
-    assert_eq!(jobs.height, 3);
+    assert!(transcript.y + transcript.height <= todos.y);
     assert_eq!(todos.height, 4);
     assert!(todos.y + todos.height <= composer.y);
 }
@@ -215,7 +211,7 @@ fn control_c_types_nothing_when_no_turn_is_running() {
 }
 
 #[test]
-fn reasoning_key_cycles_the_effort() {
+fn the_reasoning_key_opens_the_effort_menu() {
     let mut view = SessionView::default();
     let model = UiModel::default();
     view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
@@ -226,172 +222,354 @@ fn reasoning_key_cycles_the_effort() {
 
     assert!(matches!(
         view.take_action(),
-        Some(ComponentAction::SetReasoning(ReasoningLevel::Disabled))
+        Some(ComponentAction::OpenHeaderModal(
+            crate::components::HeaderModal::Reasoning
+        ))
     ));
 }
 
 #[test]
-fn rewind_picks_the_turn_the_reader_names() {
+fn the_queue_key_opens_the_queue_menu() {
     let mut view = SessionView::default();
-    let model = UiModel {
-        turn_points: vec![
-            TurnPoint {
-                turn_id: "turn-1".to_owned(),
-                preview: "first".to_owned(),
-            },
-            TurnPoint {
-                turn_id: "turn-2".to_owned(),
-                preview: "second".to_owned(),
-            },
-        ],
-        ..UiModel::default()
-    };
+    let model = UiModel::default();
     view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
     view.handle_key(
-        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
-        &model,
-    );
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
         &model,
     );
 
     assert!(matches!(
         view.take_action(),
-        Some(ComponentAction::Rewind { turn_id }) if turn_id == "turn-2"
+        Some(ComponentAction::OpenHeaderModal(
+            crate::components::HeaderModal::Queue
+        ))
     ));
 }
 
 #[test]
-fn pin_marks_the_turn_the_reader_names() {
-    let mut view = SessionView::default();
-    let model = UiModel {
-        turn_points: vec![TurnPoint {
-            turn_id: "turn-1".to_owned(),
-            preview: "first".to_owned(),
-        }],
-        ..UiModel::default()
-    };
-    view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE),
-        &model,
-    );
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
-        &model,
-    );
+fn right_clicking_a_turn_and_choosing_rewind_lands_on_it() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 3, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
 
     assert!(matches!(
         view.take_action(),
-        Some(ComponentAction::PinTurn { turn_id, pinned: true }) if turn_id == "turn-1"
+        Some(ComponentAction::Rewind { turn_id }) if turn_id == "turn_1"
     ));
 }
-
 #[test]
-fn pin_unmarks_a_turn_that_is_already_pinned() {
-    let mut view = SessionView::default();
+fn the_context_menu_pins_the_turn_the_reader_clicked() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 3, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
+
+    assert!(matches!(
+        view.take_action(),
+        Some(ComponentAction::PinTurn { turn_id, pinned: true }) if turn_id == "turn_1"
+    ));
+}
+#[test]
+fn the_context_menu_unpins_a_turn_that_is_already_pinned() {
+    let mut view = view_with_separators();
     let model = UiModel {
-        turn_points: vec![TurnPoint {
-            turn_id: "turn-1".to_owned(),
-            preview: "first".to_owned(),
-        }],
-        pinned_turns: vec!["turn-1".to_owned()],
-        ..UiModel::default()
+        pinned_turns: vec!["turn_1".to_owned()],
+        ..transcript_model()
     };
-    view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE),
-        &model,
-    );
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
-        &model,
-    );
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 3, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
 
     assert!(matches!(
         view.take_action(),
         Some(ComponentAction::PinTurn { pinned: false, .. })
     ));
 }
-
 #[test]
-fn the_turn_picker_closes_without_acting() {
-    let mut view = SessionView::default();
-    let model = UiModel {
-        turn_points: vec![TurnPoint {
-            turn_id: "turn-1".to_owned(),
-            preview: "first".to_owned(),
-        }],
-        ..UiModel::default()
-    };
-    view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
-        &model,
-    );
+fn escape_closes_the_turn_menu_without_acting() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 3, 0), &model);
     view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
 
     assert!(view.take_action().is_none());
 }
 
-fn running_job(id: &str, label: &str) -> JobInfo {
-    JobInfo {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        script: label.to_owned(),
-        state: JobState::Running,
-        exit_code: None,
-        timed_out: false,
-        elapsed_ms: 0,
-        output: String::new(),
-        dropped: false,
-        output_bytes_total: 0,
+const CLICK_LEFT: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+const CLICK_RIGHT: MouseEventKind = MouseEventKind::Down(MouseButton::Right);
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn view_with_separators() -> SessionView {
+    SessionView {
+        last_render_area: ratatui::layout::Rect::new(0, 0, 80, 20),
+        layout: super::transcript::TranscriptLayout {
+            max_scroll: 0,
+            width: 80,
+            text_area: ratatui::layout::Rect::new(0, 0, 80, 20),
+            separators: vec![
+                (0, super::transcript::TurnKey::Live(1)),
+                (5, super::transcript::TurnKey::Live(2)),
+            ],
+        },
+        ..SessionView::default()
+    }
+}
+
+fn transcript_model() -> crate::ui_model::UiModel {
+    let items = vec![
+        crate::ui_model::TranscriptItem::UserMessage {
+            queued: false,
+            turn_id: None,
+            text: "hola".to_owned(),
+            chips: Vec::new(),
+        },
+        crate::ui_model::TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: norte_code_wire::ServerEventKind::Delta {
+                turn: 1,
+                delta: norte_code_wire::Delta::Text {
+                    index: 0,
+                    text: "buenos dias".to_owned(),
+                },
+            },
+        })),
+        crate::ui_model::TranscriptItem::UserMessage {
+            queued: false,
+            turn_id: None,
+            text: "segunda".to_owned(),
+            chips: Vec::new(),
+        },
+        crate::ui_model::TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: norte_code_wire::ServerEventKind::Delta {
+                turn: 2,
+                delta: norte_code_wire::Delta::Text {
+                    index: 0,
+                    text: "otra vez".to_owned(),
+                },
+            },
+        })),
+    ];
+    UiModel {
+        transcript: items,
+        ..UiModel::default()
     }
 }
 
 #[test]
-fn the_job_picker_stops_the_job_the_reader_names() {
-    let mut view = SessionView::default();
-    let model = UiModel {
-        jobs: vec![
-            running_job("job-1", "cargo build"),
-            running_job("job-2", "cargo test"),
-        ],
-        ..UiModel::default()
+fn z_folds_the_turn_under_the_reader() {
+    let mut view = SessionView {
+        layout: super::transcript::TranscriptLayout {
+            max_scroll: 2,
+            width: 80,
+            text_area: ratatui::layout::Rect::new(0, 0, 80, 20),
+            separators: Vec::new(),
+        },
+        ..SessionView::default()
     };
+    let model = transcript_model();
+
     view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
     view.handle_key(
-        KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
-        &model,
-    );
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
         &model,
     );
 
+    assert!(view.folded.contains(&super::transcript::TurnKey::Live(1)));
+}
+
+#[test]
+fn jumping_into_a_folded_turn_unfolds_it() {
+    let mut view = SessionView {
+        layout: super::transcript::TranscriptLayout {
+            max_scroll: 2,
+            width: 80,
+            text_area: ratatui::layout::Rect::new(0, 0, 80, 20),
+            separators: Vec::new(),
+        },
+        ..SessionView::default()
+    };
+    let model = transcript_model();
+
+    view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
+    view.handle_key(
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+        &model,
+    );
+    view.handle_key(
+        KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+        &model,
+    );
+    view.handle_key(
+        KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+        &model,
+    );
+
+    assert!(!view.folded.contains(&super::transcript::TurnKey::Live(1)));
+}
+
+#[test]
+fn clicking_a_turn_separator_folds_the_turn() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_LEFT, 10, 0), &model);
+
+    assert!(view.folded.contains(&super::transcript::TurnKey::Live(1)));
+}
+
+#[test]
+fn clicking_outside_a_separator_does_nothing() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_LEFT, 10, 7), &model);
+
+    assert_eq!(view.folded.len(), 0);
+}
+
+#[test]
+fn a_right_click_on_a_separator_opens_the_menu() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 10, 0), &model);
+
+    assert!(view.context_menu.is_some());
+}
+
+#[test]
+fn a_right_click_elsewhere_does_not_open_the_menu() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 10, 7), &model);
+
+    assert!(view.context_menu.is_none());
+}
+
+#[test]
+fn escape_closes_the_menu_without_an_action() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 10, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
+
+    assert!(view.context_menu.is_none());
+    assert!(view.take_action().is_none());
+}
+
+#[test]
+fn the_menu_rewinds_to_the_clicked_turn() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 10, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
+
     assert!(matches!(
         view.take_action(),
-        Some(ComponentAction::StopJob { job_id }) if job_id == "job-2"
+        Some(ComponentAction::Rewind { turn_id }) if turn_id == "turn_1"
     ));
 }
 
 #[test]
-fn the_job_picker_ignores_a_number_that_names_no_job() {
-    let mut view = SessionView::default();
+fn the_menu_pins_and_unpins_the_turn() {
     let model = UiModel {
-        jobs: vec![running_job("job-1", "cargo build")],
+        turn_points: Vec::new(),
         ..UiModel::default()
     };
-    view.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &model);
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
-        &model,
-    );
-    view.handle_key(
-        KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
+    let mut view = view_with_separators();
+    view.handle_mouse(mouse(CLICK_RIGHT, 10, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
+
+    assert!(matches!(
+        view.take_action(),
+        Some(ComponentAction::PinTurn { turn_id, pinned: true }) if turn_id == "turn_1"
+    ));
+}
+
+#[test]
+fn the_menu_folds_the_turn() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 10, 0), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
+    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
+
+    assert!(view.folded.contains(&super::transcript::TurnKey::Live(1)));
+    assert!(view.take_action().is_none());
+}
+
+#[test]
+fn clicking_a_menu_item_executes_it() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 4, 0), &model);
+    view.handle_mouse(mouse(CLICK_LEFT, 24, 9), &model);
+
+    assert!(matches!(
+        view.take_action(),
+        Some(ComponentAction::Rewind { turn_id }) if turn_id == "turn_1"
+    ));
+}
+
+#[test]
+fn a_click_on_the_menu_keeps_it_open() {
+    let mut view = view_with_separators();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_RIGHT, 4, 0), &model);
+    view.handle_mouse(mouse(CLICK_LEFT, 24, 8), &model);
+
+    assert!(view.context_menu.is_some());
+}
+
+#[test]
+fn clicking_the_drawn_separator_folds_the_turn() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut view = SessionView::default();
+    let model = transcript_model();
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &model))
+        .expect("render");
+    let buffer = terminal.backend().buffer();
+    let row = (0..20).find(|y| {
+        (0..80)
+            .map(|x| buffer[(x, *y)].symbol())
+            .collect::<String>()
+            .contains("turn 1")
+    });
+
+    view.handle_mouse(
+        // px-4: the transcript starts at column 4.
+        mouse(CLICK_LEFT, 6, row.expect("the separator is drawn")),
         &model,
     );
 
-    assert!(view.take_action().is_none());
+    assert!(view.folded.contains(&super::transcript::TurnKey::Live(1)));
 }

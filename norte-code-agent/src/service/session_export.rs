@@ -174,6 +174,7 @@ impl Service {
             session
         };
         let key = SessionKey::new(uuid::Uuid::new_v4().to_string());
+        let owner = agent_profile.unwrap_or_else(|| self.config().name.clone());
         let record = SessionRecord {
             id: session.id,
             title,
@@ -189,6 +190,7 @@ impl Service {
             input_tokens: 0,
             context_used: 0,
             last_turn: 0,
+            activity_at_ms: None,
             turn_boundaries: Vec::new(),
             rewound_history: Vec::new(),
             imported_from: None,
@@ -214,7 +216,7 @@ impl Service {
             parent_client: None,
             parent_tool_call_id: None,
             child_terminal: None,
-            agent_profile,
+            agent_profile: Some(owner),
             depth: 0,
             delegator_suspended: false,
             delegator_queue: Vec::new(),
@@ -391,6 +393,7 @@ impl Service {
             input_tokens,
             context_used,
             last_turn: effective_turn,
+            activity_at_ms: None,
             turn_boundaries,
             rewound_history: Vec::new(),
             imported_from: None,

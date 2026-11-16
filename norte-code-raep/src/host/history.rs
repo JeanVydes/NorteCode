@@ -196,11 +196,12 @@ impl NorteCodeRaepHost {
         .await
     }
     /// Context pins (RFC 18.5): pin or unpin turns so they stay verbatim
-    /// through compaction. The pins are held in the host's in-memory
-    /// state (up to `max_pinned_turns` = 20) and persisted through the
-    /// [`PinStore`] when one is configured; without a store they do not
-    /// survive a restart. The CLI does not pin; this is so another
-    /// client (desktop) can.
+    /// through compaction. The pins are held by the service in the
+    /// session's stored stats, so they persist and the compaction seed
+    /// sees them; the host forwards the request so the client-facing
+    /// `CONTEXT_UPDATED` echoes exactly what the service recorded. The
+    /// service refuses the request rather than letting the list grow past
+    /// the pin cap, and the host echoes that refusal.
     pub(crate) async fn context_pin(
         &self,
         frame: Envelope<Value>,
@@ -226,31 +227,12 @@ impl NorteCodeRaepHost {
                 "CONTEXT_PIN requires turn_ids".to_owned(),
             ));
         }
-        let mut state = self.state.lock().await;
-        let pins = state
-            .pinned_turns
-            .entry(frame.session_id.clone())
-            .or_default();
-        for id in &turn_ids {
-            if pinned {
-                if pins.contains(id) {
-                    continue;
-                }
-                if pins.len() >= 20 {
-                    return Err(HostError::InvalidFrame(
-                        "PAYLOAD_TOO_LARGE: too many pinned turns".to_owned(),
-                    ));
-                }
-                pins.push(id.clone());
-            } else {
-                pins.retain(|p| p != id);
-            }
-        }
-        let pinned_turn_ids = pins.clone();
-        drop(state);
-        if let Some(store) = self.pin_store.clone() {
-            store.save(&frame.session_id, &pinned_turn_ids).await?;
-        }
+        let key = SessionKey::new(frame.session_id.clone());
+        let pinned_turn_ids = self
+            .service
+            .pin_turns(&key, &turn_ids, pinned)
+            .await
+            .map_err(|error| HostError::Service(error.to_string()))?;
         Ok(vec![
             self.emit(
                 &frame.session_id,

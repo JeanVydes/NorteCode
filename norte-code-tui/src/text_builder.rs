@@ -14,24 +14,127 @@ mod data;
 
 pub struct TextBuilder;
 
+fn session_id_short(session: &str) -> String {
+    session.chars().take(8).collect()
+}
+
+fn queue_mode_compact(mode: QueueMode) -> &'static str {
+    match mode {
+        QueueMode::Reject => "reject",
+        QueueMode::Queue => "queue",
+        QueueMode::Interrupt => "interrupt",
+    }
+}
+
+use crate::components::HeaderModal;
+
+/// The header as it is drawn, with the buttons in it.
+pub(crate) struct HeaderLayout {
+    pub(crate) line: Line<'static>,
+    /// The clickable parts, with the columns they span.
+    pub(crate) buttons: Vec<(usize, usize, HeaderModal)>,
+}
+
+struct HeaderBuilder {
+    theme: crate::ui_model::ThemeMode,
+    spans: Vec<Span<'static>>,
+    buttons: Vec<(usize, usize, HeaderModal)>,
+    column: usize,
+}
+
+impl HeaderBuilder {
+    fn new(theme: crate::ui_model::ThemeMode) -> Self {
+        Self {
+            theme,
+            spans: Vec::new(),
+            buttons: Vec::new(),
+            column: 0,
+        }
+    }
+
+    fn push(&mut self, span: Span<'static>) {
+        self.column += span.content.chars().count();
+        self.spans.push(span);
+    }
+
+    fn muted(&mut self, text: String) {
+        self.push(Span::styled(text, Style::default().fg(palette::muted())));
+    }
+
+    fn button(&mut self, text: String, kind: HeaderModal) {
+        let start = self.column;
+        let style = palette::selected_style(self.theme).add_modifier(Modifier::BOLD);
+        self.push(Span::styled(text, style));
+        self.buttons.push((start, self.column, kind));
+    }
+
+    fn finish(self) -> HeaderLayout {
+        HeaderLayout {
+            line: Line::from(self.spans),
+            buttons: self.buttons,
+        }
+    }
+}
+
 impl TextBuilder {
     pub const SELECTED_MARKER: &'static str = "▸ ";
 
-    #[must_use]
-    pub fn header(model: &crate::ui_model::UiModel) -> Line<'static> {
-        Line::from(vec![
-            Span::styled(
-                Self::application_title(),
-                Style::default()
-                    .fg(palette::accent(model.preferences.theme))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                Self::application_status(model),
-                Style::default().fg(palette::muted()),
-            ),
-        ])
+    /// The header as it is drawn, with the buttons in it and the columns
+    /// each button spans.
+    pub(crate) fn header_layout(model: &crate::ui_model::UiModel) -> HeaderLayout {
+        let mut builder = HeaderBuilder::new(model.preferences.theme);
+        builder.push(Span::styled(
+            Self::application_title(),
+            Style::default()
+                .fg(palette::accent(builder.theme))
+                .add_modifier(Modifier::BOLD),
+        ));
+        builder.push(Span::raw("  "));
+        builder.muted(Self::application_status(model).to_owned());
+
+        let session = model
+            .active_session
+            .as_ref()
+            .map(|session| session_id_short(session.as_str()));
+        let model_name = model
+            .session_model
+            .as_ref()
+            .map(|model| format!("{}/{}", model.provider, model.model))
+            .or_else(|| {
+                model
+                    .active_session
+                    .as_ref()
+                    .and_then(|session| {
+                        model
+                            .sessions
+                            .iter()
+                            .find(|summary| summary.session_id == session.as_str())
+                    })
+                    .and_then(|summary| {
+                        Some(format!(
+                            "{}/{}",
+                            summary.provider.clone()?,
+                            summary.model.clone()?.id
+                        ))
+                    })
+            });
+
+        for item in [session, model_name].into_iter().flatten() {
+            builder.push(Span::raw(" · "));
+            builder.muted(item);
+        }
+
+        builder.push(Span::raw(" · "));
+        builder.button(
+            format!(" queue {} ", queue_mode_compact(model.queue_mode)),
+            HeaderModal::Queue,
+        );
+        builder.push(Span::raw(" · "));
+        builder.button(
+            format!(" reasoning {} ", model.reasoning.label()),
+            HeaderModal::Reasoning,
+        );
+        builder.finish()
     }
 
     #[must_use]
@@ -42,9 +145,9 @@ impl TextBuilder {
     #[must_use]
     pub fn help_lines() -> Vec<Line<'static>> {
         vec![
-            Line::from(format!("1-7/{}  switch views", crate::keys::COSTS_VIEW)),
+            Line::from(format!("1-8/{}  switch views", crate::keys::COSTS_VIEW)),
             Line::from(format!(
-                "{}/{}  sessions · 1-9 open · {} create",
+                "{}/{}  sessions · 1-9 expand · Enter open · {} create",
                 ComponentId::Sessions.number(),
                 keys::SESSIONS_VIEW_CHAR,
                 keys::NEW_SESSION_CHAR
@@ -64,9 +167,16 @@ impl TextBuilder {
             Line::from(format!("{}  toggle edit diff mode", keys::DIFF_CHAR)),
             Line::from(format!("{}  stop the running turn", keys::CANCEL_TURN_CHAR)),
             Line::from("Ctrl+C  stop the running turn".to_owned()),
-            Line::from(format!("{}  cycle reasoning effort", keys::REASONING_CHAR)),
-            Line::from(format!("{}  rewind to a turn", keys::REWIND_CHAR)),
-            Line::from(format!("{}  pin or unpin a turn", keys::PIN_CHAR)),
+            Line::from(format!("{}  reasoning effort menu", keys::REASONING_CHAR)),
+            Line::from(format!("{}  fold or unfold the turn", keys::FOLD_CHAR)),
+            Line::from(format!(
+                "{} {}  go to the previous or next turn",
+                keys::PREV_TURN_CHAR,
+                keys::NEXT_TURN_CHAR
+            )),
+            Line::from(format!("{}  toggle a turn's fold", keys::FOLD_CHAR)),
+            Line::from("click a turn header to fold it, right-click it for a menu".to_owned()),
+            Line::from("click the queue or reasoning pill in the header for a menu".to_owned()),
             Line::from(format!("{}  stop a background job", keys::STOP_JOB_CHAR)),
             Line::from(format!("{}  start a new session", keys::NEW_SESSION_CHAR)),
             Line::from(format!(
@@ -114,6 +224,7 @@ impl TextBuilder {
             ComponentId::Models => "providers and models",
             ComponentId::Host => "capabilities",
             ComponentId::Sessions => "sessions",
+            ComponentId::Jobs => "jobs",
             ComponentId::PlanReview => "plan review",
             ComponentId::Costs => "costs",
             ComponentId::Catalog => "catalog",
@@ -151,6 +262,7 @@ impl TextBuilder {
             ComponentId::Models => "Models",
             ComponentId::Host => "Host",
             ComponentId::Sessions => "Sessions",
+            ComponentId::Jobs => "Jobs",
             ComponentId::PlanReview => "Plan review",
             ComponentId::Costs => "Costs",
             ComponentId::Catalog => "Catalog",
@@ -206,6 +318,7 @@ impl TextBuilder {
             ComponentId::Models => "No models loaded",
             ComponentId::Host => "No host capabilities loaded",
             ComponentId::Sessions => "No sessions loaded",
+            ComponentId::Jobs => "No jobs in this session",
             ComponentId::PlanReview => "No plan review is active",
             ComponentId::Costs => "No cost reports loaded",
             ComponentId::Catalog => "No catalogue loaded",
@@ -226,15 +339,6 @@ impl TextBuilder {
     #[must_use]
     pub fn composer_mode_placeholder(key: char) -> String {
         format!("Press {key} to compose")
-    }
-
-    #[must_use]
-    pub const fn queue_mode_description(mode: QueueMode) -> &'static str {
-        match mode {
-            QueueMode::Reject => "reject: refuses while busy",
-            QueueMode::Queue => "queue: waits for this turn",
-            QueueMode::Interrupt => "interrupt: stops this turn",
-        }
     }
 
     #[must_use]
@@ -316,10 +420,27 @@ impl TextBuilder {
     }
 
     #[must_use]
+    pub fn footer_ticker(view: ComponentId, offset: usize, width: usize) -> String {
+        if width == 0 {
+            return String::new();
+        }
+        let source = Self::footer_help(view);
+        if source.chars().count() <= width {
+            return source;
+        }
+        let separator = "   ·   ";
+        let ticker = format!("{source}{separator}");
+        let ticker_width = ticker.chars().count();
+        let offset = offset % ticker_width;
+        let repeated = ticker.repeat(3);
+        repeated.chars().skip(offset).take(width).collect()
+    }
+
+    #[must_use]
     pub fn footer_help(view: ComponentId) -> String {
         let controls = match view {
             ComponentId::Session => format!(
-                "{}/{} navigate · {} compose · Esc/Tab focus · {} send · {} diff · {} queue · {} thought · {} budget · {} export · {} compact · {} cancel · {} reasoning · {} rewind · {} pin · {} stop job · {} new · {} import",
+                "{}/{} navigate · {} compose · Esc/Tab focus · {} send · {} diff · {} queue · {} thought · {} budget · {} export · {} compact · {} cancel · {} reasoning · {} new · {} import · {} logs",
                 keys::NAV_DOWN_CHAR,
                 keys::NAV_UP_CHAR,
                 keys::COMPOSER_CHAR,
@@ -332,11 +453,16 @@ impl TextBuilder {
                 keys::COMPACT_CHAR,
                 keys::CANCEL_TURN_CHAR,
                 keys::REASONING_CHAR,
-                keys::REWIND_CHAR,
-                keys::PIN_CHAR,
-                keys::STOP_JOB_CHAR,
                 keys::NEW_SESSION_CHAR,
-                keys::IMPORT_CHAR
+                keys::IMPORT_CHAR,
+                'o'
+            ),
+            ComponentId::Jobs => format!(
+                "{}/{} navigate · {} stop · {} refresh",
+                keys::NAV_DOWN_CHAR,
+                keys::NAV_UP_CHAR,
+                keys::STOP_JOB_CHAR,
+                'r'
             ),
             ComponentId::Plans => format!(
                 "{}/{} navigate · Enter details",
@@ -365,10 +491,11 @@ impl TextBuilder {
                 keys::NAV_UP_CHAR
             ),
             ComponentId::Sessions => format!(
-                "1-9 open · {} create · r rename · d delete · f fork · {}/{} navigate",
-                keys::NEW_SESSION_CHAR,
+                "1-9 expand · Enter open · {} fold · r rename · d delete · f fork · {}/{} navigate · {} create",
+                keys::CANCEL,
                 keys::NAV_DOWN_CHAR,
-                keys::NAV_UP_CHAR
+                keys::NAV_UP_CHAR,
+                keys::NEW_SESSION_CHAR
             ),
             ComponentId::Costs => "r refresh".to_owned(),
             ComponentId::Catalog => "a provider · m model · d remove · r refresh".to_owned(),
@@ -376,10 +503,14 @@ impl TextBuilder {
             ComponentId::PlanReview => "Enter respond".to_owned(),
         };
         format!(
-            "1-7/{} views · v catalog · g settings · s sessions · {controls} · {} quit · {} help",
+            "1-8/{} views · v catalog · g settings · s sessions · {controls} · {} quit · {} help",
             keys::COSTS_VIEW,
             keys::QUIT_CHAR,
             keys::HELP_CHAR
         )
     }
 }
+
+#[cfg(test)]
+#[path = "text_builder_tests.rs"]
+mod tests;

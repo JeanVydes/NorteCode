@@ -1,0 +1,31 @@
+[package]
+name = "norte-code-cli"
+description = "The single entry point for Norte Code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "norte"
+path = "src/main.rs"
+
+[dependencies]
+norte-code-tui = { path = "../norte-code-tui" }
+norte-code-client = { path = "../norte-code-client", default-features = false, features = ["native"] }
+norte-code-protocol = { path = "../norte-code-protocol" }
+norte-code-wire = { path = "../norte-code-wire" }
+norte-code-agent = { path = "../norte-code-agent" }
+norte-code-raep = { path = "../norte-code-raep" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
+
+[lints]
+workspace = true

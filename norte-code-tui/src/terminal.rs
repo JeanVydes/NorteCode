@@ -1,6 +1,7 @@
 use std::io::{self, Stdout};
 
 use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -15,7 +16,7 @@ impl TerminalSession {
     pub(crate) fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -44,7 +45,11 @@ impl TerminalSession {
         }
         self.active = false;
         let cursor_result = self.terminal.show_cursor();
-        let screen_result = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let screen_result = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         let mode_result = disable_raw_mode();
         cursor_result.and(screen_result).and(mode_result)
     }

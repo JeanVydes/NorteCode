@@ -217,6 +217,11 @@ impl Service {
                 provider: record.spec.as_ref().map(|s| s.provider.clone()),
                 model: record.spec.as_ref().map(|s| s.model.clone()),
                 created_at: Some(record.created_at.to_rfc3339()),
+                updated_at: record.activity_at_ms.and_then(|milliseconds| {
+                    chrono::DateTime::from_timestamp_millis(milliseconds)
+                        .map(|moment| moment.to_rfc3339())
+                }),
+                turn_count: Some(record.last_turn),
                 phase: record.phase,
                 reasoning: record.reasoning.clone(),
                 parent: record.parent_client.clone(),

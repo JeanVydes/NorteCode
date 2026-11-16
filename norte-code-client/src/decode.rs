@@ -501,11 +501,18 @@ fn extension_event(
                 error: finished.error,
             }
         }
-        "agent_changed" => {
+        "agent_changed" | "model_changed" => {
             let changed: norte_code_wire::AgentChanged = from_payload(payload)?;
             // The extension names the pair as the agent that takes over:
             // provider in `id`, model in `version`.
             Kind::ModelChanged {
+                provider: changed.to_agent.id,
+                model: changed.to_agent.version,
+            }
+        }
+        "model_queued" => {
+            let changed: norte_code_wire::AgentChanged = from_payload(payload)?;
+            Kind::ModelQueued {
                 provider: changed.to_agent.id,
                 model: changed.to_agent.version,
             }

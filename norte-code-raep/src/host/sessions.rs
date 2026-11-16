@@ -36,40 +36,50 @@ impl NorteCodeRaepHost {
             .cloned()
             .ok_or_else(|| HostError::InvalidFrame(format!("unknown agent `{requested}`")))
     }
-    pub(crate) async fn service_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Arc<Service>, HostError> {
-        if let Some(agent_id) = self.agent_for_session(session_id).await {
-            return self.service_for_agent(&agent_id);
-        }
-        Ok(Arc::clone(&self.service))
+    pub(crate) fn service_for_session(&self, session_id: &str) -> Result<Arc<Service>, HostError> {
+        let agent_id = self.agent_for_session(session_id);
+        self.service_for_agent(&agent_id)
     }
-    pub(crate) async fn agent_for_session(&self, session_id: &str) -> Option<String> {
-        if let Some(agent_id) = self
-            .state
-            .lock()
-            .await
-            .session_agents
-            .get(session_id)
-            .cloned()
-        {
-            return Some(agent_id);
+    pub(crate) fn agent_for_session(&self, session_id: &str) -> String {
+        self.session_owner(session_id)
+    }
+    /// The agent that created the session, when the services know.
+    ///
+    /// A service whose own record says it made the session wins. Otherwise the
+    /// store is the tie-breaker: in a multi-agent host every service sees the
+    /// shared records, so a stored profile is only trusted when it names the
+    /// service's key; an in-memory service with its own store remaining unique
+    /// is also honoured.
+    pub(crate) fn session_owner(&self, session_id: &str) -> String {
+        let key = norte_code_wire::SessionKey::new(session_id);
+        let stored = |service: &Arc<Service>| service.stored_agent_profile(&key);
+        if let Some(agent_id) = self.services.iter().find_map(|(agent_id, service)| {
+            stored(service)
+                .flatten()
+                .filter(|profile| profile == agent_id)
+                .map(|_| agent_id.clone())
+        }) {
+            return agent_id;
+        }
+        let holders = self
+            .services
+            .iter()
+            .filter(|(_, service)| stored(service).is_some())
+            .map(|(agent_id, _)| agent_id.to_owned())
+            .collect::<Vec<_>>();
+        if holders.len() == 1 {
+            let [agent_id] = <[String; 1]>::try_from(holders).expect("one holder");
+            return agent_id;
         }
         self.services
             .iter()
-            .find(|(_, service)| {
-                service
-                    .sessions()
-                    .iter()
-                    .any(|session| session.session.as_str() == session_id)
-            })
-            .map(|(agent_id, _)| agent_id.clone())
+            .find_map(|(_, service)| stored(service))
+            .flatten()
+            .unwrap_or_else(|| self.config.agent_id.clone())
     }
-    /// Returns the RAEP `session_summary` for every session `principal` may see.
-    ///
-    /// A session with no recorded owner is visible to everyone; a session with
-    /// an owner is visible only to that principal.
+    /// The RAEP `session_summary` for every session `principal` may see,
+    /// newest first: what was last worked on is what was last updated, so
+    /// the list reads in the order you worked.
     pub async fn session_summaries(&self, principal: &str) -> Vec<Value> {
         let owners = {
             let state = self.state.lock().await;
@@ -89,6 +99,7 @@ impl NorteCodeRaepHost {
                 }
             }
         }
+        by_recent_first(&mut live);
         live.into_iter()
             .filter(|info| {
                 owners
@@ -113,7 +124,7 @@ impl NorteCodeRaepHost {
         if owner.is_some_and(|owner| owner != principal) {
             return None;
         }
-        let service = self.service_for_session(session_id).await.ok()?;
+        let service = self.service_for_session(session_id).ok()?;
         let info = service
             .sessions()
             .into_iter()
@@ -127,7 +138,7 @@ impl NorteCodeRaepHost {
         principal: &str,
     ) -> Option<Vec<norte_code_agent::service::ChildSessionSummary>> {
         self.session_summary(parent_session_id, principal).await?;
-        let service = self.service_for_session(parent_session_id).await.ok()?;
+        let service = self.service_for_session(parent_session_id).ok()?;
         Some(service.children_of(&SessionKey::new(parent_session_id)))
     }
     pub(crate) fn session_summary_value(
@@ -140,18 +151,16 @@ impl NorteCodeRaepHost {
             .as_deref()
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .map_or(now, |value| value.timestamp_millis());
-        let agent_id = self
-            .services
-            .iter()
-            .find(|(_, service)| {
-                service
-                    .sessions()
-                    .iter()
-                    .any(|session| session.session == info.session)
-            })
-            .map_or(self.config.agent_id.as_str(), |(agent_id, _)| {
-                agent_id.as_str()
-            });
+        // The update time is the last turn the session finished; a session
+        // that has never run one honestly shows its creation moment instead
+        // of pretending "now".
+        let updated_at = info
+            .updated_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map_or(created_at, |value| value.timestamp_millis());
+        let turn_count = info.turn_count.unwrap_or(0);
+        let agent_id = self.session_owner(&info.session.to_string());
         let spec = self
             .services
             .values()
@@ -173,7 +182,7 @@ impl NorteCodeRaepHost {
                 norte_code_wire::SessionStatus::Active
             },
             agent: Some(norte_code_wire::AgentRef {
-                id: agent_id.to_owned(),
+                id: agent_id.clone(),
                 version: self.config.server_version.clone(),
             }),
             model: spec.as_ref().map(|spec| norte_code_wire::AgentRef {
@@ -184,9 +193,9 @@ impl NorteCodeRaepHost {
             reasoning: info.reasoning.clone(),
             parent_session_id: info.parent.as_ref().map(ToString::to_string),
             created_at: Some(created_at),
-            updated_at: Some(now),
-            last_activity_at: Some(now),
-            turn_count: Some(0),
+            updated_at: Some(updated_at),
+            last_activity_at: Some(updated_at),
+            turn_count: Some(turn_count),
             has_pending: Some(false),
         })
     }
@@ -280,8 +289,7 @@ impl NorteCodeRaepHost {
         if self.session_summary(session_id, principal).await.is_none() {
             return Ok(false);
         }
-        self.service_for_session(session_id)
-            .await?
+        self.service_for_session(session_id)?
             .rename(&SessionKey::new(session_id), title)
             .await
             .map_err(|error| HostError::Service(error.to_string()))?;
@@ -403,7 +411,6 @@ impl NorteCodeRaepHost {
         let exists = created
             || self
                 .service_for_session(&session_id)
-                .await
                 .ok()
                 .and_then(|service| service.session_title(&SessionKey::new(session_id.clone())))
                 .is_some()
@@ -447,10 +454,7 @@ impl NorteCodeRaepHost {
         // `agent_mismatch` (RFC 6): for an existing session, the requested
         // agent must equal the session's current agent.
         if exists && !created {
-            let current_agent = self
-                .agent_for_session(&session_id)
-                .await
-                .unwrap_or_else(|| self.config.agent_id.clone());
+            let current_agent = self.agent_for_session(&session_id);
             if current_agent != agent_id {
                 return Err(HostError::InvalidFrame(format!(
                     "agent_mismatch: session runs agent `{current_agent}`"
@@ -587,5 +591,73 @@ impl NorteCodeRaepHost {
         output.push(state);
         output.extend(override_frames);
         Ok(output)
+    }
+}
+
+/// The moment the list should sort by: the last time anything touched the
+/// session's head, or its creation when it was never run.
+fn recency(info: &norte_code_wire::SessionInfo) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(info.updated_at.as_deref().unwrap_or_default())
+        .map_or_else(
+            |_| {
+                info.created_at
+                    .as_deref()
+                    .and_then(|created| chrono::DateTime::parse_from_rfc3339(created).ok())
+                    .map_or(i64::MIN, |value| value.timestamp_millis())
+            },
+            |value| value.timestamp_millis(),
+        )
+}
+
+/// Newest first; two sessions never touched keep creation order.
+fn by_recent_first(sessions: &mut [norte_code_wire::SessionInfo]) {
+    sessions.sort_by_key(|info| std::cmp::Reverse(recency(info)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(updated_at: Option<&str>, created_at: &str) -> norte_code_wire::SessionInfo {
+        norte_code_wire::SessionInfo {
+            session: norte_code_wire::SessionKey::new("session-1"),
+            title: None,
+            reasoning: None,
+            provider: None,
+            model: None,
+            created_at: Some(created_at.to_owned()),
+            updated_at: updated_at.map(str::to_owned),
+            turn_count: None,
+            phase: norte_code_wire::Phase::Idle,
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn sessions_list_by_most_recently_updated() {
+        let mut sessions = vec![
+            info(Some("2026-11-01T00:00:00Z"), "2026-11-05T00:00:00Z"),
+            info(Some("2026-11-14T00:00:00Z"), "2026-11-05T00:00:00Z"),
+            info(None, "2026-11-03T00:00:00Z"),
+        ];
+        by_recent_first(&mut sessions);
+        let order: Vec<_> = sessions
+            .iter()
+            .map(|session| {
+                session
+                    .updated_at
+                    .clone()
+                    .unwrap_or_else(|| session.created_at.clone().expect("created"))
+            })
+            .collect();
+
+        assert_eq!(
+            order,
+            vec![
+                "2026-11-14T00:00:00Z".to_owned(),
+                "2026-11-03T00:00:00Z".to_owned(),
+                "2026-11-01T00:00:00Z".to_owned(),
+            ]
+        );
     }
 }

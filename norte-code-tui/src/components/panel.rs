@@ -18,10 +18,12 @@ pub(crate) struct ListPanel<'a> {
     pub(crate) empty_message: &'a str,
 }
 
+/// Draws a list of entries; every entry is one or more lines that are
+/// selected and deleted as a unit.
 pub(crate) fn render_list(
     frame: &mut Frame<'_>,
     area: Rect,
-    entries: Vec<Line<'static>>,
+    entries: Vec<Vec<Line<'static>>>,
     theme: ThemeMode,
     panel: ListPanel<'_>,
 ) {
@@ -29,6 +31,7 @@ pub(crate) fn render_list(
     let block = Block::default()
         .title(TextBuilder::panel_title(panel.title, panel.phase))
         .style(background)
+        .padding(ratatui::widgets::Padding::horizontal(2))
         .title_style(if panel.focused {
             Style::default().fg(palette::accent(theme))
         } else {
@@ -58,6 +61,28 @@ pub(crate) fn render_list(
     );
 }
 
+pub(crate) fn render_text_scrolled(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    body: String,
+    theme: ThemeMode,
+    scroll: usize,
+) {
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(
+                Block::default()
+                    .title(title)
+                    .padding(ratatui::widgets::Padding::horizontal(2)),
+            )
+            .style(palette::panel_style(theme))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        area,
+    );
+}
+
 pub(crate) fn render_text(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -67,7 +92,11 @@ pub(crate) fn render_text(
 ) {
     frame.render_widget(
         Paragraph::new(body)
-            .block(Block::default().title(title))
+            .block(
+                Block::default()
+                    .title(title)
+                    .padding(ratatui::widgets::Padding::horizontal(2)),
+            )
             .style(palette::panel_style(theme))
             .wrap(ratatui::widgets::Wrap { trim: false }),
         area,

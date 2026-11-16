@@ -425,6 +425,8 @@ impl RemoteClient {
                                 provider: None,
                                 model: None,
                                 created_at: None,
+                                updated_at: None,
+                                turn_count: None,
                                 phase: norte_code_wire::Phase::Idle,
                                 reasoning: None,
                                 parent: None,

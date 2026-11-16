@@ -182,6 +182,40 @@ fn event_stream_url_uses_the_session_agent() {
 }
 
 #[test]
+fn decodes_the_legacy_model_changed_extension() {
+    let frame = frame(
+        FrameType::Extension("norte_code.model_changed".to_owned()),
+        "session-1",
+        serde_json::json!({ "from_agent": {"id": ""}, "to_agent": {"id": "tokenlab", "version": "MiniCPM-V-4.7-35B-A3B"} }),
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("legacy model changed event")
+        .expect("legacy model changed event payload");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::ModelChanged { provider, model }
+            if provider == "tokenlab" && model == "MiniCPM-V-4.7-35B-A3B"
+    ));
+}
+
+#[test]
+fn decodes_the_legacy_model_queued_extension() {
+    let frame = frame(
+        FrameType::Extension("norte_code.model_queued".to_owned()),
+        "session-1",
+        serde_json::json!({ "from_agent": {"id": ""}, "to_agent": {"id": "tokenlab", "version": "Qwen3.8-27B"} }),
+    );
+    let event = server_event_from_frame(&frame)
+        .expect("legacy model queued event")
+        .expect("legacy model queued event payload");
+    assert!(matches!(
+        event.kind,
+        norte_code_wire::ServerEventKind::ModelQueued { provider, model }
+            if provider == "tokenlab" && model == "Qwen3.8-27B"
+    ));
+}
+
+#[test]
 fn decodes_a_bare_extension_payload() {
     // The host writes `norte_code.question_asked` with the event's standard
     // shape and nothing else: no mirrored event, no canonical tag.

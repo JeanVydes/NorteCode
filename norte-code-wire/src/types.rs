@@ -87,6 +87,13 @@ pub struct SessionInfo {
     pub model: Option<String>,
     /// When it was created, as RFC 3339.
     pub created_at: Option<String>,
+    /// When it last finished a turn, as RFC 3339. Missing when it has
+    /// never completed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    /// How many turns it has run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_count: Option<u64>,
     /// Where it currently is.
     pub phase: Phase,
     /// The session-wide reasoning override, when one is set.

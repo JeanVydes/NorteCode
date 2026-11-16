@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
 
 use super::{
@@ -15,6 +15,7 @@ pub(crate) enum ComponentId {
     Models,
     Host,
     Sessions,
+    Jobs,
     PlanReview,
     Costs,
     Catalog,
@@ -32,6 +33,7 @@ impl ComponentId {
             Self::Models => crate::keys::MODELS_VIEW,
             Self::Host => crate::keys::HOST_VIEW,
             Self::Sessions => crate::keys::SESSIONS_VIEW,
+            Self::Jobs => crate::keys::JOBS_VIEW,
             Self::PlanReview => '0',
             Self::Costs => crate::keys::COSTS_VIEW,
             Self::Catalog => crate::keys::CATALOG_VIEW,
@@ -40,7 +42,7 @@ impl ComponentId {
     }
 
     #[must_use]
-    pub(crate) const fn all() -> [Self; 10] {
+    pub(crate) const fn all() -> [Self; 11] {
         [
             Self::Session,
             Self::Plans,
@@ -49,6 +51,7 @@ impl ComponentId {
             Self::Models,
             Self::Host,
             Self::Sessions,
+            Self::Jobs,
             Self::Costs,
             Self::Catalog,
             Self::Settings,
@@ -65,6 +68,7 @@ impl ComponentId {
             crate::keys::MODELS_VIEW => Some(Self::Models),
             crate::keys::HOST_VIEW => Some(Self::Host),
             crate::keys::SESSIONS_VIEW => Some(Self::Sessions),
+            crate::keys::JOBS_VIEW => Some(Self::Jobs),
             crate::keys::COSTS_VIEW => Some(Self::Costs),
             crate::keys::CATALOG_VIEW => Some(Self::Catalog),
             crate::keys::SETTINGS_VIEW => Some(Self::Settings),
@@ -85,8 +89,15 @@ pub(crate) trait Component {
     fn id(&self) -> ComponentId;
     fn lifecycle(&self) -> &ComponentLifecycle;
     fn lifecycle_mut(&mut self) -> &mut ComponentLifecycle;
+    /// Scrolls the view when it is a conversation transcript.
+    fn scroll_transcript(&mut self, _lines: isize) {}
     fn captures_global_keys(&self) -> bool {
         false
+    }
+    /// Handles a mouse event: a terminal sends one when the reader clicks,
+    /// drags or scrolls.
+    fn handle_mouse(&mut self, mouse: MouseEvent, model: &UiModel) {
+        let _ = (mouse, model);
     }
     fn handle_key(&mut self, key: KeyEvent, model: &UiModel);
     /// Handles the keys that arrived together.

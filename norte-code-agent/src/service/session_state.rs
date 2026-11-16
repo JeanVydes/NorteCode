@@ -74,6 +74,15 @@ impl Service {
             .get(session)
             .and_then(|record| record.reasoning.clone())
     }
+    /// The agent profile selected when the session was created, when known.
+    ///
+    /// Every service loads the same session table, so callers asking about a
+    /// session get the same answer regardless of which service answers.
+    pub fn stored_agent_profile(&self, session: &SessionKey) -> Option<Option<String>> {
+        self.lock_sessions()
+            .get(session)
+            .map(|record| record.agent_profile.clone())
+    }
     /// The title a session has, if one was set.
     ///
     /// `None` means the session is still known by its key alone. The renderer
@@ -227,6 +236,7 @@ impl Service {
             });
             record.turn_boundaries.sort_by_key(|boundary| boundary.turn);
             record.last_turn = record.last_turn.max(turn);
+            record.activity_at_ms = Some(chrono::Utc::now().timestamp_millis());
         }
         self.persist(key).await
     }

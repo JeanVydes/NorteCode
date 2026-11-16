@@ -8,13 +8,13 @@
 - Linux or macOS if you want the command sandbox (it needs `bwrap` on Linux or
   `sandbox-exec` on macOS; without them the sandbox fails closed).
 
-## Build
+## Install
 
 ```sh
-cargo build
+cargo install --git https://github.com/JeanVydes/NorteCode --path norte-code-cli
 ```
 
-The binary is `target/debug/norte-code`. During development:
+During development:
 
 ```sh
 cargo run -p norte-code-cli -- --help
@@ -28,14 +28,13 @@ its own `cli.json`; it does not load providers, models, keys or server
 settings. Start the local service first:
 
 ```sh
-norte-code service start
+norte service up
 ```
 
-Use `-f` to keep following the service log after startup; press Ctrl-C to
-stop following without stopping the service:
+Follow the service log with:
 
 ```sh
-norte-code service start -f
+norte service logs --live
 ```
 
 The smallest useful server file is:
@@ -49,14 +48,14 @@ The smallest useful server file is:
 Install the recommended OpenRouter catalogue:
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
+norte plugins add https://github.com/JeanVydes/catalog-plugin --package catalog-plugin-openrouter
 ```
 
 Then export the key and check the server catalogue:
 
 ```sh
 export OPENROUTER_API_KEY=sk-or-...
-norte-code models --provider openrouter --tools
+norte models --provider openrouter --tools
 ```
 
 The catalogue is two files you own beside the config — `providers.json` (who
@@ -68,11 +67,11 @@ the bundled files are empty and a missing file is also created empty.
 catalogue files to maintain:
 
 ```sh
-norte-code plugins add https://github.com/JeanVydes/catalog-plugin --package openrouter
+norte plugins add https://github.com/JeanVydes/catalog-plugin --package openrouter
 ```
 
 The server loads it before the catalogue is read, so its providers and models
-appear in `norte-code models` and `/model`, and your files stay untouched.
+appear in `norte models` and `/model`, and your files stay untouched.
 (Installing a plugin clones and builds untrusted code — including its
 `build.rs` — so only do it for sources you trust.)
 
@@ -83,14 +82,14 @@ and the [configuration reference](reference/configuration.md) for every config k
 ## Run your first prompt
 
 ```sh
-norte-code new
+norte new
 ```
 
 `new` creates a session and stays in it: the first line you type is the first
 message. For a headless one-shot, pipe newline-delimited messages:
 
 ```sh
-printf '%s\n' 'Explain this project' | norte-code new --jsonl
+printf '%s\n' 'Explain this project' | norte new --jsonl
 ```
 
 `--jsonl` emits every service event plus client diagnostics (connection,
@@ -99,7 +98,7 @@ input, request lifecycle, errors and completion), one JSON object per line.
 It prints the session key, so the next command can continue it:
 
 ```sh
-norte-code resume <key>
+norte resume <key>
 ```
 
 ## Stay in the session
@@ -112,10 +111,10 @@ for the chat commands, `/exit` or Ctrl-D to leave.
 ## Inspect what happened
 
 ```sh
-norte-code sessions
-norte-code cost
-norte-code telemetry --bucket day
-norte-code skills list
+norte sessions
+norte cost
+norte telemetry --bucket day
+norte skills list
 ```
 
 `cost` is provider-reported money; `telemetry` is local request counts,

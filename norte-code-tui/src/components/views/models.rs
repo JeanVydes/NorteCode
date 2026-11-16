@@ -103,6 +103,41 @@ impl ModelsView {
     }
 }
 
+fn current_model(model: &UiModel) -> Option<(&str, &str)> {
+    model
+        .session_model
+        .as_ref()
+        .map(|model| (model.provider.as_str(), model.model.as_str()))
+        .or_else(|| {
+            model.active_session.as_ref().and_then(|session| {
+                model
+                    .sessions
+                    .iter()
+                    .find(|summary| summary.session_id == session.as_str())
+                    .and_then(|summary| {
+                        Some((
+                            summary.provider.as_ref()?.as_str(),
+                            summary.model.as_ref()?.id.as_str(),
+                        ))
+                    })
+            })
+        })
+}
+
+fn model_marker(
+    model: &ModelInfo,
+    current: Option<(&str, &str)>,
+    queued: Option<(&str, &str)>,
+) -> Option<&'static str> {
+    if current.is_some_and(|(provider, id)| provider == model.provider && id == model.model) {
+        Some("current")
+    } else if queued.is_some_and(|(provider, id)| provider == model.provider && id == model.model) {
+        Some("queued")
+    } else {
+        None
+    }
+}
+
 impl Component for ModelsView {
     fn id(&self) -> ComponentId {
         ComponentId::Models
@@ -187,7 +222,12 @@ impl Component for ModelsView {
             areas[0],
         );
 
-        let entries = rows
+        let current_model = current_model(model);
+        let queued_model = model
+            .queued_model
+            .as_ref()
+            .map(|queued| (queued.provider.as_str(), queued.model.as_str()));
+        let entries: Vec<ratatui::text::Line<'static>> = rows
             .iter()
             .map(|row| match row {
                 ModelRow::Provider {
@@ -195,13 +235,16 @@ impl Component for ModelsView {
                     model_count,
                     expanded,
                 } => TextBuilder::model_provider_row(name, *model_count, *expanded),
-                ModelRow::Model(model) => TextBuilder::model_option_row(model),
+                ModelRow::Model(model) => TextBuilder::model_option_row(
+                    model,
+                    model_marker(model, current_model, queued_model),
+                ),
             })
             .collect();
         panel::render_list(
             frame,
             areas[1],
-            entries,
+            entries.into_iter().map(|line| vec![line]).collect(),
             model.preferences.theme,
             panel::ListPanel {
                 title: ComponentId::Models,

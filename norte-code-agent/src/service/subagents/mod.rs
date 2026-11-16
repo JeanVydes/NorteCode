@@ -59,6 +59,9 @@ pub(super) struct SubagentArgs {
     /// Whether the child is tied to the parent turn or session.
     pub lifetime: String,
     /// The configured child agent to use, when one is requested explicitly.
+    /// It must be in the parent profile's `delegates`; when omitted, the
+    /// profile's `subagent` default (or the parent's own) is used. `list_agents`
+    /// shows the allowed `delegates` for this session.
     pub agent_id: Option<String>,
     /// Whether to include a redacted excerpt of the parent history.
     pub context_mode: Option<String>,

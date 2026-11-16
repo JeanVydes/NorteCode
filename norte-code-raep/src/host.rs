@@ -1090,7 +1090,6 @@ pub struct NorteCodeRaepHost {
     replay: ReplayLog,
     artifact_store: Option<Arc<dyn ArtifactStore>>,
     upload_index: Option<Arc<dyn UploadIndex>>,
-    pin_store: Option<Arc<dyn PinStore>>,
     connections: Arc<Semaphore>,
 }
 
@@ -1167,7 +1166,6 @@ impl NorteCodeRaepHost {
             replay,
             artifact_store: None,
             upload_index: None,
-            pin_store: None,
             connections: Arc::new(Semaphore::new(max_connections)),
         })
     }
@@ -1219,13 +1217,6 @@ impl NorteCodeRaepHost {
     #[must_use]
     pub fn with_upload_index(mut self, upload_index: Arc<dyn UploadIndex>) -> Self {
         self.upload_index = Some(upload_index);
-        self
-    }
-
-    /// Enables durable pin storage for `CONTEXT_PIN`.
-    #[must_use]
-    pub fn with_pin_store(mut self, pin_store: Arc<dyn PinStore>) -> Self {
-        self.pin_store = Some(pin_store);
         self
     }
 
