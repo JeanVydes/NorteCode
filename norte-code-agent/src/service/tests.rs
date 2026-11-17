@@ -6404,7 +6404,10 @@ async fn parked_on_a_question(
             .expect("turn should not hang")
             .expect("the parked turn stays alive");
         session = session.or(event.session.clone());
-        if let ServerEventKind::QuestionAsked { question: asked, .. } = &event.kind {
+        if let ServerEventKind::QuestionAsked {
+            question: asked, ..
+        } = &event.kind
+        {
             question = Some(asked.clone());
         }
     }
@@ -6483,8 +6486,7 @@ async fn a_steer_with_an_attachment_reaches_the_turn_in_flight_with_its_media() 
         [norte::Modality::Text, norte::Modality::Image],
         [norte::Modality::Text],
     );
-    let (service, key, question, stream) =
-        parked_on_a_question(happy, Arc::clone(&model)).await;
+    let (service, key, question, stream) = parked_on_a_question(happy, Arc::clone(&model)).await;
     let outcome = service
         .steer_input(
             9,
@@ -6629,8 +6631,7 @@ async fn a_steer_with_a_blob_the_store_does_not_hold_is_refused() {
         [norte::Modality::Text, norte::Modality::Image],
         [norte::Modality::Text],
     );
-    let (service, key, question, stream) =
-        parked_on_a_question(happy, Arc::clone(&model)).await;
+    let (service, key, question, stream) = parked_on_a_question(happy, Arc::clone(&model)).await;
     let outcome = service
         .steer_input(
             9,

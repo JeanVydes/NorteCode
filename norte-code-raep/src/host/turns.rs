@@ -616,10 +616,7 @@ impl NorteCodeRaepHost {
             // so the queue's capacity does not bound it either.
             let steer_in_flight = occupied && queue_policy == raep_types::QueuePolicy::Steer;
             let queued = state.turns.queue_len(&frame.session_id);
-            if occupied
-                && !steer_in_flight
-                && queued >= self.config.max_queued_inputs
-            {
+            if occupied && !steer_in_flight && queued >= self.config.max_queued_inputs {
                 return Err(HostError::SessionBusy);
             }
             state

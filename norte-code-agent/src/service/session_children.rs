@@ -122,9 +122,15 @@ impl Service {
             let _ = service.children.set_suspended(&parent, key, suspended);
         }
         for text in held {
-            service
-                .steering
-                .push(nid, Steered::new(uuid::Uuid::new_v4().to_string(), text, Vec::new(), Vec::new()));
+            service.steering.push(
+                nid,
+                Steered::new(
+                    uuid::Uuid::new_v4().to_string(),
+                    text,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            );
         }
         service.persist(key).await?;
         Ok((suspended, queued))
