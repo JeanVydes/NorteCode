@@ -1,22 +1,17 @@
-use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
-    text::Line,
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
-};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::{Frame, layout::Rect};
 use std::collections::BTreeSet;
 
 use crate::{
     components::{
-        Component, ComponentAction, ComponentId, ComponentLifecycle, LifecycleEvent,
-        LifecyclePhase, palette,
+        Component, ComponentAction, ComponentId, ComponentLifecycle, LifecycleEvent, LifecyclePhase,
     },
     keys,
-    text_builder::TextBuilder,
     ui_model::UiModel,
 };
+
+#[path = "plan_review/render.rs"]
+mod render;
 
 const PLAN_REVIEW_PREFIX: &str = "NORTE_CODE_PLAN_REVIEW\n";
 
@@ -33,6 +28,10 @@ pub(crate) struct PlanReviewView {
     prompt_kind: PromptKind,
     input_mode: InputMode,
     response: String,
+    /// How many rows the document is scrolled down.
+    scroll: u16,
+    /// Where the review last drew, so a click maps to a button.
+    last_area: Rect,
     pending_action: Option<ComponentAction>,
 }
 
@@ -83,6 +82,7 @@ impl PlanReviewView {
         self.prompt_kind = kind;
         self.input_mode = InputMode::Respond;
         self.response.clear();
+        self.scroll = 0;
         Ok(())
     }
 
@@ -104,6 +104,7 @@ impl PlanReviewView {
         self.prompt_kind = PromptKind::Plan;
         self.input_mode = InputMode::Respond;
         self.response.clear();
+        self.scroll = 0;
         Ok(())
     }
 
@@ -135,6 +136,24 @@ impl Component for PlanReviewView {
         self.is_open()
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent, model: &UiModel) {
+        if !self.is_open() || self.input_mode != InputMode::Respond {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_document(-3),
+            MouseEventKind::ScrollDown => self.scroll_document(3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(index) = self.button_at(mouse.column, mouse.row, self.last_area) else {
+                    return;
+                };
+                self.press_button(index);
+            }
+            _ => {}
+        }
+        let _ = model;
+    }
+
     fn handle_key(&mut self, key: KeyEvent, _model: &UiModel) {
         if !self.is_open() {
             return;
@@ -153,6 +172,25 @@ impl Component for PlanReviewView {
                 _ => {}
             }
             return;
+        }
+        match key.code {
+            keys::NAV_DOWN => {
+                self.scroll_document(1);
+                return;
+            }
+            keys::NAV_UP => {
+                self.scroll_document(-1);
+                return;
+            }
+            KeyCode::PageDown => {
+                self.scroll_document(10);
+                return;
+            }
+            KeyCode::PageUp => {
+                self.scroll_document(-10);
+                return;
+            }
+            _ => {}
         }
         match (self.prompt_kind, key.code) {
             (PromptKind::Plan, KeyCode::Char('a') | keys::SUBMIT) => {
@@ -199,101 +237,8 @@ impl Component for PlanReviewView {
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, model: &UiModel) {
-        if !self.is_open() {
-            return;
-        }
-        let dialog = centered_rect(area);
-        frame.render_widget(Clear, dialog);
-        let modal_style = palette::modal_style(model.preferences.theme);
-        frame.render_widget(Block::default().style(modal_style), dialog);
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(6),
-                Constraint::Min(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ])
-            .split(dialog);
-        let is_plan = self.prompt_kind == PromptKind::Plan;
-        let content_title = if is_plan {
-            TextBuilder::plan_review_title()
-        } else {
-            TextBuilder::question_title()
-        };
-        frame.render_widget(
-            Paragraph::new(self.content.as_str())
-                .block(
-                    Block::default()
-                        .title(content_title)
-                        .style(modal_style)
-                        .title_style(Style::default().fg(palette::accent(model.preferences.theme))),
-                )
-                .wrap(Wrap { trim: false })
-                .style(modal_style),
-            sections[0],
-        );
-        if is_plan || self.options.is_empty() {
-            frame.render_widget(
-                Paragraph::new(if is_plan {
-                    TextBuilder::plan_review_feedback_hint()
-                } else {
-                    TextBuilder::question_answer_hint()
-                })
-                .style(modal_style),
-                sections[1],
-            );
-        } else {
-            let items = self.options.iter().enumerate().map(|(index, option)| {
-                let marker = if self.multiple && self.selected_options.contains(&index) {
-                    "[x]"
-                } else if self.selected_option == index {
-                    ">"
-                } else {
-                    " "
-                };
-                ListItem::new(Line::from(format!("{marker} {option}")))
-            });
-            let mut list_state = ListState::default();
-            list_state.select(Some(self.selected_option));
-            frame.render_stateful_widget(
-                List::new(items).style(modal_style).highlight_style(
-                    palette::selected_style(model.preferences.theme)
-                        .add_modifier(ratatui::style::Modifier::BOLD),
-                ),
-                sections[1],
-                &mut list_state,
-            );
-        }
-        frame.render_widget(
-            Paragraph::new(match self.input_mode {
-                InputMode::Feedback | InputMode::Answer => self.response.as_str(),
-                InputMode::Respond => "",
-            })
-            .style(modal_style)
-            .block(Block::default().title(if is_plan {
-                TextBuilder::plan_review_feedback_title()
-            } else {
-                TextBuilder::question_answer_hint()
-            })),
-            sections[2],
-        );
-        frame.render_widget(
-            Paragraph::new(match (self.prompt_kind, self.input_mode, self.multiple) {
-                (_, InputMode::Feedback | InputMode::Answer, _) => "Enter submit · Esc cancel",
-                (PromptKind::Plan, InputMode::Respond, _) => {
-                    TextBuilder::plan_review_controls(false)
-                }
-                (PromptKind::Question, InputMode::Respond, true) => {
-                    "j/k move · Space select · Enter submit · f answer"
-                }
-                (PromptKind::Question, InputMode::Respond, false) => {
-                    "j/k move · Enter select · f answer"
-                }
-            })
-            .style(modal_style),
-            sections[3],
-        );
+        self.last_area = area;
+        self.draw(frame, model);
     }
 
     fn take_action(&mut self) -> Option<ComponentAction> {
@@ -301,23 +246,43 @@ impl Component for PlanReviewView {
     }
 }
 
-fn centered_rect(area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(15),
-            Constraint::Percentage(70),
-            Constraint::Percentage(15),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(10),
-            Constraint::Percentage(80),
-            Constraint::Percentage(10),
-        ])
-        .split(vertical[1])[1]
+impl PlanReviewView {
+    /// Scrolls the document, never past its ends.
+    fn scroll_document(&mut self, rows: i16) {
+        let lines = u16::try_from(self.content.lines().count()).unwrap_or(u16::MAX);
+        let next = i32::from(self.scroll) + i32::from(rows);
+        self.scroll = u16::try_from(next.clamp(0, i32::from(lines))).unwrap_or(0);
+    }
+
+    /// Runs the button at an index of the footer.
+    fn press_button(&mut self, index: usize) {
+        match (self.prompt_kind, index) {
+            (PromptKind::Plan, 0) => self.answer("Approve".to_owned()),
+            (PromptKind::Plan, 1) => self.answer("Reject".to_owned()),
+            (PromptKind::Plan, _) => self.input_mode = InputMode::Feedback,
+            (PromptKind::Question, 0) => self.input_mode = InputMode::Answer,
+            (PromptKind::Question, _) => self.submit_question(),
+        }
+    }
+
+    /// Confirms the option the reader is on.
+    fn submit_question(&mut self) {
+        if let Some(option) = self.options.get(self.selected_option) {
+            self.answer(option.clone());
+        } else {
+            self.input_mode = InputMode::Answer;
+        }
+    }
+
+    /// The action the reader asked for, while the review is open.
+    pub(crate) fn action(&mut self) -> Option<ComponentAction> {
+        self.pending_action.take()
+    }
+
+    /// Sends one key to the review.
+    pub(crate) fn key(&mut self, key: KeyEvent, model: &UiModel) {
+        <Self as Component>::handle_key(self, key, model);
+    }
 }
 
 #[cfg(test)]

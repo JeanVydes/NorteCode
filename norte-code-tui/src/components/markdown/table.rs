@@ -6,7 +6,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub(super) struct Table {
+pub(crate) struct Table {
     alignments: Vec<Alignment>,
     rows: Vec<Vec<Vec<Span<'static>>>>,
     row: Vec<Vec<Span<'static>>>,
@@ -52,7 +52,7 @@ impl Table {
     }
 }
 
-pub(super) fn render_table(table: &Table, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn render_table(table: &Table, width: usize) -> Vec<Line<'static>> {
     let Some(headers) = table.rows.first() else {
         return Vec::new();
     };
@@ -180,7 +180,7 @@ fn table_border(widths: &[usize], left: char, join: char, right: char) -> Line<'
 }
 
 fn table_border_style() -> Style {
-    Style::default().fg(palette::muted())
+    Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark))
 }
 
 fn render_stacked_table(rows: &[Vec<Vec<Span<'static>>>], width: usize) -> Vec<Line<'static>> {

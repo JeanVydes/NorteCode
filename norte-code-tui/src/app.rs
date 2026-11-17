@@ -4,24 +4,27 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyEventKind, MouseEvent};
+use ratatui::layout::Rect;
 use thiserror::Error;
+
 mod actions;
 mod client_data;
 mod client_events;
+mod input;
 mod jobs;
+mod prompt;
 mod render;
 mod session_state;
 
 use crate::{
     client::{ClientRuntime, ClientRuntimeError},
     components::{
-        Component, ComponentId, HeaderModal, LifecycleComponent, LifecycleEvent,
-        LifecycleTransitionError, PlanReviewView, create_views,
+        CommandMenu, ComponentId, LifecycleComponent, LifecycleEvent, LifecycleTransitionError,
+        PlanReviewView, create_views,
     },
     config::{ClientConfig, ConfigError},
-    keys,
     terminal::TerminalSession,
-    ui_model::UiModel,
+    ui_model::{Notice, UiModel},
 };
 
 #[derive(Debug, Error)]
@@ -38,49 +41,12 @@ pub(crate) enum AppError {
     ComponentNotFound(ComponentId),
 }
 
+/// The one overlay drawn over the screen.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Overlay {
     #[default]
     Closed,
     Help,
-}
-
-/// A floating menu a header segment opened, with the cursor on the choice.
-#[derive(Clone)]
-struct HeaderSelectState {
-    kind: HeaderModal,
-    selected: usize,
-    options: Vec<&'static str>,
-    current: usize,
-}
-
-impl HeaderSelectState {
-    fn new(
-        kind: HeaderModal,
-        model: &UiModel,
-        capabilities: Option<&norte_code_wire::ReasoningInfo>,
-    ) -> Self {
-        let options = kind.options_for(capabilities);
-        let label = match kind {
-            HeaderModal::Queue => match model.send_mode {
-                crate::ui_model::SendMode::Steer => "steer",
-                crate::ui_model::SendMode::Queue => "queue",
-                crate::ui_model::SendMode::Interrupt => "interrupt",
-                crate::ui_model::SendMode::Reject => "reject",
-            },
-            HeaderModal::Reasoning => model.reasoning.label(),
-        };
-        let current = options
-            .iter()
-            .position(|option| *option == label)
-            .unwrap_or(0);
-        Self {
-            kind,
-            selected: current,
-            options,
-            current,
-        }
-    }
 }
 
 pub(crate) fn run() -> Result<(), AppError> {
@@ -96,22 +62,23 @@ struct App {
     views: Vec<Box<dyn LifecycleComponent>>,
     active_view: ComponentId,
     overlay: Overlay,
-    /// The floating menu a header segment opened.
-    header_select: Option<HeaderSelectState>,
+    menu: CommandMenu,
+    /// The text prompt the menu opened, if one is open.
+    prompt: Option<prompt::PromptState>,
     run_state: RunState,
     client: ClientRuntime,
     config: ClientConfig,
     plan_review: PlanReviewView,
     session_generation: u64,
-    /// The offset used to scroll the shortcut ticker across the footer.
-    ticker_offset: usize,
-    /// The last time the shortcut ticker moved.
-    last_ticker_tick: Instant,
     /// A refusal the client is already lowering for a chosen effort.
     reasoning_recovery: crate::ui_model::ReasoningRecovery,
     last_session_refresh: Instant,
-    /// When the current notice was set, if there is one.
-    notice_since: Option<Instant>,
+    /// The tick the animations read; it advances only while something moves.
+    animation_phase: u16,
+    /// Whether the last frame already showed the current state.
+    needs_redraw: bool,
+    /// The size of the last frame, so a click maps to a tab column.
+    frame_area: Rect,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -135,21 +102,22 @@ impl App {
         let mut app = Self {
             model,
             views: create_views(),
-            active_view: ComponentId::Sessions,
+            active_view: ComponentId::Session,
             overlay: Overlay::Closed,
-            header_select: None,
+            menu: CommandMenu::default(),
+            prompt: None,
             run_state: RunState::Running,
             client,
             config,
             plan_review: PlanReviewView::default(),
             session_generation: 0,
-            ticker_offset: 0,
-            last_ticker_tick: Instant::now(),
             reasoning_recovery: crate::ui_model::ReasoningRecovery::default(),
             last_session_refresh: Instant::now(),
-            notice_since: None,
+            animation_phase: 0,
+            needs_redraw: true,
+            frame_area: Rect::default(),
         };
-        app.activate_view(ComponentId::Sessions)?;
+        app.activate_view(ComponentId::Session)?;
         app.open_session(fresh);
         app.client.load_models(app.session_generation);
         app.client.load_catalog(app.session_generation);
@@ -163,48 +131,89 @@ impl App {
     fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<(), AppError> {
         let stop = crate::signals::StopSignal::listen();
         while self.run_state == RunState::Running {
-            if self.last_ticker_tick.elapsed() >= Duration::from_millis(350) {
-                self.ticker_offset = self.ticker_offset.wrapping_add(1);
-                self.last_ticker_tick = Instant::now();
-            }
+            self.advance_animation();
             self.expire_notice();
-            self.drain_client_events()?;
-            if self.model.preferences.auto_refresh_sessions.is_on()
-                && self.last_session_refresh.elapsed() >= Duration::from_secs(15)
-            {
-                self.client.refresh_sessions(self.session_generation);
-                self.last_session_refresh = Instant::now();
+            if self.drain_client_events()? {
+                self.needs_redraw = true;
             }
-            terminal.draw(|frame| self.render(frame))?;
+            self.refresh_sessions_if_due();
+            if self.needs_redraw || self.animating() {
+                terminal.draw(|frame| self.render(frame))?;
+                self.needs_redraw = false;
+            }
             if stop.was_asked() {
                 break;
             }
-            let (keys, mice) = Self::read_events()?;
+            let (keys, mice) = Self::read_events(self.poll_timeout())?;
             if !keys.is_empty() {
-                self.handle_keys(keys)?;
+                self.handle_keys(&keys)?;
+                self.needs_redraw = true;
             }
             if !mice.is_empty() {
                 self.handle_mouse(&mice)?;
+                self.needs_redraw = true;
             }
         }
         Ok(())
     }
 
-    /// Shows a notice for a short while, the way a toast behaves.
-    pub(super) fn set_notice(&mut self, message: impl Into<String>) {
-        self.model.notice = Some(message.into());
-        self.notice_since = Some(Instant::now());
+    /// Moves the sweep one step, only while something is moving.
+    fn advance_animation(&mut self) {
+        if self.animating() {
+            self.animation_phase = self.animation_phase.wrapping_add(1);
+        }
     }
 
-    /// A notice that outlived its welcome leaves the footer.
-    fn expire_notice(&mut self) {
-        if self.model.notice.is_some()
-            && self
-                .notice_since
-                .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(5))
+    /// How long to wait for input before checking the clock again.
+    fn poll_timeout(&self) -> Duration {
+        if self.animating() {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(250)
+        }
+    }
+
+    /// Whether something on screen is moving on its own.
+    fn animating(&self) -> bool {
+        self.model.turn_state.is_busy()
+            || self
+                .model
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.age() < Duration::from_secs(1))
+    }
+
+    fn refresh_sessions_if_due(&mut self) {
+        if self.model.preferences.auto_refresh_sessions.is_on()
+            && self.last_session_refresh.elapsed() >= Duration::from_secs(15)
         {
+            self.client.refresh_sessions(self.session_generation);
+            self.last_session_refresh = Instant::now();
+        }
+    }
+
+    /// Shows a notice as a toast.
+    pub(super) fn set_notice(&mut self, notice: Notice) {
+        if let Some(current) = &self.model.notice
+            && !notice.overrides(current)
+        {
+            return;
+        }
+        self.model.notice = Some(notice);
+        self.needs_redraw = true;
+    }
+
+    /// Drops the notice that is showing.
+    pub(super) fn dismiss_notice(&mut self) {
+        if self.model.notice.take().is_some() {
+            self.needs_redraw = true;
+        }
+    }
+
+    fn expire_notice(&mut self) {
+        if self.model.notice.as_ref().is_some_and(Notice::expired) {
             self.model.notice = None;
-            self.notice_since = None;
+            self.needs_redraw = true;
         }
     }
 
@@ -212,10 +221,12 @@ impl App {
     ///
     /// A paste arrives as a burst of keys, and the burst is what tells the
     /// reader that the text was pasted instead of typed.
-    fn read_events() -> Result<(Vec<crossterm::event::KeyEvent>, Vec<MouseEvent>), AppError> {
+    fn read_events(
+        timeout: Duration,
+    ) -> Result<(Vec<crossterm::event::KeyEvent>, Vec<MouseEvent>), AppError> {
         let mut keys = Vec::new();
         let mut mice = Vec::new();
-        if !event::poll(Duration::from_millis(100))? {
+        if !event::poll(timeout)? {
             return Ok((keys, mice));
         }
         while let Ok(event) = event::read() {
@@ -236,159 +247,38 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mice: &[MouseEvent]) -> Result<(), AppError> {
-        if self.plan_review.is_open() || self.overlay == Overlay::Help {
+        if self.modal_open() {
             return Ok(());
         }
         for mouse in mice {
             if mouse.kind == event::MouseEventKind::Down(event::MouseButton::Left) && mouse.row == 0
             {
-                let layout = crate::text_builder::TextBuilder::header_layout(&self.model);
+                let layout = crate::text_builder::TextBuilder::tab_bar(
+                    &self.model,
+                    self.active_view,
+                    self.frame_area.width,
+                );
                 let column = usize::from(mouse.column);
-                if let Some((_, _, action)) = layout
-                    .buttons
+                if let Some((_, _, tab)) = layout
+                    .tabs
                     .iter()
                     .find(|(start, end, _)| column >= *start && column < *end)
                 {
-                    match action {
-                        crate::text_builder::HeaderAction::Modal(kind) => {
-                            self.header_select = Some(HeaderSelectState::new(
-                                *kind,
-                                &self.model,
-                                self.catalog_capabilities(),
-                            ));
-                            return Ok(());
-                        }
-                        crate::text_builder::HeaderAction::OpenView(view) => {
-                            self.activate_view(*view)?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-        let active_index = self
-            .view_index(self.active_view)
-            .ok_or(AppError::ComponentNotFound(self.active_view))?;
-        self.handle_component_mouse(active_index, mice)?;
-        Ok(())
-    }
-
-    fn handle_header_select_key(&mut self, key: event::KeyEvent) -> Result<(), AppError> {
-        let Some(mut select) = self.header_select.take() else {
-            return Ok(());
-        };
-        let options = select.options.len();
-        match key.code {
-            keys::CANCEL => {}
-            keys::NAV_UP | keys::NAV_UP_ARROW => {
-                select.selected = select.selected.saturating_sub(1);
-                self.header_select = Some(select);
-            }
-            keys::NAV_DOWN | keys::NAV_DOWN_ARROW => {
-                select.selected = (select.selected + 1).min(options.saturating_sub(1));
-                self.header_select = Some(select);
-            }
-            keys::SUBMIT => {
-                if let Some(action) = select.kind.action(select.selected, &select.options) {
-                    self.header_select = None;
-                    self.handle_component_action(action)?;
+                    let tab = *tab;
+                    self.activate_view(tab)?;
                     return Ok(());
                 }
-                self.header_select = Some(select);
             }
-            _ => self.header_select = Some(select),
-        }
-        Ok(())
-    }
-
-    fn handle_keys(&mut self, keys: Vec<event::KeyEvent>) -> Result<(), AppError> {
-        if self.header_select.is_some() {
-            for key in keys {
-                self.handle_header_select_key(key)?;
-            }
-            return Ok(());
-        }
-        if self.plan_review.is_open() {
-            for key in keys {
-                self.plan_review.handle_key(key, &self.model);
-            }
-            if let Some(action) = self.plan_review.take_action() {
-                self.handle_component_action(action)?;
-            }
-            return Ok(());
         }
         let active_index = self
             .view_index(self.active_view)
             .ok_or(AppError::ComponentNotFound(self.active_view))?;
-        if self
-            .views
-            .get(active_index)
-            .ok_or(AppError::ComponentNotFound(self.active_view))?
-            .captures_global_keys()
-        {
-            self.handle_component_keys(active_index, &keys)?;
-            return Ok(());
-        }
-        if self.active_view == ComponentId::Sessions
-            && self
-                .views
-                .get(self.view_index(ComponentId::Sessions).unwrap_or(usize::MAX))
-                .is_some_and(|view| view.captures_global_keys())
-        {
-            self.handle_component_keys(active_index, &keys)?;
-            return Ok(());
-        }
-        if self.overlay == Overlay::Help {
-            if keys.iter().any(|key| key.code == keys::CANCEL) {
-                self.overlay = Overlay::Closed;
-            }
-            return Ok(());
-        }
-        if keys.iter().any(|key| key.code == keys::QUIT) {
-            self.run_state = RunState::Quit;
-            return Ok(());
-        }
-        if keys.iter().any(|key| key.code == keys::HELP) {
-            self.overlay = Overlay::Help;
-            return Ok(());
-        }
-        for key in &keys {
-            let code = key.code;
-            if code == crossterm::event::KeyCode::Char(keys::SESSIONS_VIEW_CHAR) {
-                self.activate_view(ComponentId::Sessions)?;
-                return Ok(());
-            }
-            if let crossterm::event::KeyCode::Char(number) = code
-                && let Some(view) = ComponentId::from_shortcut(number)
-            {
-                self.activate_view(view)?;
-                return Ok(());
-            }
-        }
-        self.handle_component_keys(active_index, &keys)?;
-        Ok(())
-    }
-
-    fn handle_component_keys(
-        &mut self,
-        active_index: usize,
-        keys: &[event::KeyEvent],
-    ) -> Result<(), AppError> {
-        self.route_to_component(active_index, |component, model| {
-            component.handle_keys(keys, model);
-        })
-    }
-
-    fn handle_component_mouse(
-        &mut self,
-        active_index: usize,
-        mice: &[MouseEvent],
-    ) -> Result<(), AppError> {
         self.route_to_component(active_index, |component, model| {
             for mouse in mice {
                 component.handle_mouse(*mouse, model);
             }
-        })
+        })?;
+        Ok(())
     }
 
     fn route_to_component(
@@ -410,38 +300,24 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn activate_view(&mut self, view: ComponentId) -> Result<(), AppError> {
-        let target_index = self
-            .view_index(view)
-            .ok_or(AppError::ComponentNotFound(view))?;
-        if self.active_view == view
-            && self
-                .views
-                .get(target_index)
-                .ok_or(AppError::ComponentNotFound(view))?
-                .lifecycle()
-                .phase()
-                != crate::components::LifecyclePhase::Dormant
-        {
+    fn activate_view(&mut self, view: ComponentId) -> Result<(), AppError> {
+        let phase = self.view_phase(view);
+        if self.active_view == view && phase != LifecyclePhase::Dormant {
             return Ok(());
         }
         let active_index = self
             .view_index(self.active_view)
             .ok_or(AppError::ComponentNotFound(self.active_view))?;
-        if self
-            .views
-            .get(active_index)
-            .ok_or(AppError::ComponentNotFound(self.active_view))?
-            .lifecycle()
-            .phase()
-            != crate::components::LifecyclePhase::Dormant
-        {
+        if self.view_phase(self.active_view) != LifecyclePhase::Dormant {
             self.views
                 .get_mut(active_index)
                 .ok_or(AppError::ComponentNotFound(self.active_view))?
                 .transition(LifecycleEvent::Unmount)?;
         }
         self.active_view = view;
+        let target_index = self
+            .view_index(view)
+            .ok_or(AppError::ComponentNotFound(view))?;
         let lifecycle_event = if self.view_has_data(view) {
             LifecycleEvent::Loaded
         } else {
@@ -457,19 +333,26 @@ impl App {
         Ok(())
     }
 
+    fn view_phase(&self, view: ComponentId) -> LifecyclePhase {
+        self.view_index(view)
+            .and_then(|index| self.views.get(index))
+            .map_or(LifecyclePhase::Dormant, |component| {
+                component.lifecycle().phase()
+            })
+    }
+
     fn view_has_data(&self, view: ComponentId) -> bool {
         match view {
             ComponentId::Session => self.model.active_session.is_some(),
-            ComponentId::Plans => !self.model.plans.is_empty(),
-            ComponentId::Telemetry => self.model.telemetry.is_some(),
-            ComponentId::Plugins => !self.model.plugins.is_empty(),
-            ComponentId::Models => !self.model.models.is_empty(),
-            ComponentId::Settings => true,
-            ComponentId::Host => self.model.server.is_some(),
             ComponentId::Sessions => {
                 !self.model.sessions.is_empty() || !self.model.children.is_empty()
             }
+            ComponentId::Models => !self.model.models.is_empty(),
+            ComponentId::Plans => !self.model.plans.is_empty(),
             ComponentId::Jobs => !self.model.jobs.is_empty(),
+            ComponentId::Telemetry => self.model.telemetry.is_some(),
+            ComponentId::Host => self.model.server.is_some(),
+            ComponentId::Plugins => !self.model.plugins.is_empty(),
             ComponentId::Costs => self.model.costs.is_some() || self.model.session_costs.is_some(),
             ComponentId::PlanReview => self.plan_review.is_open(),
         }
@@ -478,4 +361,57 @@ impl App {
     fn view_index(&self, id: ComponentId) -> Option<usize> {
         self.views.iter().position(|view| view.id() == id)
     }
+
+    /// Whether an overlay owns the keys.
+    fn modal_open(&self) -> bool {
+        self.overlay == Overlay::Help
+            || self.menu.is_open()
+            || self.plan_review.is_open()
+            || self.prompt.is_some()
+    }
+
+    fn set_quit(&mut self) {
+        self.run_state = RunState::Quit;
+    }
+
+    /// A shell of an application, for the tests that draw one frame.
+    #[cfg(test)]
+    pub(crate) fn for_test(tab: ComponentId) -> Self {
+        let config = ClientConfig::default();
+        let client = ClientRuntime::detached(&config).expect("a client needs no host");
+        let mut model = UiModel::default();
+        config.apply_to(&mut model);
+        let mut app = Self {
+            model,
+            views: create_views(),
+            active_view: tab,
+            overlay: Overlay::Closed,
+            menu: CommandMenu::default(),
+            prompt: None,
+            run_state: RunState::Running,
+            client,
+            config,
+            plan_review: PlanReviewView::default(),
+            session_generation: 0,
+            reasoning_recovery: crate::ui_model::ReasoningRecovery::default(),
+            last_session_refresh: Instant::now(),
+            animation_phase: 0,
+            needs_redraw: true,
+            frame_area: Rect::default(),
+        };
+        app.activate_view(tab).expect("the tab mounts");
+        app
+    }
+
+    /// The overlay the interface is showing, for a test to read.
+    #[cfg(test)]
+    pub(crate) const fn overlay_for_test(&self) -> Overlay {
+        self.overlay
+    }
 }
+
+#[cfg(test)]
+#[path = "app/prompt_tests.rs"]
+mod prompt_tests;
+
+use crate::components::LifecyclePhase;

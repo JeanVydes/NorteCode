@@ -236,11 +236,11 @@ impl Component for SessionsView {
             return;
         }
         match key.code {
-            KeyCode::Char(keys::NEW_SESSION_CHAR) => {
+            KeyCode::Char('n') => {
                 self.pending_action = Some(ComponentAction::CreateSession);
             }
             keys::SUBMIT => self.select_row(model),
-            keys::CANCEL | keys::FOCUS_NEXT => {
+            keys::CANCEL | keys::NEXT_TAB => {
                 if self.expanded.is_some() {
                     self.expanded = None;
                     self.clamp_selection(model);

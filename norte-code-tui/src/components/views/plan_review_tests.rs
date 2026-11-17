@@ -1,142 +1,152 @@
+//! The plan review reads like a file: numbered lines and clickable buttons.
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Terminal, backend::TestBackend};
 
-use super::{PLAN_REVIEW_PREFIX, PlanReviewView};
-use crate::{components::Component, ui_model::UiModel};
+use super::PlanReviewView;
+use crate::components::Component;
+use crate::ui_model::UiModel;
 
-#[test]
-fn opens_ordinary_questions_with_options() {
-    let mut review = PlanReviewView::default();
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
 
-    review
-        .begin(
-            norte_code_wire::SessionKey::new("session"),
-            "question",
-            "normal question",
-            &["yes".to_owned(), "no".to_owned()],
-            false,
-        )
-        .expect("lifecycle");
-    assert!(review.is_open());
-    review.handle_key(
-        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        &UiModel::default(),
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &UiModel::default(),
-    );
-    assert!(matches!(
-        review.take_action(),
-        Some(crate::components::ComponentAction::AnswerQuestion { answer, .. })
-            if answer == "no"
-    ));
+fn drawn(view: &mut PlanReviewView, model: &UiModel) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(90, 28)).expect("terminal");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), model))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+    let mut text = String::new();
+    for y in 0..28 {
+        for x in 0..90 {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn review_with_plan() -> PlanReviewView {
+    let mut view = PlanReviewView::default();
+    view.begin(
+        norte_code_wire::SessionKey::new("s1"),
+        "q1",
+        "NORTE_CODE_PLAN_REVIEW\n# The plan\nstep one\nstep two",
+        &[],
+        false,
+    )
+    .expect("review opens");
+    view
 }
 
 #[test]
-fn joins_selected_options_for_multiple_choice_questions() {
-    let mut review = PlanReviewView::default();
-    review
-        .begin(
-            norte_code_wire::SessionKey::new("session"),
-            "question",
-            "Choose tools",
-            &["read".to_owned(), "grep".to_owned(), "write".to_owned()],
-            true,
-        )
-        .expect("lifecycle");
+fn the_plan_is_rendered_as_markdown() {
+    let mut view = PlanReviewView::default();
+    view.begin(
+        norte_code_wire::SessionKey::new("s1"),
+        "q2",
+        "NORTE_CODE_PLAN_REVIEW\n## Heading\n\n- first item\n- second item\n\n**bold claim**",
+        &[],
+        false,
+    )
+    .expect("review opens");
     let model = UiModel::default();
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
-    review.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model);
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
 
-    assert!(matches!(
-        review.take_action(),
-        Some(crate::components::ComponentAction::AnswerQuestion { answer, .. })
-            if answer == "read, write"
-    ));
+    let text = drawn(&mut view, &model);
+
+    // The raw markdown markers are gone: headings and lists are drawn, not
+    // printed as source.
+    assert!(text.contains("Heading"), "drawn:\n{text}");
+    assert!(text.contains("first item"), "drawn:\n{text}");
+    assert!(text.contains('•'), "the list is bulleted:\n{text}");
+    assert!(
+        !text.contains("**bold claim**"),
+        "the bold markers are drawn:\n{text}"
+    );
+    assert!(text.contains("bold claim"), "drawn:\n{text}");
 }
 
 #[test]
-fn sends_free_form_feedback_to_the_plan_question() {
-    let mut review = PlanReviewView::default();
-    review
-        .begin(
-            norte_code_wire::SessionKey::new("session"),
-            "question",
-            &format!("{PLAN_REVIEW_PREFIX}Plan body"),
-            &[],
-            false,
-        )
-        .expect("lifecycle");
+fn a_markdown_table_is_drawn_as_a_table() {
+    let mut view = PlanReviewView::default();
+    view.begin(
+        norte_code_wire::SessionKey::new("s1"),
+        "q3",
+        "NORTE_CODE_PLAN_REVIEW\n| step | owner |\n|---|---|\n| build | me |",
+        &[],
+        false,
+    )
+    .expect("review opens");
     let model = UiModel::default();
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
-        &model,
-    );
-    review.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &model);
 
-    assert!(matches!(
-        review.take_action(),
-        Some(crate::components::ComponentAction::AnswerQuestion {
-            session,
-            question,
-            answer,
-        }) if session.as_str() == "session" && question == "question" && answer == "revise"
-    ));
+    let text = drawn(&mut view, &model);
+
+    assert!(text.contains("step"), "drawn:\n{text}");
+    assert!(text.contains("owner"), "drawn:\n{text}");
+    assert!(text.contains('│'), "the table has borders:\n{text}");
 }
 
 #[test]
-fn rejects_a_plan_with_the_review_choice() {
-    let mut review = PlanReviewView::default();
-    review
-        .begin(
-            norte_code_wire::SessionKey::new("session"),
-            "question",
-            &format!("{PLAN_REVIEW_PREFIX}Plan body"),
-            &[],
-            false,
-        )
-        .expect("lifecycle");
-    review.handle_key(
-        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-        &UiModel::default(),
-    );
+fn the_document_carries_line_numbers() {
+    let mut view = review_with_plan();
+    let model = UiModel::default();
 
-    assert!(matches!(
-        review.take_action(),
-        Some(crate::components::ComponentAction::AnswerQuestion { answer, .. })
-            if answer == "Reject"
-    ));
+    let text = drawn(&mut view, &model);
+
+    assert!(text.contains("plan review"), "drawn:\n{text}");
+    assert!(text.contains("The plan"));
+    assert!(text.contains("1"));
+}
+
+#[test]
+fn the_buttons_are_named() {
+    let mut view = review_with_plan();
+    let model = UiModel::default();
+
+    let text = drawn(&mut view, &model);
+
+    assert!(text.contains("approve"));
+    assert!(text.contains("reject"));
+    assert!(text.contains("feedback"));
+}
+
+#[test]
+fn scrolling_moves_the_document() {
+    let mut view = review_with_plan();
+    let model = UiModel::default();
+
+    for _ in 0..40 {
+        view.handle_key(key(KeyCode::PageDown), &model);
+    }
+
+    let text = drawn(&mut view, &model);
+    assert!(text.contains("plan review"));
+}
+
+#[test]
+fn the_footer_buttons_are_clickable() {
+    let mut view = review_with_plan();
+    let model = UiModel::default();
+    let area = ratatui::layout::Rect::new(0, 0, 90, 28);
+    let _ = drawn(&mut view, &model);
+
+    let buttons = view.buttons(area);
+    assert_eq!(buttons.len(), 3);
+    let (rect, index) = buttons[0];
+    assert_eq!(index, 0);
+    assert_eq!(view.button_at(rect.x, rect.y, area), Some(0));
+    let (third, index) = buttons[2];
+    assert_eq!(index, 2);
+    assert_eq!(view.button_at(third.x, third.y, area), Some(2));
+}
+
+#[test]
+fn a_plan_approves_with_a() {
+    let mut view = review_with_plan();
+    let model = UiModel::default();
+
+    view.handle_key(key(KeyCode::Char('a')), &model);
+
+    assert!(view.take_action().is_some());
 }

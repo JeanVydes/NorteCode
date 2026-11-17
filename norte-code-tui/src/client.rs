@@ -234,6 +234,34 @@ pub(crate) struct ClientRuntime {
 }
 
 impl ClientRuntime {
+    /// A runtime pointed at the configured endpoint without contacting it.
+    ///
+    /// Drawing a frame needs a client, not a host. The tests that render one
+    /// modal use this so a stopped server cannot fail them.
+    #[cfg(test)]
+    pub(crate) fn detached(config: &ClientConfig) -> Result<Self, ClientRuntimeError> {
+        let base_url = config.service.url.clone();
+        let token = config.service.token.as_deref();
+        let agent_id = config.agent_id.clone();
+        let runtime = tokio::runtime::Runtime::new()?;
+        let client = Arc::new(
+            RemoteClient::new(base_url.clone(), token, None)?.with_agent_id(agent_id.clone()),
+        );
+        let api = Arc::new(RestClient::new(&base_url, token.unwrap_or_default())?);
+        let (sender, events) = mpsc::channel(8);
+        Ok(Self {
+            runtime,
+            client,
+            api,
+            events,
+            sender,
+            endpoint: base_url,
+            authentication_configured: token.is_some(),
+            agent_id,
+            stream: std::sync::Mutex::new(None),
+        })
+    }
+
     pub(crate) fn connect(
         config: &ClientConfig,
     ) -> Result<(Self, Vec<SessionSummary>, SessionKey), ClientRuntimeError> {

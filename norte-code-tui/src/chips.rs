@@ -121,7 +121,7 @@ fn preview(text: &str) -> String {
 pub(crate) fn chip_line(chip: &Chip, theme: ThemeMode) -> Line<'static> {
     Line::from(Span::styled(
         chip.to_string(),
-        Style::default().fg(palette::foreground(theme)),
+        Style::default().fg(palette::text(theme)),
     ))
 }
 

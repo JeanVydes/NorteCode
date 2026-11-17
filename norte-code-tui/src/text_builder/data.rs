@@ -3,17 +3,14 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use norte_code_client::{CostReport, PluginSummary, ServerInfo, ToolRule};
+use norte_code_client::{PluginSummary, ToolRule};
 use norte_code_wire::{
     ChildSessionSummary, McpFailure, McpInfo, ModelInfo, PlanSummary, SessionSummary, SkillInfo,
-    TelemetryRecord, TelemetrySummary,
+    TelemetryRecord,
 };
 
 use super::TextBuilder;
-use crate::{
-    components::palette,
-    ui_model::{TelemetryScope, UiModel},
-};
+use crate::{components::palette, ui_model::UiModel};
 
 /// How far indented the meta line sits under a numbered title.
 const META_INDENT: &str = "      ";
@@ -82,7 +79,7 @@ impl TextBuilder {
         let title = session.title.as_deref().unwrap_or("Untitled session");
         let mut head = vec![Span::styled(
             format!("{number:>2}."),
-            Style::default().fg(palette::brand()),
+            Style::default().fg(palette::accent(crate::ui_model::ThemeMode::Dark)),
         )];
         head.push(Span::raw(if session.pinned { " ★" } else { "  " }));
         head.push(Span::raw(format!(
@@ -103,7 +100,7 @@ impl TextBuilder {
         }
         meta.push(Span::styled(
             pieces.join(" · "),
-            Style::default().fg(palette::muted()),
+            Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
         ));
         vec![Line::from(head), Line::from(meta)]
     }
@@ -120,7 +117,7 @@ impl TextBuilder {
         vec![Line::from(vec![
             Span::styled(
                 format!("{number:>2}."),
-                Style::default().fg(palette::brand()),
+                Style::default().fg(palette::accent(crate::ui_model::ThemeMode::Dark)),
             ),
             Span::raw(format!(
                 " {}{}",
@@ -133,7 +130,7 @@ impl TextBuilder {
                     session.state.label(),
                     session.task.as_deref().unwrap_or(&session.session_id)
                 ),
-                Style::default().fg(palette::muted()),
+                Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
             ),
         ])]
     }
@@ -151,7 +148,7 @@ impl TextBuilder {
                 .fg(palette::accent(theme))
                 .add_modifier(ratatui::style::Modifier::BOLD)
         } else {
-            Style::default().fg(palette::muted())
+            Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark))
         };
         vec![Line::from(Span::styled(format!("      ▸ {label}"), style))]
     }
@@ -166,21 +163,31 @@ impl TextBuilder {
         ))
     }
 
+    /// The row a session takes in the telemetry list: its title, its requests
+    /// and what they cost.
     #[must_use]
-    pub fn plan_detail(plan: &PlanSummary, show_details: bool) -> String {
-        if show_details {
-            format!(
-                "{}\n\nPageUp/PageDown scroll · {} toggles summary",
-                plan.content,
-                Self::submit_key_label()
-            )
-        } else {
-            format!(
-                "{}\n\nPress {} to toggle full plan text",
-                plan.title.as_deref().unwrap_or(&plan.id),
-                Self::submit_key_label()
-            )
-        }
+    pub fn telemetry_session_row(model: &UiModel, session: &str) -> Line<'static> {
+        let report = model.telemetry.as_ref();
+        let requests = report.map_or(0, |report| {
+            report
+                .records
+                .iter()
+                .filter(|record| record.session == session)
+                .count()
+        });
+        let label = model
+            .sessions
+            .iter()
+            .find(|summary| summary.session_id == session)
+            .and_then(|summary| summary.title.clone())
+            .unwrap_or_else(|| session.chars().take(8).collect());
+        Line::from(vec![
+            Span::raw(label),
+            Span::styled(
+                format!("  {requests} req"),
+                Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
+            ),
+        ])
     }
 
     #[must_use]
@@ -192,33 +199,37 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn telemetry_summary(summary: &TelemetrySummary) -> String {
-        format!(
-            "requests     {}\nerrors       {}\ncancelled    {}\nduration     {} ms\ninput        {}\noutput       {}\ncache read   {}\ncache write  {}",
-            summary.requests,
-            summary.errors,
-            summary.cancelled,
-            summary.duration_ms,
-            summary.input_tokens,
-            summary.output_tokens,
-            summary.cache_read_tokens,
-            summary.cache_write_tokens
-        )
-    }
-
-    #[must_use]
     pub fn plugin_row(plugin: &PluginSummary) -> Line<'static> {
-        let enabled = if plugin.enabled {
-            "enabled"
-        } else {
-            "disabled"
+        let theme = crate::ui_model::ThemeMode::Dark;
+        let (marker, color, state) = match (plugin.enabled, plugin.loaded) {
+            (true, true) => ("●", palette::success(), "loaded".to_owned()),
+            // An enabled plugin the host did not load has a reason or has not
+            // been tried in this process: those are different problems, and
+            // saying "failed" for both sent the reader after a build error
+            // that never happened.
+            (true, false) => match plugin.load_error.as_deref() {
+                Some(reason) => ("✗", palette::danger(), format!("failed: {reason}")),
+                None => (
+                    "◌",
+                    palette::warning(),
+                    "not loaded in this process".to_owned(),
+                ),
+            },
+            (false, true) => (
+                "◐",
+                palette::text_muted(theme),
+                "disabled, still loaded".to_owned(),
+            ),
+            (false, false) => ("○", palette::text_muted(theme), "disabled".to_owned()),
         };
-        let loaded = if plugin.loaded {
-            "loaded"
-        } else {
-            "not loaded"
-        };
-        Line::from(format!("{enabled}  {loaded}  {}", plugin.name))
+        Line::from(vec![
+            Span::styled(format!("{marker} "), Style::default().fg(color)),
+            Span::raw(plugin.name.clone()),
+            Span::styled(
+                format!("  {state}"),
+                Style::default().fg(palette::text_muted(theme)),
+            ),
+        ])
     }
 
     #[must_use]
@@ -252,164 +263,7 @@ impl TextBuilder {
         Line::from(format!("{decision}  {}  {}", rule.name, rule.scope))
     }
 
-    #[must_use]
-    pub fn host_overview(model: &UiModel) -> String {
-        let server = model
-            .server
-            .as_ref()
-            .map_or_else(|| Self::host_unavailable().to_owned(), Self::host_details);
-        let liveness = model
-            .liveness
-            .as_ref()
-            .map_or("unknown", |health| match health.status {
-                norte_code_client::HealthStatus::Live => "live",
-                norte_code_client::HealthStatus::Ready => "ready",
-            });
-        let readiness = model
-            .readiness
-            .as_ref()
-            .map_or("unknown", |health| match health.status {
-                norte_code_client::HealthStatus::Live => "live",
-                norte_code_client::HealthStatus::Ready => "ready",
-            });
-        let agents = model
-            .agents
-            .iter()
-            .map(|agent| agent.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let quota = model.quota.as_ref().map_or_else(
-            || "not loaded".to_owned(),
-            |quota| {
-                quota
-                    .dimensions
-                    .iter()
-                    .map(|dimension| {
-                        format!(
-                            "{} {}/{}",
-                            dimension.name.label(),
-                            dimension.used,
-                            dimension.limit
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            },
-        );
-        let capabilities = model
-            .server
-            .as_ref()
-            .map_or_else(String::new, |server| server.capabilities.join(", "));
-        let extensions = model
-            .server
-            .as_ref()
-            .map_or_else(String::new, |server| server.extensions.join(", "));
-        let limits = model.server.as_ref().map_or_else(
-            || "not loaded".to_owned(),
-            |server| {
-                format!(
-                    "frame {} · jobs {} · artifact {} · prompt {} bytes",
-                    Self::optional_limit(server.limits.frame_bytes),
-                    Self::optional_limit(server.limits.concurrent_jobs),
-                    Self::optional_limit(server.limits.artifact_bytes),
-                    Self::optional_limit(server.limits.prompt_bytes),
-                )
-            },
-        );
-        let host_errors = model
-            .host_errors
-            .iter()
-            .map(|(probe, error)| format!("{probe}: {error}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "endpoint        {}\nauthentication  {}\n{server}\nliveness        {liveness}\nreadiness       {readiness}\nagents          {agents}\nquota           {quota}\ncapabilities    {capabilities}\nextensions      {extensions}\nlimits          {limits}\n\n{}",
-            model.endpoint,
-            if model.authentication_configured {
-                "configured"
-            } else {
-                "not configured"
-            },
-            if host_errors.is_empty() {
-                "Tab changes section | r refreshes".to_owned()
-            } else {
-                format!("Probe failures:\n{host_errors}\n\nTab changes section | r refreshes")
-            }
-        )
-    }
-
-    #[must_use]
-    pub fn cost_reports(
-        global: Option<&CostReport>,
-        session: Option<&CostReport>,
-        session_id: Option<&norte_code_wire::SessionKey>,
-    ) -> String {
-        let global = Self::cost_report_line("all sessions", global);
-        let session_title = session_id.map_or("current session", |id| id.as_str());
-        let session = Self::cost_report_line(session_title, session);
-        format!("{global}\n{session}\n\nPress r to refresh")
-    }
-
-    fn cost_report_line(label: &str, report: Option<&CostReport>) -> String {
-        let total = report.map_or("not loaded".to_owned(), |report| {
-            report.total_usd.map_or_else(
-                || "not reported".to_owned(),
-                |amount| format!("${amount:.6}"),
-            )
-        });
-        let requests = report.map_or_else(|| "-".to_owned(), |report| report.requests.to_string());
-        format!("{label}\n  cost: {total}\n  requests: {requests}")
-    }
-
-    #[must_use]
-    pub fn telemetry_scope(scope: TelemetryScope) -> &'static str {
-        match scope {
-            TelemetryScope::Host => "all sessions",
-            TelemetryScope::Session => "current session",
-        }
-    }
-
-    #[must_use]
-    pub fn telemetry_record_detail(record: &TelemetryRecord) -> String {
-        let optional = |value: Option<u64>| {
-            value.map_or_else(|| "not reported".to_owned(), |value| value.to_string())
-        };
-        let cost = record
-            .cost_usd
-            .map_or_else(|| "not reported".to_owned(), |value| format!("${value:.6}"));
-        let endpoint = record.endpoint.as_deref().unwrap_or("not reported");
-        let error = record.error.as_deref().unwrap_or("none");
-        let tool_calls = if record.tool_calls.is_empty() {
-            "none".to_owned()
-        } else {
-            record.tool_calls.join(", ")
-        };
-        format!(
-            "request       {}\nsession       {}\nturn          {}\nprovider      {}\nmodel         {}\nstarted       {}\nendpoint      {}\nstatus        {:?}\nduration      {} ms\nfirst token   {} ms\nlast token    {} ms\ninput         {}\noutput        {}\nreasoning     {}\ncache read    {}\ncache write   {}\ncost          {}\ncache hit     {}\ntool calls    {}\nerror         {}",
-            record.id,
-            record.session,
-            record.turn,
-            record.provider,
-            record.model,
-            record.started_at,
-            endpoint,
-            record.status,
-            record.duration_ms,
-            optional(record.first_token_ms),
-            optional(record.last_token_ms),
-            optional(record.input_tokens),
-            optional(record.output_tokens),
-            optional(record.reasoning_tokens),
-            optional(record.cache_read_tokens),
-            optional(record.cache_write_tokens),
-            cost,
-            record.cache_hit,
-            tool_calls,
-            error,
-        )
-    }
-
-    fn optional_limit(limit: Option<u64>) -> String {
+    pub(crate) fn optional_limit(limit: Option<u64>) -> String {
         limit.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
     }
 
@@ -434,21 +288,5 @@ impl TextBuilder {
             (None, false) => String::new(),
         };
         Line::from(format!("    {}  ({}){suffix}", model.name, model.model))
-    }
-
-    #[must_use]
-    pub fn host_details(server: &ServerInfo) -> String {
-        let protocol_name = server
-            .protocol
-            .as_ref()
-            .map_or("", |protocol| &protocol.name);
-        let protocol_version = server
-            .protocol
-            .as_ref()
-            .map_or("", |protocol| &protocol.version);
-        format!(
-            "server version  {}\ndefault agent   {}\nprotocol        {protocol_name} {protocol_version}",
-            server.server_version, server.default_agent
-        )
     }
 }

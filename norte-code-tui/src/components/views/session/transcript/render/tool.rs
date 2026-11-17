@@ -104,16 +104,20 @@ pub(crate) fn draw_tool(
     if show_tool_output.is_on() && !tool.chunks.is_empty() {
         lines.extend(ToolCallComponent::output_chunks(&tool.chunks, width, theme));
     }
-    lines.extend(ToolCallComponent::finished(ToolFinish {
-        name: &tool.name,
-        status: tool.status.unwrap_or(ToolStatus::Ok),
-        output: tool.output.as_deref(),
-        error: tool.error.as_deref(),
-        shell: false,
-        theme,
-        width,
-        show_tool_output: show_tool_output.is_on(),
-    }));
+    // A call that has not reported an outcome is still running: drawing it as
+    // finished is what made a live tool look like an empty result.
+    if let Some(status) = tool.status {
+        lines.extend(ToolCallComponent::finished(ToolFinish {
+            name: &tool.name,
+            status,
+            output: tool.output.as_deref(),
+            error: tool.error.as_deref(),
+            shell: false,
+            theme,
+            width,
+            show_tool_output: show_tool_output.is_on(),
+        }));
+    }
 }
 
 /// The command line of a shell call: its outcome, the tool and the script.
@@ -140,11 +144,17 @@ fn shell_command_line(
         Span::styled(
             "$ shell  ".to_owned(),
             Style::default()
-                .fg(palette::brand())
+                .fg(palette::accent(crate::ui_model::ThemeMode::Dark))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(command.to_owned(), Style::default().fg(palette::muted())),
-        Span::styled(duration, Style::default().fg(palette::muted())),
+        Span::styled(
+            command.to_owned(),
+            Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
+        ),
+        Span::styled(
+            duration,
+            Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
+        ),
     ])
 }
 
@@ -176,7 +186,7 @@ fn shell_header(tool: &ToolNode) -> Line<'static> {
         Some(ToolStatus::Ok) => ("✓", palette::success()),
         Some(ToolStatus::Error) => ("✗", palette::danger()),
         Some(ToolStatus::Cancelled) => ("⊘", palette::warning()),
-        None => ("…", palette::muted()),
+        None => ("…", palette::text_muted(crate::ui_model::ThemeMode::Dark)),
     };
     shell_command_line(icon, color, tool.arguments.as_ref(), tool.duration_ms)
 }

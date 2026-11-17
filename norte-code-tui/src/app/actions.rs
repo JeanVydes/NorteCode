@@ -2,9 +2,13 @@ use norte_code_wire::ServerEventKind;
 
 use super::App;
 use crate::{
-    components::{ComponentAction, McpState, Preference, ViewAction},
+    components::{
+        CommandMenuAction, ComponentAction, ComponentEvent, McpState, Preference, ViewAction,
+        prompt::Prompt,
+    },
     ui_model::{
-        SendMode, SessionAttachmentState, ThemeMode, ThinkingVisibility, TranscriptItem, TurnState,
+        Notice, SendMode, SessionAttachmentState, ThemeMode, ThinkingVisibility, TranscriptItem,
+        TurnState,
     },
 };
 
@@ -207,6 +211,126 @@ pub(super) fn keeps_live_items(
 }
 
 impl App {
+    /// Runs what the command menu picked.
+    pub(super) fn handle_menu_action(&mut self, action: CommandMenuAction) {
+        match action {
+            CommandMenuAction::NewSession => self.client.create_session(),
+            CommandMenuAction::ExportSession => self.handle_view_action(ViewAction::ExportSession),
+            CommandMenuAction::ImportSession => self.begin_import(),
+            CommandMenuAction::CompactSession => {
+                self.handle_view_action(ViewAction::CompactSession);
+            }
+            CommandMenuAction::RenameSession => self.begin_rename(),
+            CommandMenuAction::DeleteSession => self.begin_delete(),
+            CommandMenuAction::ForkSession => self.fork_active_session(),
+            CommandMenuAction::SetQueueMode(mode) => self.model.send_mode = mode,
+            CommandMenuAction::RewindToTurn => self.begin_rewind(),
+            CommandMenuAction::PinCurrentTurn => self.pin_current_turn(),
+            CommandMenuAction::SetReasoning(level) => self.set_reasoning(level),
+            CommandMenuAction::SetBudgetLimit => self.begin_budget_entry(),
+            CommandMenuAction::SetBudgetAction(action) => {
+                self.model.budget_action = action;
+                self.persist_preferences();
+            }
+            CommandMenuAction::RefreshView => self.refresh_active_view(),
+            CommandMenuAction::SetDiffStyle(style) => {
+                self.model.cli.diff_style = match style {
+                    crate::tools::DiffMode::Unified => crate::tools::DiffMode::Split,
+                    crate::tools::DiffMode::Split => crate::tools::DiffMode::Unified,
+                };
+                self.persist_preferences();
+            }
+            CommandMenuAction::ToggleShellOutput => self.toggle_shell_output(),
+            CommandMenuAction::TogglePreference(preference) => self.toggle_preference(preference),
+            CommandMenuAction::Help => self.overlay = super::Overlay::Help,
+            CommandMenuAction::Quit => self.set_quit(),
+        }
+    }
+
+    /// Opens the import prompt.
+    fn begin_import(&mut self) {
+        self.open_prompt(Prompt::Import);
+    }
+
+    /// Opens the budget prompt.
+    fn begin_budget_entry(&mut self) {
+        self.open_prompt(Prompt::Budget);
+    }
+
+    /// Opens the rename prompt for the active session.
+    fn begin_rename(&mut self) {
+        self.open_prompt(Prompt::Rename);
+    }
+
+    /// Opens the delete confirmation.
+    fn begin_delete(&mut self) {
+        self.open_prompt(Prompt::Delete);
+    }
+
+    /// Opens the rewind prompt.
+    fn begin_rewind(&mut self) {
+        self.open_prompt(Prompt::Rewind);
+    }
+
+    /// Pins or unpins the oldest turn of the viewport.
+    fn pin_current_turn(&mut self) {
+        let Some(index) = self.view_index(crate::components::ComponentId::Session) else {
+            return;
+        };
+        if let Some(view) = self.views.get_mut(index) {
+            view.accept(ComponentEvent::PinCurrentTurn);
+        }
+    }
+
+    /// Forks the session that is open.
+    fn fork_active_session(&mut self) {
+        if let Some(session) = self.model.active_session.clone() {
+            self.client.fork_session(session, self.session_generation);
+        }
+    }
+
+    /// Flips whether shell output is shown in full.
+    fn toggle_shell_output(&mut self) {
+        self.model.shell_output_expanded = self.model.shell_output_expanded.toggled();
+    }
+
+    /// Asks the active view for a refresh, whatever the view is.
+    fn refresh_active_view(&mut self) {
+        match self.active_view {
+            crate::components::ComponentId::Host => {
+                self.handle_view_action(ViewAction::RefreshHost);
+            }
+            crate::components::ComponentId::Plugins => {
+                self.handle_view_action(ViewAction::RefreshPlugins);
+            }
+            crate::components::ComponentId::Telemetry => {
+                self.handle_view_action(ViewAction::RefreshTelemetry);
+            }
+            crate::components::ComponentId::Costs => {
+                self.handle_view_action(ViewAction::RefreshCosts);
+            }
+            crate::components::ComponentId::Jobs => {
+                self.handle_view_action(ViewAction::RefreshJobs);
+            }
+            crate::components::ComponentId::Sessions | crate::components::ComponentId::Session => {
+                self.client.refresh_sessions(self.session_generation);
+                if let Some(session) = self.model.active_session.clone() {
+                    self.client.load_history(session, self.session_generation);
+                }
+            }
+            crate::components::ComponentId::Plans => {
+                if let Some(session) = self.model.active_session.clone() {
+                    self.client.load_plans(session, self.session_generation);
+                }
+            }
+            crate::components::ComponentId::Models => {
+                self.client.load_models(self.session_generation);
+                self.client.load_catalog(self.session_generation);
+            }
+            crate::components::ComponentId::PlanReview => {}
+        }
+    }
+
     pub(super) fn handle_component_action(
         &mut self,
         action: ComponentAction,
@@ -241,16 +365,13 @@ impl App {
             ComponentAction::SendMessage { text, chips } => self.send_message(text, &chips),
             ComponentAction::AttachFile(path) => self.attach_file(path),
             ComponentAction::ImportSession(path) => self.import_session(path),
-            ComponentAction::SetQueueMode(mode) => {
-                self.model.send_mode = mode;
-            }
             ComponentAction::SetModel { provider, model } => {
                 if let Some(session) = self.model.active_session.clone()
                     && self.model.active_child.is_none()
                 {
-                    self.set_notice(format!(
-                        "Model change requested: {provider}/{model}. It applies at the next turn boundary."
-                    ));
+                    self.set_notice(Notice::info(format!(
+                        "Model change requested: {provider}/{model}. Applies at the next turn boundary."
+                    )));
                     self.client
                         .set_model(session, self.session_generation, provider, model);
                 }
@@ -259,21 +380,9 @@ impl App {
             ComponentAction::ApproveBudget => self.approve_budget(),
             ComponentAction::DeclineBudget => self.decline_budget(),
             ComponentAction::CancelTurn => self.cancel_turn(),
-            ComponentAction::OpenHeaderModal(kind) => {
-                self.header_select = Some(super::HeaderSelectState::new(
-                    kind,
-                    &self.model,
-                    self.catalog_capabilities(),
-                ));
-            }
-            ComponentAction::SetReasoning(level) => self.set_reasoning(level),
             ComponentAction::Rewind { turn_id } => self.rewind(turn_id),
             ComponentAction::PinTurn { turn_id, pinned } => self.pin_turn(turn_id, pinned),
             ComponentAction::StopJob { job_id } => self.stop_job(job_id),
-            ComponentAction::SetDiffStyle(diff_style) => {
-                self.model.cli.diff_style = diff_style;
-                self.persist_preferences();
-            }
             ComponentAction::AnswerQuestion {
                 session,
                 question,
@@ -286,7 +395,7 @@ impl App {
 
     fn handle_view_action(&mut self, action: ViewAction) {
         match action {
-            ViewAction::RefreshHost | ViewAction::TestConnection => {
+            ViewAction::RefreshHost => {
                 self.client.load_host(self.session_generation);
             }
             ViewAction::RefreshSkills => self.client.load_skills(self.session_generation, true),
@@ -305,17 +414,7 @@ impl App {
                 .client
                 .plugin_operation(operation, self.session_generation),
             ViewAction::RefreshTelemetry => self.refresh_telemetry(),
-            ViewAction::ToggleTelemetryScope => {
-                self.model.telemetry_scope = match self.model.telemetry_scope {
-                    crate::ui_model::TelemetryScope::Host => {
-                        crate::ui_model::TelemetryScope::Session
-                    }
-                    crate::ui_model::TelemetryScope::Session => {
-                        crate::ui_model::TelemetryScope::Host
-                    }
-                };
-                self.refresh_telemetry();
-            }
+
             ViewAction::RefreshCosts => self.refresh_costs(),
             ViewAction::RefreshJobs => self.refresh_jobs(),
             ViewAction::CompactSession => {
@@ -333,11 +432,10 @@ impl App {
                 if self.model.active_child.is_none()
                     && let Some(session) = self.model.active_session.clone()
                 {
-                    self.set_notice("Preparing session export...".to_owned());
+                    self.set_notice(Notice::info("Preparing session export..."));
                     self.client.export_session(session, self.session_generation);
                 }
             }
-            ViewAction::TogglePreference(preference) => self.toggle_preference(preference),
         }
     }
 
@@ -381,29 +479,31 @@ impl App {
             return;
         }
         if !self.uploads_supported() {
-            self.set_notice(
-                "This host does not accept uploads, so there is nothing to attach.".to_owned(),
-            );
+            self.set_notice(Notice::warning(
+                "This host does not accept uploads, so there is nothing to attach.",
+            ));
             return;
         }
         let path = std::path::PathBuf::from(path);
         let Some(mime) = norte_code_client::mime_of_path(&path) else {
-            self.set_notice(format!(
+            self.set_notice(Notice::warning(format!(
                 "{} has no media type this client can send.",
                 path.display()
-            ));
+            )));
             return;
         };
         let Some(kind) = norte_code_client::input_part_kind(mime) else {
-            self.set_notice(format!("{mime} is not a media type this client sends."));
+            self.set_notice(Notice::warning(format!(
+                "{mime} is not a media type this client sends."
+            )));
             return;
         };
         let modality = norte_code_client::modality_of(kind);
         if !self.agent_accepts(modality) {
-            self.set_notice(format!(
+            self.set_notice(Notice::warning(format!(
                 "This agent does not accept {} input.",
                 norte_code_client::modality_word(modality)
-            ));
+            )));
             return;
         }
         self.client.upload_file(
@@ -503,7 +603,7 @@ impl App {
             self.model.active_session.clone(),
             self.model.active_turn.clone(),
         ) else {
-            self.set_notice("There is no running turn to stop.".to_owned());
+            self.set_notice(Notice::info("There is no running turn to stop."));
             return;
         };
         if self.model.active_child.is_some() {
@@ -525,19 +625,15 @@ impl App {
             .current_model_info()
             .and_then(|model| level.incompatible_with(&model.reasoning))
         {
-            self.set_notice(format!("{message}; not changing reasoning."));
+            self.set_notice(Notice::warning(format!(
+                "{message}; not changing reasoning."
+            )));
             return;
         }
         self.reasoning_recovery.clear();
         self.model.reasoning = level;
         self.client
             .set_reasoning(session, level, self.session_generation);
-    }
-
-    /// The reasoning capabilities of the selected model, when the client
-    /// knows them.
-    pub(super) fn catalog_capabilities(&self) -> Option<&norte_code_wire::ReasoningInfo> {
-        self.current_model_info().map(|info| &info.reasoning)
     }
 
     /// The catalogue entry for the selected model, when the client knows it.
@@ -606,7 +702,7 @@ impl App {
         answer: String,
     ) {
         if let Err(error) = self.plan_review.close() {
-            self.set_notice(error.to_string());
+            self.set_notice(Notice::error(error.to_string()));
         }
         self.client
             .answer_question(session, self.session_generation, question, answer);
@@ -643,19 +739,6 @@ impl App {
                 self.model.preferences.developer_mode =
                     self.model.preferences.developer_mode.toggled();
             }
-            Preference::DiffStyle => {
-                self.model.cli.diff_style = match self.model.cli.diff_style {
-                    crate::tools::DiffMode::Unified => crate::tools::DiffMode::Split,
-                    crate::tools::DiffMode::Split => crate::tools::DiffMode::Unified,
-                };
-            }
-            Preference::BudgetAction => {
-                self.model.budget_action = match self.model.budget_action {
-                    norte_code_wire::BudgetAction::Warn => norte_code_wire::BudgetAction::Ask,
-                    norte_code_wire::BudgetAction::Ask => norte_code_wire::BudgetAction::Stop,
-                    norte_code_wire::BudgetAction::Stop => norte_code_wire::BudgetAction::Warn,
-                };
-            }
         }
         self.persist_preferences();
     }
@@ -663,7 +746,7 @@ impl App {
     fn persist_preferences(&mut self) {
         self.config.update_preferences(&self.model);
         if let Err(error) = self.config.save() {
-            self.set_notice(format!("Could not save settings: {error}"));
+            self.set_notice(Notice::error(format!("Could not save settings: {error}")));
         }
     }
 

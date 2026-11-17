@@ -77,6 +77,12 @@ struct TreeBuilder {
     tools: HashMap<String, ToolSlot>,
     /// The call each detached job belongs to.
     jobs: HashMap<String, String>,
+    /// Chunks that arrived before the call they belong to, keyed by call id.
+    orphan_chunks: HashMap<String, Vec<(norte_code_wire::OutputStream, String)>>,
+    /// Results that arrived before the call they belong to.
+    pending_results: Vec<String>,
+    /// How many calls came without an id, so each one gets a distinct one.
+    anonymous: usize,
 }
 
 impl TreeBuilder {
@@ -108,9 +114,11 @@ impl TreeBuilder {
     /// text the host wrote.
     fn push_replayed_call(&mut self, text: &str) {
         let (name, arguments) = split_tool_call(text);
+        let output = self.pending_results.pop();
         self.push_tool(ToolNode {
             name,
             arguments,
+            output,
             replayed: true,
             ..ToolNode::default()
         });
@@ -125,30 +133,21 @@ impl TreeBuilder {
             tool.output = Some(text);
             return;
         }
-        self.push_tool(ToolNode {
-            output: Some(text),
-            replayed: true,
-            ..ToolNode::default()
-        });
+        // The result names no call and no tool: it belongs to the next call
+        // the history replays, so a node without a name is never drawn.
+        self.pending_results.push(text);
     }
 
     /// One chunk of output of a running call.
-    fn push_chunk(
-        &mut self,
-        call_id: &str,
-        stream: norte_code_wire::OutputStream,
-        text: &str,
-        turn: Option<TurnKey>,
-    ) {
+    fn push_chunk(&mut self, call_id: &str, stream: norte_code_wire::OutputStream, text: &str) {
         if !self.tools.contains_key(call_id) {
-            let Some(turn) = turn else {
-                return;
-            };
-            self.open_turn(turn);
-            self.push_tool(ToolNode {
-                call_id: call_id.to_owned(),
-                ..ToolNode::default()
-            });
+            // The call has not been announced: keep the output until it is, so
+            // a nameless tool node is never drawn.
+            self.orphan_chunks
+                .entry(call_id.to_owned())
+                .or_default()
+                .push((stream, text.to_owned()));
+            return;
         }
         let Some(slot) = self.tools.get(call_id).copied() else {
             return;
@@ -163,6 +162,19 @@ impl TreeBuilder {
 
     /// A call that ended: its status, its duration and its result.
     fn finish_tool(&mut self, finished: ToolNode, turn: Option<TurnKey>) {
+        if finished.call_id.is_empty()
+            && let Some(slot) = self.last_open_tool()
+            && let TranscriptNodeKind::Tool(tool) = self.tool_at(slot).kind_mut()
+        {
+            tool.status = finished.status;
+            tool.duration_ms = finished.duration_ms;
+            tool.output = finished.output;
+            tool.error = finished.error;
+            if !finished.name.is_empty() {
+                tool.name = finished.name;
+            }
+            return;
+        }
         if !self.tools.contains_key(&finished.call_id) {
             if let Some(turn) = turn {
                 self.open_turn(turn);
@@ -195,8 +207,19 @@ impl TreeBuilder {
     }
 
     /// A new tool call, in the turn being built.
+    ///
+    /// A call that names no id gets one, so two anonymous calls stay two
+    /// nodes instead of one node that loses the name of the other.
     fn push_tool(&mut self, tool: ToolNode) {
+        let mut tool = tool;
+        if tool.call_id.is_empty() {
+            tool.call_id = format!("anon-{}", self.anonymous);
+            self.anonymous += 1;
+        }
         let call_id = tool.call_id.clone();
+        if let Some(chunks) = self.orphan_chunks.remove(&call_id) {
+            tool.chunks = chunks;
+        }
         let node = TranscriptNode::new(TranscriptNodeKind::Tool(tool));
         if let Some(turn) = self.turn.as_mut() {
             let child = turn.children.len();
@@ -223,6 +246,49 @@ impl TreeBuilder {
             Some(turn) => turn.children.push(node),
             None => self.roots.push(node),
         }
+    }
+
+    /// The last tool call that has not reported an outcome yet.
+    fn last_open_tool(&self) -> Option<ToolSlot> {
+        if let Some(turn) = self.turn.as_ref()
+            && let Some(child) = turn
+                .children
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, child)| {
+                    matches!(child.kind(), TranscriptNodeKind::Tool(tool) if tool.status.is_none())
+                })
+                .map(|(child, _)| child)
+        {
+            return Some(ToolSlot { root: None, child });
+        }
+        for (root, node) in self.roots.iter().enumerate().rev() {
+            if let TranscriptNodeKind::Tool(tool) = node.kind()
+                && tool.status.is_none()
+            {
+                return Some(ToolSlot {
+                    root: Some(root),
+                    child: 0,
+                });
+            }
+            if let Some(child) = node
+                .children()
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, child)| {
+                    matches!(child.kind(), TranscriptNodeKind::Tool(tool) if tool.status.is_none())
+                })
+                .map(|(child, _)| child)
+            {
+                return Some(ToolSlot {
+                    root: Some(root),
+                    child,
+                });
+            }
+        }
+        None
     }
 
     /// The tool call that is open, if any.
@@ -328,3 +394,7 @@ fn split_tool_call(text: &str) -> (String, Option<serde_json::Value>) {
 #[cfg(test)]
 #[path = "tree_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tree/orphan_tests.rs"]
+mod orphan_tests;

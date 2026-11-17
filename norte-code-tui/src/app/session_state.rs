@@ -83,6 +83,7 @@ impl App {
         self.model.session_costs = None;
         self.model.session_stats = None;
         self.model.notice = None;
+        self.model.clock.reset();
         self.model.reasoning = reasoning;
         self.model.queued_model = None;
         self.model.turn_state = TurnState::Idle;
@@ -171,5 +172,6 @@ impl App {
             }
         }
         self.model.notice = None;
+        self.model.clock.reset();
     }
 }

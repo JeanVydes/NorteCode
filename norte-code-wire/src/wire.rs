@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::resource::PlanSummary;
 use crate::types::*;
 use crate::{MediaPart, TelemetryRecord};
 
@@ -1037,6 +1038,20 @@ pub enum ServerEventKind {
         /// Plugin metadata.
         plugins: Vec<PluginInfo>,
     },
+    /// A plugin operation reported a step.
+    ///
+    /// Installing clones a repository and builds a whole workspace, which can
+    /// take minutes; a page that showed nothing until the end would look hung.
+    PluginProgress {
+        /// The operation under way: `install`, `update` or `remove`.
+        operation: String,
+        /// The step it reached.
+        step: u64,
+        /// How many steps the operation has.
+        total: u64,
+        /// What the step is doing, in a few words.
+        stage: String,
+    },
     /// A plugin lifecycle operation completed.
     PluginChanged {
         /// Operation description.
@@ -1156,7 +1171,7 @@ pub enum ServerEventKind {
     /// The plans of a session.
     PlanList {
         /// One entry per plan.
-        plans: Vec<PlanInfo>,
+        plans: Vec<PlanSummary>,
     },
     /// The models the catalogue knows.
     ModelList {

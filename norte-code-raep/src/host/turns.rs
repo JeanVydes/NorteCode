@@ -1364,21 +1364,33 @@ impl NorteCodeRaepHost {
                 plugins: crate::plugin_manager::plugin_info(),
             },
             ClientRequestKind::InstallPlugin { url, package, all } => {
-                let result = tokio::task::spawn_blocking(move || {
+                // The build runs on a blocking thread, and the page following
+                // it watches the session's stream: the steps go there while
+                // the work happens, so a long build is visible instead of
+                // looking hung.
+                let (steps, mut progress) = tokio::sync::mpsc::unbounded_channel();
+                let report = move |step: usize, total: usize, stage: &str| {
+                    let _ = steps.send((step, total, stage.to_owned()));
+                };
+                let work = tokio::task::spawn_blocking(move || {
                     if all {
-                        crate::plugin_manager::install_all_plugins(&url, &|_, _, _| {})
+                        crate::plugin_manager::install_all_plugins(&url, &report)
                             .map(|names| names.join(", "))
                     } else {
-                        crate::plugin_manager::install_plugin(
-                            &url,
-                            package.as_deref(),
-                            &|_, _, _| {},
-                        )
+                        crate::plugin_manager::install_plugin(&url, package.as_deref(), &report)
                     }
-                })
-                .await
-                .map_err(|error| HostError::Service(error.to_string()))?
-                .map_err(HostError::Service)?;
+                });
+                while let Some((step, total, stage)) = progress.recv().await {
+                    self.emit_event(
+                        session_id,
+                        crate::host::plugin_progress_event("install", step, total, &stage),
+                    )
+                    .await?;
+                }
+                let result = work
+                    .await
+                    .map_err(|error| HostError::Service(error.to_string()))?
+                    .map_err(HostError::Service)?;
                 ServerEventKind::PluginChanged {
                     operation: "installed".to_owned(),
                     name: result,

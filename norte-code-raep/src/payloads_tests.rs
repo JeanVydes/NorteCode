@@ -292,3 +292,24 @@ fn detached_job_lifecycle_payloads_match_the_raep_schemas() {
     assert_eq!(finished["new_turn_id"], "12");
     assert!(finished["injected_into_turn_id"].is_null());
 }
+
+#[test]
+fn session_stats_carries_the_context_the_footer_needs() {
+    let payload = standard_event_payload(&ServerEventKind::SessionStats {
+        input_tokens: 12_000,
+        output_tokens: 340,
+        cache_read_tokens: 9_600,
+        cache_write_tokens: 100,
+        cost_usd: 0.001,
+        requests: 3,
+        context_used: 12_000,
+        context_window: Some(200_000),
+    })
+    .expect("a stats payload");
+
+    assert_eq!(payload["input_tokens"], 12_000);
+    assert_eq!(payload["cache_read_tokens"], 9_600);
+    assert_eq!(payload["cache_write_tokens"], 100);
+    assert_eq!(payload["context_used"], 12_000);
+    assert_eq!(payload["context_window"], 200_000);
+}

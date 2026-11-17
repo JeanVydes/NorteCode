@@ -22,6 +22,9 @@ use crate::{components::palette, text_builder::TextBuilder, tools::EditDiffCompo
 pub(crate) struct ToolCallComponent;
 
 const SHELL_OUTPUT_TAIL: usize = 5;
+
+/// How much of an agent's message a header shows.
+const MESSAGE_PREVIEW: usize = 96;
 const RAW_JSON_TAIL: usize = 18;
 
 #[derive(Clone, Copy)]
@@ -250,7 +253,7 @@ impl ToolCallComponent {
                 let style = match stream {
                     OutputStream::Stderr => Style::default().fg(palette::danger()),
                     OutputStream::Stdout | OutputStream::Other => {
-                        Style::default().fg(palette::muted())
+                        Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark))
                     }
                 };
                 let label = TextBuilder::tool_output_label(*stream);
@@ -342,8 +345,8 @@ impl ToolCallComponent {
             vec![Span::styled(
                 title.to_owned(),
                 Style::default()
-                    .fg(palette::brand())
-                    .bg(palette::panel_background(theme))
+                    .fg(palette::accent(crate::ui_model::ThemeMode::Dark))
+                    .bg(palette::surface(theme))
                     .add_modifier(ratatui::style::Modifier::BOLD),
             )],
             width,
@@ -357,7 +360,7 @@ impl ToolCallComponent {
         width: u16,
         theme: crate::ui_model::ThemeMode,
     ) -> Line<'static> {
-        let background = palette::panel_background(theme);
+        let background = palette::surface(theme);
         let used = 1 + Self::display_width(label) + 1 + Self::display_width(&content) + 1;
         let padding = usize::from(width).saturating_sub(used);
         Line::from(vec![
@@ -365,15 +368,13 @@ impl ToolCallComponent {
             Span::styled(
                 format!("{label} "),
                 Style::default()
-                    .fg(palette::brand())
+                    .fg(palette::accent(crate::ui_model::ThemeMode::Dark))
                     .bg(background)
                     .add_modifier(ratatui::style::Modifier::BOLD),
             ),
             Span::styled(
                 content,
-                Style::default()
-                    .fg(palette::foreground(theme))
-                    .bg(background),
+                Style::default().fg(palette::text(theme)).bg(background),
             ),
             Span::styled(
                 " ".repeat(padding.saturating_add(1)),
@@ -389,7 +390,7 @@ impl ToolCallComponent {
         width: u16,
         theme: crate::ui_model::ThemeMode,
     ) -> Line<'static> {
-        let background = palette::panel_background(theme);
+        let background = palette::surface(theme);
         let used = spans
             .iter()
             .map(|span| Self::display_width(span.content.as_ref()))
@@ -482,11 +483,16 @@ impl ToolCallComponent {
     }
 
     fn target(name: &str, arguments: &Value) -> Option<String> {
-        if name == "todo" {
-            return None;
-        }
-        if name == "plan" {
-            return Self::plan_name(arguments).or_else(|| Self::plan_action(arguments));
+        match name {
+            "todo" | "list_agents" => return None,
+            "plan" => {
+                return Self::plan_name(arguments).or_else(|| Self::plan_action(arguments));
+            }
+            "spawn_agent" => return Self::spawn_target(arguments),
+            "message_agent" => return Self::message_target(arguments),
+            "wait_agent" => return Self::wait_target(arguments),
+            "stop_agent" => return Self::stop_target(arguments),
+            _ => {}
         }
         let path = arguments
             .get("path")
@@ -517,6 +523,87 @@ impl ToolCallComponent {
         path.map(str::to_owned)
     }
 
+    /// What a spawned child is called: its agent and its title.
+    ///
+    /// The prompt is what the child is given, so a title or an agent is what
+    /// names the call; a call with neither shows the start of the prompt.
+    fn spawn_target(arguments: &Value) -> Option<String> {
+        let agent = arguments.get("agent_id").and_then(Value::as_str);
+        let title = arguments.get("title").and_then(Value::as_str);
+        match (agent, title) {
+            (Some(agent), Some(title)) => Some(format!("{agent}  {title}")),
+            (Some(agent), None) => Some(agent.to_owned()),
+            (None, Some(title)) => Some(title.to_owned()),
+            (None, None) => arguments
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(|prompt| TextBuilder::truncate_inline(prompt, MESSAGE_PREVIEW)),
+        }
+    }
+
+    /// The message a parent sent a child, cut to one readable line.
+    fn message_target(arguments: &Value) -> Option<String> {
+        let child = arguments
+            .get("child_session_id")
+            .and_then(Value::as_str)
+            .map(|child| child.chars().take(8).collect::<String>());
+        let message = arguments.get("content").and_then(Self::content_text);
+        match (child, message) {
+            (Some(child), Some(message)) => Some(format!(
+                "{child}  {}",
+                TextBuilder::truncate_inline(&message, MESSAGE_PREVIEW)
+            )),
+            (Some(child), None) => Some(child),
+            (None, message) => {
+                message.map(|message| TextBuilder::truncate_inline(&message, MESSAGE_PREVIEW))
+            }
+        }
+    }
+
+    /// What a wait is waiting for: the child, the condition and the ceiling.
+    fn wait_target(arguments: &Value) -> Option<String> {
+        let child = arguments
+            .get("child_session_id")
+            .and_then(Value::as_str)
+            .map(|child| child.chars().take(8).collect::<String>());
+        let until = arguments
+            .get("until")
+            .and_then(Value::as_str)
+            .unwrap_or("idle");
+        let timeout = arguments
+            .get("timeout_s")
+            .and_then(Value::as_u64)
+            .unwrap_or(300);
+        child.map(|child| format!("{child}  until {until}  within {timeout}s"))
+    }
+
+    /// What a stop is aimed at.
+    fn stop_target(arguments: &Value) -> Option<String> {
+        let child = arguments
+            .get("child_session_id")
+            .and_then(Value::as_str)
+            .map(|child| child.chars().take(8).collect::<String>())?;
+        let mode = arguments
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("graceful");
+        Some(format!("{child}  {mode}"))
+    }
+
+    /// The text a `content` argument carries, whether it is a string or parts.
+    fn content_text(content: &Value) -> Option<String> {
+        if let Some(text) = content.as_str() {
+            return Some(text.to_owned());
+        }
+        let parts = content.as_array()?;
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!text.is_empty()).then_some(text)
+    }
+
     fn plan_name(arguments: &Value) -> Option<String> {
         let content = arguments
             .get("content")
@@ -544,6 +631,10 @@ impl ToolCallComponent {
             "shell" => "$",
             "todo" => "✓",
             "plan" => "☰",
+            "spawn_agent" | "list_agents" => "⑃",
+            "message_agent" => "✉",
+            "wait_agent" => "◔",
+            "stop_agent" => "⊘",
             _ => "◆",
         }
     }
@@ -556,7 +647,7 @@ impl ToolCallComponent {
         width: u16,
         theme: crate::ui_model::ThemeMode,
     ) -> Vec<Line<'static>> {
-        let background = palette::panel_background(theme);
+        let background = palette::surface(theme);
         let blank = || {
             Line::from(Span::styled(
                 " ".repeat(usize::from(width)),
@@ -579,9 +670,11 @@ impl ToolCallComponent {
     ) -> Line<'static> {
         let color = match stream {
             OutputStream::Stderr => palette::danger(),
-            OutputStream::Stdout | OutputStream::Other => palette::muted(),
+            OutputStream::Stdout | OutputStream::Other => {
+                palette::text_muted(crate::ui_model::ThemeMode::Dark)
+            }
         };
-        let background = palette::panel_background(theme);
+        let background = palette::surface(theme);
         let used = Self::display_width(text);
         let padding = usize::from(width).saturating_sub(used + 2);
         Line::from(vec![

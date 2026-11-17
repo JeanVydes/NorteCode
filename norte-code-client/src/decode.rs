@@ -481,12 +481,12 @@ fn extension_event(
             Kind::SessionStats {
                 input_tokens: stats.input_tokens,
                 output_tokens: stats.output_tokens,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
+                cache_read_tokens: stats.cache_read_tokens,
+                cache_write_tokens: stats.cache_write_tokens,
                 cost_usd: stats.cost_usd,
                 requests: stats.requests,
-                context_used: 0,
-                context_window: None,
+                context_used: stats.context_used,
+                context_window: stats.context_window,
             }
         }
         "compaction_finished" => {
@@ -811,7 +811,18 @@ pub(crate) fn server_event_from_frame(
                             warnings: entries.warnings,
                         }
                     }
-                    CatalogKind::Providers | CatalogKind::Plans => {
+                    CatalogKind::Plans => {
+                        // The host names the session's plans with the same
+                        // `agent_catalog` envelope the other catalogues use;
+                        // decoding them here is what makes the plans page
+                        // show anything at all.
+                        let plans: Vec<norte_code_wire::PlanSummary> =
+                            serde_json::from_value(decoded.entries).map_err(|error| {
+                                ClientError::new(format!("invalid plan list: {error}"))
+                            })?;
+                        norte_code_wire::ServerEventKind::PlanList { plans }
+                    }
+                    CatalogKind::Providers => {
                         return Err(ClientError::new(
                             "agent_catalog carried a catalogue this client reads elsewhere",
                         ));
@@ -924,6 +935,15 @@ pub(crate) fn server_event_from_frame(
                 norte_code_wire::ServerEventKind::PluginChanged {
                     operation: decoded.operation,
                     name: decoded.name,
+                }
+            }
+            CanonicalKind::PluginProgress => {
+                let decoded: CanonicalPluginProgress = canonical.decode()?;
+                norte_code_wire::ServerEventKind::PluginProgress {
+                    operation: decoded.operation,
+                    step: decoded.step,
+                    total: decoded.total,
+                    stage: decoded.stage,
                 }
             }
             CanonicalKind::ServiceData => {

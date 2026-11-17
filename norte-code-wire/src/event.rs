@@ -62,6 +62,8 @@ pub enum CanonicalEvent {
     PluginList,
     /// A plugin lifecycle operation completed.
     PluginChanged,
+    /// A plugin operation reported a step.
+    PluginProgress,
     /// A session was created.
     SessionCreated,
     /// The current session list.

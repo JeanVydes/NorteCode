@@ -278,6 +278,18 @@ pub struct SessionStats {
     /// How many model requests it made.
     #[serde(default)]
     pub requests: u64,
+    /// Prompt tokens the provider served from a cache.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Prompt tokens the provider wrote to a cache.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// The tokens the last request carried: the context the session holds.
+    #[serde(default)]
+    pub context_used: u64,
+    /// The context window, when the model declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
 }
 
 /// A `CHILD_SESSION_STARTED` payload.

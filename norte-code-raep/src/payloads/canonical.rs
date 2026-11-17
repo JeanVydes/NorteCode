@@ -307,6 +307,17 @@ pub(crate) fn canonical_event_payload(kind: &ServerEventKind) -> Value {
         ServerEventKind::PluginChanged { operation, name } => {
             CanonicalEvent::PluginChanged { operation, name }
         }
+        ServerEventKind::PluginProgress {
+            operation,
+            step,
+            total,
+            stage,
+        } => CanonicalEvent::PluginProgress {
+            operation,
+            step: *step,
+            total: *total,
+            stage,
+        },
         ServerEventKind::SteerApplied { ids, messages } => CanonicalEvent::UserInputAccepted {
             ids: ids.clone(),
             messages: messages.clone(),

@@ -2,6 +2,10 @@ use norte_code_wire::{Delta, MessageRole, ReplayedKind, ServerEvent, ServerEvent
 use ratatui::style::Modifier;
 
 use super::TranscriptRenderer;
+use crate::ui_model::SessionClock;
+
+/// A clock the transcript tests borrow.
+static CLOCK: SessionClock = SessionClock::new();
 use crate::{
     tools::DiffMode,
     ui_model::{ThinkingVisibility, TranscriptItem},
@@ -36,7 +40,7 @@ fn combines_adjacent_text_deltas_into_one_assistant_message() {
     let lines = content_lines(TranscriptRenderer::lines(&items, DiffMode::Unified, 80));
 
     assert_eq!(lines.len(), 1);
-    assert_eq!(line_content(&lines[0]), "Hello world");
+    assert_eq!(line_content(&lines[0]), "  Hello world");
 }
 
 #[test]
@@ -85,7 +89,7 @@ fn combines_reasoning_deltas_as_one_collapsed_thought_by_default() {
     assert!(
         collapsed_all
             .iter()
-            .any(|line| line_content(line).contains("Thought"))
+            .any(|line| line_content(line).contains("thought"))
     );
     let collapsed = content_lines(collapsed_all);
     assert!(collapsed.is_empty(), "a collapsed thought draws no body");
@@ -148,6 +152,7 @@ fn thought_options(
         thinking_visibility: thinking,
         show_tool_output: crate::ui_model::Toggle::On,
         show_timestamps: crate::ui_model::Toggle::Off,
+        clock: &CLOCK,
         theme: crate::ui_model::ThemeMode::Dark,
         developer_mode: crate::ui_model::Toggle::Off,
         shell_output_expanded: crate::ui_model::Toggle::Off,
@@ -226,7 +231,7 @@ fn an_expanded_thought_folds_on_its_own() {
 }
 
 #[test]
-fn aligns_user_messages_to_the_right_and_renders_their_markdown() {
+fn draws_a_user_message_behind_a_bar_and_keeps_its_markdown() {
     let lines = content_lines(TranscriptRenderer::lines(
         &[TranscriptItem::UserMessage {
             queued: false,
@@ -238,20 +243,20 @@ fn aligns_user_messages_to_the_right_and_renders_their_markdown() {
         80,
     ));
 
-    // The block's gray carries from the first column to the last, like the
-    // shell box, and the text hugs the right edge.
     let theme = crate::ui_model::ThemeMode::Dark;
     assert!(
         lines[0]
             .spans
             .iter()
-            .all(|span| span.style.bg == Some(crate::components::palette::panel_background(theme)))
+            .any(|span| span.content.contains('\u{258c}')),
+        "the user message opens with the accent bar"
     );
-    assert_eq!(
-        lines[0].spans.last().map(|span| span.content.as_ref()),
-        Some("hello")
+    assert!(
+        lines[0]
+            .spans
+            .iter()
+            .any(|span| span.style.bg == Some(crate::components::palette::background(theme)))
     );
-    assert!(!line_content(&lines[0]).contains("you"));
     assert!(line_content(&lines[0]).ends_with("hello"));
     assert!(lines[0]
         .spans
@@ -277,7 +282,7 @@ fn assistant_messages_have_no_padded_surface() {
         80,
     ));
 
-    assert_eq!(line_content(&lines[0]), "hello");
+    assert_eq!(line_content(&lines[0]), "  hello");
     assert_eq!(lines[0].style.bg, None);
 }
 
@@ -294,26 +299,39 @@ fn thought_content_stays_gray_and_uses_a_moving_palette_background() {
             },
         },
     }))];
-    let lines = content_lines(TranscriptRenderer::lines_with_thinking(
+    let lines = content_lines(TranscriptRenderer::lines_with_phase(
         &items,
         DiffMode::Unified,
         80,
         ThinkingVisibility::Expanded,
         true,
+        40,
     ));
 
+    // The sweep is a beam: the head is bright and the columns behind it fade,
+    // so the block is gray-to-bright rather than one flat color.
+    let colors = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .filter(|span| !span.content.trim().is_empty())
+        .filter_map(|span| span.style.fg)
+        .collect::<Vec<_>>();
+    assert!(!colors.is_empty());
     assert!(
-        lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .filter(|span| !span.content.trim().is_empty())
-            .all(|span| span.style.fg == Some(crate::components::palette::thinking_foreground()))
+        colors.iter().any(|color| *color
+            == crate::components::palette::thinking_foreground(crate::ui_model::ThemeMode::Dark)),
+        "some text keeps the resting gray"
+    );
+    assert!(
+        colors.iter().any(|color| *color
+            != crate::components::palette::thinking_foreground(crate::ui_model::ThemeMode::Dark)),
+        "the head of the beam is brighter than the rest"
     );
     assert!(lines.iter().any(|line| {
         line.spans.iter().any(|span| {
             span.style.bg
                 == Some(crate::components::palette::thinking_background(
-                    0,
+                    Some(0),
                     0,
                     80,
                     crate::ui_model::ThemeMode::Dark,
@@ -403,7 +421,7 @@ fn only_the_last_thought_of_a_turn_moves_while_it_streams() {
         true,
     ));
     let swept = Some(crate::components::palette::thinking_background(
-        0,
+        Some(0),
         0,
         80,
         crate::ui_model::ThemeMode::Dark,
@@ -672,6 +690,7 @@ mod tail {
                 Toggle::Off
             },
             show_timestamps: Toggle::Off,
+            clock: &CLOCK,
             theme: ThemeMode::Dark,
             attachment_state: SessionAttachmentState::Attached,
             developer_mode: Toggle::Off,
@@ -1092,10 +1111,7 @@ fn the_tree_draws_what_the_flat_log_drew() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let expected = format!(
-        "▾ turn 1 · 1 tools · 2 messages · 3ms\n{}hola\n\n▸ Thought\n\nbuenos dias\n\n✓ $ shell  ls -la  3ms\n\n file.txt\n\ncode: Success\nexit_code: Some(0)\nduration_ms: 3\nbytes_read: 6\nstdout:\nfile.txt\nJob started: ls\nerror  algo fallo",
-        " ".repeat(56)
-    );
+    let expected = "▾ turn 1 · 1 tools · 2 messages · 3ms\n▌ hola\n\n▸ thought\n\n  buenos dias\n\n✓ $ shell  ls -la  3ms\n\n file.txt\n\ncode: Success\nexit_code: Some(0)\nduration_ms: 3\nbytes_read: 6\nstdout:\nfile.txt\n  Job started: ls\nerror  algo fallo";
 
     assert_eq!(drawn, expected);
 }
@@ -1164,6 +1180,7 @@ fn a_folded_turn_shows_only_its_separator() {
             thinking_visibility: ThinkingVisibility::Collapsed,
             show_tool_output: crate::ui_model::Toggle::On,
             show_timestamps: crate::ui_model::Toggle::Off,
+            clock: &CLOCK,
             theme: crate::ui_model::ThemeMode::Dark,
             developer_mode: crate::ui_model::Toggle::Off,
             shell_output_expanded: crate::ui_model::Toggle::Off,
@@ -1235,6 +1252,7 @@ fn the_layout_says_where_each_turn_starts() {
             thinking_visibility: ThinkingVisibility::Collapsed,
             show_tool_output: crate::ui_model::Toggle::On,
             show_timestamps: crate::ui_model::Toggle::Off,
+            clock: &CLOCK,
             theme: crate::ui_model::ThemeMode::Dark,
             developer_mode: crate::ui_model::Toggle::Off,
             shell_output_expanded: crate::ui_model::Toggle::Off,
@@ -1262,6 +1280,7 @@ fn layout_options(folded: &[super::TurnKey]) -> super::render::TranscriptOptions
         thinking_visibility: ThinkingVisibility::Collapsed,
         show_tool_output: crate::ui_model::Toggle::On,
         show_timestamps: crate::ui_model::Toggle::Off,
+        clock: &CLOCK,
         theme: crate::ui_model::ThemeMode::Dark,
         developer_mode: crate::ui_model::Toggle::Off,
         shell_output_expanded: crate::ui_model::Toggle::Off,
@@ -1371,7 +1390,12 @@ fn the_separator_shows_how_long_the_tools_ran() {
 
 #[test]
 fn after_a_history_reload_the_error_lands_after_the_turn() {
-    use crate::ui_model::TranscriptItem;
+    use crate::ui_model::{SessionClock, TranscriptItem};
+
+    /// A clock every transcript test can borrow.
+    fn clock() -> SessionClock {
+        SessionClock::default()
+    }
     use norte_code_wire::HistorySpeaker;
 
     // The shape `replace_history(history, merged, preserve_live = true)`
@@ -1420,7 +1444,12 @@ fn after_a_history_reload_the_error_lands_after_the_turn() {
 
 #[test]
 fn a_queued_user_message_says_it_waits_for_the_turn() {
-    use crate::ui_model::TranscriptItem;
+    use crate::ui_model::{SessionClock, TranscriptItem};
+
+    /// A clock every transcript test can borrow.
+    fn clock() -> SessionClock {
+        SessionClock::default()
+    }
 
     let items = [
         TranscriptItem::UserMessage {

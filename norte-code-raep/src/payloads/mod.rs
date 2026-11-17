@@ -206,6 +206,13 @@ enum CanonicalEvent<'a> {
     PluginList { plugins: Value },
     /// A plugin lifecycle operation completed.
     PluginChanged { operation: &'a str, name: &'a str },
+    /// A plugin operation reported a step.
+    PluginProgress {
+        operation: &'a str,
+        step: u64,
+        total: u64,
+        stage: &'a str,
+    },
     /// A session was created.
     SessionCreated {
         #[serde(skip_serializing_if = "Option::is_none")]

@@ -16,7 +16,6 @@ use crate::{
     },
 };
 
-mod markdown;
 mod node;
 mod render;
 mod tree;
@@ -59,6 +58,8 @@ pub(super) struct TranscriptContext<'a> {
     pub(super) thinking_visibility: ThinkingVisibility,
     pub(super) show_tool_output: Toggle,
     pub(super) show_timestamps: Toggle,
+    /// The clock a message is stamped with.
+    pub(super) clock: &'a crate::ui_model::SessionClock,
     pub(super) theme: ThemeMode,
     pub(super) attachment_state: SessionAttachmentState,
     pub(super) developer_mode: Toggle,
@@ -105,6 +106,7 @@ impl TranscriptRenderer {
                 thinking_visibility: context.thinking_visibility,
                 show_tool_output: context.show_tool_output,
                 show_timestamps: context.show_timestamps,
+                clock: context.clock,
                 theme: context.theme,
                 developer_mode: context.developer_mode,
                 shell_output_expanded: context.shell_output_expanded,
@@ -176,6 +178,10 @@ impl TranscriptRenderer {
 #[path = "transcript/tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "transcript/width_probe_tests.rs"]
+mod width_probe_tests;
+
 /// The lines the transcript is drawn with, for the tests that read them.
 #[cfg(test)]
 impl TranscriptRenderer {
@@ -218,6 +224,27 @@ impl TranscriptRenderer {
         thinking_visibility: ThinkingVisibility,
         thinking_streaming: bool,
     ) -> Vec<Line<'static>> {
+        Self::lines_with_phase(
+            items,
+            diff_mode,
+            width,
+            thinking_visibility,
+            thinking_streaming,
+            0,
+        )
+    }
+
+    /// The same, at a given phase of the sweep, so a test can look at the beam
+    /// from the middle and see both its head and the text behind it.
+    pub(super) fn lines_with_phase(
+        items: &[TranscriptItem],
+        diff_mode: DiffMode,
+        width: u16,
+        thinking_visibility: ThinkingVisibility,
+        thinking_streaming: bool,
+        phase: u16,
+    ) -> Vec<Line<'static>> {
+        let clock = crate::ui_model::SessionClock::default();
         render::lines_annotated(
             items,
             render::TranscriptOptions {
@@ -226,10 +253,11 @@ impl TranscriptRenderer {
                 thinking_visibility,
                 show_tool_output: Toggle::On,
                 show_timestamps: Toggle::Off,
+                clock: &clock,
                 theme: ThemeMode::Dark,
                 developer_mode: Toggle::Off,
                 shell_output_expanded: Toggle::Off,
-                thinking_phase: 0,
+                thinking_phase: phase,
                 thinking_streaming,
                 folded: &[],
                 thoughts: &[],

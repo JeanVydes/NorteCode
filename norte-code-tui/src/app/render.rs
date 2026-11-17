@@ -1,163 +1,104 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Tabs},
+    widgets::{Block, Borders, Paragraph},
 };
 
-use super::{App, HeaderSelectState, Overlay};
+use super::{App, Overlay};
 use crate::{
-    components::{Component, ComponentId, palette, rect},
+    components::{Modal, paint_scrim, palette, spacing, toast},
     text_builder::TextBuilder,
+    ui_model::ThemeMode,
 };
 
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame<'_>) {
-        let frame_width = usize::from(frame.area().width);
+        self.frame_area = frame.area();
+        let theme = self.model.preferences.theme;
+        let width = frame.area().width;
         let regions = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
             .split(frame.area());
-        let header = TextBuilder::header_layout(&self.model);
+
         frame.render_widget(
-            Paragraph::new(header.line).style(palette::panel_style(self.model.preferences.theme)),
+            Paragraph::new(TextBuilder::tab_bar(&self.model, self.active_view, width).line)
+                .style(palette::panel_style(theme)),
             regions[0],
         );
-        let tabs = ComponentId::all()
-            .into_iter()
-            .map(TextBuilder::tab_label)
-            .collect::<Vec<_>>();
-        let selected = ComponentId::all()
-            .iter()
-            .position(|view| *view == self.active_view)
-            .unwrap_or_default();
-        frame.render_widget(
-            Tabs::new(tabs)
-                .select(selected)
-                .block(Block::default().borders(Borders::BOTTOM))
-                .style(palette::panel_style(self.model.preferences.theme))
-                .highlight_style(
-                    Style::default()
-                        .fg(palette::accent(self.model.preferences.theme))
-                        .add_modifier(Modifier::BOLD),
-                ),
-            regions[1],
-        );
+
         if let Some(index) = self.view_index(self.active_view)
             && let Some(component) = self.views.get_mut(index)
         {
-            component.render(frame, regions[2], &self.model);
+            component.render(frame, inset(regions[1], theme), &self.model);
         }
-        let footer = self.model.notice.as_ref().map_or_else(
-            || TextBuilder::footer_ticker(self.active_view, self.ticker_offset, frame_width),
-            std::clone::Clone::clone,
-        );
-        let footer_color = if self.model.notice.is_some() {
-            palette::danger()
-        } else {
-            palette::muted()
-        };
+
         frame.render_widget(
-            Paragraph::new(footer)
-                .style(palette::panel_style(self.model.preferences.theme).fg(footer_color)),
-            regions[3],
+            Paragraph::new(crate::text_builder::status::status_line(
+                &self.model,
+                self.active_view,
+                width,
+            ))
+            .style(palette::panel_style(theme)),
+            regions[2],
         );
-        if self.overlay == Overlay::Help {
-            Self::render_help(frame, self.model.preferences.theme);
+
+        if let Some(notice) = &self.model.notice {
+            toast::draw(
+                frame,
+                ratatui::layout::Rect {
+                    y: regions[1].y + 1,
+                    ..regions[1]
+                },
+                notice,
+                theme,
+            );
         }
+
+        self.render_overlays(frame, theme);
+    }
+
+    /// Draws the one overlay that owns the keys, over a scrim.
+    fn render_overlays(&mut self, frame: &mut Frame<'_>, theme: ThemeMode) {
+        let modal = self.overlay == Overlay::Help || self.menu.is_open() || self.prompt_open();
         if self.plan_review.is_open() {
-            self.plan_review.render(frame, frame.area(), &self.model);
+            self.plan_review.draw(frame, &self.model);
+            return;
         }
-        if let Some(select) = &self.header_select {
-            Self::render_header_select(frame, select, &self.model);
+        if modal {
+            paint_scrim(frame, theme);
         }
+        if self.overlay == Overlay::Help {
+            Modal {
+                title: TextBuilder::help_title(),
+                controls: "Esc closes",
+                body: TextBuilder::help_lines(theme),
+                theme,
+                selected: None,
+            }
+            .render(frame);
+            return;
+        }
+        if self.menu.is_open() {
+            self.menu.render(frame, theme);
+            return;
+        }
+        let borrowed = std::mem::take(&mut self.model);
+        self.render_prompt(frame, &borrowed);
+        self.model = borrowed;
     }
+}
 
-    fn render_header_select(
-        frame: &mut Frame<'_>,
-        select: &HeaderSelectState,
-        model: &crate::ui_model::UiModel,
-    ) {
-        let theme = model.preferences.theme;
-        let current = select.current;
-        let options = &select.options;
-        let width = options
-            .iter()
-            .map(|option| option.chars().count())
-            .max()
-            .unwrap_or(8)
-            .saturating_add(12)
-            .min(usize::from(u16::MAX));
-        let width = u16::try_from(width)
-            .unwrap_or(u16::MAX)
-            .min(frame.area().width);
-        let height = u16::try_from(options.len())
-            .unwrap_or(u16::MAX)
-            .saturating_add(2)
-            .min(frame.area().height);
-        let area = rect::centered_rect(width, height, frame.area());
-        frame.render_widget(ratatui::widgets::Clear, area);
-        let lines: Vec<Line<'static>> = options
-            .iter()
-            .enumerate()
-            .map(|(index, option)| {
-                let marker = if index == current { "·" } else { " " };
-                if index == select.selected {
-                    Line::from(vec![
-                        Span::styled(
-                            "> ",
-                            Style::default()
-                                .fg(palette::brand())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            option.to_string(),
-                            palette::selected_style(theme).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(format!(" {marker}"), Style::default().fg(palette::muted())),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw("  ".to_owned()),
-                        Span::raw(option.to_string()),
-                        Span::styled(format!(" {marker}"), Style::default().fg(palette::muted())),
-                    ])
-                }
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(ratatui::text::Text::from(lines)).block(
-                Block::default()
-                    .title(format!(" {} ", select.kind.title()))
-                    .title_style(
-                        Style::default()
-                            .fg(palette::brand())
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .style(palette::modal_style(theme))
-                    .padding(ratatui::widgets::Padding::horizontal(1)),
-            ),
-            area,
-        );
-    }
-
-    fn render_help(frame: &mut Frame<'_>, theme: crate::ui_model::ThemeMode) {
-        let width = frame.area().width / 2;
-        let height = u16::try_from((u32::from(frame.area().height) * 45) / 100).unwrap_or(u16::MAX);
-        let area = rect::centered_rect(width, height, frame.area());
-        frame.render_widget(Clear, area);
-        frame.render_widget(Block::default().style(palette::modal_style(theme)), area);
-        frame.render_widget(
-            Paragraph::new(TextBuilder::help_lines())
-                .block(Block::default().title(TextBuilder::help_title()))
-                .style(palette::modal_style(theme)),
-            area,
-        );
-    }
+/// The body area, with the screen gutter applied.
+fn inset(area: ratatui::layout::Rect, theme: ThemeMode) -> ratatui::layout::Rect {
+    let gutter = spacing::SCREEN_GUTTER.min(area.width / 4);
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .style(palette::transcript_style(theme))
+        .padding(ratatui::widgets::Padding::horizontal(gutter));
+    block.inner(area)
 }

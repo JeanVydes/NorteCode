@@ -123,6 +123,9 @@ pub struct PluginSummary {
     /// Whether it loaded.
     #[serde(default)]
     pub loaded: bool,
+    /// Why loading failed, when it did.
+    #[serde(default)]
+    pub load_error: Option<String>,
 }
 
 /// The result of a plugin operation.
