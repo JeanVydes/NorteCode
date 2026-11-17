@@ -16,6 +16,67 @@ pub use plugins::{PLUGIN_ABI_SYMBOL, PLUGIN_ABI_VERSION, Plugin, PluginContext, 
 
 static LIBRARIES: Mutex<Vec<(PathBuf, Arc<libloading::Library>)>> = Mutex::new(Vec::new());
 
+/// The plugin files that loaded in this process, by file name.
+///
+/// The host reports what is on disk and what is running separately: a library
+/// that failed to load is on disk and not here, and a plugin that answers a
+/// different name than its file still counts as loaded under that file.
+static LOADED_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The file names of the plugin libraries that loaded in this process.
+#[must_use]
+pub fn loaded_files() -> Vec<String> {
+    LOADED_FILES
+        .lock()
+        .map(|files| files.clone())
+        .unwrap_or_default()
+}
+
+/// Whether a plugin file loaded in this process.
+#[must_use]
+pub fn is_loaded(file_name: &str) -> bool {
+    LOADED_FILES
+        .lock()
+        .is_ok_and(|files| files.iter().any(|known| known == file_name))
+}
+
+/// The plugin files that failed to load in this process, with the reason.
+static FAILED_FILES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// The reason a plugin file failed to load, when it did.
+#[must_use]
+pub fn failure_reason(file_name: &str) -> Option<String> {
+    FAILED_FILES.lock().ok().and_then(|files| {
+        files
+            .iter()
+            .find(|(known, _)| known == file_name)
+            .map(|(_, reason)| reason.clone())
+    })
+}
+
+/// Records a plugin file that failed to load.
+fn remember_failure(path: &Path, reason: &str) {
+    let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    if let Ok(mut files) = FAILED_FILES.lock() {
+        files.retain(|(known, _)| known != file);
+        files.push((file.to_owned(), reason.to_owned()));
+    }
+}
+
+/// Records a plugin file that loaded, once.
+fn remember_loaded(path: &Path) {
+    let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    if let Ok(mut files) = LOADED_FILES.lock()
+        && !files.iter().any(|known| known == file)
+    {
+        files.push(file.to_owned());
+    }
+}
+
 /// Loads all enabled dynamic plugins from the configured plugin directory.
 ///
 /// Invalid or incompatible libraries are reported and skipped so one broken
@@ -34,8 +95,12 @@ pub fn load_plugins(plugins: &mut Plugins, ctx: Option<&PluginContext>) {
             continue;
         }
         match load_one(&path, ctx) {
-            Ok(plugin) => plugins.add(plugin),
+            Ok(plugin) => {
+                remember_loaded(&path);
+                plugins.add(plugin);
+            }
             Err(error) => {
+                remember_failure(&path, &error);
                 eprintln!("warning: could not load plugin {}: {error}", path.display());
             }
         }

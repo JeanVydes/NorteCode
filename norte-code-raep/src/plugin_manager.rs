@@ -662,8 +662,11 @@ pub(crate) fn installed_entries() -> Vec<PathBuf> {
 
 /// The installed plugins, in file order.
 ///
-/// `loaded` is always `false`: what the running service has loaded in memory
-/// is the service's business; this reports what is on disk.
+/// `loaded` says whether this process actually loaded the library, which is
+/// not the same as `enabled`: an enabled plugin whose build failed is on disk
+/// and not in memory, and a disabled one that was loaded before the rename is
+/// the other way around. Reporting `false` for everything made a working
+/// plugin look broken.
 #[must_use]
 pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
     installed_entries()
@@ -676,10 +679,26 @@ pub fn plugin_info() -> Vec<norte_code_wire::PluginInfo> {
                 .to_str()?
                 .trim_end_matches(".disabled")
                 .to_owned();
+            // The file is renamed when a plugin is disabled, and the registry
+            // remembers the name it loaded under: both spellings name the same
+            // library, so a plugin disabled after it loaded still reads as
+            // loaded until the process restarts.
+            let loaded = norte_code_plugin_host::is_loaded(&file)
+                || norte_code_plugin_host::is_loaded(&format!("{name}.so"))
+                || norte_code_plugin_host::is_loaded(&format!("{name}.dll"))
+                || norte_code_plugin_host::is_loaded(&format!("{name}.dylib"));
+            // The reason is only meaningful for an enabled plugin that did not
+            // load: a disabled library was never tried.
+            let load_error = if !loaded && !disabled {
+                norte_code_plugin_host::failure_reason(&file)
+            } else {
+                None
+            };
             Some(norte_code_wire::PluginInfo {
                 name,
                 enabled: !disabled,
-                loaded: false,
+                loaded,
+                load_error,
             })
         })
         .collect()

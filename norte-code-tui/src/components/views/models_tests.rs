@@ -1,95 +1,79 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+//! What the provider and model picker shows under a filter.
 
-use super::{ModelRow, ModelsView};
-use crate::{
-    components::{Component, ComponentAction},
-    ui_model::UiModel,
-};
-use norte_code_wire::{ModelInfo, ReasoningInfo};
+use norte_code_wire::ModelInfo;
 
-#[test]
-fn provider_search_keeps_all_of_its_models_and_hides_other_providers() {
-    let models = [
-        model("OpenAI", "o3", "Reasoning"),
-        model("OpenAI", "gpt-4.1", "GPT 4.1"),
-        model("Anthropic", "claude-sonnet", "Sonnet"),
-    ];
-    let view = ModelsView {
-        filter: "openai".to_owned(),
-        ..ModelsView::default()
-    };
+use super::ModelsView;
 
-    let rows = view.visible_rows(&models);
-
-    assert_eq!(rows.len(), 3);
-    assert!(matches!(rows[0], ModelRow::Provider { name: "OpenAI", .. }));
-    assert!(matches!(rows[1], ModelRow::Model(model) if model.model == "o3"));
-    assert!(matches!(rows[2], ModelRow::Model(model) if model.model == "gpt-4.1"));
-}
-
-#[test]
-fn model_search_keeps_its_provider_but_only_matching_models() {
-    let models = [
-        model("OpenAI", "o3", "Reasoning"),
-        model("OpenAI", "gpt-4.1", "GPT 4.1"),
-        model("Anthropic", "claude-sonnet", "Sonnet"),
-    ];
-    let view = ModelsView {
-        filter: "O3".to_owned(),
-        ..ModelsView::default()
-    };
-
-    let rows = view.visible_rows(&models);
-
-    assert_eq!(rows.len(), 2);
-    assert!(matches!(rows[0], ModelRow::Provider { name: "OpenAI", .. }));
-    assert!(matches!(rows[1], ModelRow::Model(model) if model.model == "o3"));
-}
-
-#[test]
-fn unmatched_search_hides_every_provider() {
-    let models = [model("OpenAI", "o3", "Reasoning")];
-    let view = ModelsView {
-        filter: "missing".to_owned(),
-        ..ModelsView::default()
-    };
-
-    assert!(view.visible_rows(&models).is_empty());
-}
-
-#[test]
-fn enter_expands_a_provider_before_selecting_its_models() {
-    let model_info = model("OpenAI", "o3", "Reasoning");
-    let ui_model = UiModel {
-        models: vec![model_info],
-        active_session: Some(norte_code_wire::SessionKey::new("session")),
-        ..UiModel::default()
-    };
-    let mut view = ModelsView::default();
-
-    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ui_model);
-    view.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &ui_model);
-    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &ui_model);
-
-    assert!(matches!(
-        view.take_action(),
-        Some(ComponentAction::SetModel { provider, model })
-            if provider == "OpenAI" && model == "o3"
-    ));
-}
-
-fn model(provider: &str, model: &str, name: &str) -> ModelInfo {
+fn model(provider: &str, id: &str) -> ModelInfo {
     ModelInfo {
         provider: provider.to_owned(),
-        model: model.to_owned(),
-        name: name.to_owned(),
+        model: id.to_owned(),
+        name: id.to_owned(),
         description: None,
         max_context: None,
         max_output: None,
-        tools: false,
+        tools: true,
         input: Vec::new(),
         output: Vec::new(),
-        reasoning: ReasoningInfo::default(),
+        reasoning: norte_code_wire::ReasoningInfo::default(),
         deprecated: false,
     }
+}
+
+fn catalog() -> Vec<ModelInfo> {
+    vec![
+        model("openai", "gpt-4o"),
+        model("openai", "gpt-6"),
+        model("openai", "o3"),
+        model("anthropic", "claude-sonnet"),
+        model("anthropic", "gpt-clone"),
+    ]
+}
+
+#[test]
+fn a_matching_model_does_not_keep_its_whole_provider() {
+    let mut view = ModelsView::default();
+    view.filter = "gpt-6".to_owned();
+
+    let rows = view.visible_rows_for(&catalog());
+
+    assert!(rows.iter().any(|row| row.contains("openai")));
+    assert!(rows.iter().any(|row| row.contains("gpt-6")));
+    assert!(
+        !rows.iter().any(|row| row.contains("gpt-4o")),
+        "a sibling model that does not match must not be listed"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("claude-sonnet")),
+        "a provider with no match must not be listed"
+    );
+}
+
+#[test]
+fn a_matching_provider_shows_all_of_its_models() {
+    let mut view = ModelsView::default();
+    view.filter = "anthropic".to_owned();
+
+    let rows = view.visible_rows_for(&catalog());
+
+    assert!(rows.iter().any(|row| row.contains("claude-sonnet")));
+    assert!(rows.iter().any(|row| row.contains("gpt-clone")));
+    assert!(!rows.iter().any(|row| row.contains("openai")));
+}
+
+#[test]
+fn an_empty_filter_shows_every_provider_and_no_model() {
+    let view = ModelsView::default();
+
+    let rows = view.visible_rows_for(&catalog());
+
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn a_filter_that_matches_nothing_shows_nothing() {
+    let mut view = ModelsView::default();
+    view.filter = "zzz".to_owned();
+
+    assert!(view.visible_rows_for(&catalog()).is_empty());
 }

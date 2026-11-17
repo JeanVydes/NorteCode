@@ -122,7 +122,7 @@ fn a_detached_shell_call_hides_output_and_says_so() {
 }
 
 fn footer_background() -> Color {
-    palette::panel_background(ThemeMode::Dark)
+    palette::surface(ThemeMode::Dark)
 }
 
 /// The blob a shell returns: one structured result with the streams inside.
@@ -205,4 +205,209 @@ fn an_edit_shows_its_result_text_as_the_tool_wrote_it() {
         !drawn.contains("out "),
         "the result is not labelled:\n{drawn}"
     );
+}
+
+#[test]
+fn a_spawned_agent_shows_its_agent_and_title() {
+    let arguments = serde_json::json!({
+        "prompt": "do the thing",
+        "agent_id": "reviewer",
+        "title": "Review the diff",
+        "detach": false,
+        "lifetime": "turn"
+    });
+    let lines = ToolCallComponent::started(
+        "spawn_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("reviewer"), "drawn:\n{drawn}");
+    assert!(drawn.contains("Review the diff"), "drawn:\n{drawn}");
+}
+
+#[test]
+fn a_spawn_without_a_title_shows_the_start_of_the_prompt() {
+    let prompt = "a".repeat(400);
+    let arguments = serde_json::json!({
+        "prompt": prompt,
+        "detach": false,
+        "lifetime": "turn"
+    });
+    let lines = ToolCallComponent::started(
+        "spawn_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("..."), "a long prompt is cut:\n{drawn}");
+}
+
+#[test]
+fn a_message_to_an_agent_shows_what_was_sent() {
+    let arguments = serde_json::json!({
+        "child_session_id": "abcdef1234567890",
+        "content": "please also check the tests",
+        "delivery": "steer"
+    });
+    let lines = ToolCallComponent::started(
+        "message_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("abcdef12"), "drawn:\n{drawn}");
+    assert!(
+        drawn.contains("please also check the tests"),
+        "drawn:\n{drawn}"
+    );
+}
+
+#[test]
+fn a_message_sent_as_content_parts_still_shows_its_text() {
+    let arguments = serde_json::json!({
+        "child_session_id": "abcdef1234567890",
+        "content": [{"type": "text", "text": "part one"}, {"type": "text", "text": "part two"}]
+    });
+    let lines = ToolCallComponent::started(
+        "message_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("part one"), "drawn:\n{drawn}");
+    assert!(drawn.contains("part two"), "drawn:\n{drawn}");
+}
+
+#[test]
+fn a_long_message_is_cut_to_one_readable_line() {
+    let arguments = serde_json::json!({
+        "child_session_id": "abcdef1234567890",
+        "content": "word ".repeat(200)
+    });
+    let lines = ToolCallComponent::started(
+        "message_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.ends_with("..."), "the message is cut:\n{drawn}");
+    assert!(drawn.len() < 200);
+}
+
+#[test]
+fn a_wait_names_what_it_waits_for() {
+    let arguments = serde_json::json!({
+        "child_session_id": "abcdef1234567890",
+        "until": "finished",
+        "timeout_s": 120
+    });
+    let lines = ToolCallComponent::started(
+        "wait_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("until finished"), "drawn:\n{drawn}");
+    assert!(drawn.contains("within 120s"), "drawn:\n{drawn}");
+}
+
+#[test]
+fn a_wait_defaults_are_shown() {
+    let arguments = serde_json::json!({"child_session_id": "abcdef1234567890"});
+    let lines = ToolCallComponent::started(
+        "wait_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("until idle"), "drawn:\n{drawn}");
+    assert!(drawn.contains("within 300s"), "drawn:\n{drawn}");
+}
+
+#[test]
+fn a_stop_names_the_child_and_the_mode() {
+    let arguments = serde_json::json!({
+        "child_session_id": "abcdef1234567890",
+        "mode": "kill"
+    });
+    let lines = ToolCallComponent::started(
+        "stop_agent",
+        Some(&arguments),
+        None,
+        DiffMode::Unified,
+        80,
+        false,
+        ThemeMode::Dark,
+    );
+    let drawn = lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(drawn.contains("kill"), "drawn:\n{drawn}");
 }

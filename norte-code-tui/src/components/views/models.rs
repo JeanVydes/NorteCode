@@ -61,6 +61,18 @@ enum ModelRow<'a> {
 }
 
 impl ModelsView {
+    /// The rows a filter leaves, as text, for a test to read.
+    #[cfg(test)]
+    pub(super) fn visible_rows_for(&self, models: &[ModelInfo]) -> Vec<String> {
+        self.visible_rows(models)
+            .into_iter()
+            .map(|row| match row {
+                ModelRow::Provider { name, .. } => name.to_owned(),
+                ModelRow::Model(model) => model.model.clone(),
+            })
+            .collect()
+    }
+
     fn visible_rows<'a>(&self, models: &'a [ModelInfo]) -> Vec<ModelRow<'a>> {
         let query = self.filter.to_lowercase();
         let mut providers = Vec::new();
@@ -75,16 +87,24 @@ impl ModelsView {
         for provider in providers {
             let provider_matches =
                 query.is_empty() || provider.to_lowercase().contains(query.as_str());
-            let matching = models
+            let all = models
                 .iter()
                 .filter(|model| model.provider == provider)
-                .filter(|model| {
-                    provider_matches
-                        || model.model.to_lowercase().contains(query.as_str())
-                        || model.name.to_lowercase().contains(query.as_str())
-                })
                 .collect::<Vec<_>>();
-            if !query.is_empty() && !provider_matches && matching.is_empty() {
+            // A provider the query names shows all of its models; a provider
+            // the query does not name shows only the models that match it.
+            let matching = if provider_matches {
+                all.clone()
+            } else {
+                all.iter()
+                    .copied()
+                    .filter(|model| {
+                        model.model.to_lowercase().contains(query.as_str())
+                            || model.name.to_lowercase().contains(query.as_str())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if !provider_matches && matching.is_empty() {
                 continue;
             }
 
@@ -363,7 +383,7 @@ impl Component for ModelsView {
         }
 
         match key.code {
-            KeyCode::Char(keys::MODEL_SEARCH_CHAR) => {
+            KeyCode::Char(keys::SEARCH_CHAR) => {
                 self.filtering = true;
                 self.selected = 0;
             }

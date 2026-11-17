@@ -8,7 +8,7 @@ use crate::{
     client::{ClientData, ClientEvent, ClientOperationError},
     components::{ComponentEvent, ComponentId},
     ui_model::{
-        BudgetApprovalRequest, ReasoningLevel, SessionAttachmentState, SessionModel,
+        BudgetApprovalRequest, Notice, ReasoningLevel, SessionAttachmentState, SessionModel,
         TranscriptItem, TurnState,
     },
 };
@@ -25,11 +25,17 @@ impl App {
         matches!(kind, ServerEventKind::Error { .. }) && state.is_busy()
     }
 
-    pub(super) fn drain_client_events(&mut self) -> Result<(), super::AppError> {
+    /// Applies every event that is waiting, and reports whether one arrived.
+    ///
+    /// A frame is only drawn when the state changed, so an event that nobody
+    /// marks as a change would sit invisible until the next key.
+    pub(super) fn drain_client_events(&mut self) -> Result<bool, super::AppError> {
+        let mut applied = false;
         while let Some(client_event) = self.client.try_recv() {
             self.apply_client_event(client_event)?;
+            applied = true;
         }
-        Ok(())
+        Ok(applied)
     }
 
     /// Records a successful attach, and clears the reconnecting notice.
@@ -45,8 +51,8 @@ impl App {
         if self
             .model
             .notice
-            .as_deref()
-            .is_some_and(|n| n.starts_with("Connection lost"))
+            .as_ref()
+            .is_some_and(|notice| notice.text().starts_with("Connection lost"))
         {
             self.model.notice = None;
         }
@@ -55,10 +61,10 @@ impl App {
     /// Records that the open stream went away.
     fn apply_reconnecting(&mut self, attempt: u32) {
         self.model.attachment_state = SessionAttachmentState::Connecting;
-        self.set_notice(format!(
+        self.set_notice(Notice::warning(format!(
             "Connection lost; reconnecting (attempt {}).",
             attempt + 1
-        ));
+        )));
     }
 
     /// Records a rewind that arrived from the host.
@@ -107,7 +113,7 @@ impl App {
 
     /// Opens a session that arrived from an import.
     fn apply_import(&mut self, session_id: String) {
-        self.set_notice("Session imported.".to_owned());
+        self.set_notice(Notice::info("Session imported."));
         self.open_session(norte_code_wire::SessionKey::new(session_id));
     }
 
@@ -350,7 +356,9 @@ impl App {
                 // The stream healed itself by reloading; the reader only
                 // needs a short note, not a transcript entry that every
                 // later reload would drag to the end.
-                self.set_notice("Stream skipped events; reloading the session.".to_owned());
+                self.set_notice(Notice::info(
+                    "Stream skipped events; reloading the session.",
+                ));
                 self.client.load_history(session, generation);
                 return;
             }
@@ -368,6 +376,24 @@ impl App {
                     .push(TranscriptItem::Error(Self::transport_notice(message)));
             }
             return;
+        }
+        if let ServerEventKind::PluginProgress {
+            operation,
+            step,
+            total,
+            stage,
+        } = &event.kind
+        {
+            self.model.plugin_job = Some(crate::ui_model::PluginJob {
+                operation: operation.clone(),
+                step: *step,
+                total: *total,
+                stage: stage.clone(),
+            });
+            return;
+        }
+        if let ServerEventKind::PluginChanged { .. } = &event.kind {
+            self.model.plugin_job = None;
         }
         if let ServerEventKind::ReasoningDowngraded { from, to, reason } = &event.kind {
             self.apply_reasoning_downgrade(from, to, reason);
@@ -569,6 +595,8 @@ impl App {
     /// Tracks the session's usage as the host reports it or the requests
     /// accumulate it.
     fn track_session_stats(&mut self, kind: &ServerEventKind) {
+        let now = Self::now_millis();
+        self.model.clock.mark(now);
         let mut stats = self.model.session_stats.take().unwrap_or_default();
         if Self::session_stats_update(&mut stats, kind) {
             self.model.session_stats = Some(stats);
@@ -698,8 +726,18 @@ impl App {
                 self.plan_review
                     .begin(session.clone(), question, prompt, options, *multiple)
         {
-            self.set_notice(error.to_string());
+            self.set_notice(Notice::error(error.to_string()));
         }
+    }
+
+    /// The wall clock, in milliseconds since the epoch.
+    pub(super) fn now_millis() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis()),
+        )
+        .unwrap_or(i64::MAX)
     }
 
     fn is_current_session_event(&self, session: &SessionKey, generation: u64) -> bool {

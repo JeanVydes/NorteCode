@@ -96,7 +96,7 @@ impl Service {
             .await
             .map_err(ServiceError::Plan)?
             .into_iter()
-            .map(|(plan, _)| norte_code_wire::PlanInfo {
+            .map(|(plan, _)| norte_code_wire::PlanSummary {
                 id: plan.id,
                 content: plan.content,
                 status: plan.status,

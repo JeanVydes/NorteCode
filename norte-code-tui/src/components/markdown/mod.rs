@@ -6,12 +6,11 @@ use ratatui::{
 
 use crate::components::palette;
 
-#[path = "markdown/table.rs"]
 mod table;
 
 use table::{Table, render_table};
 
-pub(super) fn render(markdown: &str, width: u16) -> Vec<Line<'static>> {
+pub(crate) fn render(markdown: &str, width: u16) -> Vec<Line<'static>> {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
@@ -52,7 +51,7 @@ impl MarkdownRenderer {
             Event::Code(code) => {
                 self.start_style(
                     Style::default()
-                        .fg(palette::brand())
+                        .fg(palette::accent(crate::ui_model::ThemeMode::Dark))
                         .add_modifier(Modifier::BOLD),
                 );
                 self.append_text(&code);
@@ -65,7 +64,7 @@ impl MarkdownRenderer {
                 self.finish_line();
                 self.lines.push(Line::from(vec![Span::styled(
                     "─".repeat(self.width),
-                    Style::default().fg(palette::muted()),
+                    Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
                 )]));
             }
             Event::TaskListMarker(checked) => {
@@ -85,7 +84,7 @@ impl MarkdownRenderer {
                 self.start_block();
                 self.start_style(
                     Style::default()
-                        .fg(palette::brand())
+                        .fg(palette::accent(crate::ui_model::ThemeMode::Dark))
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -103,7 +102,9 @@ impl MarkdownRenderer {
             }
             Tag::CodeBlock(_) => {
                 self.start_block();
-                self.start_style(Style::default().fg(palette::brand()));
+                self.start_style(
+                    Style::default().fg(palette::accent(crate::ui_model::ThemeMode::Dark)),
+                );
             }
             Tag::BlockQuote(_) => {
                 self.start_block();
@@ -233,5 +234,5 @@ impl MarkdownRenderer {
 }
 
 #[cfg(test)]
-#[path = "markdown_tests.rs"]
+#[path = "tests.rs"]
 mod tests;

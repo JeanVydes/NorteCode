@@ -7,5 +7,6 @@ pub(super) mod plans;
 pub(super) mod plugins;
 pub(super) mod session;
 pub(super) mod sessions;
-pub(super) mod settings;
 pub(super) mod telemetry;
+pub(super) mod telemetry_detail;
+pub(crate) mod telemetry_pages;

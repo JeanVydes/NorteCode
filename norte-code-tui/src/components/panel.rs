@@ -61,28 +61,6 @@ pub(crate) fn render_list(
     );
 }
 
-pub(crate) fn render_text_scrolled(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    title: &str,
-    body: String,
-    theme: ThemeMode,
-    scroll: usize,
-) {
-    frame.render_widget(
-        Paragraph::new(body)
-            .block(
-                Block::default()
-                    .title(title)
-                    .padding(ratatui::widgets::Padding::horizontal(2)),
-            )
-            .style(palette::panel_style(theme))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
-        area,
-    );
-}
-
 pub(crate) fn render_text(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -111,4 +89,24 @@ pub(crate) fn move_selection(selected: &mut usize, length: usize, down: bool) {
     } else {
         *selected = selected.saturating_sub(1);
     }
+}
+
+/// Draws lines that were already built, so a view can color them itself.
+pub(crate) fn render_lines(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    lines: Vec<Line<'static>>,
+    theme: ThemeMode,
+) {
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines))
+            .block(
+                Block::default()
+                    .title(title)
+                    .padding(ratatui::widgets::Padding::horizontal(2)),
+            )
+            .style(palette::panel_style(theme)),
+        area,
+    );
 }

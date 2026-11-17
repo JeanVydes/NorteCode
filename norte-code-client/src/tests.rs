@@ -532,3 +532,58 @@ fn surfaces_unsupported_bare_extension_as_protocol_error() {
             if message.contains("unsupported RAEP extension event")
     ));
 }
+
+#[test]
+fn decodes_the_plans_the_host_sends_as_an_agent_catalog() {
+    // The host answers LIST_PLANS with the same `agent_catalog` envelope the
+    // other catalogues use, with `kind: plans`. A decoder that refused it left
+    // the plans page permanently empty.
+    let frame = frame(
+        FrameType::Extension("norte_code.plan_list".to_owned()),
+        "session-1",
+        serde_json::json!({
+            "event": "agent_catalog",
+            "kind": "plans",
+            "entries": [
+                {
+                    "id": "plan-1",
+                    "content": "# The plan",
+                    "status": "pending",
+                    "title": "The plan",
+                    "revision": 0,
+                    "model": null
+                }
+            ]
+        }),
+    );
+
+    let event = server_event_from_frame(&frame)
+        .expect("plans decode")
+        .expect("a plans event");
+
+    match event.kind {
+        norte_code_wire::ServerEventKind::PlanList { plans } => {
+            assert_eq!(plans.len(), 1);
+            assert_eq!(plans[0].id, "plan-1");
+        }
+        other => panic!("expected a plan list, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_plan_list_still_decodes() {
+    let frame = frame(
+        FrameType::Extension("norte_code.plan_list".to_owned()),
+        "session-1",
+        serde_json::json!({"event": "agent_catalog", "kind": "plans", "entries": []}),
+    );
+
+    let event = server_event_from_frame(&frame)
+        .expect("plans decode")
+        .expect("a plans event");
+
+    match event.kind {
+        norte_code_wire::ServerEventKind::PlanList { plans } => assert!(plans.is_empty()),
+        other => panic!("expected a plan list, got {other:?}"),
+    }
+}

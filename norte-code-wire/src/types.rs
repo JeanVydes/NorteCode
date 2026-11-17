@@ -114,6 +114,9 @@ pub struct PluginInfo {
     pub enabled: bool,
     /// Whether the host currently loaded it successfully.
     pub loaded: bool,
+    /// Why loading failed, when it did; empty when it loaded or never tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
 }
 
 /// One MCP server visible to the service.
@@ -428,24 +431,6 @@ pub struct JobInfo {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
-}
-
-/// One plan of a session, as the app lists it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlanInfo {
-    /// Stable plan identifier, also the Markdown filename.
-    pub id: String,
-    /// The plan text.
-    pub content: String,
-    /// Where the plan stands.
-    pub status: crate::PlanStatus,
-    /// Its title from the front matter, when it has one.
-    pub title: Option<String>,
-    /// Revisions after the initial proposal.
-    pub revision: u32,
-    /// The model that proposed it, when recorded.
-    pub model: Option<String>,
 }
 
 /// One installed Agent Skill, as a client sees it.

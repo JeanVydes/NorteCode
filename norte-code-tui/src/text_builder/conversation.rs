@@ -43,7 +43,7 @@ impl TextBuilder {
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(
                 format!("{}/{}", model.provider, model.model),
-                Style::default().fg(palette::muted()),
+                Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
             ));
             if let Some(queued) = queued_model {
                 spans.push(Span::styled(
@@ -56,16 +56,16 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn thinking_summary(expanded: bool) -> Line<'static> {
+    pub fn thinking_summary(expanded: bool, theme: crate::ui_model::ThemeMode) -> Line<'static> {
         Line::from(vec![
             Span::styled(
                 if expanded { "▾ " } else { "▸ " },
-                Style::default().fg(palette::muted()),
+                Style::default().fg(palette::text_muted(theme)),
             ),
             Span::styled(
-                "Thought",
+                "thought",
                 Style::default()
-                    .fg(palette::muted())
+                    .fg(palette::text_muted(theme))
                     .add_modifier(ratatui::style::Modifier::ITALIC),
             ),
         ])
@@ -83,7 +83,7 @@ impl TextBuilder {
             Span::styled(
                 name.to_owned(),
                 Style::default()
-                    .fg(palette::brand())
+                    .fg(palette::text(crate::ui_model::ThemeMode::Dark))
                     .add_modifier(Modifier::BOLD),
             ),
         ];
@@ -91,7 +91,7 @@ impl TextBuilder {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 target.to_owned(),
-                Style::default().fg(palette::muted()),
+                Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
             ));
         }
         Line::from(spans)
@@ -122,12 +122,15 @@ impl TextBuilder {
             ToolStatus::Cancelled => Self::tool_cancelled_label(),
         };
         let color = match status {
-            ToolStatus::Ok => palette::muted(),
+            ToolStatus::Ok => palette::text_muted(crate::ui_model::ThemeMode::Dark),
             ToolStatus::Error => palette::danger(),
             ToolStatus::Cancelled => palette::warning(),
         };
         Line::from(vec![
-            Span::styled(name.to_owned(), Style::default().fg(palette::muted())),
+            Span::styled(
+                name.to_owned(),
+                Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
+            ),
             Span::raw("  "),
             Span::styled(state.to_owned(), Style::default().fg(color)),
         ])
@@ -185,7 +188,8 @@ impl TextBuilder {
         ))
     }
 
-    fn truncate_inline(text: &str, max_chars: usize) -> String {
+    /// Cuts a text to a length, marking the cut with an ellipsis.
+    pub(crate) fn truncate_inline(text: &str, max_chars: usize) -> String {
         let mut chars = text.chars();
         let taken: String = chars.by_ref().take(max_chars).collect();
         if chars.next().is_some() {
@@ -277,9 +281,12 @@ impl TextBuilder {
         Line::from(vec![
             Span::styled(
                 if folded { "▸ " } else { "▾ " },
-                Style::default().fg(palette::brand()),
+                Style::default().fg(palette::accent(crate::ui_model::ThemeMode::Dark)),
             ),
-            Span::styled(parts.join(" · "), Style::default().fg(palette::muted())),
+            Span::styled(
+                parts.join(" · "),
+                Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
+            ),
         ])
     }
 

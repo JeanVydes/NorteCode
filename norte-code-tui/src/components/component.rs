@@ -6,70 +6,93 @@ use super::{
 };
 use crate::ui_model::UiModel;
 
+/// The tabs of the interface, in the order they are shown and numbered.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ComponentId {
     Session,
-    Plans,
-    Telemetry,
-    Plugins,
-    Models,
-    Host,
     Sessions,
+    Models,
+    Plans,
     Jobs,
-    PlanReview,
+    Telemetry,
+    Host,
+    Plugins,
     Costs,
-    Settings,
+    /// The review overlay. It is not a tab; no shortcut selects it.
+    PlanReview,
 }
 
 impl ComponentId {
+    /// Every tab, in display order.
     #[must_use]
-    pub(crate) const fn number(self) -> char {
-        match self {
-            Self::Session => crate::keys::SESSION_VIEW,
-            Self::Plans => crate::keys::PLANS_VIEW,
-            Self::Telemetry => crate::keys::TELEMETRY_VIEW,
-            Self::Plugins => crate::keys::PLUGINS_VIEW,
-            Self::Models => crate::keys::MODELS_VIEW,
-            Self::Host => crate::keys::HOST_VIEW,
-            Self::Sessions => crate::keys::SESSIONS_VIEW_CHAR,
-            Self::Jobs => crate::keys::JOBS_VIEW,
-            Self::PlanReview => '0',
-            Self::Costs => crate::keys::COSTS_VIEW,
-            Self::Settings => crate::keys::SETTINGS_VIEW,
-        }
-    }
-
-    #[must_use]
-    pub(crate) const fn all() -> [Self; 10] {
+    pub(crate) const fn tabs() -> [Self; 9] {
         [
             Self::Session,
-            Self::Plans,
-            Self::Telemetry,
-            Self::Plugins,
-            Self::Models,
-            Self::Host,
-            Self::Jobs,
-            Self::Costs,
-            Self::Settings,
             Self::Sessions,
+            Self::Models,
+            Self::Plans,
+            Self::Jobs,
+            Self::Telemetry,
+            Self::Host,
+            Self::Plugins,
+            Self::Costs,
         ]
     }
 
+    /// The digit that selects the tab, when it is one.
+    #[must_use]
+    pub(crate) const fn shortcut(self) -> Option<char> {
+        match self {
+            Self::Session => Some('1'),
+            Self::Sessions => Some('2'),
+            Self::Models => Some('3'),
+            Self::Plans => Some('4'),
+            Self::Jobs => Some('5'),
+            Self::Telemetry => Some('6'),
+            Self::Host => Some('7'),
+            Self::Plugins => Some('8'),
+            Self::Costs => Some('9'),
+            Self::PlanReview => None,
+        }
+    }
+
+    /// The tab a digit selects.
     #[must_use]
     pub(crate) const fn from_shortcut(shortcut: char) -> Option<Self> {
         match shortcut {
-            crate::keys::SESSION_VIEW => Some(Self::Session),
-            crate::keys::PLANS_VIEW => Some(Self::Plans),
-            crate::keys::TELEMETRY_VIEW => Some(Self::Telemetry),
-            crate::keys::PLUGINS_VIEW => Some(Self::Plugins),
-            crate::keys::MODELS_VIEW | crate::keys::MODELS_VIEW_CHAR => Some(Self::Models),
-            crate::keys::HOST_VIEW => Some(Self::Host),
-            crate::keys::JOBS_VIEW => Some(Self::Jobs),
-            crate::keys::SESSIONS_VIEW_CHAR => Some(Self::Sessions),
-            crate::keys::COSTS_VIEW => Some(Self::Costs),
-            crate::keys::SETTINGS_VIEW => Some(Self::Settings),
+            '1' => Some(Self::Session),
+            '2' => Some(Self::Sessions),
+            '3' => Some(Self::Models),
+            '4' => Some(Self::Plans),
+            '5' => Some(Self::Jobs),
+            '6' => Some(Self::Telemetry),
+            '7' => Some(Self::Host),
+            '8' => Some(Self::Plugins),
+            '9' => Some(Self::Costs),
             _ => None,
         }
+    }
+
+    /// The index of the tab among the tabs.
+    #[must_use]
+    pub(crate) fn tab_index(self) -> Option<usize> {
+        Self::tabs().iter().position(|tab| *tab == self)
+    }
+
+    /// The tab next to this one, wrapping at both ends.
+    #[must_use]
+    pub(crate) fn next_tab(self) -> Self {
+        let tabs = Self::tabs();
+        let index = self.tab_index().unwrap_or(0);
+        tabs[(index + 1) % tabs.len()]
+    }
+
+    /// The tab before this one, wrapping at both ends.
+    #[must_use]
+    pub(crate) fn previous_tab(self) -> Self {
+        let tabs = Self::tabs();
+        let index = self.tab_index().unwrap_or(0);
+        tabs[(index + tabs.len() - 1) % tabs.len()]
     }
 }
 
@@ -79,17 +102,21 @@ pub(crate) enum ComponentEvent {
     Uploaded(crate::chips::Chip),
     /// Another session was opened and the component starts clean.
     SessionOpened,
+    /// The menu asked to pin or unpin the turn under the viewport.
+    PinCurrentTurn,
 }
 
 pub(crate) trait Component {
     fn id(&self) -> ComponentId;
     fn lifecycle(&self) -> &ComponentLifecycle;
     fn lifecycle_mut(&mut self) -> &mut ComponentLifecycle;
+    /// Whether the component owns the keys while it is open.
+    ///
+    /// A prompt, a filter or a modal does; a plain list does not, so the
+    /// global shortcuts keep working.
     fn captures_global_keys(&self) -> bool {
         false
     }
-    /// Handles a mouse event: a terminal sends one when the reader clicks,
-    /// drags or scrolls.
     fn handle_mouse(&mut self, mouse: MouseEvent, model: &UiModel) {
         let _ = (mouse, model);
     }

@@ -313,14 +313,21 @@ pub(crate) fn standard_event_payload(kind: &ServerEventKind) -> Option<Value> {
         ServerEventKind::SessionStats {
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
             cost_usd,
             requests,
-            ..
+            context_used,
+            context_window,
         } => Some(payload(SessionStats {
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
+            cache_read_tokens: *cache_read_tokens,
+            cache_write_tokens: *cache_write_tokens,
             cost_usd: *cost_usd,
             requests: *requests,
+            context_used: *context_used,
+            context_window: *context_window,
         })),
         ServerEventKind::QuestionAsked {
             turn,

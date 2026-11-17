@@ -10,6 +10,15 @@ use norte_code_wire::{
 use serde::{Deserialize, Serialize};
 
 use crate::tools::DiffMode;
+
+mod clock;
+mod context;
+mod notice;
+
+pub(crate) use clock::SessionClock;
+pub(crate) use context::ContextGauge;
+pub(crate) use notice::{Notice, Severity};
+
 pub(crate) enum TranscriptItem {
     UserMessage {
         text: String,
@@ -342,8 +351,12 @@ impl TurnState {
 }
 
 #[cfg(test)]
-#[path = "ui_model_tests.rs"]
+#[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod context_tests;
 
 /// How the composer sends the next input while a turn is running.
 ///
@@ -362,6 +375,39 @@ pub(crate) enum SendMode {
     Reject,
 }
 
+impl SendMode {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Steer => "steer",
+            Self::Queue => "queue",
+            Self::Interrupt => "interrupt",
+            Self::Reject => "reject",
+        }
+    }
+
+    pub(crate) const fn description(self) -> &'static str {
+        match self {
+            Self::Steer => "reach the request in flight",
+            Self::Queue => "wait behind the running turn",
+            Self::Interrupt => "cancel the turn, then send",
+            Self::Reject => "refuse input while a turn runs",
+        }
+    }
+}
+
+/// A plugin operation the host is running, as it reports its steps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PluginJob {
+    /// `install`, `update` or `remove`.
+    pub(crate) operation: String,
+    /// The step it reached.
+    pub(crate) step: u64,
+    /// How many steps it has.
+    pub(crate) total: u64,
+    /// What the step is doing.
+    pub(crate) stage: String,
+}
+
 #[derive(Default)]
 pub(crate) struct UiModel {
     pub(crate) endpoint: String,
@@ -369,6 +415,8 @@ pub(crate) struct UiModel {
     pub(crate) host_errors: Vec<(String, String)>,
     pub(crate) preferences: TuiPreferences,
     pub(crate) cli: TuiCliPreferences,
+    /// Whether shell output boxes show everything rather than the last lines.
+    pub(crate) shell_output_expanded: Toggle,
     pub(crate) server: Option<ServerInfo>,
     pub(crate) liveness: Option<Liveness>,
     pub(crate) readiness: Option<Readiness>,
@@ -385,7 +433,10 @@ pub(crate) struct UiModel {
     /// once, so the retries that keep failing stay out of the transcript.
     pub(crate) service_down: bool,
     pub(crate) budget_approval: Option<BudgetApprovalRequest>,
-    pub(crate) notice: Option<String>,
+    /// The notice the footer shows, with its severity and how long it stays.
+    pub(crate) notice: Option<Notice>,
+    /// The clock the transcript stamps messages with.
+    pub(crate) clock: SessionClock,
     pub(crate) transcript: Vec<TranscriptItem>,
     pub(crate) turn_state: TurnState,
     pub(crate) send_mode: SendMode,
@@ -407,6 +458,8 @@ pub(crate) struct UiModel {
     /// The session's accumulated usage, as the host has reported it.
     pub(crate) session_stats: Option<SessionStatsSummary>,
     pub(crate) plugins: Vec<PluginSummary>,
+    /// The plugin operation under way, with the step it reached.
+    pub(crate) plugin_job: Option<PluginJob>,
     pub(crate) models: Vec<ModelInfo>,
     pub(crate) catalog: CatalogDetail,
 }

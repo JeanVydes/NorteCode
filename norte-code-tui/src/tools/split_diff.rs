@@ -21,7 +21,7 @@ impl SplitDiffComponent {
                 CodeRow::Gap => {
                     lines.push(Line::from(Span::styled(
                         " ⋯",
-                        Style::default().fg(palette::muted()),
+                        Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
                     )));
                     continue;
                 }
@@ -29,12 +29,15 @@ impl SplitDiffComponent {
             lines.push(Line::from(vec![
                 Span::styled(
                     Self::fit(before, column_width),
-                    Style::default().fg(left.unwrap_or_else(|| palette::foreground(theme))),
+                    Style::default().fg(left.unwrap_or_else(|| palette::text(theme))),
                 ),
-                Span::styled(" │ ", Style::default().fg(palette::muted())),
+                Span::styled(
+                    " │ ",
+                    Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
+                ),
                 Span::styled(
                     Self::fit(after, column_width),
-                    Style::default().fg(right.unwrap_or_else(|| palette::foreground(theme))),
+                    Style::default().fg(right.unwrap_or_else(|| palette::text(theme))),
                 ),
             ]));
         }

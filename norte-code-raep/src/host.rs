@@ -1446,6 +1446,25 @@ pub(crate) fn is_plugin_request(kind: &ClientRequestKind) -> bool {
     )
 }
 
+/// The event a plugin step reports on the session's stream.
+pub(crate) fn plugin_progress_event(
+    operation: &str,
+    step: usize,
+    total: usize,
+    stage: &str,
+) -> norte_code_wire::ServerEvent {
+    norte_code_wire::ServerEvent::new(
+        0,
+        None,
+        norte_code_wire::ServerEventKind::PluginProgress {
+            operation: operation.to_owned(),
+            step: u64::try_from(step).unwrap_or(0),
+            total: u64::try_from(total).unwrap_or(0),
+            stage: stage.to_owned(),
+        },
+    )
+}
+
 pub(crate) fn standard(kind: StandardFrameType) -> FrameType {
     FrameType::Standard(kind)
 }

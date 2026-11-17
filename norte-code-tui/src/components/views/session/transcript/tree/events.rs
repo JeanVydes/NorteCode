@@ -47,14 +47,13 @@ impl TreeBuilder {
                 });
             }
             ServerEventKind::ToolOutput {
-                turn,
                 call_id,
                 stream,
                 text,
                 ..
             } => {
                 self.flush();
-                self.push_chunk(call_id, *stream, text, Some(TurnKey::Live(*turn)));
+                self.push_chunk(call_id, *stream, text);
             }
             ServerEventKind::ToolFinished {
                 turn,
@@ -100,7 +99,7 @@ impl TreeBuilder {
                     return;
                 };
                 self.flush();
-                self.push_chunk(&call_id, *stream, delta, None);
+                self.push_chunk(&call_id, *stream, delta);
             }
             ServerEventKind::MessageReplayed {
                 role, kind, text, ..

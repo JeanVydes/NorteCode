@@ -83,7 +83,7 @@ impl CodeBoxRenderer {
     /// Draws the box: the title on the gray, then one row per line.
     pub(crate) fn render(code: &CodeBox<'_>, width: u16, theme: ThemeMode) -> Vec<Line<'static>> {
         let width = usize::from(width);
-        let background = palette::panel_background(theme);
+        let background = palette::surface(theme);
         let gutter = code
             .rows
             .iter()
@@ -128,7 +128,9 @@ impl CodeBoxRenderer {
                 Span::styled(" ".repeat(gutter + 1), Style::default().bg(background)),
                 Span::styled(
                     GAP.to_owned(),
-                    Style::default().fg(palette::muted()).bg(background),
+                    Style::default()
+                        .fg(palette::text_muted(crate::ui_model::ThemeMode::Dark))
+                        .bg(background),
                 ),
                 fill(gutter + 1 + display_width(GAP), width, background),
             ])
@@ -138,14 +140,24 @@ impl CodeBoxRenderer {
         let (sign, color) = match row {
             CodeRow::Added { .. } => ("+", palette::success()),
             CodeRow::Removed { .. } => ("-", palette::danger()),
-            CodeRow::Context { .. } | CodeRow::Gap => (" ", palette::foreground(theme)),
+            CodeRow::Context { .. } | CodeRow::Gap => (" ", palette::text(theme)),
         };
         let number = row
             .number()
             .map_or_else(|| " ".repeat(gutter), |number| format!("{number:>gutter$}"));
         let mut spans = vec![
-            Span::styled(number, Style::default().fg(palette::muted()).bg(background)),
-            Span::styled(" │ ", Style::default().fg(palette::muted()).bg(background)),
+            Span::styled(
+                number,
+                Style::default()
+                    .fg(palette::text_muted(crate::ui_model::ThemeMode::Dark))
+                    .bg(background),
+            ),
+            Span::styled(
+                " │ ",
+                Style::default()
+                    .fg(palette::text_muted(crate::ui_model::ThemeMode::Dark))
+                    .bg(background),
+            ),
             Span::styled(
                 format!("{sign} "),
                 Style::default().fg(color).bg(background),

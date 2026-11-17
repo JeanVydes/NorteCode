@@ -1,14 +1,12 @@
 //! The composer: what the reader writes, and where the focus is.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    style::Style,
-    text::{Line, Span},
-};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use crate::{
     chips::{Chip, ChipGroup},
-    components::{ComponentAction, palette},
+    components::ComponentAction,
     keys,
     text_builder::TextBuilder,
     ui_model::{SessionAttachmentState, UiModel},
@@ -45,8 +43,6 @@ pub(super) struct Composer {
     pub(super) chips: Vec<ChipGroup>,
     /// Where the keys go.
     pub(super) focus: SessionFocus,
-    /// The budget the reader is typing, when they are typing one.
-    pub(super) budget_entry: Option<String>,
     /// The path of the file being attached, when the reader is typing one.
     pub(super) attach: Option<String>,
     /// Where the caret sits.
@@ -56,20 +52,8 @@ pub(super) struct Composer {
 impl Composer {
     /// What the composer shows while the reader is not typing.
     pub(super) fn placeholder(&self, model: &UiModel) -> String {
-        if let Some(approval) = model.budget_approval {
-            return format!(
-                "Budget reached: ${:.2} spent of ${:.2}. Approve one continuation?",
-                approval.spent, approval.limit
-            );
-        }
         if let Some(path) = &self.attach {
             return format!("Attach file: {path}");
-        }
-        if let Some(budget) = &self.budget_entry {
-            return format!(
-                "Session budget USD · {}: {budget} (Enter apply, Esc cancel)",
-                TextBuilder::budget_action_description(model.budget_action)
-            );
         }
         if model.active_child.is_some() {
             return TextBuilder::child_session_read_only().to_owned();
@@ -89,28 +73,11 @@ impl Composer {
         if self.focus == SessionFocus::Composer {
             return TextBuilder::composer_focused_placeholder().to_owned();
         }
-        TextBuilder::composer_mode_placeholder(keys::COMPOSER_CHAR)
-    }
-
-    /// The line under the input, when it has something only it can say.
-    ///
-    /// The queue mode and the reasoning level live in the header now, so the
-    /// only statuses left here are the ones no other view carries.
-    pub(super) fn hint(model: &UiModel) -> Option<String> {
-        model
-            .budget_approval
-            .is_some()
-            .then(|| "a approve · d decline".to_owned())
-    }
-
-    /// The style of the line under the input.
-    pub(super) fn hint_style() -> Style {
-        Style::default().fg(palette::muted())
+        TextBuilder::composer_placeholder()
     }
 
     /// The line the caret is on, drawn with the caret in it.
     fn line_with_caret(line: String, col: usize) -> Line<'static> {
-        use ratatui::style::Modifier;
         let chars: Vec<char> = line.chars().collect();
         if col >= chars.len() {
             // The caret sits at the end of the line.
@@ -132,10 +99,26 @@ impl Composer {
         ])
     }
 
+    /// Whether the composer owns the keys.
+    pub(super) const fn is_focused(&self) -> bool {
+        matches!(self.focus, SessionFocus::Composer)
+    }
+
     /// The lines that fit in the input area, the caret's line always visible.
+    ///
+    /// A composer that does not own the keys draws no caret: a blinking cursor
+    /// in an input that ignores what you type is a lie.
     pub(super) fn visible_lines(&self, model: &UiModel) -> Vec<Line<'static>> {
         if self.text.is_empty() {
             return vec![Line::from(self.placeholder(model))];
+        }
+        if !self.is_focused() {
+            return self
+                .text
+                .split('\n')
+                .take(VISIBLE_INPUT_LINES)
+                .map(|line| Line::from(line.to_owned()))
+                .collect();
         }
         let lines: Vec<&str> = self.text.split('\n').collect();
         let (caret_line, caret_col) = self.caret.line_col(&self.text);
@@ -193,7 +176,6 @@ impl Composer {
         self.text.clear();
         self.chips.clear();
         self.attach = None;
-        self.budget_entry = None;
         self.focus = SessionFocus::Composer;
         self.caret.reset();
     }
@@ -213,17 +195,22 @@ impl Composer {
         if self.attach.is_some() {
             return self.handle_attach_key(key);
         }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if keys::is_cancel_turn(key) {
             if model.turn_state.is_busy() {
                 return Some(ComponentAction::CancelTurn);
             }
             return None;
         }
-        if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if keys::is_attach(key) {
             self.attach = Some(String::new());
             return None;
         }
-        if key.code == keys::SUBMIT && key.modifiers.contains(KeyModifiers::SHIFT) {
+        // A new line: Shift+Enter where the terminal reports modifiers, and
+        // Ctrl+J everywhere, which is the chord terminals send for the same
+        // thing when they cannot tell the two Enters apart.
+        let new_line = (key.code == keys::SUBMIT && key.modifiers.contains(KeyModifiers::SHIFT))
+            || keys::is_newline(key);
+        if new_line {
             self.caret.insert(&mut self.text, '\n');
             self.chipify_long_text();
             return None;
@@ -260,7 +247,7 @@ impl Composer {
             _ => {}
         }
         match key.code {
-            keys::CANCEL | keys::FOCUS_NEXT => self.focus = SessionFocus::Transcript,
+            keys::CANCEL | keys::NEXT_TAB => self.focus = SessionFocus::Transcript,
             keys::SUBMIT
                 if (!self.text.trim().is_empty() || !self.chips.is_empty())
                     && model.attachment_state == SessionAttachmentState::Attached

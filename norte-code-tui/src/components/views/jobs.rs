@@ -137,7 +137,9 @@ impl JobsView {
         if let Some(tail) = Self::output_tail(job) {
             lines.push(Line::from(Span::styled(
                 format!("  {tail}"),
-                Style::default().fg(crate::components::palette::muted()),
+                Style::default().fg(crate::components::palette::text_muted(
+                    crate::ui_model::ThemeMode::Dark,
+                )),
             )));
         }
         lines
@@ -151,7 +153,10 @@ impl JobsView {
                 Some(0) => ("✓", crate::components::palette::success()),
                 _ => ("✗", crate::components::palette::danger()),
             },
-            JobState::Cancelled => ("■", crate::components::palette::muted()),
+            JobState::Cancelled => (
+                "■",
+                crate::components::palette::text_muted(crate::ui_model::ThemeMode::Dark),
+            ),
         };
         let state = match job.state {
             JobState::Running => "running".to_owned(),
@@ -166,7 +171,9 @@ impl JobsView {
             Span::raw(Self::name(job)),
             Span::styled(
                 format!("  {state} · {}", Self::elapsed(job.elapsed_ms)),
-                Style::default().fg(crate::components::palette::muted()),
+                Style::default().fg(crate::components::palette::text_muted(
+                    crate::ui_model::ThemeMode::Dark,
+                )),
             ),
         ])
     }

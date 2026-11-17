@@ -3,13 +3,34 @@ use norte_code_wire::AgentRef;
 use super::App;
 use crate::{
     client::{ClientData, ClientOperationError},
-    ui_model::TranscriptItem,
+    ui_model::{Notice, TranscriptItem},
 };
 
 #[derive(Clone, Copy)]
 pub(super) enum ErrorDestination {
     Transcript,
     Notice,
+}
+
+/// What a finished plugin operation says in the toast.
+///
+/// The host answers with an operation and the plugin it touched, and an update
+/// that changed nothing names the plugin with an empty name: both read as a
+/// sentence here, because a bare "updated" tells the reader nothing.
+fn plugin_change_message(change: &norte_code_client::PluginChange) -> String {
+    let name = change.name.trim();
+    match (change.operation.as_str(), name.is_empty()) {
+        ("installed", false) => format!("Plugin installed: {name}"),
+        ("installed", true) => "Plugin installed".to_owned(),
+        ("updated", false) => format!("Plugin updated: {name}"),
+        ("updated", true) => "Every plugin is already up to date".to_owned(),
+        ("removed", false) => format!("Plugin removed: {name}"),
+        ("removed", true) => "Plugin removed".to_owned(),
+        ("enabled", false) => format!("Plugin enabled: {name}"),
+        ("disabled", false) => format!("Plugin disabled: {name}"),
+        (operation, false) => format!("{operation}: {name}"),
+        (operation, true) => operation.to_owned(),
+    }
 }
 
 impl App {
@@ -70,8 +91,9 @@ impl App {
             }
             ClientData::PluginUpdate { change, plugins } => {
                 self.model.plugins = plugins;
+                self.model.plugin_job = None;
                 if !change.operation.is_empty() {
-                    self.set_notice(format!("{} {}", change.operation, change.name));
+                    self.set_notice(Notice::info(plugin_change_message(&change)));
                 }
             }
             ClientData::Telemetry(report) => self.model.telemetry = Some(report),
@@ -87,7 +109,7 @@ impl App {
                 self.model.notice = None;
             }
             ClientData::ExportReady(url) => {
-                self.set_notice(format!("Export ready: {url}"));
+                self.set_notice(Notice::sticky(format!("Export ready: {url}")));
             }
             ClientData::SessionCreated(session) => self.apply_created_session(*session)?,
             ClientData::SessionsUpdated(sessions) => self.apply_sessions_updated(sessions),
@@ -145,7 +167,7 @@ impl App {
             ErrorDestination::Transcript => {
                 self.model.transcript.push(TranscriptItem::Error(message));
             }
-            ErrorDestination::Notice => self.set_notice(message),
+            ErrorDestination::Notice => self.set_notice(Notice::error(message)),
         }
         if recovered {
             self.sync_reasoning_with_host();

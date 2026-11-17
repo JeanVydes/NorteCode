@@ -35,6 +35,7 @@ pub(crate) enum CanonicalKind {
     CostNotReported,
     PluginList,
     PluginChanged,
+    PluginProgress,
     ServiceData,
     ChildSessionStarted,
     ChildSessionUpdated,
@@ -80,6 +81,7 @@ impl CanonicalKind {
             "cost_not_reported" => Self::CostNotReported,
             "plugin_list" => Self::PluginList,
             "plugin_changed" => Self::PluginChanged,
+            "plugin_progress" => Self::PluginProgress,
             "service_data" => Self::ServiceData,
             "child_session_started" => Self::ChildSessionStarted,
             "child_session_updated" => Self::ChildSessionUpdated,
@@ -213,7 +215,7 @@ pub(crate) struct CanonicalSessionTodos {
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct CanonicalPlanList {
     #[serde(default)]
-    pub(crate) plans: Vec<norte_code_wire::PlanInfo>,
+    pub(crate) plans: Vec<norte_code_wire::PlanSummary>,
 }
 
 /// A canonical `question_asked` payload (`ask_user`).
@@ -477,6 +479,15 @@ pub(crate) struct CanonicalPluginList {
 pub(crate) struct CanonicalPluginChanged {
     pub(crate) operation: String,
     pub(crate) name: String,
+}
+
+/// A canonical `plugin_progress` payload.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CanonicalPluginProgress {
+    pub(crate) operation: String,
+    pub(crate) step: u64,
+    pub(crate) total: u64,
+    pub(crate) stage: String,
 }
 
 /// A canonical `service_data` payload.

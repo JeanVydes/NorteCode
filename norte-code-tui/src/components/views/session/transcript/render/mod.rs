@@ -35,6 +35,8 @@ pub(crate) struct TranscriptOptions<'a> {
     pub(crate) thinking_visibility: ThinkingVisibility,
     pub(crate) show_tool_output: Toggle,
     pub(crate) show_timestamps: Toggle,
+    /// The clock a message is stamped with.
+    pub(crate) clock: &'a crate::ui_model::SessionClock,
     pub(crate) theme: ThemeMode,
     pub(crate) developer_mode: Toggle,
     pub(crate) shell_output_expanded: Toggle,
@@ -235,14 +237,9 @@ fn draw_node(
             timestamp,
             queued,
         } => draw_message(lines, *role, text, chips, *timestamp, *queued, options),
-        TranscriptNodeKind::Reasoning { text } => draw_reasoning(
-            lines,
-            text,
-            options,
-            &mut thoughts,
-            progress,
-            turn,
-        ),
+        TranscriptNodeKind::Reasoning { text } => {
+            draw_reasoning(lines, text, options, &mut thoughts, progress, turn);
+        }
         TranscriptNodeKind::Tool(tool) => draw_tool(lines, tool, options),
         TranscriptNodeKind::Error { code, message } => {
             lines.push(match code {
@@ -251,10 +248,13 @@ fn draw_node(
             });
         }
         TranscriptNodeKind::Notice { text } => {
-            lines.push(Line::from(Span::styled(
-                text.clone(),
-                Style::default().fg(palette::brand()),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    text.clone(),
+                    Style::default().fg(palette::text_muted(options.theme)),
+                ),
+            ]));
         }
         TranscriptNodeKind::Retry {
             attempt,
@@ -294,22 +294,23 @@ fn draw_message(
     options: TranscriptOptions<'_>,
 ) {
     separate(lines);
+    let stamp = options
+        .show_timestamps
+        .is_on()
+        .then(|| timestamp.map(|at| options.clock.stamp(at)))
+        .flatten();
     lines.extend(message_lines(
         role,
         text,
         options.width,
-        options
-            .show_timestamps
-            .is_on()
-            .then_some(timestamp)
-            .flatten(),
+        stamp.as_deref(),
         options.theme,
     ));
     lines.extend(chip_lines(chips, options.theme));
     if queued {
         lines.push(Line::from(Span::styled(
             "· queued, waiting for the turn to finish",
-            Style::default().fg(palette::muted()),
+            Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
         )));
     }
 }
@@ -384,7 +385,7 @@ fn folded_summary(turn: &TranscriptNode, width: u16) -> Option<Line<'static>> {
     }
     Some(Line::from(Span::styled(
         format!("  {summary}"),
-        Style::default().fg(palette::muted()),
+        Style::default().fg(palette::text_muted(crate::ui_model::ThemeMode::Dark)),
     )))
 }
 

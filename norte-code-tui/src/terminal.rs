@@ -24,7 +24,14 @@ impl TerminalSession {
         // never see the newline chord.
         if let Err(error) = execute!(
             stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            // Both flags are needed for Shift+Enter: without them a terminal
+            // reports the chord as a plain Enter, and the composer can never
+            // tell "send" from "new line".
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            )
         ) {
             let _ = disable_raw_mode();
             return Err(error);
