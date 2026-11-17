@@ -73,7 +73,7 @@ fn combines_reasoning_deltas_as_one_collapsed_thought_by_default() {
         }))
     });
 
-    let collapsed = content_lines(TranscriptRenderer::lines(&items, DiffMode::Unified, 80));
+    let collapsed_all = TranscriptRenderer::lines(&items, DiffMode::Unified, 80);
     let expanded = content_lines(TranscriptRenderer::lines_with_thinking(
         &items,
         DiffMode::Unified,
@@ -82,9 +82,13 @@ fn combines_reasoning_deltas_as_one_collapsed_thought_by_default() {
         false,
     ));
 
-    assert_eq!(collapsed.len(), 1);
-    assert!(line_content(&collapsed[0]).contains("Thought"));
-    assert!(line_content(&expanded[0]).contains("Thought"));
+    assert!(
+        collapsed_all
+            .iter()
+            .any(|line| line_content(line).contains("Thought"))
+    );
+    let collapsed = content_lines(collapsed_all);
+    assert!(collapsed.is_empty(), "a collapsed thought draws no body");
     assert!(
         expanded
             .iter()
@@ -97,6 +101,127 @@ fn combines_reasoning_deltas_as_one_collapsed_thought_by_default() {
             .any(|span| {
                 span.content.contains('s') && span.style.add_modifier.contains(Modifier::BOLD)
             })
+    );
+}
+
+fn two_thought_turn() -> Vec<TranscriptItem> {
+    let reasoning = |index: u32, text: &str| {
+        TranscriptItem::ServerEvent(Box::new(ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::Delta {
+                turn: 1,
+                delta: Delta::Reasoning {
+                    index,
+                    text: text.to_owned(),
+                },
+            },
+        }))
+    };
+    let answer = |text: &str| {
+        TranscriptItem::ServerEvent(Box::new(ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: ServerEventKind::Delta {
+                turn: 1,
+                delta: Delta::Text {
+                    index: 1,
+                    text: text.to_owned(),
+                },
+            },
+        }))
+    };
+    vec![
+        reasoning(0, "first thought"),
+        answer("answer"),
+        reasoning(1, "second thought"),
+    ]
+}
+
+fn thought_options(
+    thinking: ThinkingVisibility,
+    thoughts: &[super::ThoughtFold],
+) -> super::render::TranscriptOptions<'_> {
+    super::render::TranscriptOptions {
+        diff_mode: DiffMode::Unified,
+        width: 80,
+        thinking_visibility: thinking,
+        show_tool_output: crate::ui_model::Toggle::On,
+        show_timestamps: crate::ui_model::Toggle::Off,
+        theme: crate::ui_model::ThemeMode::Dark,
+        developer_mode: crate::ui_model::Toggle::Off,
+        shell_output_expanded: crate::ui_model::Toggle::Off,
+        thinking_phase: 0,
+        thinking_streaming: false,
+        folded: &[],
+        thoughts,
+    }
+}
+
+#[test]
+fn a_thought_expands_on_its_own() {
+    let items = two_thought_turn();
+    let fold = super::ThoughtFold {
+        key: super::ThoughtKey {
+            turn: super::TurnKey::Live(1),
+            ordinal: 0,
+        },
+        expanded: true,
+    };
+
+    let annotated = super::render::lines_annotated(
+        &items,
+        thought_options(ThinkingVisibility::Collapsed, std::slice::from_ref(&fold)),
+    );
+    let drawn = annotated
+        .lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        drawn.contains("first thought"),
+        "the unfolded block draws its text"
+    );
+    assert!(
+        !drawn.contains("second thought"),
+        "the other block stays folded"
+    );
+    assert_eq!(annotated.thoughts.len(), 2);
+    assert_eq!(annotated.thoughts[0].1.ordinal, 0);
+    assert_eq!(annotated.thoughts[1].1.ordinal, 1);
+}
+
+#[test]
+fn an_expanded_thought_folds_on_its_own() {
+    let items = two_thought_turn();
+    let fold = super::ThoughtFold {
+        key: super::ThoughtKey {
+            turn: super::TurnKey::Live(1),
+            ordinal: 1,
+        },
+        expanded: false,
+    };
+
+    let annotated = super::render::lines_annotated(
+        &items,
+        thought_options(ThinkingVisibility::Expanded, std::slice::from_ref(&fold)),
+    );
+    let drawn = annotated
+        .lines
+        .iter()
+        .map(line_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        drawn.contains("first thought"),
+        "the other block stays expanded"
+    );
+    assert!(
+        !drawn.contains("second thought"),
+        "the folded block draws no text"
     );
 }
 
@@ -316,8 +441,7 @@ fn the_chips_of_a_message_are_drawn_under_it() {
         text: "mira esto".to_owned(),
         chips: vec![crate::chips::Chip {
             content: crate::chips::ChipContent::Text("un texto largo".to_owned()),
-            label: "text".to_owned(),
-            detail: "14 chars".to_owned(),
+            label: "un texto largo".to_owned(),
             kind: None,
         }],
     }];
@@ -329,8 +453,7 @@ fn the_chips_of_a_message_are_drawn_under_it() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(drawn.contains("mira esto"));
-    assert!(drawn.contains("text"));
-    assert!(drawn.contains("14 chars"));
+    assert!(drawn.contains("[Copied: un texto largo]"));
 }
 
 #[test]
@@ -555,6 +678,7 @@ mod tail {
             shell_output_expanded: Toggle::Off,
             thinking_phase: 0,
             folded: &[],
+            thoughts: &[],
         }
     }
 
@@ -969,7 +1093,7 @@ fn the_tree_draws_what_the_flat_log_drew() {
         .join("\n");
 
     let expected = format!(
-        "▾ turn 1 · 1 tools · 2 messages · 3ms\n{}hola\n\nThought\n\nbuenos dias\n\n✓ $ shell  ls -la  3ms\n\n file.txt\n\ncode: Success\nexit_code: Some(0)\nduration_ms: 3\nbytes_read: 6\nstdout:\nfile.txt\nJob started: ls\nerror  algo fallo",
+        "▾ turn 1 · 1 tools · 2 messages · 3ms\n{}hola\n\n▸ Thought\n\nbuenos dias\n\n✓ $ shell  ls -la  3ms\n\n file.txt\n\ncode: Success\nexit_code: Some(0)\nduration_ms: 3\nbytes_read: 6\nstdout:\nfile.txt\nJob started: ls\nerror  algo fallo",
         " ".repeat(56)
     );
 
@@ -1046,9 +1170,10 @@ fn a_folded_turn_shows_only_its_separator() {
             thinking_phase: 0,
             thinking_streaming: false,
             folded: &folded,
+            thoughts: &[],
         },
     )
-    .0;
+    .lines;
 
     assert_eq!(
         lines.len(),
@@ -1116,6 +1241,7 @@ fn the_layout_says_where_each_turn_starts() {
             thinking_phase: 0,
             thinking_streaming: false,
             folded: &[],
+            thoughts: &[],
         },
     );
 
@@ -1142,6 +1268,7 @@ fn layout_options(folded: &[super::TurnKey]) -> super::render::TranscriptOptions
         thinking_phase: 0,
         thinking_streaming: false,
         folded,
+        thoughts: &[],
     }
 }
 

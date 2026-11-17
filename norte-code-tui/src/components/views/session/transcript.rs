@@ -21,7 +21,7 @@ mod node;
 mod render;
 mod tree;
 
-pub(super) use node::TurnKey;
+pub(super) use node::{ThoughtFold, ThoughtKey, TurnKey};
 pub(super) use render::turn_layout;
 pub(super) use render::{TranscriptOptions, TurnLayout};
 
@@ -40,6 +40,8 @@ pub(super) struct TranscriptLayout {
     pub(super) text_area: Rect,
     /// The absolute rows a turn separator takes, and the turn it opens.
     pub(super) separators: Vec<(usize, TurnKey)>,
+    /// The absolute rows a thought summary takes, and the block it folds.
+    pub(super) thoughts: Vec<(usize, ThoughtKey)>,
 }
 
 /// What the transcript is drawn from.
@@ -65,6 +67,8 @@ pub(super) struct TranscriptContext<'a> {
     pub(super) thinking_phase: u16,
     /// The turns the reader folded away.
     pub(super) folded: &'a [TurnKey],
+    /// The reasoning blocks whose reader chose a state of their own.
+    pub(super) thoughts: &'a [ThoughtFold],
 }
 
 impl TranscriptRenderer {
@@ -93,7 +97,7 @@ impl TranscriptRenderer {
             });
         let inner = block.inner(area);
         let content_width = inner.width;
-        let (mut lines, separator_marks) = render::lines_annotated(
+        let annotated = render::lines_annotated(
             context.items,
             render::TranscriptOptions {
                 diff_mode: context.diff_mode,
@@ -109,14 +113,22 @@ impl TranscriptRenderer {
                 // the moment the turn moves on to the answer.
                 thinking_streaming: matches!(context.turn_state, TurnState::Thinking),
                 folded: context.folded,
+                thoughts: context.thoughts,
             },
         );
+        let mut lines = annotated.lines;
         if lines.is_empty() {
             lines.push(Line::from(TextBuilder::transcript_empty()));
         }
 
         let (starts, wrapped) = render::wrapped_starts(&lines, content_width);
-        let separators: Vec<(usize, TurnKey)> = separator_marks
+        let separators: Vec<(usize, TurnKey)> = annotated
+            .separators
+            .into_iter()
+            .map(|(index, key)| (starts[index], key))
+            .collect();
+        let thoughts: Vec<(usize, ThoughtKey)> = annotated
+            .thoughts
             .into_iter()
             .map(|(index, key)| (starts[index], key))
             .collect();
@@ -155,6 +167,7 @@ impl TranscriptRenderer {
                 ..inner
             },
             separators,
+            thoughts,
         }
     }
 }
@@ -219,8 +232,9 @@ impl TranscriptRenderer {
                 thinking_phase: 0,
                 thinking_streaming,
                 folded: &[],
+                thoughts: &[],
             },
         )
-        .0
+        .lines
     }
 }
