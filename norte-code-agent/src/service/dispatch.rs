@@ -3,10 +3,10 @@
 //! The parent's imports are in scope through `super`, so the domain
 //! names types the same way the service does.
 
+use super::turn_media::unsupported_attachment;
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use super::turn_media::unsupported_attachment;
 
 impl Service {
     /// Replaces every session name in a request with the session it names.

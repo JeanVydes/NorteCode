@@ -694,24 +694,32 @@ fn scripted_spec() -> norte_code_agent::ModelSpec {
     }
 }
 
+/// A service built the way the host tests build one.
+fn test_service<F: norte_code_agent::ModelFactory + 'static>(
+    spec: Option<norte_code_agent::ModelSpec>,
+    factory: F,
+) -> Arc<Service> {
+    Arc::new(
+        Service::new(
+            norte_code_protocol::config::Config::default(),
+            Arc::new(norte_code_protocol::catalog::Catalog::default()),
+            spec,
+            Arc::new(factory),
+            Arc::new(norte_code_protocol::InMemoryStore::new()),
+            Arc::new(norte::InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    )
+}
+
 /// A host whose service runs the `scripted` model, with one attached session.
 async fn scripted_host(
     model: Arc<norte_testing::ScriptedModel>,
     config: HostConfig,
 ) -> (Arc<NorteCodeRaepHost>, String) {
     let model_dyn: Arc<dyn norte::Model> = model;
-    let service = Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            Some(scripted_spec()),
-            Arc::new(SingleModel(model_dyn)),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
+    let service = test_service(Some(scripted_spec()), SingleModel(model_dyn));
     let host = Arc::new(NorteCodeRaepHost::new(service, config).expect("host"));
     let session_id = attach_session(&host).await;
     (host, session_id)
@@ -719,18 +727,7 @@ async fn scripted_host(
 
 /// A host with no model configured, with one attached session.
 async fn vendor_host(config: HostConfig) -> (NorteCodeRaepHost, String) {
-    let service = Arc::new(
-        Service::new(
-            norte_code_protocol::config::Config::default(),
-            Arc::new(norte_code_protocol::catalog::Catalog::default()),
-            None,
-            Arc::new(norte_code_agent::VendorModels),
-            Arc::new(norte_code_protocol::InMemoryStore::new()),
-            Arc::new(norte::InMemoryBlobStore::new()),
-            "system",
-        )
-        .expect("service"),
-    );
+    let service = test_service(None, norte_code_agent::VendorModels);
     let host = NorteCodeRaepHost::new(service, config).expect("host");
     let session_id = attach_session(&host).await;
     (host, session_id)
@@ -820,9 +817,18 @@ async fn a_steer_on_an_occupied_session_is_accepted_without_queueing() {
 async fn a_steer_carries_none_of_the_per_turn_shaping() {
     let (host, session_id) = vendor_host(HostConfig::default()).await;
     for (timestamp, body) in [
-        (2, json!({"prompt": "shaped", "queue_policy": "steer", "overrides": {}})),
-        (3, json!({"prompt": "shaped", "queue_policy": "steer", "response_format": {"type": "text"}})),
-        (4, json!({"prompt": "shaped", "queue_policy": "steer", "metadata": {"origin": "test"}})),
+        (
+            2,
+            json!({"prompt": "shaped", "queue_policy": "steer", "overrides": {}}),
+        ),
+        (
+            3,
+            json!({"prompt": "shaped", "queue_policy": "steer", "response_format": {"type": "text"}}),
+        ),
+        (
+            4,
+            json!({"prompt": "shaped", "queue_policy": "steer", "metadata": {"origin": "test"}}),
+        ),
     ] {
         let frame = user_input(&session_id, &format!("steer_{timestamp}"), timestamp, body);
         assert!(
@@ -968,14 +974,19 @@ async fn a_steer_while_the_turn_is_parked_joins_it_without_a_new_turn() {
     let mut question = None;
     for _ in 0..250 {
         let window = host.replay.after(&session_id, 0);
-        question = window.frames.into_iter().find_map(|frame| {
-            match &frame.kind {
+        question = window
+            .frames
+            .into_iter()
+            .find_map(|frame| match &frame.kind {
                 raep_types::FrameType::Extension(name) if name == "norte_code.question_asked" => {
-                    frame.payload.get("question").and_then(Value::as_str).map(str::to_owned)
+                    frame
+                        .payload
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
                 }
                 _ => None,
-            }
-        });
+            });
         if question.is_some() {
             break;
         }
