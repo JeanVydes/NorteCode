@@ -1,7 +1,5 @@
-use norte_code_wire::QueueMode;
-
 use super::{ComponentAction, HeaderModal};
-use crate::ui_model::ReasoningLevel;
+use crate::ui_model::{ReasoningLevel, SendMode};
 
 fn accepts_all() -> norte_code_wire::ReasoningInfo {
     norte_code_wire::ReasoningInfo {
@@ -14,18 +12,18 @@ fn accepts_all() -> norte_code_wire::ReasoningInfo {
 }
 
 #[test]
-fn the_queue_menu_offers_the_three_modes() {
+fn the_queue_menu_offers_the_send_modes() {
     let selected = HeaderModal::Queue.options();
-    assert_eq!(selected, &["reject", "queue", "interrupt"]);
+    assert_eq!(selected, &["steer", "queue", "interrupt", "reject"]);
     assert!(matches!(
         HeaderModal::Queue.action(0, selected),
-        Some(ComponentAction::SetQueueMode(QueueMode::Reject))
+        Some(ComponentAction::SetQueueMode(SendMode::Steer))
     ));
     assert!(matches!(
-        HeaderModal::Queue.action(2, selected),
-        Some(ComponentAction::SetQueueMode(QueueMode::Interrupt))
+        HeaderModal::Queue.action(3, selected),
+        Some(ComponentAction::SetQueueMode(SendMode::Reject))
     ));
-    assert!(HeaderModal::Queue.action(3, selected).is_none());
+    assert!(HeaderModal::Queue.action(4, selected).is_none());
 }
 
 #[test]

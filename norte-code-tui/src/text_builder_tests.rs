@@ -32,7 +32,6 @@ fn a_window_cannot_cut_a_wide_character_in_half() {
 #[test]
 fn the_header_marks_the_queue_and_reasoning_buttons() {
     use crate::ui_model::UiModel;
-    use norte_code_wire::QueueMode;
 
     let model = UiModel::default();
     let layout = TextBuilder::header_layout(&model);
@@ -62,10 +61,11 @@ fn the_header_marks_the_queue_and_reasoning_buttons() {
         button_text((layout.buttons[0].0, layout.buttons[0].1)),
         format!(
             "queue {}",
-            match model.queue_mode {
-                QueueMode::Reject => "reject",
-                QueueMode::Queue => "queue",
-                QueueMode::Interrupt => "interrupt",
+            match model.send_mode {
+                crate::ui_model::SendMode::Steer => "steer",
+                crate::ui_model::SendMode::Queue => "queue",
+                crate::ui_model::SendMode::Interrupt => "interrupt",
+                crate::ui_model::SendMode::Reject => "reject",
             }
         )
     );

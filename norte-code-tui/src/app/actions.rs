@@ -1,9 +1,11 @@
-use norte_code_wire::{QueueMode, ServerEventKind};
+use norte_code_wire::ServerEventKind;
 
 use super::App;
 use crate::{
     components::{ComponentAction, ComponentId, McpState, Preference, ViewAction},
-    ui_model::{SessionAttachmentState, ThemeMode, ThinkingVisibility, TranscriptItem, TurnState},
+    ui_model::{
+        SendMode, SessionAttachmentState, ThemeMode, ThinkingVisibility, TranscriptItem, TurnState,
+    },
 };
 
 /// The capability a host advertises when it accepts uploads.
@@ -235,7 +237,7 @@ impl App {
                 }
             }
             ComponentAction::SetQueueMode(mode) => {
-                self.model.queue_mode = mode;
+                self.model.send_mode = mode;
             }
             ComponentAction::SetModel { provider, model } => {
                 if let Some(session) = self.model.active_session.clone()
@@ -337,7 +339,7 @@ impl App {
     fn send_message(&mut self, text: String, chips: &[crate::chips::Chip]) {
         if self.model.active_child.is_some()
             || self.model.attachment_state != SessionAttachmentState::Attached
-            || (self.model.turn_state.is_busy() && self.model.queue_mode == QueueMode::Reject)
+            || (self.model.turn_state.is_busy() && self.model.send_mode == SendMode::Reject)
         {
             return;
         }
@@ -358,7 +360,7 @@ impl App {
             self.session_generation,
             text,
             parts,
-            self.model.queue_mode,
+            self.model.send_mode,
         );
     }
 

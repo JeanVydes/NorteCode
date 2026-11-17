@@ -6,8 +6,8 @@ use ratatui::{
 use crate::{
     components::{ComponentId, LifecyclePhase, palette},
     keys,
+    ui_model::SendMode,
 };
-use norte_code_wire::QueueMode;
 
 mod conversation;
 mod data;
@@ -18,11 +18,12 @@ fn session_id_short(session: &str) -> String {
     session.chars().take(8).collect()
 }
 
-fn queue_mode_compact(mode: QueueMode) -> &'static str {
+fn queue_mode_compact(mode: SendMode) -> &'static str {
     match mode {
-        QueueMode::Reject => "reject",
-        QueueMode::Queue => "queue",
-        QueueMode::Interrupt => "interrupt",
+        SendMode::Steer => "steer",
+        SendMode::Queue => "queue",
+        SendMode::Interrupt => "interrupt",
+        SendMode::Reject => "reject",
     }
 }
 
@@ -126,7 +127,7 @@ impl TextBuilder {
 
         builder.push(Span::raw(" · "));
         builder.button(
-            format!(" queue {} ", queue_mode_compact(model.queue_mode)),
+            format!(" queue {} ", queue_mode_compact(model.send_mode)),
             HeaderModal::Queue,
         );
         builder.push(Span::raw(" · "));

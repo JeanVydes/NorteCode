@@ -62,10 +62,11 @@ impl HeaderSelectState {
     ) -> Self {
         let options = kind.options_for(capabilities);
         let label = match kind {
-            HeaderModal::Queue => match model.queue_mode {
-                norte_code_wire::QueueMode::Reject => "reject",
-                norte_code_wire::QueueMode::Queue => "queue",
-                norte_code_wire::QueueMode::Interrupt => "interrupt",
+            HeaderModal::Queue => match model.send_mode {
+                crate::ui_model::SendMode::Steer => "steer",
+                crate::ui_model::SendMode::Queue => "queue",
+                crate::ui_model::SendMode::Interrupt => "interrupt",
+                crate::ui_model::SendMode::Reject => "reject",
             },
             HeaderModal::Reasoning => model.reasoning.label(),
         };
