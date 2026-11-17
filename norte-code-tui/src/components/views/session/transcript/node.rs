@@ -37,6 +37,27 @@ impl TurnKey {
     }
 }
 
+/// The identity of one reasoning block.
+///
+/// A block is named by its turn and its place among that turn's blocks, so
+/// the reader can fold one without folding the rest.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ThoughtKey {
+    /// The turn the block belongs to.
+    pub(crate) turn: TurnKey,
+    /// The block's place among the turn's reasoning blocks.
+    pub(crate) ordinal: usize,
+}
+
+/// A reasoning block the reader chose a state of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ThoughtFold {
+    /// The block.
+    pub(crate) key: ThoughtKey,
+    /// Whether it is expanded.
+    pub(crate) expanded: bool,
+}
+
 /// One node of the transcript tree.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TranscriptNode {

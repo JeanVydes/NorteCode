@@ -133,6 +133,7 @@ impl Default for SessionView {
             import: None,
             shell_output_expanded: crate::ui_model::Toggle::Off,
             folded: Vec::new(),
+            thoughts: Vec::new(),
             layout: transcript::TranscriptLayout::default(),
             context_menu: None,
             last_render_area: Rect::default(),
@@ -152,6 +153,8 @@ pub(in crate::components) struct SessionView {
     shell_output_expanded: crate::ui_model::Toggle,
     /// The turns the reader folded away.
     folded: Vec<transcript::TurnKey>,
+    /// The reasoning blocks the reader folded, or unfolded, one by one.
+    thoughts: Vec<transcript::ThoughtFold>,
     /// What the last draw measured.
     layout: transcript::TranscriptLayout,
     /// A menu the reader opened over a turn with a right click.
@@ -225,6 +228,7 @@ impl Component for SessionView {
                 self.composer.reset();
                 // The folds belong to the session that was open.
                 self.folded.clear();
+                self.thoughts.clear();
                 self.context_menu = None;
             }
         }
@@ -243,7 +247,9 @@ impl Component for SessionView {
                 self.scroll_transcript(-3);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(key) = self.turn_at(mouse.column, mouse.row) {
+                if let Some(key) = self.thought_at(mouse.column, mouse.row) {
+                    self.toggle_thought_scrollable(model, &key);
+                } else if let Some(key) = self.turn_at(mouse.column, mouse.row) {
                     self.fold_turn_scrollable(model, &key);
                 }
             }
@@ -294,6 +300,7 @@ impl Component for SessionView {
                 shell_output_expanded: self.shell_output_expanded,
                 thinking_phase: self.animation_phase,
                 folded: &self.folded,
+                thoughts: &self.thoughts,
             },
         );
         let mut lines = if let Some(path) = &self.import {
@@ -302,7 +309,7 @@ impl Component for SessionView {
             self.composer.visible_lines(model)
         };
         todos::TodosPanel::render(frame, content[1], &model.todos, model.preferences.theme);
-        lines.extend(self.composer.chip_lines());
+        lines.extend(self.composer.chip_lines(model.preferences.theme));
         if let Some(hint) = hint {
             lines.push(Line::from(Span::styled(hint, Composer::hint_style())));
         }
@@ -381,6 +388,67 @@ impl SessionView {
             .iter()
             .find(|(row, _)| *row == absolute)
             .map(|(_, key)| key.clone())
+    }
+
+    /// The reasoning block whose summary sits at the row the reader clicked.
+    fn thought_at(&self, column: u16, row: u16) -> Option<transcript::ThoughtKey> {
+        let Rect {
+            x,
+            y,
+            width,
+            height,
+        } = self.layout.text_area;
+        if column < x
+            || column >= x.saturating_add(width)
+            || row < y
+            || row >= y.saturating_add(height)
+        {
+            return None;
+        }
+        let scroll = self
+            .layout
+            .max_scroll
+            .saturating_sub(self.scroll_from_bottom);
+        let absolute = usize::from(row - y) + scroll;
+        self.layout
+            .thoughts
+            .iter()
+            .find(|(row, _)| *row == absolute)
+            .map(|(_, key)| key.clone())
+    }
+
+    /// Folds or unfolds one reasoning block, keeping the reader in place.
+    fn toggle_thought_scrollable(&mut self, model: &UiModel, key: &transcript::ThoughtKey) {
+        let before = transcript::turn_layout(
+            &model.transcript,
+            self.layout.width,
+            self.transcript_options(model, self.layout.width),
+        );
+        let expanded = self.thought_expanded(model, key);
+        match self.thoughts.iter_mut().find(|fold| fold.key == *key) {
+            Some(fold) => fold.expanded = !expanded,
+            None => self.thoughts.push(transcript::ThoughtFold {
+                key: key.clone(),
+                expanded: !expanded,
+            }),
+        }
+        let after = transcript::turn_layout(
+            &model.transcript,
+            self.layout.width,
+            self.transcript_options(model, self.layout.width),
+        );
+        let before_rows = Self::turn_rows(&before, &key.turn);
+        let after_rows = Self::turn_rows(&after, &key.turn);
+        let delta = after_rows.cast_signed() - before_rows.cast_signed();
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_add_signed(delta);
+    }
+
+    /// Whether one reasoning block is expanded.
+    fn thought_expanded(&self, model: &UiModel, key: &transcript::ThoughtKey) -> bool {
+        self.thoughts.iter().find(|fold| fold.key == *key).map_or(
+            model.preferences.thinking == crate::ui_model::ThinkingVisibility::Expanded,
+            |fold| fold.expanded,
+        )
     }
 
     /// The menu's keys: close it, move its cursor or run the chosen item.
@@ -471,6 +539,7 @@ impl SessionView {
             thinking_phase: self.animation_phase,
             thinking_streaming: matches!(model.turn_state, crate::ui_model::TurnState::Thinking),
             folded: &self.folded,
+            thoughts: &self.thoughts,
         }
     }
 

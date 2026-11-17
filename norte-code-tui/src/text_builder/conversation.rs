@@ -56,13 +56,19 @@ impl TextBuilder {
     }
 
     #[must_use]
-    pub fn thinking_summary() -> Line<'static> {
-        Line::from(Span::styled(
-            "Thought",
-            Style::default()
-                .fg(palette::muted())
-                .add_modifier(ratatui::style::Modifier::ITALIC),
-        ))
+    pub fn thinking_summary(expanded: bool) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                if expanded { "▾ " } else { "▸ " },
+                Style::default().fg(palette::muted()),
+            ),
+            Span::styled(
+                "Thought",
+                Style::default()
+                    .fg(palette::muted())
+                    .add_modifier(ratatui::style::Modifier::ITALIC),
+            ),
+        ])
     }
 
     #[must_use]

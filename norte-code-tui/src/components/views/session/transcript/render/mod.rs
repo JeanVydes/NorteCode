@@ -10,10 +10,12 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use std::collections::HashMap;
+
 mod blocks;
 mod tool;
 
-use super::node::{TranscriptNode, TranscriptNodeKind, TurnKey};
+use super::node::{ThoughtFold, ThoughtKey, TranscriptNode, TranscriptNodeKind, TurnKey};
 use super::tree::TranscriptTree;
 use crate::{
     components::palette,
@@ -42,16 +44,46 @@ pub(crate) struct TranscriptOptions<'a> {
     pub(crate) thinking_streaming: bool,
     /// The turns the reader folded away.
     pub(crate) folded: &'a [TurnKey],
+    /// The reasoning blocks whose reader chose a state of their own.
+    pub(crate) thoughts: &'a [ThoughtFold],
+}
+
+impl TranscriptOptions<'_> {
+    /// Whether one reasoning block is expanded.
+    ///
+    /// The global preference is the default; a block the reader toggled
+    /// keeps the state the reader gave it.
+    pub(crate) fn thought_expanded(&self, key: &ThoughtKey) -> bool {
+        self.thoughts.iter().find(|fold| fold.key == *key).map_or(
+            self.thinking_visibility == ThinkingVisibility::Expanded,
+            |fold| fold.expanded,
+        )
+    }
 }
 
 /// How many reasoning blocks the tree holds, and how many were drawn.
 ///
 /// The block that streams last is the one that animates; measurement paths
 /// pass the zero value, which animates nothing.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct ReasoningProgress {
     total: usize,
     seen: usize,
+    /// The next block number of each turn.
+    thoughts: HashMap<TurnKey, usize>,
+}
+
+impl ReasoningProgress {
+    /// The identity of the next block of a turn.
+    fn next_thought(&mut self, turn: &TurnKey) -> ThoughtKey {
+        let ordinal = self.thoughts.entry(turn.clone()).or_insert(0);
+        let key = ThoughtKey {
+            turn: turn.clone(),
+            ordinal: *ordinal,
+        };
+        *ordinal += 1;
+        key
+    }
 }
 
 /// How many reasoning blocks a subtree holds.
@@ -63,31 +95,52 @@ fn reasoning_total(node: &TranscriptNode) -> usize {
     total
 }
 
-/// The lines the tree is drawn with, and where the turn separators are.
+/// The lines the tree is drawn with, and the rows the click view maps.
 ///
-/// The click view maps a row to the turn it opens, so the caller needs the
-/// logical indexes of the separator lines.
+/// `separators` names the turn each row opens; `thoughts` names the
+/// reasoning block each row folds.
+pub(super) struct AnnotatedLines {
+    /// One item per drawn line.
+    pub(super) lines: Vec<Line<'static>>,
+    /// The row each turn opens, and the turn it opens.
+    pub(super) separators: Vec<(usize, TurnKey)>,
+    /// The row each thought summary sits on, and the block it folds.
+    pub(super) thoughts: Vec<(usize, ThoughtKey)>,
+}
+
+/// The lines the tree is drawn with, and where the turn and thought marks
+/// are.
+///
+/// The click view maps a row to the turn it opens or the reasoning block it
+/// folds, so the caller needs the logical indexes of those lines.
 pub(super) fn lines_annotated(
     items: &[TranscriptItem],
     options: TranscriptOptions<'_>,
-) -> (Vec<Line<'static>>, Vec<(usize, TurnKey)>) {
+) -> AnnotatedLines {
     let tree = TranscriptTree::build(items);
     let mut progress = ReasoningProgress {
         total: tree.iter().map(reasoning_total).sum(),
-        seen: 0,
+        ..ReasoningProgress::default()
     };
     let mut lines = Vec::new();
     let mut separators = Vec::new();
+    let mut thoughts = Vec::new();
     for node in &tree {
         draw_node(
             &mut lines,
             node,
             options,
             Some(&mut separators),
+            Some(&mut thoughts),
             &mut progress,
+            None,
         );
     }
-    (lines, separators)
+    AnnotatedLines {
+        lines,
+        separators,
+        thoughts,
+    }
 }
 
 /// The rows each line takes once it wraps, and the row every line starts at.
@@ -120,59 +173,42 @@ pub(crate) fn turn_layout(
     width: u16,
     options: TranscriptOptions<'_>,
 ) -> Vec<TurnLayout> {
-    let tree = TranscriptTree::build(items);
-    let mut progress = ReasoningProgress::default();
-    let mut layout = Vec::new();
-    let mut start = 0;
-    for node in &tree {
-        let lines = lines_of_with_progress(std::slice::from_ref(node), options, &mut progress);
-        let rows = ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .line_count(width);
-        if let Some(key) = node.turn_key() {
-            layout.push(TurnLayout {
-                key: key.clone(),
-                start,
-            });
-        }
-        start += rows;
-    }
-    layout
-}
-
-/// The lines a group of nodes is drawn with, for a caller that already
-/// counts the reasoning blocks it draws.
-fn lines_of_with_progress(
-    nodes: &[TranscriptNode],
-    options: TranscriptOptions<'_>,
-    progress: &mut ReasoningProgress,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut separators = Vec::new();
-    for node in nodes {
-        draw_node(&mut lines, node, options, Some(&mut separators), progress);
-    }
-    lines
+    let annotated = lines_annotated(items, options);
+    let (starts, _) = wrapped_starts(&annotated.lines, width);
+    annotated
+        .separators
+        .into_iter()
+        .map(|(index, key)| TurnLayout {
+            key,
+            start: starts[index],
+        })
+        .collect()
 }
 
 /// Draws one node and the nodes under it.
 ///
 /// `progress` counts the reasoning blocks the caller expects and the ones
-/// drawn so far, so the draw knows which block streams last.
+/// drawn so far, so the draw knows which block streams last and which block
+/// each thought summary opens.
 fn draw_node(
     lines: &mut Vec<Line<'static>>,
     node: &TranscriptNode,
     options: TranscriptOptions<'_>,
     mut separators: Option<&mut Vec<(usize, TurnKey)>>,
+    mut thoughts: Option<&mut Vec<(usize, ThoughtKey)>>,
     progress: &mut ReasoningProgress,
+    turn: Option<&TurnKey>,
 ) {
     match node.kind() {
         TranscriptNodeKind::Turn { key } => {
             let folded = options.folded.contains(key);
-            separate(lines);
             if let Some(marks) = &mut separators {
+                // The blank row that keeps the turn apart belongs to the
+                // turn's block, so the mark goes before it, not on the line
+                // that opens the turn.
                 marks.push((lines.len(), key.clone()));
             }
+            separate(lines);
             lines.push(turn_separator(key, node, folded));
             if folded {
                 if let Some(summary) = folded_summary(node, options.width) {
@@ -181,7 +217,15 @@ fn draw_node(
                 return;
             }
             for child in node.children() {
-                draw_node(lines, child, options, separators.as_deref_mut(), progress);
+                draw_node(
+                    lines,
+                    child,
+                    options,
+                    separators.as_deref_mut(),
+                    thoughts.as_deref_mut(),
+                    progress,
+                    Some(key),
+                );
             }
         }
         TranscriptNodeKind::Message {
@@ -190,35 +234,15 @@ fn draw_node(
             chips,
             timestamp,
             queued,
-        } => {
-            separate(lines);
-            lines.extend(message_lines(
-                *role,
-                text,
-                options.width,
-                options
-                    .show_timestamps
-                    .is_on()
-                    .then_some(*timestamp)
-                    .flatten(),
-                options.theme,
-            ));
-            lines.extend(chip_lines(chips));
-            if *queued {
-                lines.push(Line::from(Span::styled(
-                    "· queued, waiting for the turn to finish",
-                    Style::default().fg(palette::muted()),
-                )));
-            }
-        }
-        TranscriptNodeKind::Reasoning { text } => {
-            separate(lines);
-            let ordinal = progress.seen;
-            progress.seen += 1;
-            let phase = (options.thinking_streaming && ordinal + 1 == progress.total)
-                .then_some(options.thinking_phase);
-            lines.extend(reasoning_lines(text, options, phase));
-        }
+        } => draw_message(lines, *role, text, chips, *timestamp, *queued, options),
+        TranscriptNodeKind::Reasoning { text } => draw_reasoning(
+            lines,
+            text,
+            options,
+            &mut thoughts,
+            progress,
+            turn,
+        ),
         TranscriptNodeKind::Tool(tool) => draw_tool(lines, tool, options),
         TranscriptNodeKind::Error { code, message } => {
             lines.push(match code {
@@ -257,6 +281,62 @@ fn draw_node(
             lines.push(TextBuilder::media_delta(*bytes, *last));
         }
     }
+}
+
+/// A message: what the reader said, or what the model answered.
+fn draw_message(
+    lines: &mut Vec<Line<'static>>,
+    role: MessageRole,
+    text: &str,
+    chips: &[crate::chips::Chip],
+    timestamp: Option<i64>,
+    queued: bool,
+    options: TranscriptOptions<'_>,
+) {
+    separate(lines);
+    lines.extend(message_lines(
+        role,
+        text,
+        options.width,
+        options
+            .show_timestamps
+            .is_on()
+            .then_some(timestamp)
+            .flatten(),
+        options.theme,
+    ));
+    lines.extend(chip_lines(chips, options.theme));
+    if queued {
+        lines.push(Line::from(Span::styled(
+            "· queued, waiting for the turn to finish",
+            Style::default().fg(palette::muted()),
+        )));
+    }
+}
+
+/// The reasoning the model wrote.
+fn draw_reasoning(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    options: TranscriptOptions<'_>,
+    thoughts: &mut Option<&mut Vec<(usize, ThoughtKey)>>,
+    progress: &mut ReasoningProgress,
+    turn: Option<&TurnKey>,
+) {
+    separate(lines);
+    let ordinal = progress.seen;
+    progress.seen += 1;
+    let phase = (options.thinking_streaming && ordinal + 1 == progress.total)
+        .then_some(options.thinking_phase);
+    let thought = turn.map(|turn| progress.next_thought(turn));
+    let expanded = thought.as_ref().map_or(
+        options.thinking_visibility == ThinkingVisibility::Expanded,
+        |key| options.thought_expanded(key),
+    );
+    if let (Some(marks), Some(key)) = (thoughts, &thought) {
+        marks.push((lines.len(), key.clone()));
+    }
+    lines.extend(reasoning_lines(text, options, phase, expanded));
 }
 
 /// The line that opens a turn.
@@ -325,6 +405,6 @@ pub(super) fn separate(lines: &mut Vec<Line<'static>>) {
 /// Whether a line opens a turn.
 fn opens_a_turn(line: &Line<'_>) -> bool {
     line.spans
-        .first()
-        .is_some_and(|span| span.content.starts_with('▾') || span.content.starts_with('▸'))
+        .get(1)
+        .is_some_and(|span| span.content.starts_with("turn"))
 }

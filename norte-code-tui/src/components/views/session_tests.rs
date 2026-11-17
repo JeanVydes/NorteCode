@@ -324,6 +324,7 @@ fn view_with_separators() -> SessionView {
                 (0, super::transcript::TurnKey::Live(1)),
                 (5, super::transcript::TurnKey::Live(2)),
             ],
+            thoughts: Vec::new(),
         },
         ..SessionView::default()
     }
@@ -380,6 +381,7 @@ fn z_folds_the_turn_under_the_reader() {
             width: 80,
             text_area: ratatui::layout::Rect::new(0, 0, 80, 20),
             separators: Vec::new(),
+            thoughts: Vec::new(),
         },
         ..SessionView::default()
     };
@@ -402,6 +404,7 @@ fn jumping_into_a_folded_turn_unfolds_it() {
             width: 80,
             text_area: ratatui::layout::Rect::new(0, 0, 80, 20),
             separators: Vec::new(),
+            thoughts: Vec::new(),
         },
         ..SessionView::default()
     };
@@ -432,6 +435,48 @@ fn clicking_a_turn_separator_folds_the_turn() {
     view.handle_mouse(mouse(CLICK_LEFT, 10, 0), &model);
 
     assert!(view.folded.contains(&super::transcript::TurnKey::Live(1)));
+}
+
+fn view_with_thoughts() -> SessionView {
+    SessionView {
+        last_render_area: ratatui::layout::Rect::new(0, 0, 80, 20),
+        layout: super::transcript::TranscriptLayout {
+            max_scroll: 0,
+            width: 80,
+            text_area: ratatui::layout::Rect::new(0, 0, 80, 20),
+            separators: Vec::new(),
+            thoughts: vec![(
+                3,
+                super::transcript::ThoughtKey {
+                    turn: super::transcript::TurnKey::Live(1),
+                    ordinal: 0,
+                },
+            )],
+        },
+        ..SessionView::default()
+    }
+}
+
+#[test]
+fn clicking_a_thought_summary_toggles_it() {
+    let mut view = view_with_thoughts();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_LEFT, 10, 3), &model);
+    assert!(view.thoughts.iter().any(|fold| fold.expanded));
+
+    view.handle_mouse(mouse(CLICK_LEFT, 10, 3), &model);
+    assert!(view.thoughts.iter().all(|fold| !fold.expanded));
+}
+
+#[test]
+fn clicking_outside_a_thought_does_not_toggle_it() {
+    let mut view = view_with_thoughts();
+    let model = transcript_model();
+
+    view.handle_mouse(mouse(CLICK_LEFT, 10, 7), &model);
+
+    assert_eq!(view.thoughts.len(), 0);
 }
 
 #[test]
@@ -572,4 +617,54 @@ fn clicking_the_drawn_separator_folds_the_turn() {
     );
 
     assert!(view.folded.contains(&super::transcript::TurnKey::Live(1)));
+}
+
+#[test]
+fn clicking_the_drawn_thought_summary_toggles_the_thought() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let items = vec![
+        crate::ui_model::TranscriptItem::UserMessage {
+            queued: false,
+            turn_id: None,
+            text: "hola".to_owned(),
+            chips: Vec::new(),
+        },
+        crate::ui_model::TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
+            request_id: 1,
+            session: None,
+            kind: norte_code_wire::ServerEventKind::Delta {
+                turn: 1,
+                delta: norte_code_wire::Delta::Reasoning {
+                    index: 0,
+                    text: "**quick thought**".to_owned(),
+                },
+            },
+        })),
+    ];
+    let model = UiModel {
+        transcript: items,
+        ..UiModel::default()
+    };
+    let mut view = SessionView::default();
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| view.render(frame, frame.area(), &model))
+        .expect("render");
+    let buffer = terminal.backend().buffer();
+    let row = (0..20).find(|y| {
+        (0..80)
+            .map(|x| buffer[(x, *y)].symbol())
+            .collect::<String>()
+            .contains("Thought")
+    });
+
+    view.handle_mouse(
+        // px-4: the transcript starts at column 4.
+        mouse(CLICK_LEFT, 6, row.expect("the thought is drawn")),
+        &model,
+    );
+
+    assert!(view.thoughts.iter().any(|fold| fold.expanded));
 }

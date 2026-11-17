@@ -9,11 +9,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::super::markdown;
 use super::TranscriptOptions;
-use crate::{
-    components::palette,
-    text_builder::TextBuilder,
-    ui_model::{ThemeMode, ThinkingVisibility},
-};
+use crate::{components::palette, text_builder::TextBuilder, ui_model::ThemeMode};
 
 /// The lines a message is drawn with.
 pub(crate) fn message_lines(
@@ -50,22 +46,19 @@ pub(crate) fn message_lines(
 
 /// The lines the reasoning is drawn with. `phase` animates the block while
 /// the reasoning streams; `None` leaves it frozen on the neutral background.
+/// `expanded` says whether this block shows its text.
 pub(crate) fn reasoning_lines(
     text: &str,
     options: TranscriptOptions<'_>,
     phase: Option<u16>,
+    expanded: bool,
 ) -> Vec<Line<'static>> {
-    let TranscriptOptions {
-        width,
-        theme,
-        thinking_visibility,
-        ..
-    } = options;
+    let TranscriptOptions { width, theme, .. } = options;
     let mut lines = Vec::new();
-    let mut summary = TextBuilder::thinking_summary();
+    let mut summary = TextBuilder::thinking_summary(expanded);
     palette::style_thinking_line(&mut summary, phase, width, theme);
     lines.push(summary);
-    if thinking_visibility == ThinkingVisibility::Expanded {
+    if expanded {
         for mut line in markdown::render(text, width.saturating_sub(4)) {
             line.spans.insert(0, Span::raw("  "));
             palette::style_thinking_line(&mut line, phase, width, theme);
@@ -108,21 +101,9 @@ fn fill_user_line(line: &mut Line<'static>, width: u16, theme: ThemeMode) {
 }
 
 /// The lines the chips of a message are drawn with.
-pub(crate) fn chip_lines(chips: &[crate::chips::Chip]) -> Vec<Line<'static>> {
+pub(crate) fn chip_lines(chips: &[crate::chips::Chip], theme: ThemeMode) -> Vec<Line<'static>> {
     chips
         .iter()
-        .map(|chip| {
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", crate::chips::chip_icon(chip.kind())),
-                    Style::default().fg(palette::muted()),
-                ),
-                Span::raw(chip.label.clone()),
-                Span::styled(
-                    format!(" · {}", chip.detail),
-                    Style::default().fg(palette::muted()),
-                ),
-            ])
-        })
+        .map(|chip| crate::chips::chip_line(chip, theme))
         .collect()
 }
