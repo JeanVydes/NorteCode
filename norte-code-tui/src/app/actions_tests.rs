@@ -1,7 +1,7 @@
 use crate::ui_model::TranscriptItem;
 use norte_code_wire::{Delta, HistorySpeaker, MessageRole, ReplayedKind, ServerEventKind};
 
-use super::transcript_with_history;
+use super::{keeps_live_items, transcript_with_history};
 
 fn user_item(id: &str, content: &str, turn: Option<&str>) -> norte_code_wire::HistoryItem {
     norte_code_wire::HistoryItem {
@@ -231,6 +231,7 @@ fn a_fresh_history_replaces_the_whole_transcript_after_compaction() {
         TranscriptItem::History(user_item("u1", "lo que se compactó", Some("1"))),
         TranscriptItem::History(assistant_item("a2", "respuesta reemplazada", Some("2"))),
         TranscriptItem::Status("Session compacted.".to_owned()),
+        TranscriptItem::Error("compaction failed".to_owned()),
         TranscriptItem::ServerEvent(Box::new(norte_code_wire::ServerEvent {
             request_id: 0,
             session: None,
@@ -243,5 +244,65 @@ fn a_fresh_history_replaces_the_whole_transcript_after_compaction() {
     assert_eq!(merged.len(), 3);
     assert!(matches!(&merged[0], TranscriptItem::History(item) if item.id == "seed"));
     assert!(matches!(&merged[1], TranscriptItem::History(item) if item.id == "a1"));
-    assert!(matches!(&merged[2], TranscriptItem::Status(status) if status == "Session compacted."));
+    assert!(matches!(&merged[2], TranscriptItem::Error(message) if message == "compaction failed"));
+}
+
+#[test]
+fn a_history_item_the_next_page_renames_is_not_repeated() {
+    // The host first reported the message without a turn, so the client
+    // named the item by position; the next page gives it a turn and a new id.
+    let first_page = transcript_with_history(
+        vec![user_item("history:3", "A background job finished.", None)],
+        Vec::new(),
+        true,
+    );
+    let second_page = transcript_with_history(
+        vec![user_item(
+            "turn_8:3",
+            "A background job finished.",
+            Some("turn_8"),
+        )],
+        first_page,
+        true,
+    );
+
+    assert_eq!(second_page.len(), 1);
+    assert!(matches!(&second_page[0], TranscriptItem::History(item) if item.id == "turn_8:3"));
+}
+
+#[test]
+fn a_finished_turn_leaves_nothing_live_to_keep() {
+    let history = vec![user_item("u1", "hola", Some("turn_1"))];
+    let current = vec![
+        TranscriptItem::History(user_item("u1", "hola", Some("turn_1"))),
+        TranscriptItem::Status("Session compacted.".to_owned()),
+    ];
+
+    let keep = keeps_live_items(crate::ui_model::TurnState::Idle, &history, &current);
+
+    assert!(!keep);
+}
+
+#[test]
+fn a_running_turn_keeps_its_live_items() {
+    let history = vec![user_item("u1", "hola", Some("turn_1"))];
+
+    let keep = keeps_live_items(crate::ui_model::TurnState::Thinking, &history, &[]);
+
+    assert!(keep);
+}
+
+#[test]
+fn a_message_the_page_lacks_keeps_the_live_items() {
+    let history = vec![user_item("u1", "hola", Some("turn_1"))];
+    let current = vec![TranscriptItem::UserMessage {
+        queued: true,
+        turn_id: None,
+        text: "otra cosa".to_owned(),
+        chips: Vec::new(),
+    }];
+
+    let keep = keeps_live_items(crate::ui_model::TurnState::Idle, &history, &current);
+
+    assert!(keep);
 }
