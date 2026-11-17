@@ -172,7 +172,6 @@ fn select_wire<'a>(
     }
 }
 
-
 /// Builds a Norte model from a [`ModelSpec`]. Tests implement this to inject a
 /// scripted model.
 pub trait ModelFactory: Send + Sync {
@@ -282,9 +281,7 @@ fn build_with_profile(
             Arc::new(AnthropicMessages::new(reference, profile, capabilities)?)
         }
         WireSchema::Google => Arc::new(GeminiGenerate::new(reference, profile, capabilities)?),
-        WireSchema::Responses => {
-            Arc::new(OpenAiResponses::new(reference, profile, capabilities)?)
-        }
+        WireSchema::Responses => Arc::new(OpenAiResponses::new(reference, profile, capabilities)?),
     })
 }
 

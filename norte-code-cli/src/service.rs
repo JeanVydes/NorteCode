@@ -88,7 +88,8 @@ pub(crate) fn probe(url: &str) -> bool {
 /// The daemon is launched in a fresh session so it is not in this
 /// process group and survives the terminal being closed.
 fn spawn_daemon() -> Result<u32, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("could not resolve the current executable: {e}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("could not resolve the current executable: {e}"))?;
     let state = state_dir();
     fs::create_dir_all(&state).map_err(|e| format!("could not create {}: {e}", state.display()))?;
     let log = logfile_path();
@@ -101,12 +102,16 @@ fn spawn_daemon() -> Result<u32, String> {
     let mut cmd = Command::new(exe);
     cmd.arg("service").arg("serve");
     cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::from(log_file.try_clone().map_err(|e| format!("{e}"))?));
+    cmd.stdout(Stdio::from(
+        log_file.try_clone().map_err(|e| format!("{e}"))?,
+    ));
     cmd.stderr(Stdio::from(log_file));
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let child = cmd.spawn().map_err(|e| format!("failed to launch the server task: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to launch the server task: {e}"))?;
     Ok(child.id())
 }
 

@@ -111,8 +111,7 @@ fn add(id: &str, name: Option<&str>, keys: &[String]) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err("provider id must not be empty".to_owned());
     }
-    norte_code_protocol::catalog::ensure_catalog_files()
-        .map_err(|e| format!("{e}"))?;
+    norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
     let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
     let wires = providers
         .providers
@@ -163,13 +162,11 @@ fn add_wire(
     if schemas.is_empty() {
         return Err("at least one --schema is required (openai, anthropic or google)".to_owned());
     }
-    norte_code_protocol::catalog::ensure_catalog_files()
-        .map_err(|e| format!("{e}"))?;
+    norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
     let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
-    let provider = providers
-        .providers
-        .get_mut(id)
-        .ok_or_else(|| format!("`{id}` is not in providers.json; add it first with `providers add`"))?;
+    let provider = providers.providers.get_mut(id).ok_or_else(|| {
+        format!("`{id}` is not in providers.json; add it first with `providers add`")
+    })?;
     let auth = auth.map(parse_auth).transpose()?;
     for schema in schemas {
         let schema = parse_schema(schema)?;
@@ -199,16 +196,20 @@ fn remove_wires(id: &str, schemas: &[String]) -> Result<(), String> {
     if schemas.is_empty() {
         return Err("at least one --schema is required".to_owned());
     }
-    norte_code_protocol::catalog::ensure_catalog_files()
-        .map_err(|e| format!("{e}"))?;
+    norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
     let (mut providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
     let provider = providers
         .providers
         .get_mut(id)
         .ok_or_else(|| format!("`{id}` is not in providers.json"))?;
-    let targets: Vec<WireSchema> = schemas.iter().map(|s| parse_schema(s)).collect::<Result<_, _>>()?;
+    let targets: Vec<WireSchema> = schemas
+        .iter()
+        .map(|s| parse_schema(s))
+        .collect::<Result<_, _>>()?;
     let before = provider.wires.len();
-    provider.wires.retain(|wire| !targets.contains(&wire.schema));
+    provider
+        .wires
+        .retain(|wire| !targets.contains(&wire.schema));
     if before == provider.wires.len() {
         return Err(format!(
             "no matching wires found in `{id}`; see them with `providers get-wires {id}`"
@@ -235,8 +236,7 @@ fn auth_label(auth: norte_code_wire::catalog::AuthKind) -> String {
 }
 
 fn get_wires(id: &str) -> Result<(), String> {
-    norte_code_protocol::catalog::ensure_catalog_files()
-        .map_err(|e| format!("{e}"))?;
+    norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
     let (providers, _models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
     let provider = providers
         .providers
@@ -248,7 +248,10 @@ fn get_wires(id: &str) -> Result<(), String> {
         crate::output::muted(&format!("({} wires)", provider.wires.len()))
     );
     if provider.wires.is_empty() {
-        println!("  {}", crate::output::muted("(none; add one with `providers add-wire`)"));
+        println!(
+            "  {}",
+            crate::output::muted("(none; add one with `providers add-wire`)")
+        );
         return Ok(());
     }
     for wire in &provider.wires {
@@ -273,8 +276,7 @@ fn get_wires(id: &str) -> Result<(), String> {
 }
 
 fn remove(id: &str) -> Result<(), String> {
-    norte_code_protocol::catalog::ensure_catalog_files()
-        .map_err(|e| format!("{e}"))?;
+    norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
     let (mut providers, mut models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
     if providers.providers.remove(id).is_none() {
         return Err(format!(
@@ -335,10 +337,7 @@ fn print_live_catalog(detail: &norte_code_client::api::CatalogDetail) {
     print_provider_group("plugins", &plugins);
 }
 
-fn print_provider_group(
-    title: &str,
-    providers: &[&norte_code_wire::CatalogProviderInfo],
-) {
+fn print_provider_group(title: &str, providers: &[&norte_code_wire::CatalogProviderInfo]) {
     println!(
         "  {}  {}",
         crate::output::bold(title),
@@ -349,7 +348,10 @@ fn print_provider_group(
         return;
     }
     for provider in providers {
-        let api = provider.api.clone().unwrap_or_else(|| "(no wire)".to_owned());
+        let api = provider
+            .api
+            .clone()
+            .unwrap_or_else(|| "(no wire)".to_owned());
         println!(
             "  {}  {}  {}",
             crate::output::accent(&provider.provider_id),
@@ -361,8 +363,7 @@ fn print_provider_group(
 }
 
 fn print_file_catalog() -> Result<(), String> {
-    norte_code_protocol::catalog::ensure_catalog_files()
-        .map_err(|e| format!("{e}"))?;
+    norte_code_protocol::catalog::ensure_catalog_files().map_err(|e| format!("{e}"))?;
     let (providers, models) = load_catalog_raw().map_err(|e| format!("{e}"))?;
     println!(
         "  {}  {}",

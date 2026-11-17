@@ -7,8 +7,7 @@ pub(crate) mod rect;
 mod views;
 
 pub(crate) use action::{
-    ComponentAction, HeaderModal, McpState, PluginOperation, Preference, ToolRuleAction,
-    ViewAction,
+    ComponentAction, HeaderModal, McpState, PluginOperation, Preference, ToolRuleAction, ViewAction,
 };
 pub(crate) use component::{Component, ComponentEvent, ComponentId, LifecycleComponent};
 pub(crate) use lifecycle::{

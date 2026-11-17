@@ -41,7 +41,11 @@ pub(crate) enum Command {
 pub(crate) fn run(command: Option<Command>) -> Result<(), String> {
     match command.unwrap_or(Command::List) {
         Command::List => list(),
-        Command::Add { url, package, all: _ } => add(&url, package.as_deref()),
+        Command::Add {
+            url,
+            package,
+            all: _,
+        } => add(&url, package.as_deref()),
         Command::Remove { name } => remove(&name),
         Command::Disable { name } => set_enabled(&name, false),
         Command::Enable { name } => set_enabled(&name, true),
@@ -96,7 +100,11 @@ fn add(url: &str, package: Option<&str>) -> Result<(), String> {
     };
 
     let stems = if let Some(package) = package {
-        vec![plugin_manager::install_plugin(url, Some(package), &progress)?]
+        vec![plugin_manager::install_plugin(
+            url,
+            Some(package),
+            &progress,
+        )?]
     } else {
         plugin_manager::install_all_plugins(url, &progress)?
     };
