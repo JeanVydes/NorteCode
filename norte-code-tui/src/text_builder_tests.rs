@@ -30,17 +30,38 @@ fn a_window_cannot_cut_a_wide_character_in_half() {
 }
 
 #[test]
-fn the_header_marks_the_queue_and_reasoning_buttons() {
-    use crate::ui_model::UiModel;
+fn the_header_marks_the_model_and_the_queue_and_reasoning_buttons() {
+    use crate::ui_model::{SessionModel, SessionStatsSummary, UiModel};
 
-    let model = UiModel::default();
+    let mut model = UiModel::default();
+    model.session_model = Some(SessionModel {
+        provider: "openrouter".to_owned(),
+        model: "particle-1:free".to_owned(),
+    });
+    model.session_stats = Some(SessionStatsSummary {
+        requests: 3,
+        input_tokens: 12_000,
+        output_tokens: 340,
+        cache_read_tokens: 9_600,
+        cache_write_tokens: 100,
+        cost_usd: 0.001,
+        context_used: 12_000,
+        context_window: Some(200_000),
+    });
     let layout = TextBuilder::header_layout(&model);
 
-    assert_eq!(layout.buttons.len(), 2);
-    assert_eq!(layout.buttons[0].2, crate::components::HeaderModal::Queue);
+    assert_eq!(layout.buttons.len(), 3);
+    assert_eq!(
+        layout.buttons[0].2,
+        crate::text_builder::HeaderAction::OpenView(ComponentId::Models)
+    );
     assert_eq!(
         layout.buttons[1].2,
-        crate::components::HeaderModal::Reasoning
+        crate::text_builder::HeaderAction::Modal(crate::components::HeaderModal::Queue)
+    );
+    assert_eq!(
+        layout.buttons[2].2,
+        crate::text_builder::HeaderAction::Modal(crate::components::HeaderModal::Reasoning)
     );
 
     let drawn: Vec<char> = layout
@@ -49,6 +70,8 @@ fn the_header_marks_the_queue_and_reasoning_buttons() {
         .iter()
         .flat_map(|span| span.content.chars())
         .collect();
+    let whole = drawn.iter().collect::<String>();
+    assert!(whole.contains("3 req · 12.0k in · 340 out · 9.6k cached · $0.0010"));
     let button_text = |(start, end): (usize, usize)| {
         drawn[start..end]
             .iter()
@@ -59,6 +82,10 @@ fn the_header_marks_the_queue_and_reasoning_buttons() {
 
     assert_eq!(
         button_text((layout.buttons[0].0, layout.buttons[0].1)),
+        "openrouter/particle-1:free"
+    );
+    assert_eq!(
+        button_text((layout.buttons[1].0, layout.buttons[1].1)),
         format!(
             "queue {}",
             match model.send_mode {
@@ -70,7 +97,7 @@ fn the_header_marks_the_queue_and_reasoning_buttons() {
         )
     );
     assert_eq!(
-        button_text((layout.buttons[1].0, layout.buttons[1].1)),
+        button_text((layout.buttons[2].0, layout.buttons[2].1)),
         format!("reasoning {}", model.reasoning.label())
     );
 }

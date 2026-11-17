@@ -222,17 +222,25 @@ impl App {
             {
                 let layout = crate::text_builder::TextBuilder::header_layout(&self.model);
                 let column = usize::from(mouse.column);
-                if let Some((_, _, kind)) = layout
+                if let Some((_, _, action)) = layout
                     .buttons
                     .iter()
                     .find(|(start, end, _)| column >= *start && column < *end)
                 {
-                    self.header_select = Some(HeaderSelectState::new(
-                        *kind,
-                        &self.model,
-                        self.catalog_capabilities(),
-                    ));
-                    return Ok(());
+                    match action {
+                        crate::text_builder::HeaderAction::Modal(kind) => {
+                            self.header_select = Some(HeaderSelectState::new(
+                                *kind,
+                                &self.model,
+                                self.catalog_capabilities(),
+                            ));
+                            return Ok(());
+                        }
+                        crate::text_builder::HeaderAction::OpenView(view) => {
+                            self.activate_view(*view)?;
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }

@@ -220,11 +220,6 @@ fn draw_node(
             lines.extend(reasoning_lines(text, options, phase));
         }
         TranscriptNodeKind::Tool(tool) => draw_tool(lines, tool, options),
-        TranscriptNodeKind::Usage { usage } => {
-            if let Some(line) = TextBuilder::usage_footer(usage) {
-                lines.push(line);
-            }
-        }
         TranscriptNodeKind::Error { code, message } => {
             lines.push(match code {
                 Some(code) => TextBuilder::host_error(*code, message),

@@ -1,13 +1,13 @@
 //! The nodes the transcript is drawn from.
 //!
 //! The log is flat; the tree is what the reader sees: a turn, and inside it
-//! the reasoning, the messages, the tool calls, the usage footer and the
-//! errors that belong to that turn.
+//! the reasoning, the messages, the tool calls and the errors that belong
+//! to that turn.
 
 use norte_code_wire::{MessageRole, OutputStream, ToolStatus};
 use serde_json::Value;
 
-use crate::{chips::Chip, ui_model::UsageSummary};
+use crate::chips::Chip;
 
 /// The key that groups the nodes of one turn.
 ///
@@ -112,8 +112,6 @@ pub(crate) enum TranscriptNodeKind {
     },
     /// A tool call, with everything it produced.
     Tool(ToolNode),
-    /// The footer of an answer: model, tokens, cost.
-    Usage { usage: UsageSummary },
     /// An error: from the host, with its code, or from the reader's own
     /// view of a failed request.
     Error {

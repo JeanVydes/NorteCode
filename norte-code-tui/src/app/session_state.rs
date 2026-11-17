@@ -79,6 +79,7 @@ impl App {
         self.model.budget_approval = None;
         self.model.session_model = None;
         self.model.session_costs = None;
+        self.model.session_stats = None;
         self.model.notice = None;
         self.model.reasoning = reasoning;
         self.model.queued_model = None;

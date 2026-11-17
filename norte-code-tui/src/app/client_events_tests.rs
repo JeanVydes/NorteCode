@@ -113,32 +113,77 @@ fn the_task_list_the_host_sends_is_kept() {
 }
 
 #[test]
-fn a_reconstructed_request_becomes_a_usage_footer() {
-    let usage = App::usage_summary(&ServerEventKind::RequestReconstructed {
-        turn: 1,
-        index: 0,
-        usage: norte_code_wire::Usage {
-            input_tokens: Some(1200),
-            output_tokens: Some(340),
+fn a_reconstructed_request_accumulates_into_the_session_stats() {
+    let mut stats = crate::ui_model::SessionStatsSummary {
+        requests: 1,
+        input_tokens: 1300,
+        output_tokens: 400,
+        cache_read_tokens: 100,
+        cache_write_tokens: 50,
+        cost_usd: 0.5,
+        context_used: 1300,
+        context_window: Some(128_000),
+    };
+    App::session_stats_update(
+        &mut stats,
+        &ServerEventKind::RequestReconstructed {
+            turn: 1,
+            index: 1,
+            usage: norte_code_wire::Usage {
+                input_tokens: Some(1200),
+                output_tokens: Some(340),
+                cache_read_tokens: Some(200),
+                cache_write_tokens: Some(20),
+                cost_usd: Some(0.25),
+                ..norte_code_wire::Usage::default()
+            },
             cost_usd: Some(0.25),
-            ..norte_code_wire::Usage::default()
+            truncated: false,
+            duration_ms: 820,
+            first_token_ms: Some(120),
+            tokens_per_second: Some(42.5),
+            cache_hit: true,
+            provider: Some("openai".to_owned()),
+            model: Some("gpt-5".to_owned()),
+            tools: Vec::new(),
         },
-        cost_usd: Some(0.25),
-        truncated: false,
-        duration_ms: 820,
-        first_token_ms: Some(120),
-        tokens_per_second: Some(42.5),
-        cache_hit: false,
-        provider: Some("openai".to_owned()),
-        model: Some("gpt-5".to_owned()),
-        tools: Vec::new(),
-    });
+    );
 
-    let usage = usage.expect("usage summary");
-    assert_eq!(usage.input_tokens, Some(1200));
-    assert_eq!(usage.output_tokens, Some(340));
-    assert_eq!(usage.provider.as_deref(), Some("openai"));
-    assert_eq!(usage.duration_ms, Some(820));
+    assert_eq!(stats.requests, 2);
+    assert_eq!(stats.input_tokens, 2500);
+    assert_eq!(stats.output_tokens, 740);
+    assert_eq!(stats.cache_read_tokens, 300);
+    assert_eq!(stats.cache_write_tokens, 70);
+    assert!((stats.cost_usd - 0.75).abs() < 1e-9, "{}", stats.cost_usd);
+    assert_eq!(stats.context_used, 1200);
+    assert_eq!(stats.context_window, Some(128_000));
+}
+
+#[test]
+fn a_resume_snapshot_replaces_the_accumulated_stats() {
+    let mut stats = crate::ui_model::SessionStatsSummary {
+        requests: 1,
+        input_tokens: 1000,
+        ..crate::ui_model::SessionStatsSummary::default()
+    };
+    App::session_stats_update(
+        &mut stats,
+        &ServerEventKind::SessionStats {
+            input_tokens: 9000,
+            output_tokens: 700,
+            cache_read_tokens: 800,
+            cache_write_tokens: 100,
+            cost_usd: 1.5,
+            requests: 9,
+            context_used: 9000,
+            context_window: Some(200_000),
+        },
+    );
+
+    assert_eq!(stats.requests, 9);
+    assert_eq!(stats.input_tokens, 9000);
+    assert_eq!(stats.cost_usd, 1.5);
+    assert_eq!(stats.context_window, Some(200_000));
 }
 
 #[test]

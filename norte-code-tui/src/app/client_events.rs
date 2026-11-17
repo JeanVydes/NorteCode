@@ -9,7 +9,7 @@ use crate::{
     components::{ComponentEvent, ComponentId},
     ui_model::{
         BudgetApprovalRequest, ReasoningLevel, SessionAttachmentState, SessionModel,
-        TranscriptItem, TurnState, UsageSummary,
+        TranscriptItem, TurnState,
     },
 };
 
@@ -389,6 +389,7 @@ impl App {
         self.track_todos(&event.kind);
         self.track_model(&event.kind);
         self.track_job(&event.kind);
+        self.track_session_stats(&event.kind);
         if (matches!(
             &event.kind,
             ServerEventKind::TurnFinished { .. } | ServerEventKind::TurnStopped { .. }
@@ -397,10 +398,6 @@ impl App {
             && let Some(session) = self.model.active_session.clone()
         {
             self.client.load_history(session, self.session_generation);
-        }
-        if let Some(usage) = Self::usage_summary(&event.kind) {
-            self.model.transcript.push(TranscriptItem::Usage(usage));
-            return;
         }
         if let Some(item) = Self::transcript_status(&event.kind) {
             self.model.transcript.push(item);
@@ -502,31 +499,70 @@ impl App {
         ))
     }
 
-    fn usage_summary(kind: &ServerEventKind) -> Option<UsageSummary> {
-        let ServerEventKind::RequestReconstructed {
-            turn,
-            usage,
-            cost_usd,
-            duration_ms,
-            tokens_per_second,
-            provider,
-            model,
-            ..
-        } = kind
-        else {
-            return None;
-        };
-        Some(UsageSummary {
-            turn: Some(*turn),
-            provider: provider.clone(),
-            model: model.clone(),
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_tokens: usage.cache_read_tokens,
-            cost_usd: usage.cost_usd.or(*cost_usd),
-            duration_ms: Some(*duration_ms),
-            tokens_per_second: *tokens_per_second,
-        })
+    /// Applies one event's contribution to the session's usage.
+    ///
+    /// The resume snapshot replaces the accumulator; every request's own
+    /// accounting adds to it. Returns whether the event carried any.
+    fn session_stats_update(
+        stats: &mut crate::ui_model::SessionStatsSummary,
+        kind: &ServerEventKind,
+    ) -> bool {
+        match kind {
+            ServerEventKind::SessionStats {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                cost_usd,
+                requests,
+                context_used,
+                context_window,
+            } => {
+                *stats = crate::ui_model::SessionStatsSummary {
+                    requests: *requests,
+                    input_tokens: *input_tokens,
+                    output_tokens: *output_tokens,
+                    cache_read_tokens: *cache_read_tokens,
+                    cache_write_tokens: *cache_write_tokens,
+                    cost_usd: *cost_usd,
+                    context_used: *context_used,
+                    context_window: *context_window,
+                };
+                true
+            }
+            ServerEventKind::RequestReconstructed {
+                usage, cost_usd, ..
+            } => {
+                stats.requests = stats.requests.saturating_add(1);
+                stats.input_tokens = stats
+                    .input_tokens
+                    .saturating_add(usage.input_tokens.unwrap_or(0));
+                stats.output_tokens = stats
+                    .output_tokens
+                    .saturating_add(usage.output_tokens.unwrap_or(0));
+                stats.cache_read_tokens = stats
+                    .cache_read_tokens
+                    .saturating_add(usage.cache_read_tokens.unwrap_or(0));
+                stats.cache_write_tokens = stats
+                    .cache_write_tokens
+                    .saturating_add(usage.cache_write_tokens.unwrap_or(0));
+                stats.cost_usd += usage.cost_usd.or(*cost_usd).unwrap_or(0.0);
+                if let Some(input) = usage.input_tokens {
+                    stats.context_used = input;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Tracks the session's usage as the host reports it or the requests
+    /// accumulate it.
+    fn track_session_stats(&mut self, kind: &ServerEventKind) {
+        let mut stats = self.model.session_stats.take().unwrap_or_default();
+        if Self::session_stats_update(&mut stats, kind) {
+            self.model.session_stats = Some(stats);
+        }
     }
 
     fn transcript_status(kind: &ServerEventKind) -> Option<TranscriptItem> {

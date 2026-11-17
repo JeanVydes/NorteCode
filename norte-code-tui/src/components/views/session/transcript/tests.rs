@@ -371,34 +371,6 @@ fn a_reasoning_downgrade_is_shown_as_a_state_change() {
     assert!(drawn.contains("medium"));
 }
 
-#[test]
-fn the_usage_footer_names_the_model_the_tokens_and_the_cost() {
-    let items = [TranscriptItem::Usage(crate::ui_model::UsageSummary {
-        turn: None,
-        provider: Some("openai".to_owned()),
-        model: Some("gpt-5".to_owned()),
-        input_tokens: Some(1200),
-        output_tokens: Some(340),
-        cache_read_tokens: Some(900),
-        cost_usd: Some(0.25),
-        duration_ms: Some(820),
-        tokens_per_second: Some(42.5),
-    })];
-    let lines = TranscriptRenderer::lines(&items, DiffMode::Unified, 80);
-
-    let footer = lines
-        .iter()
-        .map(line_content)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(footer.contains("openai/gpt-5"));
-    assert!(footer.contains("1.2k in"));
-    assert!(footer.contains("340 out"));
-    assert!(footer.contains("900 cached"));
-    assert!(footer.contains("820 ms"));
-    assert!(footer.contains("$0.2500"));
-}
-
 fn line_content(line: &ratatui::text::Line<'_>) -> String {
     line.spans
         .iter()
@@ -1271,7 +1243,7 @@ fn the_separator_shows_how_long_the_tools_ran() {
 }
 
 #[test]
-fn after_a_history_reload_the_usage_lands_inside_its_turn() {
+fn after_a_history_reload_the_error_lands_after_the_turn() {
     use crate::ui_model::TranscriptItem;
     use norte_code_wire::HistorySpeaker;
 
@@ -1298,65 +1270,25 @@ fn after_a_history_reload_the_usage_lands_inside_its_turn() {
             provenance: None,
         }),
     ];
-    let tail = vec![
-        TranscriptItem::Usage(crate::ui_model::UsageSummary {
-            turn: Some(6),
-            provider: Some("tokenlab".to_owned()),
-            model: Some("MiniCPM".to_owned()),
-            input_tokens: Some(14300),
-            output_tokens: Some(72),
-            cache_read_tokens: Some(14100),
-            cost_usd: Some(0.0),
-            duration_ms: Some(2332),
-            tokens_per_second: Some(89.0),
-        }),
-        TranscriptItem::Error("turn is not active (TURN_NOT_ACTIVE)".to_owned()),
-    ];
+    let tail = vec![TranscriptItem::Error(
+        "turn is not active (TURN_NOT_ACTIVE)".to_owned(),
+    )];
     let merged: Vec<TranscriptItem> = history.into_iter().chain(tail).collect();
 
     let lines = TranscriptRenderer::lines(&merged, DiffMode::Unified, 80);
     let rendered: Vec<String> = lines.into_iter().map(|line| line_content(&line)).collect();
-    let footer = rendered
-        .iter()
-        .position(|line| line.contains("tokenlab"))
-        .expect("footer rendered");
     let error = rendered
         .iter()
         .position(|line| line.contains("turn is not active"))
         .expect("error rendered");
-    eprintln!("rendered: {rendered:?}");
     let separator = rendered
         .iter()
         .position(|line| line.starts_with('▾'))
         .expect("separator rendered");
     assert!(
-        footer > separator,
-        "the footer belongs to the turn: {rendered:?}"
+        error > separator,
+        "the error renders after the turn: {rendered:?}"
     );
-    assert!(
-        error > footer,
-        "the error renders after the footer: {rendered:?}"
-    );
-}
-
-#[test]
-fn a_usage_without_a_turn_renders_at_the_end() {
-    use crate::ui_model::TranscriptItem;
-
-    let items = [TranscriptItem::Usage(crate::ui_model::UsageSummary {
-        turn: None,
-        provider: Some("openai".to_owned()),
-        model: Some("gpt-5".to_owned()),
-        input_tokens: Some(1200),
-        output_tokens: Some(340),
-        cache_read_tokens: Some(900),
-        cost_usd: Some(0.25),
-        duration_ms: Some(820),
-        tokens_per_second: Some(42.5),
-    })];
-    let lines = TranscriptRenderer::lines(&items, DiffMode::Unified, 80);
-    let rendered: Vec<String> = lines.into_iter().map(|line| line_content(&line)).collect();
-    assert!(rendered.iter().any(|line| line.contains("openai/gpt-5")));
 }
 
 #[test]
