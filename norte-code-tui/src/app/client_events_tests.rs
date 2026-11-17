@@ -99,6 +99,14 @@ fn an_error_kills_a_live_turn_but_not_an_idle_one() {
 }
 
 #[test]
+fn a_sequence_gap_is_not_a_turn_error() {
+    assert!(App::is_sequence_gap(
+        "RAEP sequence gap: expected 1334, received 1335"
+    ));
+    assert!(!App::is_sequence_gap("rate limit"));
+}
+
+#[test]
 fn the_task_list_the_host_sends_is_kept() {
     let todos = App::todo_list(&ServerEventKind::SessionTodos {
         todos: vec![norte_code_wire::TodoInfo {

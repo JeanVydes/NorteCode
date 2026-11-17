@@ -71,7 +71,7 @@ impl App {
             ClientData::PluginUpdate { change, plugins } => {
                 self.model.plugins = plugins;
                 if !change.operation.is_empty() {
-                    self.model.notice = Some(format!("{} {}", change.operation, change.name));
+                    self.set_notice(format!("{} {}", change.operation, change.name));
                 }
             }
             ClientData::Telemetry(report) => self.model.telemetry = Some(report),
@@ -87,7 +87,7 @@ impl App {
                 self.model.notice = None;
             }
             ClientData::ExportReady(url) => {
-                self.model.notice = Some(format!("Export ready: {url}"));
+                self.set_notice(format!("Export ready: {url}"));
             }
             ClientData::SessionCreated(session) => self.apply_created_session(*session)?,
             ClientData::SessionsUpdated(sessions) => self.apply_sessions_updated(sessions),
@@ -145,7 +145,7 @@ impl App {
             ErrorDestination::Transcript => {
                 self.model.transcript.push(TranscriptItem::Error(message));
             }
-            ErrorDestination::Notice => self.model.notice = Some(message),
+            ErrorDestination::Notice => self.set_notice(message),
         }
         if recovered {
             self.sync_reasoning_with_host();
