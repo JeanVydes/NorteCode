@@ -203,6 +203,7 @@ impl TextBuilder {
             )),
             Line::from(format!("{}  focus message composer", keys::COMPOSER_CHAR)),
             Line::from(format!("{}  send message", Self::submit_key_label())),
+            Line::from("Shift+Enter  new line in the message".to_owned()),
             Line::from(format!("{}  toggle edit diff mode", keys::DIFF_CHAR)),
             Line::from(format!("{}  stop the running turn", keys::CANCEL_TURN_CHAR)),
             Line::from("Ctrl+C  stop the running turn".to_owned()),

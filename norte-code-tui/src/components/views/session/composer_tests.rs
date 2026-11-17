@@ -165,7 +165,8 @@ fn the_composer_keeps_only_five_visible_lines() {
     assert_eq!(line_content(&composer.visible_lines(&model())[0]), "three");
     assert_eq!(
         line_content(composer.visible_lines(&model()).last().expect("a line")),
-        "seven"
+        "seven ",
+        "the caret sits at the end of the line as one cell"
     );
 }
 
@@ -174,4 +175,134 @@ fn line_content(line: &ratatui::text::Line<'_>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect()
+}
+
+#[test]
+fn the_caret_moves_left_and_right() {
+    let mut composer = Composer::default();
+    composer.paste("abc");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "abxc");
+}
+
+#[test]
+fn the_caret_moves_between_the_lines() {
+    let mut composer = Composer::default();
+    composer.paste("one\nthree");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "oneX\nthree");
+}
+
+#[test]
+fn the_caret_clamps_to_the_end_of_a_shorter_line() {
+    let mut composer = Composer::default();
+    composer.paste("abc\nlonger line");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "abcZ\nlonger line");
+}
+
+#[test]
+fn the_caret_returns_to_its_column_after_a_short_line() {
+    let mut composer = Composer::default();
+    composer.paste("abc\nlonger line");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &model());
+    composer.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "abc\nlonger lineZ");
+}
+
+#[test]
+fn erase_removes_the_character_before_the_caret() {
+    let mut composer = Composer::default();
+    composer.paste("abc");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "ac");
+}
+
+#[test]
+fn erase_does_nothing_at_the_start_of_the_text() {
+    let mut composer = Composer::default();
+    composer.paste("abc");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &model());
+    composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &model());
+    composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "abc");
+}
+
+#[test]
+fn a_newline_at_the_end_opens_a_line_for_the_caret() {
+    let mut composer = Composer::default();
+    composer.paste("first line");
+
+    composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), &model());
+
+    let lines = composer.visible_lines(&model());
+    assert_eq!(lines.len(), 2);
+    assert_eq!(line_content(&lines[1]), " ");
+    assert_eq!(composer.height(false), 5);
+}
+
+#[test]
+fn the_visible_lines_follow_the_caret() {
+    let mut composer = Composer::default();
+    composer.paste("one\ntwo\nthree\nfour\nfive\nsix\nseven");
+
+    for _ in 0..6 {
+        composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &model());
+    }
+
+    let lines = composer.visible_lines(&model());
+    assert_eq!(lines.len(), 5);
+    assert_eq!(line_content(&lines[0]), "one ");
+}
+
+#[test]
+fn sending_puts_the_caret_back_at_the_start() {
+    let mut composer = Composer::default();
+    composer.paste("hola");
+    press(&mut composer, KeyCode::Enter);
+
+    composer.paste("ab");
+    composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &model());
+    composer.handle_key(
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+        &model(),
+    );
+
+    assert_eq!(composer.text, "aXb");
 }
