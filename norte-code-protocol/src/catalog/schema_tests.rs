@@ -13,6 +13,7 @@ fn provider(name: &str) -> Provider {
         wires: vec![Wire {
             api: "https://example.invalid/v1".to_owned(),
             schema: WireSchema::OpenAI,
+            auth: None,
             headers: std::collections::BTreeMap::new(),
         }],
     }
@@ -111,16 +112,19 @@ fn the_preferred_wire_is_the_openai_one() {
         Wire {
             api: "https://example.invalid/google".to_owned(),
             schema: WireSchema::Google,
+            auth: None,
             headers: std::collections::BTreeMap::new(),
         },
         Wire {
             api: "https://example.invalid/anthropic".to_owned(),
             schema: WireSchema::Anthropic,
+            auth: None,
             headers: std::collections::BTreeMap::new(),
         },
         Wire {
             api: "https://example.invalid/openai".to_owned(),
             schema: WireSchema::OpenAI,
+            auth: None,
             headers: std::collections::BTreeMap::new(),
         },
     ];
