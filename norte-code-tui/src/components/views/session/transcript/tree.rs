@@ -1,7 +1,7 @@
 //! Builds the transcript tree from the log.
 //!
 //! The log is flat and stays flat: this is a view of it, rebuilt every frame.
-//! A turn holds the reasoning, the messages, the tool calls, the usage footer
+//! A turn holds the reasoning, the messages, the tool calls
 //! and the errors that belong to it.
 
 use std::collections::HashMap;
@@ -52,7 +52,7 @@ pub(super) struct ToolSlot {
 
 /// What remains of the stream while no turn claims it.
 ///
-/// User messages, errors and usage footers all land in one queue, in the
+/// User messages and errors land in one queue, in the
 /// order they arrived, so a render that happens before the turn exists
 /// cannot reorder them or scatter them across the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,10 +64,6 @@ pub(super) enum Residual {
     },
     Error {
         message: String,
-    },
-    Usage {
-        turn: Option<u64>,
-        usage: crate::ui_model::UsageSummary,
     },
 }
 
@@ -99,19 +95,10 @@ impl TreeBuilder {
             TranscriptItem::History(item) => self.push_history(item),
             TranscriptItem::ServerEvent(event) => self.push_event(&event.kind),
             TranscriptItem::Error(message) => {
-                // Kept for the open turn, like the usage footers, so a
+                // Kept for the open turn so a
                 // reload cannot clump the errors before what caused them.
                 self.residual.push(Residual::Error {
                     message: message.clone(),
-                });
-            }
-            TranscriptItem::Usage(usage) => {
-                // A footer is kept for the turn that is still open and
-                // accumulated into it when the turn closes, so a reload that
-                // reorders the log cannot strand it after later turns.
-                self.residual.push(Residual::Usage {
-                    turn: usage.turn,
-                    usage: usage.clone(),
                 });
             }
         }

@@ -7,22 +7,8 @@ use ratatui::{
 use super::TextBuilder;
 use crate::{
     components::palette,
-    ui_model::{SessionAttachmentState, SessionModel, TurnState, UsageSummary},
+    ui_model::{SessionAttachmentState, SessionModel, TurnState},
 };
-
-/// A token count short enough to read.
-fn human_count(value: u64) -> String {
-    let (divisor, suffix) = if value >= 1_000_000 {
-        (1_000_000, "M")
-    } else if value >= 1_000 {
-        (1_000, "k")
-    } else {
-        return value.to_string();
-    };
-    let whole = value / divisor;
-    let tenth = (value % divisor) * 10 / divisor;
-    format!("{whole}.{tenth}{suffix}")
-}
 
 impl TextBuilder {
     #[must_use]
@@ -77,53 +63,6 @@ impl TextBuilder {
                 .fg(palette::muted())
                 .add_modifier(ratatui::style::Modifier::ITALIC),
         ))
-    }
-
-    /// The footer under an answer: what the model request reported.
-    #[must_use]
-    pub fn usage_footer(usage: &UsageSummary) -> Option<Line<'static>> {
-        let mut parts: Vec<String> = Vec::new();
-        if let (Some(provider), Some(model)) = (&usage.provider, &usage.model) {
-            parts.push(format!("{provider}/{model}"));
-        }
-        if let Some(input) = usage.input_tokens {
-            parts.push(format!("{} in", human_count(input)));
-        }
-        if let Some(output) = usage.output_tokens {
-            parts.push(format!("{} out", human_count(output)));
-        }
-        if let Some(cache) = usage.cache_read_tokens {
-            parts.push(format!("{} cached", human_count(cache)));
-        }
-        if let Some(duration) = usage.duration_ms {
-            parts.push(Self::human_duration(duration));
-        }
-        if let Some(speed) = usage.tokens_per_second {
-            parts.push(format!("{speed:.1} tok/s"));
-        }
-        if let Some(cost) = usage.cost_usd {
-            parts.push(format!("${cost:.4}"));
-        }
-        if parts.is_empty() {
-            return None;
-        }
-        Some(Line::from(Span::styled(
-            parts.join(" · "),
-            Style::default().fg(palette::muted()),
-        )))
-    }
-
-    /// A duration short enough to read: milliseconds under a second,
-    /// seconds after that, so an accumulated turn does not read "9632 ms".
-    #[must_use]
-    pub fn human_duration(ms: u64) -> String {
-        if ms >= 1000 {
-            #[allow(clippy::cast_precision_loss)]
-            let seconds = ms as f64 / 1000.0;
-            format!("{seconds:.1} s")
-        } else {
-            format!("{ms} ms")
-        }
     }
 
     #[must_use]

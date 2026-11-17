@@ -29,17 +29,26 @@ fn queue_mode_compact(mode: SendMode) -> &'static str {
 
 use crate::components::HeaderModal;
 
+/// What a clickable header segment does when it is clicked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeaderAction {
+    /// Opens the named floating menu.
+    Modal(HeaderModal),
+    /// Switches to the named view.
+    OpenView(ComponentId),
+}
+
 /// The header as it is drawn, with the buttons in it.
 pub(crate) struct HeaderLayout {
     pub(crate) line: Line<'static>,
     /// The clickable parts, with the columns they span.
-    pub(crate) buttons: Vec<(usize, usize, HeaderModal)>,
+    pub(crate) buttons: Vec<(usize, usize, HeaderAction)>,
 }
 
 struct HeaderBuilder {
     theme: crate::ui_model::ThemeMode,
     spans: Vec<Span<'static>>,
-    buttons: Vec<(usize, usize, HeaderModal)>,
+    buttons: Vec<(usize, usize, HeaderAction)>,
     column: usize,
 }
 
@@ -62,11 +71,11 @@ impl HeaderBuilder {
         self.push(Span::styled(text, Style::default().fg(palette::muted())));
     }
 
-    fn button(&mut self, text: String, kind: HeaderModal) {
+    fn button(&mut self, text: String, action: HeaderAction) {
         let start = self.column;
         let style = palette::selected_style(self.theme).add_modifier(Modifier::BOLD);
         self.push(Span::styled(text, style));
-        self.buttons.push((start, self.column, kind));
+        self.buttons.push((start, self.column, action));
     }
 
     fn finish(self) -> HeaderLayout {
@@ -75,6 +84,20 @@ impl HeaderBuilder {
             buttons: self.buttons,
         }
     }
+}
+
+/// A token count short enough to read.
+fn human_count(value: u64) -> String {
+    let (divisor, suffix) = if value >= 1_000_000 {
+        (1_000_000, "M")
+    } else if value >= 1_000 {
+        (1_000, "k")
+    } else {
+        return value.to_string();
+    };
+    let whole = value / divisor;
+    let tenth = (value % divisor) * 10 / divisor;
+    format!("{whole}.{tenth}{suffix}")
 }
 
 impl TextBuilder {
@@ -120,22 +143,42 @@ impl TextBuilder {
                     })
             });
 
-        for item in [session, model_name].into_iter().flatten() {
+        for item in [session].into_iter().flatten() {
             builder.push(Span::raw(" · "));
             builder.muted(item);
+        }
+        if let Some(model) = model_name {
+            builder.push(Span::raw(" · "));
+            builder.button(model, HeaderAction::OpenView(ComponentId::Models));
         }
 
         builder.push(Span::raw(" · "));
         builder.button(
             format!(" queue {} ", queue_mode_compact(model.send_mode)),
-            HeaderModal::Queue,
+            HeaderAction::Modal(HeaderModal::Queue),
         );
         builder.push(Span::raw(" · "));
         builder.button(
             format!(" reasoning {} ", model.reasoning.label()),
-            HeaderModal::Reasoning,
+            HeaderAction::Modal(HeaderModal::Reasoning),
         );
+        if let Some(stats) = model.session_stats {
+            builder.push(Span::raw(" · "));
+            builder.muted(Self::session_stats_compact(&stats));
+        }
         builder.finish()
+    }
+
+    /// The session's usage, short enough to read at a glance.
+    fn session_stats_compact(stats: &crate::ui_model::SessionStatsSummary) -> String {
+        format!(
+            "{} req · {} in · {} out · {} cached · ${:.4}",
+            stats.requests,
+            human_count(stats.input_tokens),
+            human_count(stats.output_tokens),
+            human_count(stats.cache_read_tokens),
+            stats.cost_usd,
+        )
     }
 
     #[must_use]
@@ -172,6 +215,7 @@ impl TextBuilder {
             )),
             Line::from(format!("{}  toggle a turn's fold", keys::FOLD_CHAR)),
             Line::from("click a turn header to fold it, right-click it for a menu".to_owned()),
+            Line::from("click the model name in the header to open the catalogue".to_owned()),
             Line::from("click the queue or reasoning pill in the header for a menu".to_owned()),
             Line::from(format!("{}  stop a background job", keys::STOP_JOB_CHAR)),
             Line::from(format!("{}  start a new session", keys::NEW_SESSION_CHAR)),

@@ -26,71 +26,31 @@ pub(crate) enum TranscriptItem {
     History(norte_code_wire::HistoryItem),
     ServerEvent(Box<ServerEvent>),
     Error(String),
-    Usage(UsageSummary),
 }
 
-/// What one model request reported about itself.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UsageSummary {
-    /// The turn this request belongs to, as the host numbers it.
-    pub(crate) turn: Option<u64>,
-    pub(crate) provider: Option<String>,
-    pub(crate) model: Option<String>,
-    pub(crate) input_tokens: Option<u64>,
-    pub(crate) output_tokens: Option<u64>,
-    pub(crate) cache_read_tokens: Option<u64>,
-    pub(crate) cost_usd: Option<f64>,
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) tokens_per_second: Option<f64>,
-}
-
-impl UsageSummary {
-    /// Folds what another request of the same turn reported into this one.
-    ///
-    /// A turn shows one footer, so the counts are summed and the names are
-    /// kept from the last request that said them; the speed is what the
-    /// whole turn averaged once both totals are known.
-    pub(crate) fn absorb(&mut self, other: Self) {
-        self.turn = self.turn.or(other.turn);
-        if other.provider.is_some() {
-            self.provider = other.provider;
-        }
-        if other.model.is_some() {
-            self.model = other.model;
-        }
-        self.input_tokens = sum_counts(self.input_tokens, other.input_tokens);
-        self.output_tokens = sum_counts(self.output_tokens, other.output_tokens);
-        self.cache_read_tokens = sum_counts(self.cache_read_tokens, other.cache_read_tokens);
-        self.cost_usd = sum_costs(self.cost_usd, other.cost_usd);
-        self.duration_ms = sum_counts(self.duration_ms, other.duration_ms);
-        self.tokens_per_second = match (self.output_tokens, self.duration_ms) {
-            (Some(out), Some(ms)) if out > 0 && ms > 0 => {
-                #[allow(clippy::cast_precision_loss)]
-                let per_second = out as f64 / (ms as f64 / 1000.0);
-                Some(per_second)
-            }
-            _ => self.tokens_per_second.or(other.tokens_per_second),
-        };
-    }
-}
-
-/// Two request counts as one: what either reported, summed, or the one that
-/// reported when the other said nothing.
-fn sum_counts(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (None, None) => None,
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (Some(a), Some(b)) => Some(a.saturating_add(b)),
-    }
-}
-
-/// Two reported costs as one, the same way.
-fn sum_costs(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    match (a, b) {
-        (None, None) => None,
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (Some(a), Some(b)) => Some(a + b),
-    }
+/// The session's accumulated usage, as the host reports it.
+///
+/// Filled from the resume snapshot when one arrives, then kept current with
+/// each request's own accounting, so it reads the whole session rather
+/// than the last request.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SessionStatsSummary {
+    /// Requests reported for usage.
+    pub(crate) requests: u64,
+    /// Input tokens, summed over reported requests.
+    pub(crate) input_tokens: u64,
+    /// Output tokens, summed over reported requests.
+    pub(crate) output_tokens: u64,
+    /// Prompt tokens the provider served from a cache, summed.
+    pub(crate) cache_read_tokens: u64,
+    /// Prompt tokens the provider wrote to a cache, summed.
+    pub(crate) cache_write_tokens: u64,
+    /// Provider-reported cost, summed.
+    pub(crate) cost_usd: f64,
+    /// The input tokens of the last request: the context the session holds.
+    pub(crate) context_used: u64,
+    /// The declared context window, when the model reports it.
+    pub(crate) context_window: Option<u64>,
 }
 
 /// A user turn the reader can rewind to or pin.
@@ -444,6 +404,8 @@ pub(crate) struct UiModel {
     pub(crate) telemetry_scope: TelemetryScope,
     pub(crate) costs: Option<CostReport>,
     pub(crate) session_costs: Option<CostReport>,
+    /// The session's accumulated usage, as the host has reported it.
+    pub(crate) session_stats: Option<SessionStatsSummary>,
     pub(crate) plugins: Vec<PluginSummary>,
     pub(crate) models: Vec<ModelInfo>,
     pub(crate) catalog: CatalogDetail,

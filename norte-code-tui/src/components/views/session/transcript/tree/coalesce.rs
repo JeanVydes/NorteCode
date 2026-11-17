@@ -54,8 +54,7 @@ impl TreeBuilder {
         };
         Self::flush_assistant_of(&mut turn);
         Self::flush_reasoning_of(&mut turn);
-        let usage = self.take_usage_for(&turn.key);
-        turn.children.extend(usage);
+        turn.children.extend(self.take_errors_for());
         let mut node = TranscriptNode::new(TranscriptNodeKind::Turn { key: turn.key });
         for child in turn.children {
             node.push(child);
@@ -97,59 +96,36 @@ impl TreeBuilder {
             .push(TranscriptNode::new(TranscriptNodeKind::Reasoning { text }));
     }
 
-    /// The footer of the turn that just closed: what its requests reported,
-    /// accumulated into the one footer the turn shows, plus the errors that
-    /// arrived while it was open. Only live turns carry a number; anything
-    /// else stays queued for whoever closes a matching turn.
-    fn take_usage_for(&mut self, key: &super::TurnKey) -> Vec<TranscriptNode> {
-        let Some(number) = (match key {
-            super::TurnKey::Live(number) => Some(*number),
-            super::TurnKey::Named(_) => None,
-        }) else {
-            return Vec::new();
-        };
-        let mut footers = Vec::new();
+    /// The errors that arrived while the turn was open.
+    fn take_errors_for(&mut self) -> Vec<TranscriptNode> {
         let mut errors = Vec::new();
         let mut kept = Vec::with_capacity(self.residual.len());
         for entry in std::mem::take(&mut self.residual) {
             match entry {
-                Residual::Usage {
-                    turn: Some(turn),
-                    usage,
-                } if turn == number => footers.push(usage),
                 Residual::Error { message } => errors.push(message),
-                other => kept.push(other),
+                other @ Residual::UserMessage { .. } => kept.push(other),
             }
         }
         self.residual = kept;
-        let mut taken = Vec::new();
-        if let Some(usage) = merged_usage(footers) {
-            taken.push(TranscriptNode::new(TranscriptNodeKind::Usage { usage }));
-        }
-        for message in errors {
-            taken.push(TranscriptNode::new(TranscriptNodeKind::Error {
-                code: None,
-                message,
-            }));
-        }
-        taken
+        errors
+            .into_iter()
+            .map(|message| {
+                TranscriptNode::new(TranscriptNodeKind::Error {
+                    code: None,
+                    message,
+                })
+            })
+            .collect()
     }
 
     /// The tree, with everything no turn claimed laid down in the order it
-    /// arrived: user messages, errors and footers follow one another in
+    /// arrived: user messages and errors follow one another in
     /// stream order, which a reload cannot discover for them.
     pub(super) fn finish(mut self) -> Vec<TranscriptNode> {
         self.flush();
         self.close_turn();
         let mut roots = std::mem::take(&mut self.roots);
-        let mut pending_footers: Vec<(Option<u64>, crate::ui_model::UsageSummary)> = Vec::new();
-        let flush_footers =
-            |roots: &mut Vec<TranscriptNode>,
-             pending: &mut Vec<(Option<u64>, crate::ui_model::UsageSummary)>| {
-                for (_, usage) in merged_pending(std::mem::take(pending)) {
-                    roots.push(TranscriptNode::new(TranscriptNodeKind::Usage { usage }));
-                }
-            };
+        let mut pending_users: Vec<TranscriptNode> = Vec::new();
         let flush_users = |roots: &mut Vec<TranscriptNode>, users: &mut Vec<TranscriptNode>| {
             if users.is_empty() {
                 return;
@@ -162,7 +138,6 @@ impl TreeBuilder {
             }
             roots.push(turn);
         };
-        let mut pending_users: Vec<TranscriptNode> = Vec::new();
         for entry in std::mem::take(&mut self.residual) {
             match entry {
                 Residual::UserMessage {
@@ -170,7 +145,6 @@ impl TreeBuilder {
                     chips,
                     queued,
                 } => {
-                    flush_footers(&mut roots, &mut pending_footers);
                     pending_users.push(TranscriptNode::new(TranscriptNodeKind::Message {
                         role: MessageRole::User,
                         text,
@@ -180,18 +154,15 @@ impl TreeBuilder {
                     }));
                 }
                 Residual::Error { message } => {
-                    flush_footers(&mut roots, &mut pending_footers);
                     flush_users(&mut roots, &mut pending_users);
                     roots.push(TranscriptNode::new(TranscriptNodeKind::Error {
                         code: None,
                         message,
                     }));
                 }
-                Residual::Usage { turn, usage } => pending_footers.push((turn, usage)),
             }
         }
         flush_users(&mut roots, &mut pending_users);
-        flush_footers(&mut roots, &mut pending_footers);
         self.roots = roots;
         Self::merge_adjacent_turns(std::mem::take(&mut self.roots))
     }
@@ -216,33 +187,4 @@ impl TreeBuilder {
         }
         merged
     }
-}
-
-/// The footers of one turn, accumulated into the single footer it shows.
-fn merged_usage(
-    footers: Vec<crate::ui_model::UsageSummary>,
-) -> Option<crate::ui_model::UsageSummary> {
-    let mut merged: Option<crate::ui_model::UsageSummary> = None;
-    for footer in footers {
-        match &mut merged {
-            None => merged = Some(footer),
-            Some(accumulated) => accumulated.absorb(footer),
-        }
-    }
-    merged
-}
-
-/// The footers no turn claimed, accumulated per turn: the footers of a turn
-/// travel together in the log, so the ones that share a turn become one.
-fn merged_pending(
-    footers: Vec<(Option<u64>, crate::ui_model::UsageSummary)>,
-) -> Vec<(Option<u64>, crate::ui_model::UsageSummary)> {
-    let mut merged: Vec<(Option<u64>, crate::ui_model::UsageSummary)> = Vec::new();
-    for (turn, usage) in footers {
-        match merged.last_mut() {
-            Some((last_turn, accumulated)) if *last_turn == turn => accumulated.absorb(usage),
-            _ => merged.push((turn, usage)),
-        }
-    }
-    merged
 }
