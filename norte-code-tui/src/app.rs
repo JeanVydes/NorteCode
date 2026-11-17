@@ -110,6 +110,8 @@ struct App {
     /// A refusal the client is already lowering for a chosen effort.
     reasoning_recovery: crate::ui_model::ReasoningRecovery,
     last_session_refresh: Instant,
+    /// When the current notice was set, if there is one.
+    notice_since: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -145,6 +147,7 @@ impl App {
             last_ticker_tick: Instant::now(),
             reasoning_recovery: crate::ui_model::ReasoningRecovery::default(),
             last_session_refresh: Instant::now(),
+            notice_since: None,
         };
         app.activate_view(ComponentId::Sessions)?;
         app.open_session(fresh);
@@ -164,6 +167,7 @@ impl App {
                 self.ticker_offset = self.ticker_offset.wrapping_add(1);
                 self.last_ticker_tick = Instant::now();
             }
+            self.expire_notice();
             self.drain_client_events()?;
             if self.model.preferences.auto_refresh_sessions.is_on()
                 && self.last_session_refresh.elapsed() >= Duration::from_secs(15)
@@ -184,6 +188,24 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Shows a notice for a short while, the way a toast behaves.
+    pub(super) fn set_notice(&mut self, message: impl Into<String>) {
+        self.model.notice = Some(message.into());
+        self.notice_since = Some(Instant::now());
+    }
+
+    /// A notice that outlived its welcome leaves the footer.
+    fn expire_notice(&mut self) {
+        if self.model.notice.is_some()
+            && self
+                .notice_since
+                .is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(5))
+        {
+            self.model.notice = None;
+            self.notice_since = None;
+        }
     }
 
     /// Reads the keys and the mouse events that are waiting.

@@ -55,7 +55,7 @@ impl App {
     /// Records that the open stream went away.
     fn apply_reconnecting(&mut self, attempt: u32) {
         self.model.attachment_state = SessionAttachmentState::Connecting;
-        self.model.notice = Some(format!(
+        self.set_notice(format!(
             "Connection lost; reconnecting (attempt {}).",
             attempt + 1
         ));
@@ -107,7 +107,7 @@ impl App {
 
     /// Opens a session that arrived from an import.
     fn apply_import(&mut self, session_id: String) {
-        self.model.notice = Some("Session imported.".to_owned());
+        self.set_notice("Session imported.".to_owned());
         self.open_session(norte_code_wire::SessionKey::new(session_id));
     }
 
@@ -147,6 +147,11 @@ impl App {
     /// reached a host, so nothing about the session decided it.
     pub(super) fn is_transport_failure(message: &str) -> bool {
         message.contains("error sending request for url")
+    }
+
+    /// Whether the client skipped stream frames and healed by reloading.
+    pub(super) fn is_sequence_gap(message: &str) -> bool {
+        message.starts_with("RAEP sequence gap")
     }
 
     /// The one line a transport failure tells the reader, naming the host
@@ -341,10 +346,15 @@ impl App {
         event: norte_code_wire::ServerEvent,
     ) {
         if let ServerEventKind::Error { code, message } = &event.kind {
-            self.apply_reasoning_error(*code, message);
-            if message.starts_with("RAEP sequence gap") {
+            if Self::is_sequence_gap(message) {
+                // The stream healed itself by reloading; the reader only
+                // needs a short note, not a transcript entry that every
+                // later reload would drag to the end.
+                self.set_notice("Stream skipped events; reloading the session.".to_owned());
                 self.client.load_history(session, generation);
+                return;
             }
+            self.apply_reasoning_error(*code, message);
         }
         if let ServerEventKind::Error { message, .. } = &event.kind
             && Self::is_transport_failure(message)
@@ -688,7 +698,7 @@ impl App {
                 self.plan_review
                     .begin(session.clone(), question, prompt, options, *multiple)
         {
-            self.model.notice = Some(error.to_string());
+            self.set_notice(error.to_string());
         }
     }
 
