@@ -1,4 +1,4 @@
-use norte_code_wire::{QueueMode, SessionKey};
+use norte_code_wire::SessionKey;
 
 use crate::tools::DiffMode;
 
@@ -91,7 +91,7 @@ impl HeaderModal {
     /// The options of the menu when no model is known, in the order shown.
     pub(crate) const fn options(self) -> &'static [&'static str] {
         match self {
-            Self::Queue => &["reject", "queue", "interrupt"],
+            Self::Queue => &["steer", "queue", "interrupt", "reject"],
             Self::Reasoning => &["auto", "off", "low", "medium", "high"],
         }
     }
@@ -133,14 +133,17 @@ impl HeaderModal {
     pub(crate) fn action(self, index: usize, selected: &[&'static str]) -> Option<ComponentAction> {
         match self {
             Self::Queue => match selected.get(index) {
-                Some(&"reject") => Some(ComponentAction::SetQueueMode(
-                    norte_code_wire::QueueMode::Reject,
+                Some(&"steer") => Some(ComponentAction::SetQueueMode(
+                    crate::ui_model::SendMode::Steer,
                 )),
                 Some(&"queue") => Some(ComponentAction::SetQueueMode(
-                    norte_code_wire::QueueMode::Queue,
+                    crate::ui_model::SendMode::Queue,
                 )),
                 Some(&"interrupt") => Some(ComponentAction::SetQueueMode(
-                    norte_code_wire::QueueMode::Interrupt,
+                    crate::ui_model::SendMode::Interrupt,
+                )),
+                Some(&"reject") => Some(ComponentAction::SetQueueMode(
+                    crate::ui_model::SendMode::Reject,
                 )),
                 _ => None,
             },
@@ -185,7 +188,7 @@ pub(crate) enum ComponentAction {
     AttachFile(String),
     ImportSession(String),
     ScrollTranscript(isize),
-    SetQueueMode(QueueMode),
+    SetQueueMode(crate::ui_model::SendMode),
     SetModel {
         provider: String,
         model: String,

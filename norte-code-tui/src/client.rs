@@ -4,9 +4,7 @@ use futures_util::StreamExt;
 use norte_code_client::{
     AgentClient, ApiError, ClientError, EventStream, RemoteClient, RestClient, SessionSummary,
 };
-use norte_code_wire::{
-    ChildSessionSummary, ModelInfo, PlanSummary, QueueMode, ServerEvent, SessionKey,
-};
+use norte_code_wire::{ChildSessionSummary, ModelInfo, PlanSummary, ServerEvent, SessionKey};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
@@ -20,6 +18,7 @@ mod turns;
 mod uploads;
 
 use crate::config::ClientConfig;
+use crate::ui_model::SendMode;
 
 /// How long to wait before opening the stream again.
 fn reconnect_delay(attempt: u32) -> u64 {
@@ -92,12 +91,13 @@ async fn pump_stream(
     attempt
 }
 
-/// The queue policy the host spells for a mode.
-fn queue_policy(mode: QueueMode) -> &'static str {
+/// The queue policy the host spells for a send mode.
+fn queue_policy(mode: SendMode) -> &'static str {
     match mode {
-        QueueMode::Reject => "reject",
-        QueueMode::Queue => "queue",
-        QueueMode::Interrupt => "interrupt",
+        SendMode::Steer => "steer",
+        SendMode::Queue => "queue",
+        SendMode::Interrupt => "interrupt",
+        SendMode::Reject => "reject",
     }
 }
 
@@ -505,13 +505,13 @@ impl ClientRuntime {
         generation: u64,
         text: String,
         parts: Vec<norte_code_wire::UserInputPart>,
-        queue_mode: QueueMode,
+        send_mode: SendMode,
     ) {
         let api = Arc::clone(&self.api);
         let client = Arc::clone(&self.client);
         let sender = self.sender.clone();
         self.runtime.spawn(async move {
-            let policy = queue_policy(queue_mode);
+            let policy = queue_policy(send_mode);
             let session_id = session.as_str().to_owned();
             let outcome: Result<(), ClientOperationError> = async {
                 for attempt in 0..2 {

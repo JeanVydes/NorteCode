@@ -4,7 +4,7 @@ use norte_code_client::{
 };
 use norte_code_wire::{
     AgentSummary, BudgetAction, BudgetScope, BudgetUnit, ChildSessionSummary, JobInfo, ModelInfo,
-    PlanSummary, QueueMode, QuotaReport, ServerEvent, ServerEventKind, SessionKey, SessionSummary,
+    PlanSummary, QuotaReport, ServerEvent, ServerEventKind, SessionKey, SessionSummary,
     TelemetryReport, TodoInfo, TurnPhaseName,
 };
 use serde::{Deserialize, Serialize};
@@ -385,6 +385,23 @@ impl TurnState {
 #[path = "ui_model_tests.rs"]
 mod tests;
 
+/// How the composer sends the next input while a turn is running.
+///
+/// RAEP spells the same choice as its `QueuePolicy`; the client's default is
+/// `steer`, which reaches the request in flight instead of refusing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SendMode {
+    /// Reach the request in flight, or start a turn when none is running.
+    #[default]
+    Steer,
+    /// Wait behind the turn in flight.
+    Queue,
+    /// Cancel the turn in flight, then run this input.
+    Interrupt,
+    /// Refuse the input while a turn is running.
+    Reject,
+}
+
 #[derive(Default)]
 pub(crate) struct UiModel {
     pub(crate) endpoint: String,
@@ -411,7 +428,7 @@ pub(crate) struct UiModel {
     pub(crate) notice: Option<String>,
     pub(crate) transcript: Vec<TranscriptItem>,
     pub(crate) turn_state: TurnState,
-    pub(crate) queue_mode: QueueMode,
+    pub(crate) send_mode: SendMode,
     pub(crate) budget_action: BudgetAction,
     pub(crate) active_turn: Option<String>,
     pub(crate) session_model: Option<SessionModel>,

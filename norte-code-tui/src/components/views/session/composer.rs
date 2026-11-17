@@ -79,7 +79,7 @@ impl Composer {
         }
         if self.focus == SessionFocus::Composer
             && model.active_turn.is_some()
-            && model.queue_mode == norte_code_wire::QueueMode::Reject
+            && model.send_mode == crate::ui_model::SendMode::Reject
         {
             return TextBuilder::composer_busy_placeholder().to_owned();
         }
@@ -220,7 +220,7 @@ impl Composer {
                 if (!self.text.trim().is_empty() || !self.chips.is_empty())
                     && model.attachment_state == SessionAttachmentState::Attached
                     && (model.active_turn.is_none()
-                        || model.queue_mode != norte_code_wire::QueueMode::Reject) =>
+                        || model.send_mode != crate::ui_model::SendMode::Reject) =>
             {
                 let text = std::mem::take(&mut self.text);
                 let chips = self.take_chips();
