@@ -175,16 +175,6 @@ impl Component for SessionView {
     fn lifecycle_mut(&mut self) -> &mut ComponentLifecycle {
         &mut self.lifecycle
     }
-    fn scroll_transcript(&mut self, lines: isize) {
-        if lines.is_negative() {
-            self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(lines.unsigned_abs());
-        } else {
-            self.scroll_from_bottom = self
-                .scroll_from_bottom
-                .saturating_add(usize::try_from(lines).unwrap_or_default())
-                .min(self.layout.max_scroll);
-        }
-    }
 
     fn captures_global_keys(&self) -> bool {
         self.composer.focus == SessionFocus::Composer
@@ -354,6 +344,18 @@ impl Component for SessionView {
 }
 
 impl SessionView {
+    /// Scrolls the transcript by `lines` rows, negative towards the newest.
+    fn scroll_transcript(&mut self, lines: isize) {
+        if lines.is_negative() {
+            self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(lines.unsigned_abs());
+        } else {
+            self.scroll_from_bottom = self
+                .scroll_from_bottom
+                .saturating_add(usize::try_from(lines).unwrap_or_default())
+                .min(self.layout.max_scroll);
+        }
+    }
+
     /// The turn whose separator sits at the row the reader clicked.
     fn turn_at(&self, column: u16, row: u16) -> Option<transcript::TurnKey> {
         let Rect {

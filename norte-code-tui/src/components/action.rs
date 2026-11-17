@@ -187,7 +187,6 @@ pub(crate) enum ComponentAction {
     },
     AttachFile(String),
     ImportSession(String),
-    ScrollTranscript(isize),
     SetQueueMode(crate::ui_model::SendMode),
     SetModel {
         provider: String,
