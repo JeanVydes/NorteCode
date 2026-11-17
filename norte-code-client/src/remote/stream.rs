@@ -1,5 +1,4 @@
 use futures_util::stream::{self, StreamExt};
-use norte_code_wire::QueueMode;
 use norte_code_wire::{ClientRequest, ServerEvent};
 use raep_types::{Ack, Envelope, FrameType, StandardFrameType, TurnId, UserInput};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
@@ -54,17 +53,6 @@ impl RemoteClient {
             percent_encode(session_id),
             percent_encode(&self.agent_for_session(session_id))
         )
-    }
-
-    /// RAEP `QueuePolicy` for a [`QueueMode`]: the two enums spell the
-    /// same three values, so the mapping is exhaustive and cannot fall
-    /// through to a default.
-    pub(crate) const fn raep_queue_policy(mode: QueueMode) -> raep_types::QueuePolicy {
-        match mode {
-            QueueMode::Reject => raep_types::QueuePolicy::Reject,
-            QueueMode::Queue => raep_types::QueuePolicy::Queue,
-            QueueMode::Interrupt => raep_types::QueuePolicy::Interrupt,
-        }
     }
 
     /// Submits one `UserInput` frame while reading its live event stream.

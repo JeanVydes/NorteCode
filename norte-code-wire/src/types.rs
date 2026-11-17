@@ -43,7 +43,7 @@ impl fmt::Display for SessionKey {
 /// Local clients may provide `path`; remote clients should provide `blob` after
 /// uploading through the host. The latter avoids shared-filesystem assumptions
 /// and lets the service use its content-addressed store directly.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attachment {
     /// The path to a local file, for in-process clients.

@@ -663,6 +663,382 @@ async fn user_inputs_require_turn_ids_and_queue_with_a_bounded_position() {
     assert_eq!(cancelled[0].payload["stop_reason"], "cancelled");
 }
 
+/// A model factory that always returns one scripted model.
+struct SingleModel(Arc<dyn norte::Model>);
+
+impl norte_code_agent::ModelFactory for SingleModel {
+    fn build(
+        &self,
+        _spec: &norte_code_agent::ModelSpec,
+        _capabilities: &norte::Capabilities,
+    ) -> Result<Arc<dyn norte::Model>, norte_code_agent::ServiceError> {
+        Ok(Arc::clone(&self.0))
+    }
+}
+
+/// The spec a scripted host session runs with.
+fn scripted_spec() -> norte_code_agent::ModelSpec {
+    norte_code_agent::ModelSpec {
+        provider: "test".to_owned(),
+        model: "scripted".to_owned(),
+        endpoint: "https://example.invalid/v1".to_owned(),
+        api_key: norte_code_protocol::config::ApiKey::new("test"),
+        schema: norte_code_wire::catalog::WireSchema::OpenAI,
+        auth: None,
+        capabilities: norte::Capabilities::builder()
+            .streaming(norte::StreamingGranularity::Delta)
+            .input(norte::Modality::Text)
+            .output(norte::Modality::Text)
+            .build(),
+        headers: std::collections::BTreeMap::new(),
+    }
+}
+
+/// A host whose service runs the `scripted` model, with one attached session.
+async fn scripted_host(
+    model: Arc<norte_testing::ScriptedModel>,
+    config: HostConfig,
+) -> (Arc<NorteCodeRaepHost>, String) {
+    let model_dyn: Arc<dyn norte::Model> = model;
+    let service = Arc::new(
+        Service::new(
+            norte_code_protocol::config::Config::default(),
+            Arc::new(norte_code_protocol::catalog::Catalog::default()),
+            Some(scripted_spec()),
+            Arc::new(SingleModel(model_dyn)),
+            Arc::new(norte_code_protocol::InMemoryStore::new()),
+            Arc::new(norte::InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let host = Arc::new(NorteCodeRaepHost::new(service, config).expect("host"));
+    let session_id = attach_session(&host).await;
+    (host, session_id)
+}
+
+/// A host with no model configured, with one attached session.
+async fn vendor_host(config: HostConfig) -> (NorteCodeRaepHost, String) {
+    let service = Arc::new(
+        Service::new(
+            norte_code_protocol::config::Config::default(),
+            Arc::new(norte_code_protocol::catalog::Catalog::default()),
+            None,
+            Arc::new(norte_code_agent::VendorModels),
+            Arc::new(norte_code_protocol::InMemoryStore::new()),
+            Arc::new(norte::InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let host = NorteCodeRaepHost::new(service, config).expect("host");
+    let session_id = attach_session(&host).await;
+    (host, session_id)
+}
+
+/// Attaches a session to `host`, returning the session id.
+async fn attach_session(host: &NorteCodeRaepHost) -> String {
+    let attach = Envelope::new(
+        standard(StandardFrameType::SessionAttach),
+        payload(SessionAttach {
+            agent_id: "norte-code".to_owned(),
+            agent_override: None,
+            create_if_missing: Some(true),
+            mode: None,
+            takeover: None,
+            resume_from_seq: None,
+            capabilities: None,
+            client_info: None,
+            options: None,
+        }),
+        1,
+    );
+    let attached = host.handle(attach).await.expect("attach");
+    attached[0].session_id.clone()
+}
+
+fn user_input(session_id: &str, turn_id: &str, timestamp: i64, body: Value) -> Envelope<Value> {
+    let mut frame = Envelope::new(standard(StandardFrameType::UserInput), body, timestamp);
+    frame.session_id = session_id.to_owned();
+    frame.turn_id = Some(TurnId::new(turn_id).expect("turn id"));
+    frame
+}
+
+#[tokio::test]
+async fn a_steer_on_an_occupied_session_is_accepted_without_queueing() {
+    let reference = norte::ModelRef::new(
+        norte::ProviderId::new("test").expect("provider"),
+        norte::ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(norte_testing::ScriptedModel::new(reference).turn_text("ok"));
+    let (host, session_id) = scripted_host(model, HostConfig::default()).await;
+    // The host's book says a turn is in flight, which is what the steer
+    // consults before it asks the service to start one.
+    host.state
+        .lock()
+        .await
+        .turns
+        .activate(&session_id, TurnId::new("active_turn").expect("turn id"));
+    let steer = user_input(
+        &session_id,
+        "steer_turn",
+        2,
+        json!({"prompt": "sideways", "queue_policy": "steer"}),
+    );
+    let response = host.handle(steer).await.expect("steer accepted");
+    assert_eq!(
+        response[0].kind,
+        standard(StandardFrameType::UserInputAccepted)
+    );
+    assert_eq!(
+        response[0].turn_id.as_ref().map(TurnId::as_str),
+        Some("steer_turn")
+    );
+    assert!(
+        response[0].payload["position"].is_null(),
+        "a steer has no queue position"
+    );
+    assert!(
+        !response
+            .iter()
+            .any(|frame| frame.payload["state"].as_str() == Some("QUEUED")),
+        "a steer never parks in the queue: {response:?}"
+    );
+    // The turn the steer started ran, aliased to the id the client chose.
+    assert!(response.iter().any(|frame| {
+        frame.kind == standard(StandardFrameType::TurnStateChanged)
+            && frame.payload["state"].as_str() == Some("CALLING_PROVIDER")
+            && frame.turn_id.as_ref().map(TurnId::as_str) == Some("steer_turn")
+    }));
+    assert!(response.iter().any(|frame| {
+        frame.payload["state"].as_str() == Some("COMPLETED")
+            && frame.turn_id.as_ref().map(TurnId::as_str) == Some("steer_turn")
+    }));
+}
+
+#[tokio::test]
+async fn a_steer_carries_none_of_the_per_turn_shaping() {
+    let (host, session_id) = vendor_host(HostConfig::default()).await;
+    for (timestamp, body) in [
+        (2, json!({"prompt": "shaped", "queue_policy": "steer", "overrides": {}})),
+        (3, json!({"prompt": "shaped", "queue_policy": "steer", "response_format": {"type": "text"}})),
+        (4, json!({"prompt": "shaped", "queue_policy": "steer", "metadata": {"origin": "test"}})),
+    ] {
+        let frame = user_input(&session_id, &format!("steer_{timestamp}"), timestamp, body);
+        assert!(
+            matches!(
+                host.handle(frame).await,
+                Err(HostError::InvalidFrame(ref message)) if message.contains("steer")
+            ),
+            "the steer is refused with the shaping it asked for"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_steer_is_not_bounded_by_the_queue_capacity() {
+    // One slot in the queue and it is full: the next `queue` input is
+    // refused, and the steers keep being accepted.
+    let reference = norte::ModelRef::new(
+        norte::ProviderId::new("test").expect("provider"),
+        norte::ModelId::new("scripted").expect("model"),
+    );
+    let model = Arc::new(norte_testing::ScriptedModel::new(reference).turn_text("ok"));
+    let (host, session_id) = scripted_host(
+        model,
+        HostConfig {
+            max_queued_inputs: 1,
+            ..HostConfig::default()
+        },
+    )
+    .await;
+    host.state
+        .lock()
+        .await
+        .turns
+        .activate(&session_id, TurnId::new("active_turn").expect("turn id"));
+    let queued = user_input(
+        &session_id,
+        "queue_turn",
+        2,
+        json!({"prompt": "queued input", "queue_policy": "queue"}),
+    );
+    let accepted = host.handle(queued).await.expect("queued input accepted");
+    assert_eq!(accepted[0].payload["position"], 1);
+    let overflow = user_input(
+        &session_id,
+        "queue_overflow",
+        3,
+        json!({"prompt": "one too many", "queue_policy": "queue"}),
+    );
+    assert!(matches!(
+        host.handle(overflow).await,
+        Err(HostError::SessionBusy)
+    ));
+    for (timestamp, turn_id) in [(4, "steer_one"), (5, "steer_two")] {
+        host.state
+            .lock()
+            .await
+            .turns
+            .activate(&session_id, TurnId::new("active_turn").expect("turn id"));
+        let steer = user_input(
+            &session_id,
+            turn_id,
+            timestamp,
+            json!({"prompt": "sideways", "queue_policy": "steer"}),
+        );
+        let response = host.handle(steer).await.expect("steer accepted");
+        assert_eq!(
+            response[0].kind,
+            standard(StandardFrameType::UserInputAccepted)
+        );
+        assert!(
+            response[0].payload["position"].is_null(),
+            "a steer has no queue position"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_steer_the_service_cannot_run_reports_it_and_clears_the_retry() {
+    let (host, session_id) = vendor_host(HostConfig::default()).await;
+    host.state
+        .lock()
+        .await
+        .turns
+        .activate(&session_id, TurnId::new("active_turn").expect("turn id"));
+    let steer = || {
+        user_input(
+            &session_id,
+            "steer_turn",
+            2,
+            json!({"prompt": "sideways", "queue_policy": "steer"}),
+        )
+    };
+    assert!(
+        matches!(
+            host.handle(steer()).await,
+            Err(HostError::Service(ref message)) if message.contains("no model is configured")
+        ),
+        "the service refuses to run the steer"
+    );
+    // The failure cleared the idempotency book: the same frame fails the same
+    // way instead of replaying the accepted frame it never made whole.
+    assert!(matches!(
+        host.handle(steer()).await,
+        Err(HostError::Service(_))
+    ));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_steer_while_the_turn_is_parked_joins_it_without_a_new_turn() {
+    let reference = norte::ModelRef::new(
+        norte::ProviderId::new("test").expect("provider"),
+        norte::ModelId::new("scripted").expect("model"),
+    );
+    let call = norte::CallId::new();
+    let model = Arc::new(
+        norte_testing::ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "ask_user",
+                &serde_json::json!({
+                    "question": "Which file should I edit?",
+                    "options": ["src/lib.rs", "src/main.rs"],
+                    "multiple": false,
+                }),
+            )
+            .turn_text("done."),
+    );
+    let model_handle = Arc::clone(&model);
+    let (host, session_id) = scripted_host(Arc::clone(&model), HostConfig::default()).await;
+
+    // The first input parks on the question and holds the turn lock.
+    let input = user_input(
+        &session_id,
+        "client_turn",
+        2,
+        json!({"prompt": "do the work"}),
+    );
+    let input_host = Arc::clone(&host);
+    let input_task = tokio::spawn(async move { input_host.handle(input).await });
+
+    // Wait for the parked question to reach the replay log.
+    let mut question = None;
+    for _ in 0..250 {
+        let window = host.replay.after(&session_id, 0);
+        question = window.frames.into_iter().find_map(|frame| {
+            match &frame.kind {
+                raep_types::FrameType::Extension(name) if name == "norte_code.question_asked" => {
+                    frame.payload.get("question").and_then(Value::as_str).map(str::to_owned)
+                }
+                _ => None,
+            }
+        });
+        if question.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let question = question.expect("the turn parked on a question");
+
+    // The turn is alive and parked: a steer joins its request in flight
+    // instead of starting one of its own.
+    let steer = user_input(
+        &session_id,
+        "steer_turn",
+        3,
+        json!({"prompt": "like it so", "queue_policy": "steer"}),
+    );
+    let response = host.handle(steer).await.expect("steer accepted");
+    assert_eq!(
+        response.len(),
+        1,
+        "the steer joins the turn in flight and emits nothing else: {response:?}"
+    );
+    assert_eq!(
+        response[0].kind,
+        standard(StandardFrameType::UserInputAccepted)
+    );
+    assert!(response[0].payload["position"].is_null());
+
+    // Answer through the NorteCode command extension; the parked turn reads
+    // its own answer and finishes.
+    let answer = norte_code_wire::ClientRequest {
+        request_id: 4,
+        kind: norte_code_wire::ClientRequestKind::AnswerQuestion {
+            session: norte_code_wire::SessionKey::new(session_id.clone()),
+            question,
+            answer: "src/lib.rs".to_owned(),
+        },
+    };
+    let mut answer_frame = Envelope::new(
+        raep_types::FrameType::Extension(crate::NorteCodeExtension::Command.as_str().to_owned()),
+        serde_json::to_value(answer).expect("request"),
+        4,
+    );
+    answer_frame.session_id = session_id.clone();
+    host.handle(answer_frame).await.expect("answer");
+
+    let frames = input_task.await.expect("join").expect("turn events");
+    assert!(
+        frames.iter().any(|frame| {
+            frame.payload["state"].as_str() == Some("COMPLETED")
+                && frame.turn_id.as_ref().map(TurnId::as_str) == Some("client_turn")
+        }),
+        "the turn finished under the client's id: {frames:?}"
+    );
+    let requests = model_handle.requests();
+    assert_eq!(requests.len(), 2, "the turn made two requests");
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.role == norte::Role::User && message.text().contains("like it so")
+        }),
+        "the steered message joined the request in flight"
+    );
+}
+
 #[tokio::test]
 async fn attach_delivers_replay_between_attached_and_state() {
     let service = Arc::new(

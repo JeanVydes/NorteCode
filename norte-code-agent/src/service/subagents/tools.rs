@@ -231,6 +231,8 @@ impl MessageAgent {
                 Steered::new(
                     uuid::Uuid::new_v4().to_string(),
                     format!("Message from delegator:\n{text}"),
+                    Vec::new(),
+                    Vec::new(),
                 ),
             );
             return ToolOutput::text(answer(&AcceptedMessage {

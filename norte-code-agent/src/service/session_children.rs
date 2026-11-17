@@ -124,7 +124,7 @@ impl Service {
         for text in held {
             service
                 .steering
-                .push(nid, Steered::new(uuid::Uuid::new_v4().to_string(), text));
+                .push(nid, Steered::new(uuid::Uuid::new_v4().to_string(), text, Vec::new(), Vec::new()));
         }
         service.persist(key).await?;
         Ok((suspended, queued))

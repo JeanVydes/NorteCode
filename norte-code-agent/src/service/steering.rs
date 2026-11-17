@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::runtime::{ConsultationPoint, Interception, InterceptionContext, TurnInterceptor};
-use norte::{Message, Result, SessionId};
+use norte::domain::part::Part;
+use norte::{MediaPart, Message, Result, SessionId};
+use norte_code_wire::Attachment;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// A steering message on its way to the model.
@@ -14,17 +16,37 @@ pub(crate) struct Steered {
     pub(crate) id: String,
     /// The text the model reads.
     pub(crate) text: String,
+    /// The media parts the model reads, resolved before the message waited.
+    ///
+    /// The interceptor does not hold the blob store, so the service resolves
+    /// the attachments while the turn the message joins is still running.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) parts: Vec<MediaPart>,
+    /// The attachments behind the parts, for a message that starts a turn
+    /// instead of joining one: that turn resolves them itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attachments: Vec<Attachment>,
 }
 
 impl Steered {
     /// A message with a name.
-    pub(crate) fn new(id: String, text: String) -> Self {
-        Self { id, text }
+    pub(crate) fn new(
+        id: String,
+        text: String,
+        parts: Vec<MediaPart>,
+        attachments: Vec<Attachment>,
+    ) -> Self {
+        Self {
+            id,
+            text,
+            parts,
+            attachments,
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for Steered {
-    /// Reads a message, accepting the older shape where it was only text.
+    /// Reads a message, accepting the shapes where media was not carried.
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -32,14 +54,33 @@ impl<'de> Deserialize<'de> for Steered {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Shape {
-            Named { id: String, text: String },
+            Named {
+                id: String,
+                text: String,
+                #[serde(default)]
+                parts: Vec<MediaPart>,
+                #[serde(default)]
+                attachments: Vec<Attachment>,
+            },
             Text(String),
         }
         Ok(match Shape::deserialize(deserializer)? {
-            Shape::Named { id, text } => Self { id, text },
+            Shape::Named {
+                id,
+                text,
+                parts,
+                attachments,
+            } => Self {
+                id,
+                text,
+                parts,
+                attachments,
+            },
             Shape::Text(text) => Self {
                 id: String::new(),
                 text,
+                parts: Vec::new(),
+                attachments: Vec::new(),
             },
         })
     }
@@ -85,6 +126,22 @@ impl Steering {
                 .extend(taken.iter().cloned());
         }
         taken.into_iter().collect()
+    }
+
+    /// Takes one pending message by name, without the applied bookkeeping.
+    ///
+    /// The service calls this when it reclaims a message no turn will apply:
+    /// the message starts its own turn instead of joining one, so it never
+    /// reaches the applied queue.
+    pub(crate) fn take_if_pending(&self, session: SessionId, id: &str) -> Option<Steered> {
+        let mut pending = self.pending();
+        let queue = pending.get_mut(&session)?;
+        let index = queue.iter().position(|message| message.id == id)?;
+        let message = queue.remove(index);
+        if queue.is_empty() {
+            pending.remove(&session);
+        }
+        message
     }
 
     /// The messages the engine reported as applied, oldest first.
@@ -139,12 +196,63 @@ impl TurnInterceptor for SteeringInterceptor {
             .steering
             .take(context.session)
             .into_iter()
-            .map(|steered| Message::user(steered.text))
+            .map(|steered| {
+                let mut message = Message::user(steered.text);
+                message
+                    .parts
+                    .extend(steered.parts.into_iter().map(Part::Media));
+                message
+            })
             .collect();
         if messages.is_empty() {
             Ok(Interception::Continue)
         } else {
             Ok(Interception::Inject(messages))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn steered(id: &str) -> Steered {
+        Steered::new(id.to_owned(), format!("text of {id}"), Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn take_if_pending_removes_one_and_keeps_the_rest() {
+        let steering = Steering::default();
+        let session = SessionId::new();
+        steering.push(session, steered("a"));
+        steering.push(session, steered("b"));
+
+        let taken = steering.take_if_pending(session, "a").expect("first is pending");
+        assert_eq!(taken.id, "a");
+
+        assert!(!steering.is_pending(session, "a"));
+        assert!(steering.is_pending(session, "b"));
+        let remaining = steering.take(session);
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+    }
+
+    #[test]
+    fn take_if_pending_with_an_unknown_id_changes_nothing() {
+        let steering = Steering::default();
+        let session = SessionId::new();
+        steering.push(session, steered("a"));
+
+        assert!(steering.take_if_pending(session, "missing").is_none());
+        assert!(steering.is_pending(session, "a"));
+        assert!(
+            steering.applied(session, 1).is_empty(),
+            "the applied bookkeeping is not touched either"
+        );
     }
 }

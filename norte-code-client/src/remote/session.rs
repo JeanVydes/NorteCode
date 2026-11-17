@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use norte_code_wire::ClientRequest;
-use norte_code_wire::QueueMode;
 use raep_types::{FrameType, StandardFrameType, TurnId};
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde_json::Value;
@@ -42,9 +41,9 @@ impl AgentClient for RemoteClient {
         &self,
         session: &str,
         text: &str,
-        queue_mode: QueueMode,
+        queue_policy: raep_types::QueuePolicy,
     ) -> Result<EventStream, ClientError> {
-        self.submit_user_input_streaming(session, text, Self::raep_queue_policy(queue_mode))
+        self.submit_user_input_streaming(session, text, queue_policy)
             .await
     }
 

@@ -25,25 +25,6 @@ pub use wire::*;
 
 use serde::{Deserialize, Serialize};
 
-/// What a new input does when the session already has a turn running.
-///
-/// RAEP's `USER_INPUT.queue_policy` is the wire name for this. RAEP calls it
-/// `QueuePolicy` and spells the values `reject`, `queue` and `interrupt`.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-#[schemars(rename_all = "snake_case")]
-pub enum QueueMode {
-    /// Refuse the input while a turn is active (RAEP's default).
-    #[default]
-    Reject,
-    /// Enqueue the input for the turn already in flight.
-    Queue,
-    /// Cancel the running turn, then enqueue the input.
-    Interrupt,
-}
-
 /// The lifecycle state of one plan.
 ///
 /// It lives here and not with the plan's Markdown parser: it is a value that
