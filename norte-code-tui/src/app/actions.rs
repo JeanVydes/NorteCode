@@ -2,7 +2,7 @@ use norte_code_wire::ServerEventKind;
 
 use super::App;
 use crate::{
-    components::{ComponentAction, ComponentId, McpState, Preference, ViewAction},
+    components::{ComponentAction, McpState, Preference, ViewAction},
     ui_model::{
         SendMode, SessionAttachmentState, ThemeMode, ThinkingVisibility, TranscriptItem, TurnState,
     },
@@ -79,7 +79,10 @@ fn replayed_kind(
 }
 
 /// Whether a history page covers one live item exactly.
-fn history_covers(history: &[norte_code_wire::HistoryItem], item: &TranscriptItem) -> bool {
+pub(super) fn history_covers(
+    history: &[norte_code_wire::HistoryItem],
+    item: &TranscriptItem,
+) -> bool {
     match item {
         TranscriptItem::UserMessage { text, turn_id, .. } => {
             let by_id = turn_id.as_deref().is_some_and(|id| {
@@ -129,7 +132,10 @@ pub(super) fn drop_replaced_deltas(
     current
         .into_iter()
         .filter(|item| match item {
-            TranscriptItem::Status(_) | TranscriptItem::History(_) => true,
+            // The newest page is the committed record: a copy an earlier
+            // merge left is stale, even when the host renamed its id.
+            TranscriptItem::History(_) => false,
+            TranscriptItem::Status(_) => true,
             TranscriptItem::ServerEvent(event) => match &event.kind {
                 ServerEventKind::Delta { delta, .. } => match delta {
                     norte_code_wire::Delta::Text { .. }
@@ -159,12 +165,12 @@ pub(super) fn transcript_with_history(
             .filter(|item| seen.insert(item.id.clone()))
             .map(TranscriptItem::History)
             .collect();
-        // The compaction notice and any error are not part of the history
-        // page, so they are the only things that survive a replacement.
+        // The page is the record: only a failure is not part of it, so it is
+        // the one live item a replacement keeps.
         transcript.extend(
-            current.into_iter().filter(|item| {
-                matches!(item, TranscriptItem::Status(_) | TranscriptItem::Error(_))
-            }),
+            current
+                .into_iter()
+                .filter(|item| matches!(item, TranscriptItem::Error(_))),
         );
         return transcript;
     }
@@ -175,23 +181,29 @@ pub(super) fn transcript_with_history(
         .into_iter()
         .filter(|item| seen.insert(item.id.clone()))
         .collect();
-    let history_ids: std::collections::HashSet<String> =
-        history.iter().map(|item| item.id.clone()).collect();
     let live = drop_replaced_deltas(&history, current);
 
     // The history page is the committed record and forms the base; live
     // items the page does not cover follow it, keeping their order.
     let mut transcript = Vec::with_capacity(history.len() + live.len());
     transcript.extend(history.into_iter().map(TranscriptItem::History));
-    for item in live {
-        if let TranscriptItem::History(item) = &item
-            && history_ids.contains(item.id.as_str())
-        {
-            continue;
-        }
-        transcript.push(item);
-    }
+    transcript.extend(live);
     transcript
+}
+
+/// Whether a reload still has live work to keep.
+///
+/// A turn in flight is live by definition. So is a message the page does not
+/// hold yet: the reader typed it and the host has not committed it.
+pub(super) fn keeps_live_items(
+    turn_state: crate::ui_model::TurnState,
+    history: &[norte_code_wire::HistoryItem],
+    current: &[TranscriptItem],
+) -> bool {
+    turn_state.is_busy()
+        || current.iter().any(|item| {
+            matches!(item, TranscriptItem::UserMessage { .. }) && !history_covers(history, item)
+        })
 }
 
 impl App {
@@ -229,13 +241,6 @@ impl App {
             ComponentAction::SendMessage { text, chips } => self.send_message(text, &chips),
             ComponentAction::AttachFile(path) => self.attach_file(path),
             ComponentAction::ImportSession(path) => self.import_session(path),
-            ComponentAction::ScrollTranscript(lines) => {
-                if let Some(index) = self.view_index(ComponentId::Session)
-                    && let Some(component) = self.views.get_mut(index)
-                {
-                    component.scroll_transcript(lines);
-                }
-            }
             ComponentAction::SetQueueMode(mode) => {
                 self.model.send_mode = mode;
             }
@@ -243,7 +248,7 @@ impl App {
                 if let Some(session) = self.model.active_session.clone()
                     && self.model.active_child.is_none()
                 {
-                    self.model.notice = Some(format!(
+                    self.set_notice(format!(
                         "Model change requested: {provider}/{model}. It applies at the next turn boundary."
                     ));
                     self.client
@@ -328,7 +333,7 @@ impl App {
                 if self.model.active_child.is_none()
                     && let Some(session) = self.model.active_session.clone()
                 {
-                    self.model.notice = Some("Preparing session export...".to_owned());
+                    self.set_notice("Preparing session export...".to_owned());
                     self.client.export_session(session, self.session_generation);
                 }
             }
@@ -376,26 +381,26 @@ impl App {
             return;
         }
         if !self.uploads_supported() {
-            self.model.notice = Some(
+            self.set_notice(
                 "This host does not accept uploads, so there is nothing to attach.".to_owned(),
             );
             return;
         }
         let path = std::path::PathBuf::from(path);
         let Some(mime) = norte_code_client::mime_of_path(&path) else {
-            self.model.notice = Some(format!(
+            self.set_notice(format!(
                 "{} has no media type this client can send.",
                 path.display()
             ));
             return;
         };
         let Some(kind) = norte_code_client::input_part_kind(mime) else {
-            self.model.notice = Some(format!("{mime} is not a media type this client sends."));
+            self.set_notice(format!("{mime} is not a media type this client sends."));
             return;
         };
         let modality = norte_code_client::modality_of(kind);
         if !self.agent_accepts(modality) {
-            self.model.notice = Some(format!(
+            self.set_notice(format!(
                 "This agent does not accept {} input.",
                 norte_code_client::modality_word(modality)
             ));
@@ -498,7 +503,7 @@ impl App {
             self.model.active_session.clone(),
             self.model.active_turn.clone(),
         ) else {
-            self.model.notice = Some("There is no running turn to stop.".to_owned());
+            self.set_notice("There is no running turn to stop.".to_owned());
             return;
         };
         if self.model.active_child.is_some() {
@@ -520,7 +525,7 @@ impl App {
             .current_model_info()
             .and_then(|model| level.incompatible_with(&model.reasoning))
         {
-            self.model.notice = Some(format!("{message}; not changing reasoning."));
+            self.set_notice(format!("{message}; not changing reasoning."));
             return;
         }
         self.reasoning_recovery.clear();
@@ -601,7 +606,7 @@ impl App {
         answer: String,
     ) {
         if let Err(error) = self.plan_review.close() {
-            self.model.notice = Some(error.to_string());
+            self.set_notice(error.to_string());
         }
         self.client
             .answer_question(session, self.session_generation, question, answer);
@@ -658,7 +663,7 @@ impl App {
     fn persist_preferences(&mut self) {
         self.config.update_preferences(&self.model);
         if let Err(error) = self.config.save() {
-            self.model.notice = Some(format!("Could not save settings: {error}"));
+            self.set_notice(format!("Could not save settings: {error}"));
         }
     }
 

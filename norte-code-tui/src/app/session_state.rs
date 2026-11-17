@@ -43,6 +43,8 @@ impl App {
     ) {
         self.model.turn_points = turn_points(&history);
         let current = std::mem::take(&mut self.model.transcript);
+        let preserve_live = preserve_live
+            && super::actions::keeps_live_items(self.model.turn_state, &history, &current);
         self.model.transcript =
             super::actions::transcript_with_history(history, current, preserve_live);
     }
