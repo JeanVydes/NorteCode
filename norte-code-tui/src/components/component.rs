@@ -85,8 +85,6 @@ pub(crate) trait Component {
     fn id(&self) -> ComponentId;
     fn lifecycle(&self) -> &ComponentLifecycle;
     fn lifecycle_mut(&mut self) -> &mut ComponentLifecycle;
-    /// Scrolls the view when it is a conversation transcript.
-    fn scroll_transcript(&mut self, _lines: isize) {}
     fn captures_global_keys(&self) -> bool {
         false
     }
