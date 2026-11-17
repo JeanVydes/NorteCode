@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
-use crate::{MediaPart, QueueMode, TelemetryRecord};
+use crate::{MediaPart, TelemetryRecord};
 
 fn default_resume_replay() -> bool {
     true
@@ -350,26 +350,6 @@ pub enum ClientRequestKind {
         /// transcript at all.
         #[serde(default)]
         replay: bool,
-    },
-    /// Queue a message to apply at the next turn boundary.
-    ///
-    /// The `queue_mode` on the queued message decides what happens when
-    /// the session is already running a turn: `Reject` answers
-    /// `SessionBusy`, `Queue` puts the message in front of the request in
-    /// flight, and `Interrupt` cancels that turn before queueing.
-    Steer {
-        /// The session.
-        session: SessionKey,
-        /// The message.
-        text: String,
-        /// A name for the message, so the client can tell it apart when the
-        /// engine reports it applied. An empty name is fine: the service names
-        /// it then.
-        #[serde(default)]
-        id: String,
-        /// What to do when the session is already running a turn.
-        #[serde(default)]
-        queue_mode: QueueMode,
     },
     /// Ask the running turn to stop.
     CancelTurn {

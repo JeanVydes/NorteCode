@@ -521,19 +521,32 @@ impl NorteCodeRaepHost {
                 ));
             }
         };
-        let queue_mode = if input.replaces_turn_id.is_some() {
+        let queue_policy = if input.replaces_turn_id.is_some() {
             // `queue_policy` does not apply while `replaces_turn_id` is
             // present (RFC 18.2): the input is a rewind-and-re-run in one
             // step, not a queued input. The rewind is applied below before
             // any queueing decision, and the input then runs immediately.
-            norte_code_wire::QueueMode::Reject
+            raep_types::QueuePolicy::Reject
         } else {
-            match input.queue_policy.clone() {
-                Some(raep_types::QueuePolicy::Queue) => norte_code_wire::QueueMode::Queue,
-                Some(raep_types::QueuePolicy::Interrupt) => norte_code_wire::QueueMode::Interrupt,
-                Some(raep_types::QueuePolicy::Reject) | None => norte_code_wire::QueueMode::Reject,
-            }
+            input
+                .queue_policy
+                .clone()
+                .unwrap_or(raep_types::QueuePolicy::Reject)
         };
+        // A steer reaches a request in flight, so it carries none of the
+        // per-turn shaping the other policies honor.
+        if queue_policy == raep_types::QueuePolicy::Steer
+            && (input.overrides.is_some()
+                || input.response_format.is_some()
+                || input.metadata.is_some()
+                || requested_output
+                    .iter()
+                    .any(|modality| modality != &raep_types::Modality::Text))
+        {
+            return Err(HostError::InvalidFrame(
+                "steer accepts text and media only; send overrides, response_format, output parts and metadata on a regular input".to_owned(),
+            ));
+        }
         // Per-turn `overrides` (RFC 12.4): translate the known fields onto
         // the turn's own reasoning/budget. Model changes are not a per-turn
         // concept in the service, so a model override here is rejected.
@@ -580,7 +593,7 @@ impl NorteCodeRaepHost {
             response_format,
             replaces_turn_id: input.replaces_turn_id.clone(),
         };
-        let queued_position = {
+        let (queued_position, steer_in_flight) = {
             let mut state = self.state.lock().await;
             if let Some(previous_fingerprint) = state.turn_request_fingerprints.get(&turn_key) {
                 if previous_fingerprint != &turn_fingerprint {
@@ -596,11 +609,17 @@ impl NorteCodeRaepHost {
                     .collect());
             }
             let occupied = state.turns.is_occupied(&frame.session_id);
-            if occupied && queue_mode == norte_code_wire::QueueMode::Reject {
+            if occupied && queue_policy == raep_types::QueuePolicy::Reject {
                 return Err(HostError::SessionBusy);
             }
+            // A steer does not queue: it reaches the turn in flight directly,
+            // so the queue's capacity does not bound it either.
+            let steer_in_flight = occupied && queue_policy == raep_types::QueuePolicy::Steer;
             let queued = state.turns.queue_len(&frame.session_id);
-            if occupied && queued >= self.config.max_queued_inputs {
+            if occupied
+                && !steer_in_flight
+                && queued >= self.config.max_queued_inputs
+            {
                 return Err(HostError::SessionBusy);
             }
             state
@@ -614,11 +633,18 @@ impl NorteCodeRaepHost {
                 }
             }
             if occupied {
-                Some(state.turns.enqueue(
-                    &frame.session_id,
-                    queued_turn.clone(),
-                    queue_mode == norte_code_wire::QueueMode::Interrupt,
-                ))
+                if steer_in_flight {
+                    (None, true)
+                } else {
+                    (
+                        Some(state.turns.enqueue(
+                            &frame.session_id,
+                            queued_turn.clone(),
+                            queue_policy == raep_types::QueuePolicy::Interrupt,
+                        )),
+                        false,
+                    )
+                }
             } else {
                 state.turns.reserve(&frame.session_id, turn_id.clone());
                 state.turns.pending_push(&frame.session_id, turn_id.clone());
@@ -631,7 +657,7 @@ impl NorteCodeRaepHost {
                         .turns
                         .set_pending_output(&frame.session_id, queued_turn.output.clone());
                 }
-                None
+                (None, false)
             }
         };
         let outcome: Result<Vec<Envelope<Value>>, HostError> = async {
@@ -727,7 +753,7 @@ impl NorteCodeRaepHost {
                     )
                     .await?,
                 );
-                if queue_mode == norte_code_wire::QueueMode::Interrupt
+                if queue_policy == raep_types::QueuePolicy::Interrupt
                     && let Err(error) = self
                         .submit_service(
                             &frame.session_id,
@@ -744,6 +770,46 @@ impl NorteCodeRaepHost {
                     return Err(error);
                 }
                 return Ok(output);
+            }
+            if steer_in_flight {
+                let outcome = service
+                    .steer_input(
+                        0,
+                        &session,
+                        turn_id.as_str(),
+                        queued_turn.text.clone(),
+                        queued_turn.attachments.clone(),
+                    )
+                    .await;
+                match outcome {
+                    Ok(norte_code_agent::SteerOutcome::Injected) => {
+                        // The steer joins the turn in flight; the frames it
+                        // produces surface on that turn's event stream, which
+                        // the request that started the turn is collecting.
+                        return Ok(vec![accepted]);
+                    }
+                    Ok(norte_code_agent::SteerOutcome::Started(events)) => {
+                        // The turn the steer started belongs to this session's
+                        // aliasing too: the pending entry must exist before the
+                        // events are collected, so the TurnStarted aliases the
+                        // turn id the client chose. The book still shows the
+                        // finished turn it replaced; `activate` overwrites it.
+                        {
+                            let mut state = self.state.lock().await;
+                            state.turns.pending_push(&frame.session_id, turn_id.clone());
+                        }
+                        let events = self
+                            .collect_service_events(&frame.session_id, events)
+                            .await?;
+                        let mut output = vec![accepted];
+                        output.extend(events);
+                        return Ok(output);
+                    }
+                    Err(error) => {
+                        self.remove_turn_request(&frame.session_id, &turn_id).await;
+                        return Err(HostError::Service(error.to_string()));
+                    }
+                }
             }
             let submission = self
                 .submit_service(

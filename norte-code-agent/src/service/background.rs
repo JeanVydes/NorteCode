@@ -632,7 +632,7 @@ impl ShellProgress {
             job.dropped,
             &job.output,
         );
-        let steered = Steered::new(format!("job:{id}"), report);
+        let steered = Steered::new(format!("job:{id}"), report, Vec::new(), Vec::new());
         if let Some(service) = service {
             service.complete_background_job(
                 self.session,

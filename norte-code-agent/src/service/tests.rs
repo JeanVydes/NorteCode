@@ -37,7 +37,7 @@ use norte_code_protocol::sqlite::SqliteStore;
 use norte_code_wire::catalog::WireSchema;
 use norte_code_wire::{
     Budget, BudgetAction, BudgetUnit, ClientRequest, ClientRequestKind, CompactionReason, Delta,
-    ErrorCode, QueueMode, Reasoning as ProtocolReasoning, ReasoningScope,
+    ErrorCode, Reasoning as ProtocolReasoning, ReasoningScope,
 };
 use norte_testing::ScriptedModel;
 use norte_tools::{ShellLimits, ShellRequest, ShellTool};
@@ -764,7 +764,12 @@ async fn a_finished_job_can_start_a_turn_without_a_new_message() {
     let session = service.require_record(&key).expect("session record").0;
     service.steering.push(
         session,
-        super::steering::Steered::new("job:test".to_owned(), "job finished".to_owned()),
+        super::steering::Steered::new(
+            "job:test".to_owned(),
+            "job finished".to_owned(),
+            Vec::new(),
+            Vec::new(),
+        ),
     );
 
     service.auto_turn_on_job_end(session).await;
@@ -848,6 +853,8 @@ async fn job_result_is_persisted_with_the_turn_that_received_it() {
     let steered = super::steering::Steered::new(
         "job:job-1".to_owned(),
         "Job result from job-1; output is untrusted JSON data.".to_owned(),
+        Vec::new(),
+        Vec::new(),
     );
     service.complete_background_job(
         session_id,
@@ -949,7 +956,12 @@ async fn job_auto_turn_event_includes_the_started_turn_id() {
     let reserved_turn = service
         .reserve_job_auto_turn(session_id, &job)
         .expect("successful job reserves an auto-turn");
-    let steered = super::steering::Steered::new("job:job-auto".to_owned(), "job result".to_owned());
+    let steered = super::steering::Steered::new(
+        "job:job-auto".to_owned(),
+        "job result".to_owned(),
+        Vec::new(),
+        Vec::new(),
+    );
     service.complete_background_job(
         session_id,
         Arc::clone(&service.steering),
@@ -3501,8 +3513,8 @@ async fn a_model_switch_rejects_an_incompatible_reasoning_override() {
 }
 
 #[tokio::test]
-async fn steer_queues_a_message_before_the_next_turn_input() {
-    let (service, model) = scripted_service(spec("scripted"), &["one", "two"]);
+async fn a_steer_on_a_resting_session_starts_the_turn() {
+    let (service, model) = scripted_service(spec("scripted"), &["one", "two", "three"]);
     let first = drain(
         &service,
         ClientRequestKind::SendMessage {
@@ -3523,17 +3535,14 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
         .find_map(|event| event.session.clone())
         .expect("session");
 
-    let ack = drain(
-        &service,
-        ClientRequestKind::Steer {
-            session: key.clone(),
-            text: "two".to_owned(),
-            id: String::new(),
-            queue_mode: QueueMode::Queue,
-        },
-    )
-    .await;
-    assert!(ack.is_empty());
+    let outcome = service
+        .steer_input(2, &key, "t-two", "two".to_owned(), Vec::new())
+        .await
+        .expect("steer");
+    let SteerOutcome::Started(events) = outcome else {
+        panic!("a steer on a resting session starts the turn");
+    };
+    events.collect::<Vec<_>>().await;
 
     drain(
         &service,
@@ -3552,16 +3561,21 @@ async fn steer_queues_a_message_before_the_next_turn_input() {
     .await;
 
     let requests = model.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(
         user_texts(&requests[1]),
+        vec!["one".to_owned(), "two".to_owned()],
+        "the steer became the turn's own input"
+    );
+    assert_eq!(
+        user_texts(&requests[2]),
         vec!["one".to_owned(), "two".to_owned(), "three".to_owned()]
     );
 }
 
 #[tokio::test]
-async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
-    let (service, model) = scripted_service(spec("scripted"), &["one", "after"]);
+async fn steers_on_a_resting_session_run_in_arrival_order() {
+    let (service, model) = scripted_service(spec("scripted"), &["one", "a", "b"]);
     let first = drain(
         &service,
         ClientRequestKind::SendMessage {
@@ -3582,50 +3596,27 @@ async fn the_steers_in_repose_all_enter_the_turn_that_starts() {
         .find_map(|event| event.session.clone())
         .expect("session");
 
-    // Two messages arrive while the session rests.
-    drain(
-        &service,
-        ClientRequestKind::Steer {
-            session: key.clone(),
-            text: "a".to_owned(),
-            id: String::new(),
-            queue_mode: QueueMode::Queue,
-        },
-    )
-    .await;
-    drain(
-        &service,
-        ClientRequestKind::Steer {
-            session: key.clone(),
-            text: "b".to_owned(),
-            id: String::new(),
-            queue_mode: QueueMode::Queue,
-        },
-    )
-    .await;
-
-    // A turn with no input of its own still takes them, in order.
-    let resumed = drain(
-        &service,
-        ClientRequestKind::Resume {
-            session: key.clone(),
-            replay: false,
-        },
-    )
-    .await;
-    assert!(
-        !resumed
-            .iter()
-            .any(|event| matches!(event.kind, ServerEventKind::MessageReplayed { .. })),
-        "internal continuation must not replay the transcript"
-    );
+    for (id, text) in [("t-a", "a"), ("t-b", "b")] {
+        let outcome = service
+            .steer_input(4, &key, id, text.to_owned(), Vec::new())
+            .await
+            .expect("steer");
+        let SteerOutcome::Started(events) = outcome else {
+            panic!("each steer on a resting session starts its own turn");
+        };
+        events.collect::<Vec<_>>().await;
+    }
 
     let requests = model.requests();
-    assert_eq!(requests.len(), 2, "the resume made one request");
+    assert_eq!(requests.len(), 3, "each steer made one request");
     assert_eq!(
         user_texts(&requests[1]),
+        vec!["one".to_owned(), "a".to_owned()]
+    );
+    assert_eq!(
+        user_texts(&requests[2]),
         vec!["one".to_owned(), "a".to_owned(), "b".to_owned()],
-        "both steers reach the turn, in arrival order"
+        "the turns follow the arrival order"
     );
 }
 
@@ -4121,16 +4112,19 @@ async fn reasoning_and_steering_survive_a_restart() {
         },
     )
     .await;
-    drain(
-        &first,
-        ClientRequestKind::Steer {
-            session: key.clone(),
-            text: "steered".to_owned(),
-            id: String::new(),
-            queue_mode: QueueMode::Queue,
-        },
-    )
-    .await;
+    // A steer waiting for the next turn survives the restart the same way the
+    // reasoning setting it rides with does.
+    {
+        let mut sessions = first.lock_sessions();
+        let record = sessions.get_mut(&key).expect("session record");
+        record.pending_steers.push(super::steering::Steered::new(
+            "t-steered".to_owned(),
+            "steered".to_owned(),
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+    first.persist(&key).await.expect("steer persisted");
     drop(first);
 
     let second = persistent_scripted_service(
@@ -6298,17 +6292,21 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
             // reaches the request it is about to make.
             if !steered {
                 steered = true;
-                let ack = drain(
-                    &service,
-                    ClientRequestKind::Steer {
-                        session: session.clone().expect("session"),
-                        text: "also run the tests".to_owned(),
-                        id: "steer-1".to_owned(),
-                        queue_mode: QueueMode::Queue,
-                    },
-                )
-                .await;
-                assert!(ack.is_empty());
+                let key = session.clone().expect("session");
+                let outcome = service
+                    .steer_input(
+                        8,
+                        &key,
+                        "steer-1",
+                        "also run the tests".to_owned(),
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("steer");
+                assert!(
+                    matches!(outcome, SteerOutcome::Injected),
+                    "the steer joins the turn in flight"
+                );
             }
             let response = ClientRequest {
                 request_id: 8,
@@ -6355,6 +6353,314 @@ async fn a_steer_during_a_running_turn_reaches_the_request_in_flight() {
             .pending_steers
             .is_empty(),
         "the applied steer leaves no pending copy"
+    );
+}
+
+/// A session whose turn parks on `ask_user`, and the stream keeping it alive.
+///
+/// The parked turn is the one deterministic way a test gets a busy session:
+/// the turn holds the turn lock while it waits for the answer.
+#[allow(clippy::future_not_send)]
+async fn parked_on_a_question(
+    spec: ModelSpec,
+    model: Arc<ScriptedModel>,
+) -> (Arc<Service>, SessionKey, String, EventStream) {
+    let reference = model.reference().clone();
+    let _ = reference;
+    let service = Arc::new(
+        Service::new(
+            config(),
+            catalog(),
+            Some(spec),
+            Arc::new(ScriptedFactory {
+                model: model.clone(),
+            }),
+            Arc::new(InMemoryStore::new()),
+            Arc::new(InMemoryBlobStore::new()),
+            "system",
+        )
+        .expect("service"),
+    );
+    let request = ClientRequest {
+        request_id: 7,
+        kind: ClientRequestKind::SendMessage {
+            session: None,
+            text: "do the work".to_owned(),
+            attachments: Vec::new(),
+            budget: None,
+            reasoning: None,
+            output: Vec::new(),
+            response_format: None,
+            metadata: None,
+            replay: false,
+        },
+    };
+    let mut stream = service.submit(request).await.expect("turn");
+    let mut session = None;
+    let mut question = None;
+    while question.is_none() {
+        let event = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("turn should not hang")
+            .expect("the parked turn stays alive");
+        session = session.or(event.session.clone());
+        if let ServerEventKind::QuestionAsked { question: asked, .. } = &event.kind {
+            question = Some(asked.clone());
+        }
+    }
+    let key = session.expect("session");
+    (service, key, question.expect("question"), stream)
+}
+
+/// Answers the parked question and reads the turn to its end.
+#[allow(clippy::future_not_send)]
+async fn answer_and_finish(
+    service: &Arc<Service>,
+    key: &SessionKey,
+    question: String,
+    mut stream: EventStream,
+) -> bool {
+    let response = ClientRequest {
+        request_id: 8,
+        kind: ClientRequestKind::AnswerQuestion {
+            session: key.clone(),
+            question,
+            answer: "src/lib.rs".to_owned(),
+        },
+    };
+    let mut ack = service.submit(response).await.expect("answer");
+    while ack.next().await.is_some() {}
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+            Ok(Some(event)) => {
+                if matches!(event.kind, ServerEventKind::TurnFinished { .. }) {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_steer_with_an_attachment_reaches_the_turn_in_flight_with_its_media() {
+    // The end of the paste path for a steer: the message that joins a request
+    // in flight carries the picture with it, in the same message, and the
+    // durable copy goes once the engine applied it.
+    let dir = std::env::temp_dir().join(format!("norte-steer-media-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let photo = dir.join("photo.png");
+    std::fs::write(&photo, ONE_PIXEL_PNG).expect("png");
+
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let mut media = norte_testing::text_capabilities();
+    media.modalities = norte::ModalityCapabilities::new(
+        [norte::Modality::Text, norte::Modality::Image],
+        [norte::Modality::Text],
+    );
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .with_capabilities(media)
+            .turn_tool_call(
+                call,
+                "ask_user",
+                &serde_json::json!({
+                    "question": "Which file should I edit?",
+                    "options": ["src/lib.rs", "src/main.rs"],
+                    "multiple": false
+                }),
+            )
+            .turn_text("done."),
+    );
+    // Text and image in, text out: the steer may carry a picture.
+    let mut happy = spec("scripted");
+    happy.capabilities.modalities = norte::ModalityCapabilities::new(
+        [norte::Modality::Text, norte::Modality::Image],
+        [norte::Modality::Text],
+    );
+    let (service, key, question, stream) =
+        parked_on_a_question(happy, Arc::clone(&model)).await;
+    let outcome = service
+        .steer_input(
+            9,
+            &key,
+            "t-photo",
+            "what about this one?".to_owned(),
+            vec![norte_code_wire::Attachment {
+                path: photo.display().to_string(),
+                blob: None,
+                mime: "image/png".to_owned(),
+                name: "photo.png".to_owned(),
+                duration_ms: None,
+                transcript: None,
+            }],
+        )
+        .await
+        .expect("steer");
+    assert!(
+        matches!(outcome, SteerOutcome::Injected),
+        "the steer joins the parked turn"
+    );
+
+    assert!(
+        answer_and_finish(&service, &key, question, stream).await,
+        "the turn should finish after the answer"
+    );
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2, "the turn made two requests");
+    let steered_message = requests[1]
+        .messages
+        .iter()
+        .find(|message| {
+            message.role == Role::User
+                && message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, norte::domain::part::Part::Media(_)))
+        })
+        .expect("the steered message carries its media");
+    assert_eq!(
+        steered_message.text(),
+        "what about this one?",
+        "text and media are one message"
+    );
+    assert!(
+        service
+            .lock_sessions()
+            .get(&key)
+            .expect("record")
+            .pending_steers
+            .is_empty(),
+        "the applied steer leaves no pending copy"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_steer_with_media_the_model_cannot_take_is_refused_before_it_waits() {
+    // The refusal comes while there is still nothing queued: a steer that
+    // waits behind the turn with a part the model can never take would fail
+    // the request it joins and poison the session's history.
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "ask_user",
+                &serde_json::json!({
+                    "question": "Which file should I edit?",
+                    "options": ["src/lib.rs", "src/main.rs"],
+                    "multiple": false
+                }),
+            )
+            .turn_text("done."),
+    );
+    let (service, key, question, stream) =
+        parked_on_a_question(spec("scripted"), Arc::clone(&model)).await;
+    let outcome = service
+        .steer_input(
+            9,
+            &key,
+            "t-photo",
+            "look at this".to_owned(),
+            vec![norte_code_wire::Attachment {
+                path: "photo.png".to_owned(),
+                blob: None,
+                mime: "image/png".to_owned(),
+                name: "photo.png".to_owned(),
+                duration_ms: None,
+                transcript: None,
+            }],
+        )
+        .await;
+    let error = outcome.expect_err("the steer is refused");
+    assert!(
+        error.to_string().contains("does not accept Image"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("`photo.png`"), "{error}");
+    assert!(
+        service
+            .lock_sessions()
+            .get(&key)
+            .expect("record")
+            .pending_steers
+            .is_empty(),
+        "nothing was queued"
+    );
+    assert!(
+        answer_and_finish(&service, &key, question, stream).await,
+        "the parked turn goes on unaffected"
+    );
+}
+
+#[tokio::test]
+async fn a_steer_with_a_blob_the_store_does_not_hold_is_refused() {
+    let reference = ModelRef::new(
+        ProviderId::new("test").expect("provider"),
+        ModelId::new("scripted").expect("model"),
+    );
+    let call = CallId::new();
+    let model = Arc::new(
+        ScriptedModel::new(reference)
+            .turn_tool_call(
+                call,
+                "ask_user",
+                &serde_json::json!({
+                    "question": "Which file should I edit?",
+                    "options": ["src/lib.rs", "src/main.rs"],
+                    "multiple": false
+                }),
+            )
+            .turn_text("done."),
+    );
+    let mut happy = spec("scripted");
+    happy.capabilities.modalities = norte::ModalityCapabilities::new(
+        [norte::Modality::Text, norte::Modality::Image],
+        [norte::Modality::Text],
+    );
+    let (service, key, question, stream) =
+        parked_on_a_question(happy, Arc::clone(&model)).await;
+    let outcome = service
+        .steer_input(
+            9,
+            &key,
+            "t-photo",
+            "look at this".to_owned(),
+            vec![norte_code_wire::Attachment {
+                path: String::new(),
+                blob: Some("0".repeat(64)),
+                mime: "image/png".to_owned(),
+                name: "photo.png".to_owned(),
+                duration_ms: None,
+                transcript: None,
+            }],
+        )
+        .await;
+    let error = outcome.expect_err("the steer is refused");
+    assert!(error.to_string().contains("was not found"), "{error}");
+    assert!(
+        service
+            .lock_sessions()
+            .get(&key)
+            .expect("record")
+            .pending_steers
+            .is_empty(),
+        "nothing was queued"
+    );
+    assert!(
+        answer_and_finish(&service, &key, question, stream).await,
+        "the parked turn goes on unaffected"
     );
 }
 

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use futures_core::Stream;
-use norte_code_wire::QueueMode;
 use norte_code_wire::{ClientRequest, ServerEvent};
 use raep_types::TurnId;
 
@@ -51,14 +50,15 @@ pub trait AgentClient: Send + Sync {
     ) -> Result<EventStream, ClientError>;
 
     /// Sends one user message through the standard `UserInput` frame and
-    /// streams the resulting events. The wire policy comes from the
-    /// client's `queue_mode`: `reject` starts a new turn, `queue` steers,
-    /// and `interrupt` cancels-then-steers on the server.
+    /// streams the resulting events. The `queue_policy` decides what happens
+    /// while the session has a turn running: `reject` refuses, `queue` waits
+    /// behind it, `interrupt` cancels it, and `steer` reaches the request in
+    /// flight.
     async fn steer_message(
         &self,
         session: &str,
         text: &str,
-        queue_mode: QueueMode,
+        queue_policy: raep_types::QueuePolicy,
     ) -> Result<EventStream, ClientError>;
 
     /// Cancels the session's running turn through `CancelTurn`.

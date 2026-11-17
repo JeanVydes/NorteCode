@@ -1361,7 +1361,6 @@ pub(crate) fn session_for_request(kind: &ClientRequestKind) -> Option<&SessionKe
     match kind {
         ClientRequestKind::RenameSession { session, .. }
         | ClientRequestKind::DeleteSession { session }
-        | ClientRequestKind::Steer { session, .. }
         | ClientRequestKind::CancelTurn { session }
         | ClientRequestKind::StopJobs { session, .. }
         | ClientRequestKind::DetachTurn { session }

@@ -110,6 +110,25 @@ pub use prompt::PromptSize;
 /// A stream of events answering one request.
 pub type EventStream = Pin<Box<dyn Stream<Item = ServerEvent> + Send>>;
 
+/// Where a steering message went.
+pub enum SteerOutcome {
+    /// The message joined the turn already in flight; the events it produces
+    /// surface on that turn's stream.
+    Injected,
+    /// No turn was running, so the message started one and the stream carries
+    /// its events.
+    Started(EventStream),
+}
+
+impl std::fmt::Debug for SteerOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Injected => formatter.write_str("Injected"),
+            Self::Started(_) => formatter.write_str("Started(..)"),
+        }
+    }
+}
+
 /// A session as the service tracks it, beyond what Norte stores.
 /// Live counters for the turn in flight.
 #[derive(Debug, Clone, Default)]

@@ -1046,7 +1046,6 @@ pub(crate) fn session_from_request(request: &ClientRequest) -> Option<String> {
         | ClientRequestKind::ForkSession { session, .. }
         | ClientRequestKind::RenameSession { session, .. }
         | ClientRequestKind::DeleteSession { session }
-        | ClientRequestKind::Steer { session, .. }
         | ClientRequestKind::CancelTurn { session }
         | ClientRequestKind::StopJobs { session, .. }
         | ClientRequestKind::DetachTurn { session }

@@ -280,7 +280,12 @@ impl SubagentTool {
             jobs.finish(&job_id, None);
             steering.push(
                 parent,
-                Steered::new(format!("subagent:{job_id}"), report(&job_id, &outcome)),
+                Steered::new(
+                    format!("subagent:{job_id}"),
+                    report(&job_id, &outcome),
+                    Vec::new(),
+                    Vec::new(),
+                ),
             );
             if let Some(service) = service_of(&service_slot) {
                 service.schedule_auto_turn(parent);

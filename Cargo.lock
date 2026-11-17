@@ -1431,6 +1431,7 @@ dependencies = [
  "norte-code-plugin-host",
  "norte-code-protocol",
  "norte-code-wire",
+ "norte-testing",
  "raep-types",
  "reqwest",
  "rusqlite",
@@ -1827,7 +1828,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "raep-types"
 version = "0.1.0"
-source = "git+https://github.com/JeanVydes/RAEP.git?rev=b34b5b5863082b27f308d02f7ae06074a9fa5dae#b34b5b5863082b27f308d02f7ae06074a9fa5dae"
+source = "git+https://github.com/JeanVydes/RAEP.git?rev=ddc595d2f95909e904d2f335b7a2e77532ffb0d4#ddc595d2f95909e904d2f335b7a2e77532ffb0d4"
 dependencies = [
  "serde",
  "serde_json",

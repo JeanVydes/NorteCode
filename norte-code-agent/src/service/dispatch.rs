@@ -6,6 +6,7 @@
 #[allow(unused_imports)]
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use super::turn_media::unsupported_attachment;
 
 impl Service {
     /// Replaces every session name in a request with the session it names.
@@ -67,17 +68,6 @@ impl Service {
                 response_format,
                 metadata,
                 replay,
-            },
-            Kind::Steer {
-                session,
-                text,
-                id,
-                queue_mode,
-            } => Kind::Steer {
-                session: resolve(session)?,
-                text,
-                id,
-                queue_mode,
             },
             Kind::CancelTurn { session } => Kind::CancelTurn {
                 session: resolve(session)?,
@@ -459,12 +449,6 @@ impl Service {
                 self.answer_question(request_id, session, question, answer)
                     .await
             }
-            Kind::Steer {
-                session,
-                text,
-                id,
-                queue_mode,
-            } => self.steer(request_id, session, text, id, queue_mode).await,
             Kind::Compact { session } => self.compact_event_stream(request_id, session).await,
             Kind::SessionCompact { session, .. } => {
                 self.compact_event_stream(request_id, session).await
@@ -609,53 +593,118 @@ impl Service {
         }
         Box::pin(futures_util::stream::iter(events))
     }
-    /// Validates and sets the session's budget.
+    /// Delivers a steering message: it joins the turn in flight, or starts one.
     ///
-    /// A USD budget over a provider that never reported cost cannot be
-    /// measured, so it is refused instead of silently comparing against zero.
-    pub(crate) async fn steer(
-        &self,
-        _request_id: u64,
-        key: SessionKey,
+    /// The durable copy stays in the session until the engine reports that it
+    /// applied the message, so a crash cannot lose it. When no turn is running
+    /// the message becomes a turn's input instead of a steer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServiceError::UnknownSession`] when the session does not
+    /// exist, [`ServiceError::Unsupported`] when a busy session has no model
+    /// configured, [`ServiceError::SessionBusy`] when the session's pending
+    /// steers are full, the [`ServiceError::Norte`] wrapping of the media
+    /// refusal when a steer carries a part the model cannot accept (or a blob
+    /// the store does not hold), and the [`ServiceError::Norte`] wrapping of
+    /// the submission failure when the message starts its own turn and that
+    /// turn cannot start.
+    pub async fn steer_input(
+        self: &Arc<Self>,
+        request_id: u64,
+        key: &SessionKey,
+        turn_id: &str,
         text: String,
-        id: String,
-        queue_mode: norte_code_wire::QueueMode,
-    ) -> Result<EventStream, ServiceError> {
-        // The message takes the request already in flight. The durable copy
-        // stays in the session until the engine reports that it applied it, so
-        // a crash cannot lose it.
-        let (nid, _, _) = self.require_record(&key)?;
-        let busy = self.turn_lock(&key).try_lock().is_err();
-        match queue_mode {
-            norte_code_wire::QueueMode::Reject if busy => {
-                return Err(ServiceError::SessionBusy);
-            }
-            norte_code_wire::QueueMode::Interrupt if busy => {
-                self.cancel_turn(&key);
-            }
-            norte_code_wire::QueueMode::Reject
-            | norte_code_wire::QueueMode::Queue
-            | norte_code_wire::QueueMode::Interrupt => {}
+        attachments: Vec<norte_code_wire::Attachment>,
+    ) -> Result<SteerOutcome, ServiceError> {
+        let (nid, spec, _) = self.require_record(key)?;
+        let busy = self.turn_lock(key).try_lock().is_err();
+        if !busy {
+            let stream = self
+                .submit(norte_code_wire::ClientRequest {
+                    request_id,
+                    kind: norte_code_wire::ClientRequestKind::SendMessage {
+                        session: Some(key.clone()),
+                        text,
+                        attachments,
+                        budget: None,
+                        reasoning: None,
+                        output: Vec::new(),
+                        response_format: None,
+                        metadata: None,
+                        replay: false,
+                    },
+                })
+                .await?;
+            return Ok(SteerOutcome::Started(stream));
         }
-        let id = if id.is_empty() {
+        // A message with media can only join a request the model can carry it
+        // in, and the interceptor holds no blob store: the parts are resolved
+        // now, while there is still time to refuse.
+        let spec = spec
+            .filter(|spec| !spec.model.trim().is_empty())
+            .ok_or(ServiceError::Unsupported("no model is configured"))?;
+        if let Some((_, message)) = unsupported_attachment(&spec.capabilities, &attachments) {
+            return Err(ServiceError::Norte(norte::Error::InvalidInput(message)));
+        }
+        let mut parts = Vec::with_capacity(attachments.len());
+        for attachment in &attachments {
+            match self.media_part(attachment).await {
+                Ok(Some(media)) => parts.push(media),
+                Ok(None) => {}
+                Err(error) => return Err(ServiceError::Norte(norte::Error::InvalidInput(error))),
+            }
+        }
+        let id = if turn_id.is_empty() {
             uuid::Uuid::new_v4().to_string()
         } else {
-            id
+            turn_id.to_owned()
         };
-        let steered = Steered::new(id.clone(), text);
+        let steered = Steered::new(id, text, parts, attachments);
         {
             let mut sessions = self.lock_sessions();
             let record = sessions
-                .get_mut(&key)
+                .get_mut(key)
                 .ok_or_else(|| ServiceError::UnknownSession(key.to_string()))?;
             if record.pending_steers.len() >= self.max_queued_inputs {
                 return Err(ServiceError::SessionBusy);
             }
             record.pending_steers.push(steered.clone());
         }
-        self.persist(&key).await?;
-        self.steering.push(nid, steered);
-        Ok(Box::pin(futures_util::stream::empty()))
+        self.persist(key).await?;
+        self.steering.push(nid, steered.clone());
+        // The turn may have ended between the busy check and the push, which
+        // would strand the message with no request left to join. When the lock
+        // is free again the message is reclaimed: its durable copy goes first,
+        // so a turn starting later has nothing to re-queue, and one that took
+        // the message already reports it as applied. The guard is dropped
+        // before the submit: the new turn takes the lock itself.
+        let free = self.turn_lock(key).try_lock().is_ok();
+        if free {
+            self.clear_applied_steers(key, std::slice::from_ref(&steered))
+                .await;
+            let Some(claimed) = self.steering.take_if_pending(nid, &steered.id) else {
+                return Ok(SteerOutcome::Injected);
+            };
+            let stream = self
+                .submit(norte_code_wire::ClientRequest {
+                    request_id,
+                    kind: norte_code_wire::ClientRequestKind::SendMessage {
+                        session: Some(key.clone()),
+                        text: claimed.text,
+                        attachments: claimed.attachments,
+                        budget: None,
+                        reasoning: None,
+                        output: Vec::new(),
+                        response_format: None,
+                        metadata: None,
+                        replay: false,
+                    },
+                })
+                .await?;
+            return Ok(SteerOutcome::Started(stream));
+        }
+        Ok(SteerOutcome::Injected)
     }
     pub(crate) async fn queue_job_result(
         &self,
