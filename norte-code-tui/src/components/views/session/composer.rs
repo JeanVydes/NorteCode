@@ -173,23 +173,11 @@ impl Composer {
     }
 
     /// The lines the chips are drawn with.
-    pub(super) fn chip_lines(&self) -> Vec<Line<'static>> {
+    pub(super) fn chip_lines(&self, theme: crate::ui_model::ThemeMode) -> Vec<Line<'static>> {
         self.chips
             .iter()
             .flat_map(|group| group.chips.iter())
-            .map(|chip| {
-                Line::from(vec![
-                    Span::styled(
-                        format!("{} ", crate::chips::chip_icon(chip.kind())),
-                        Style::default().fg(palette::accent(crate::ui_model::ThemeMode::Dark)),
-                    ),
-                    Span::raw(chip.label.clone()),
-                    Span::styled(
-                        format!(" · {}", chip.detail),
-                        Style::default().fg(palette::muted()),
-                    ),
-                ])
-            })
+            .map(|chip| crate::chips::chip_line(chip, theme))
             .collect()
     }
 
@@ -255,6 +243,18 @@ impl Composer {
             }
             KeyCode::Right => {
                 self.caret.move_horizontal(&self.text, 1);
+                return None;
+            }
+            KeyCode::Home => {
+                self.caret.move_to_line_start(&self.text);
+                return None;
+            }
+            KeyCode::End => {
+                self.caret.move_to_line_end(&self.text);
+                return None;
+            }
+            KeyCode::Delete => {
+                self.caret.erase_after(&mut self.text);
                 return None;
             }
             _ => {}
