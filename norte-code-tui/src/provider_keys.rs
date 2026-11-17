@@ -116,9 +116,10 @@ fn find_environment_keys(model: &UiModel, provider_id: &str) -> Vec<String> {
 
 /// The first environment variable of `members` that is set and non-blank.
 fn first_set_env_var(members: &[String]) -> Option<String> {
-    members.iter().find(|name| {
-        std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
-    }).cloned()
+    members
+        .iter()
+        .find(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+        .cloned()
 }
 
 /// Checks the environment and the secrets file for one provider.
@@ -137,19 +138,14 @@ pub(crate) fn check(model: &UiModel, provider_id: &str) -> ProviderKeyStatus {
         secrets_path().and_then(|path| read_secret(&path, provider_id))
     }) {
         ProviderKeyDecision::Available => ProviderKeyStatus::Available,
-        ProviderKeyDecision::Missing {
-            environment_keys,
-        } => ProviderKeyStatus::Missing {
+        ProviderKeyDecision::Missing { environment_keys } => ProviderKeyStatus::Missing {
             provider: provider_id.to_owned(),
             environment_keys,
         },
     }
 }
 
-fn environment_keys_for(
-    model: &UiModel,
-    provider_id: &str,
-) -> Result<Option<Vec<String>>, ()> {
+fn environment_keys_for(model: &UiModel, provider_id: &str) -> Result<Option<Vec<String>>, ()> {
     if let Some(provider) = model
         .catalog
         .providers
@@ -215,13 +211,24 @@ mod tests {
 
     #[test]
     fn an_environment_value_satisfies() {
-        let keys = decide(&["A".to_owned()], |k| k.first().map(|_| norte_code_protocol::config::ApiKey::new("sk".to_owned())), || None);
+        let keys = decide(
+            &["A".to_owned()],
+            |k| {
+                k.first()
+                    .map(|_| norte_code_protocol::config::ApiKey::new("sk".to_owned()))
+            },
+            || None,
+        );
         assert_eq!(keys, ProviderKeyDecision::Available);
     }
 
     #[test]
     fn a_secret_value_satisfies() {
-        let keys = decide(&["A".to_owned()], |_| None, || Some(norte_code_protocol::config::ApiKey::new("sk".to_owned())));
+        let keys = decide(
+            &["A".to_owned()],
+            |_| None,
+            || Some(norte_code_protocol::config::ApiKey::new("sk".to_owned())),
+        );
         assert_eq!(keys, ProviderKeyDecision::Available);
     }
 
@@ -238,11 +245,13 @@ mod tests {
 
     #[test]
     fn missing_blocks_the_switch() {
-        assert!(ProviderKeyStatus::Missing {
-            provider: "tokenlab".to_owned(),
-            environment_keys: vec!["TOKENLAB_API_KEY".to_owned()],
-        }
-        .blocks());
+        assert!(
+            ProviderKeyStatus::Missing {
+                provider: "tokenlab".to_owned(),
+                environment_keys: vec!["TOKENLAB_API_KEY".to_owned()],
+            }
+            .blocks()
+        );
         assert!(!ProviderKeyStatus::Available.blocks());
         assert!(!ProviderKeyStatus::Unknown.blocks());
     }

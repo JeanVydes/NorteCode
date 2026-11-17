@@ -19,7 +19,11 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "norte", version, about = "The single entry point for Norte Code")]
+#[command(
+    name = "norte",
+    version,
+    about = "The single entry point for Norte Code"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -81,8 +85,9 @@ enum ServiceCommand {
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelp
-            || e.kind() == clap::error::ErrorKind::DisplayVersion =>
+        Err(e)
+            if e.kind() == clap::error::ErrorKind::DisplayHelp
+                || e.kind() == clap::error::ErrorKind::DisplayVersion =>
         {
             print!("{e}");
             return ExitCode::SUCCESS;

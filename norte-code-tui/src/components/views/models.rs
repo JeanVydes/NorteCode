@@ -38,29 +38,16 @@ enum KeyPrompt {
 
 enum KeyPromptIntent {
     /// After saving the key, switch to this model.
-    SwitchModel {
-        model: String,
-    },
+    SwitchModel { model: String },
     /// After saving the key, expand the provider's list of models.
     Expand,
 }
 
 enum ErasePrompt {
-    FromEnvironment {
-        provider: String,
-        variable: String,
-    },
-    Removed {
-        provider: String,
-        path: String,
-    },
-    Missing {
-        provider: String,
-    },
-    Error {
-        provider: String,
-        message: String,
-    },
+    FromEnvironment { provider: String, variable: String },
+    Removed { provider: String, path: String },
+    Missing { provider: String },
+    Error { provider: String, message: String },
 }
 
 #[derive(Clone, Copy)]
@@ -185,9 +172,7 @@ impl ModelsView {
                 }
             }
             crate::provider_keys::ProviderKeyEraseOutcome::Missing => {
-                ErasePrompt::Missing {
-                    provider: selected,
-                }
+                ErasePrompt::Missing { provider: selected }
             }
             crate::provider_keys::ProviderKeyEraseOutcome::Error { message } => {
                 ErasePrompt::Error {
@@ -234,10 +219,8 @@ impl ModelsView {
                         self.key_prompt = None;
                         match intent {
                             KeyPromptIntent::SwitchModel { model } => {
-                                self.pending_action = Some(ComponentAction::SetModel {
-                                    provider,
-                                    model,
-                                });
+                                self.pending_action =
+                                    Some(ComponentAction::SetModel { provider, model });
                             }
                             KeyPromptIntent::Expand => {
                                 if !self.expanded.remove(&provider) {
@@ -427,7 +410,9 @@ impl Component for ModelsView {
                         frame,
                         area,
                         "API key deleted",
-                        format!("The key for {provider} was removed from\n{path}\n\nPress Esc to close."),
+                        format!(
+                            "The key for {provider} was removed from\n{path}\n\nPress Esc to close."
+                        ),
                         model.preferences.theme,
                     );
                     return;
@@ -447,14 +432,21 @@ impl Component for ModelsView {
                         frame,
                         area,
                         "Could not delete key",
-                        format!("The key for {provider} could not be deleted.\n\n{message}\n\nPress Esc to close."),
+                        format!(
+                            "The key for {provider} could not be deleted.\n\n{message}\n\nPress Esc to close."
+                        ),
                         model.preferences.theme,
                     );
                     return;
                 }
             }
         }
-        if let Some(KeyPrompt::Edit { value, provider, error, .. }) = &self.key_prompt
+        if let Some(KeyPrompt::Edit {
+            value,
+            provider,
+            error,
+            ..
+        }) = &self.key_prompt
         {
             let bullets = "•".repeat(value.chars().count());
             let body = format!(
@@ -464,7 +456,13 @@ impl Component for ModelsView {
                 Some(message) => format!("{body}\n\n{message}"),
                 None => body,
             };
-            panel::render_text(frame, area, "API key required", body, model.preferences.theme);
+            panel::render_text(
+                frame,
+                area,
+                "API key required",
+                body,
+                model.preferences.theme,
+            );
             return;
         }
         let rows = self.visible_rows(&model.models);

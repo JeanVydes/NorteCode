@@ -105,7 +105,9 @@ struct AddArgs {
 fn sane_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains("__")
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn default_agent_name(root: &serde_json::Value) -> Option<String> {
@@ -157,7 +159,10 @@ fn find_agent_index(root: &mut serde_json::Value, agent: Option<&str>) -> Result
             .filter_map(|a| a.get("name").and_then(|v| v.as_str()))
             .map(str::to_owned)
             .collect();
-        format!("agent `{target}` not found; available: {}", names.join(", "))
+        format!(
+            "agent `{target}` not found; available: {}",
+            names.join(", ")
+        )
     })
 }
 
