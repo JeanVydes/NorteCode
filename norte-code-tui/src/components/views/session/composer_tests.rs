@@ -27,8 +27,8 @@ fn a_long_text_becomes_a_chip_instead_of_filling_the_composer() {
     assert_eq!(composer.text, "");
     assert_eq!(composer.all_chips().len(), 1);
     assert_eq!(
-        composer.all_chips()[0].detail,
-        format!("{} chars", long.len())
+        composer.all_chips()[0].to_string(),
+        format!("[Copied: {}...]", "x".repeat(48))
     );
 }
 
@@ -150,7 +150,10 @@ fn the_composer_reserves_a_row_for_every_chip_it_draws() {
     composer.add_chip(Chip::text("a".to_owned()));
     composer.add_chip(Chip::text("b".to_owned()));
 
-    assert_eq!(composer.chip_lines().len(), 2);
+    assert_eq!(
+        composer.chip_lines(crate::ui_model::ThemeMode::Dark).len(),
+        2
+    );
     assert_eq!(composer.height(false), 6);
 }
 
@@ -262,6 +265,64 @@ fn erase_does_nothing_at_the_start_of_the_text() {
     );
 
     assert_eq!(composer.text, "abc");
+}
+
+#[test]
+fn home_and_end_move_within_the_line() {
+    let mut composer = Composer::default();
+    composer.paste("abc\nxyz");
+
+    press(&mut composer, KeyCode::Home);
+    press(&mut composer, KeyCode::Char('Q'));
+    assert_eq!(composer.text, "abc\nQxyz");
+
+    press(&mut composer, KeyCode::End);
+    press(&mut composer, KeyCode::Char('!'));
+    assert_eq!(composer.text, "abc\nQxyz!");
+}
+
+#[test]
+fn home_from_the_end_of_the_first_line_reaches_its_start() {
+    let mut composer = Composer::default();
+    composer.paste("abc\nxyz");
+
+    press(&mut composer, KeyCode::Up);
+    press(&mut composer, KeyCode::Home);
+    press(&mut composer, KeyCode::Char('Q'));
+
+    assert_eq!(composer.text, "Qabc\nxyz");
+}
+
+#[test]
+fn delete_erases_the_character_at_the_caret() {
+    let mut composer = Composer::default();
+    composer.paste("abc");
+
+    press(&mut composer, KeyCode::Home);
+    press(&mut composer, KeyCode::Delete);
+    assert_eq!(composer.text, "bc");
+    press(&mut composer, KeyCode::Delete);
+    assert_eq!(composer.text, "c");
+}
+
+#[test]
+fn delete_at_the_end_of_the_text_does_nothing() {
+    let mut composer = Composer::default();
+    composer.paste("abc");
+
+    press(&mut composer, KeyCode::Delete);
+
+    assert_eq!(composer.text, "abc");
+}
+
+#[test]
+fn delete_at_the_end_of_a_line_joins_it_with_the_next() {
+    let mut composer = Composer::default();
+    composer.paste("ab\ncd");
+
+    press(&mut composer, KeyCode::Up);
+    press(&mut composer, KeyCode::Delete);
+    assert_eq!(composer.text, "abcd");
 }
 
 #[test]

@@ -1,11 +1,14 @@
 //! Uploading a file to attach it to the next message.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use norte_code_wire::{InputPartKind, SessionKey};
 
 use super::{ClientEvent, ClientRuntime};
-use crate::chips::{Chip, ChipContent};
+use crate::chips::Chip;
 
 /// The largest file the client reads.
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -95,13 +98,7 @@ impl ClientRuntime {
                 }
             };
             let part = norte_code_client::upload_part(kind, &receipt.upload_id, &receipt.mime_type);
-            let detail = format!("{} bytes", receipt.bytes);
-            let chip = Chip {
-                content: ChipContent::Upload(part),
-                label: name,
-                detail,
-                kind: Some(kind),
-            };
+            let chip = Chip::upload(part, display_path(&path), kind);
             let _ = sender
                 .send(ClientEvent::Uploaded {
                     session,
@@ -112,3 +109,23 @@ impl ClientRuntime {
         });
     }
 }
+
+/// The path a chip shows, with the home directory shortened to `~`.
+fn display_path(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    display_path_under(path, home.as_deref())
+}
+
+/// The path a chip shows, with `home` shortened to `~`.
+fn display_path_under(path: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = path.strip_prefix(home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+#[cfg(test)]
+#[path = "uploads_tests.rs"]
+mod tests;

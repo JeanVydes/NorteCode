@@ -89,6 +89,22 @@ impl Caret {
         self.desired_col = Some(desired);
     }
 
+    /// Moves the caret to the start of its line.
+    pub(super) fn move_to_line_start(&mut self, text: &str) {
+        self.clamp(text);
+        let (line, _) = self.line_col(text);
+        self.index = Self::index_at(text, line, 0);
+        self.desired_col = None;
+    }
+
+    /// Moves the caret to the end of its line.
+    pub(super) fn move_to_line_end(&mut self, text: &str) {
+        self.clamp(text);
+        let (line, _) = self.line_col(text);
+        self.index = Self::index_at(text, line, usize::MAX);
+        self.desired_col = None;
+    }
+
     /// Inserts a character at the caret.
     pub(super) fn insert(&mut self, text: &mut String, character: char) {
         self.clamp(text);
@@ -104,6 +120,19 @@ impl Caret {
         let byte = Self::byte_index(text, self.index);
         text.insert_str(byte, insert);
         self.index += insert.chars().count();
+        self.desired_col = None;
+    }
+
+    /// Erases the character at the caret, if there is one.
+    pub(super) fn erase_after(&mut self, text: &mut String) {
+        self.clamp(text);
+        let end = text.chars().count();
+        if self.index == end {
+            return;
+        }
+        let start = Self::byte_index(text, self.index);
+        let stop = Self::byte_index(text, self.index + 1);
+        text.replace_range(start..stop, "");
         self.desired_col = None;
     }
 
