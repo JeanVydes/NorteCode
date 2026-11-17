@@ -14,6 +14,10 @@ use crate::{
     ui_model::{SessionAttachmentState, UiModel},
 };
 
+mod caret;
+
+use caret::Caret;
+
 /// How much text the composer shows inline before it becomes a chip.
 pub(crate) const INLINE_LIMIT: usize = 120;
 
@@ -45,6 +49,8 @@ pub(super) struct Composer {
     pub(super) budget_entry: Option<String>,
     /// The path of the file being attached, when the reader is typing one.
     pub(super) attach: Option<String>,
+    /// Where the caret sits.
+    caret: Caret,
 }
 
 impl Composer {
@@ -67,9 +73,6 @@ impl Composer {
         }
         if model.active_child.is_some() {
             return TextBuilder::child_session_read_only().to_owned();
-        }
-        if !self.text.is_empty() {
-            return self.text.clone();
         }
         if model.attachment_state == SessionAttachmentState::Connecting {
             return "Connecting to session...".to_owned();
@@ -105,19 +108,50 @@ impl Composer {
         Style::default().fg(palette::muted())
     }
 
-    /// The input lines that fit in the composer, keeping the newest ones.
+    /// The line the caret is on, drawn with the caret in it.
+    fn line_with_caret(line: String, col: usize) -> Line<'static> {
+        use ratatui::style::Modifier;
+        let chars: Vec<char> = line.chars().collect();
+        if col >= chars.len() {
+            // The caret sits at the end of the line.
+            return Line::from(vec![
+                Span::raw(line),
+                Span::styled(
+                    " ".to_owned(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ),
+            ]);
+        }
+        let pre: String = chars[..col].iter().collect();
+        let current = chars[col].to_string();
+        let post: String = chars[col + 1..].iter().collect();
+        Line::from(vec![
+            Span::raw(pre),
+            Span::styled(current, Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(post),
+        ])
+    }
+
+    /// The lines that fit in the input area, the caret's line always visible.
     pub(super) fn visible_lines(&self, model: &UiModel) -> Vec<Line<'static>> {
         if self.text.is_empty() {
             return vec![Line::from(self.placeholder(model))];
         }
-        self.text
-            .lines()
-            .rev()
+        let lines: Vec<&str> = self.text.split('\n').collect();
+        let (caret_line, caret_col) = self.caret.line_col(&self.text);
+        let start = caret_line.saturating_sub(VISIBLE_INPUT_LINES - 1);
+        lines
+            .iter()
+            .skip(start)
             .take(VISIBLE_INPUT_LINES)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|line| Line::from(line.to_owned()))
+            .enumerate()
+            .map(|(index, line)| {
+                if start + index == caret_line {
+                    Self::line_with_caret((*line).to_owned(), caret_col)
+                } else {
+                    Line::from((*line).to_owned())
+                }
+            })
             .collect()
     }
 
@@ -125,11 +159,7 @@ impl Composer {
     /// of `py-1`, the input, one line per chip and the hint line when it shows.
     pub(super) fn height(&self, hint: bool) -> u16 {
         let chips = u16::try_from(self.all_chips().len()).unwrap_or(u16::MAX);
-        let input = if self.text.is_empty() {
-            1_usize
-        } else {
-            self.text.lines().count().clamp(1, VISIBLE_INPUT_LINES)
-        };
+        let input = self.text.split('\n').count().clamp(1, VISIBLE_INPUT_LINES);
         let input = u16::try_from(input).unwrap_or(u16::MAX);
         1 + 1 + input + chips + u16::from(hint) + 1
     }
@@ -177,6 +207,7 @@ impl Composer {
         self.attach = None;
         self.budget_entry = None;
         self.focus = SessionFocus::Composer;
+        self.caret.reset();
     }
 
     /// Adds a chip to the composer.
@@ -205,14 +236,28 @@ impl Composer {
             return None;
         }
         if key.code == keys::SUBMIT && key.modifiers.contains(KeyModifiers::SHIFT) {
-            self.text.push('\n');
+            self.caret.insert(&mut self.text, '\n');
+            self.chipify_long_text();
             return None;
         }
-        if key.code == KeyCode::Up {
-            return Some(ComponentAction::ScrollTranscript(2));
-        }
-        if key.code == KeyCode::Down {
-            return Some(ComponentAction::ScrollTranscript(-2));
+        match key.code {
+            KeyCode::Up => {
+                self.caret.move_vertical(&self.text, -1);
+                return None;
+            }
+            KeyCode::Down => {
+                self.caret.move_vertical(&self.text, 1);
+                return None;
+            }
+            KeyCode::Left => {
+                self.caret.move_horizontal(&self.text, -1);
+                return None;
+            }
+            KeyCode::Right => {
+                self.caret.move_horizontal(&self.text, 1);
+                return None;
+            }
+            _ => {}
         }
         match key.code {
             keys::CANCEL | keys::FOCUS_NEXT => self.focus = SessionFocus::Transcript,
@@ -224,10 +269,11 @@ impl Composer {
             {
                 let text = std::mem::take(&mut self.text);
                 let chips = self.take_chips();
+                self.caret.reset();
                 return Some(ComponentAction::SendMessage { text, chips });
             }
             KeyCode::Char(character) => {
-                self.text.push(character);
+                self.caret.insert(&mut self.text, character);
                 self.chipify_long_text();
             }
             keys::ERASE => {
@@ -251,7 +297,7 @@ impl Composer {
             self.chips.push(ChipGroup::one(Chip::text(text.to_owned())));
             return;
         }
-        self.text.push_str(text);
+        self.caret.insert_str(&mut self.text, text);
     }
 
     /// Handles the keys that reach the attach prompt.
@@ -285,10 +331,11 @@ impl Composer {
         if self.text.chars().count() > INLINE_LIMIT {
             let text = std::mem::take(&mut self.text);
             self.chips.push(ChipGroup::one(Chip::text(text)));
+            self.caret.reset();
         }
     }
 
-    /// Erases the last thing the reader added.
+    /// Erases the thing before the caret.
     ///
     /// A chip is atomic: the whole chip goes, and the chips that travel
     /// together go together.
@@ -297,6 +344,6 @@ impl Composer {
             self.chips.pop();
             return;
         }
-        self.text.pop();
+        self.caret.erase_before(&mut self.text);
     }
 }
