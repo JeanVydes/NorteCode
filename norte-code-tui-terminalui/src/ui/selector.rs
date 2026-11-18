@@ -52,7 +52,8 @@ impl Selector {
 
     /// Width in cells of the whole selector.
     pub(crate) fn width(&self) -> u16 {
-        (self.label.chars().count() + self.value().chars().count() + 6) as u16
+        let cells = self.label.chars().count() + self.value().chars().count() + 6;
+        u16::try_from(cells).unwrap_or(u16::MAX)
     }
 }
 
@@ -91,7 +92,7 @@ impl View for Selector {
             Style::default().fg(theme.muted).bg(surface),
         );
         let value = self.value().to_string();
-        let value_x = area.x + label.chars().count() as u16 + 1;
+        let value_x = area.x + u16::try_from(label.chars().count()).unwrap_or(u16::MAX) + 1;
         let mut value_style = Style::default()
             .fg(theme.accent)
             .bg(surface)
@@ -100,7 +101,7 @@ impl View for Selector {
             value_style = value_style.add_modifier(Modifier::REVERSED);
         }
         buf.set_stringn(value_x, area.y, &value, value.chars().count(), value_style);
-        let caret_x = value_x + value.chars().count() as u16 + 1;
+        let caret_x = value_x + u16::try_from(value.chars().count()).unwrap_or(u16::MAX) + 1;
         buf.set_stringn(
             caret_x,
             area.y,

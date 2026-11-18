@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use serde::Serialize;
 
-use terminalui::components::chrome::{draw_box, Border, BorderSet, Chrome, Padding, Radius};
+use terminalui::components::chrome::{Border, BorderSet, Chrome, Padding, Radius, draw_box};
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
 use crate::ui_model::SessionAttachmentState;
@@ -85,54 +85,140 @@ impl View for Rail {
         if inner.width < 10 {
             return;
         }
-        let dim = Style::default().fg(theme.muted).bg(theme.background);
-        let text = Style::default().fg(theme.foreground).bg(theme.background);
         let mut y = inner.y + 1;
 
-        buf.set_stringn(inner.x + 1, y, "SESSION", 7, dim.add_modifier(Modifier::BOLD));
-        y += 1;
-        if let Some(session) = &self.session {
-            buf.set_stringn(inner.x + 1, y, session, session.len(), text.clone().add_modifier(Modifier::BOLD));
-            y += 1;
-        } else {
-            buf.set_stringn(inner.x + 1, y, "no session", 10, dim);
-            y += 2;
-        }
-        if let Some(model) = &self.model {
-            buf.set_stringn(inner.x + 1, y, model, model.len(), Style::default().fg(theme.accent).bg(theme.background));
-        } else {
-            buf.set_stringn(inner.x + 1, y, "—", 1, dim);
-        }
-        y += 1;
-        if let Some(provider) = &self.provider {
-            buf.set_stringn(inner.x + 1, y, provider, provider.len(), dim);
-        } else {
-            buf.set_stringn(inner.x + 1, y, "—", 1, dim);
-        }
-        y += 2;
-
-        buf.set_stringn(inner.x + 1, y, "CONNECTION", 10, dim.add_modifier(Modifier::BOLD));
-        y += 1;
-        match &self.attachment {
-            SessionAttachmentState::Disconnected => {
-                buf.set_stringn(inner.x + 1, y, "detached", 8, dim);
-            }
-            SessionAttachmentState::Connecting => {
-                buf.set_stringn(inner.x + 1, y, "● connecting…", 14, Style::default().fg(theme.warning).bg(theme.background));
-            }
-            SessionAttachmentState::Attached => {
-                buf.set_stringn(inner.x + 1, y, "● attached", 10, Style::default().fg(theme.success).bg(theme.background));
-            }
-            SessionAttachmentState::Failed { reason } => {
-                buf.set_stringn(inner.x + 1, y, "✗ failed", 9, Style::default().fg(theme.destructive).bg(theme.background).add_modifier(Modifier::BOLD));
-                y += 1;
-                let detail: String = reason.chars().take(inner.width.saturating_sub(3) as usize).collect();
-                buf.set_stringn(inner.x + 1, y, &detail, detail.len(), dim);
-            }
-        }
+        y = paint_session(buf, inner, y, self.session.as_deref(), theme);
+        y = paint_model(
+            buf,
+            inner,
+            y,
+            self.model.as_deref(),
+            self.provider.as_deref(),
+            theme,
+        );
+        paint_connection(buf, inner, y, &self.attachment, theme);
     }
 
     fn handle_event(&mut self, _event: &InputEvent, _cx: &mut Context) -> Outcome {
         Outcome::Ignored
+    }
+}
+
+fn paint_session(
+    buf: &mut Buffer,
+    inner: Rect,
+    y: u16,
+    session: Option<&str>,
+    theme: &Theme,
+) -> u16 {
+    let dim = Style::default().fg(theme.muted).bg(theme.background);
+    let text = Style::default().fg(theme.foreground).bg(theme.background);
+    buf.set_stringn(
+        inner.x + 1,
+        y,
+        "SESSION",
+        7,
+        dim.add_modifier(Modifier::BOLD),
+    );
+    let y = y + 1;
+    if let Some(session) = session {
+        buf.set_stringn(
+            inner.x + 1,
+            y,
+            session,
+            session.len(),
+            text.add_modifier(Modifier::BOLD),
+        );
+        y + 1
+    } else {
+        buf.set_stringn(inner.x + 1, y, "no session", 10, dim);
+        y + 2
+    }
+}
+
+fn paint_model(
+    buf: &mut Buffer,
+    inner: Rect,
+    y: u16,
+    model: Option<&str>,
+    provider: Option<&str>,
+    theme: &Theme,
+) -> u16 {
+    let dim = Style::default().fg(theme.muted).bg(theme.background);
+    if let Some(model) = model {
+        buf.set_stringn(
+            inner.x + 1,
+            y,
+            model,
+            model.len(),
+            Style::default().fg(theme.accent).bg(theme.background),
+        );
+    } else {
+        buf.set_stringn(inner.x + 1, y, "—", 1, dim);
+    }
+    let y = y + 1;
+    if let Some(provider) = provider {
+        buf.set_stringn(inner.x + 1, y, provider, provider.len(), dim);
+    } else {
+        buf.set_stringn(inner.x + 1, y, "—", 1, dim);
+    }
+    y + 2
+}
+
+fn paint_connection(
+    buf: &mut Buffer,
+    inner: Rect,
+    y: u16,
+    attachment: &SessionAttachmentState,
+    theme: &Theme,
+) {
+    let dim = Style::default().fg(theme.muted).bg(theme.background);
+    buf.set_stringn(
+        inner.x + 1,
+        y,
+        "CONNECTION",
+        10,
+        dim.add_modifier(Modifier::BOLD),
+    );
+    let y = y + 1;
+    match attachment {
+        SessionAttachmentState::Disconnected => {
+            buf.set_stringn(inner.x + 1, y, "detached", 8, dim);
+        }
+        SessionAttachmentState::Connecting => {
+            buf.set_stringn(
+                inner.x + 1,
+                y,
+                "● connecting…",
+                14,
+                Style::default().fg(theme.warning).bg(theme.background),
+            );
+        }
+        SessionAttachmentState::Attached => {
+            buf.set_stringn(
+                inner.x + 1,
+                y,
+                "● attached",
+                10,
+                Style::default().fg(theme.success).bg(theme.background),
+            );
+        }
+        SessionAttachmentState::Failed { reason } => {
+            buf.set_stringn(
+                inner.x + 1,
+                y,
+                "✗ failed",
+                9,
+                Style::default()
+                    .fg(theme.destructive)
+                    .bg(theme.background)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let detail: String = reason
+                .chars()
+                .take(usize::from(inner.width.saturating_sub(3)))
+                .collect();
+            buf.set_stringn(inner.x + 1, y + 1, &detail, detail.len(), dim);
+        }
     }
 }

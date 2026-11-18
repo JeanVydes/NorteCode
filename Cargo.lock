@@ -1558,6 +1558,7 @@ dependencies = [
  "crossterm 0.29.0",
  "futures-util",
  "norte-code-client",
+ "norte-code-protocol",
  "norte-code-wire",
  "ratatui",
  "serde",
@@ -2556,6 +2557,7 @@ dependencies = [
 [[package]]
 name = "terminalui"
 version = "0.1.0"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a8a95f959f06cf29b208410f03f64642f02dfa9f#a8a95f959f06cf29b208410f03f64642f02dfa9f"
 dependencies = [
  "terminalui-animations",
  "terminalui-components",
@@ -2565,6 +2567,7 @@ dependencies = [
 [[package]]
 name = "terminalui-animations"
 version = "0.1.0"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a8a95f959f06cf29b208410f03f64642f02dfa9f#a8a95f959f06cf29b208410f03f64642f02dfa9f"
 dependencies = [
  "crossterm 0.29.0",
  "ratatui",
@@ -2575,6 +2578,7 @@ dependencies = [
 [[package]]
 name = "terminalui-components"
 version = "0.1.0"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a8a95f959f06cf29b208410f03f64642f02dfa9f#a8a95f959f06cf29b208410f03f64642f02dfa9f"
 dependencies = [
  "crossterm 0.29.0",
  "ratatui",
@@ -2587,6 +2591,7 @@ dependencies = [
 [[package]]
 name = "terminalui-core"
 version = "0.1.0"
+source = "git+https://github.com/JeanVydes/terminalui.git?rev=a8a95f959f06cf29b208410f03f64642f02dfa9f#a8a95f959f06cf29b208410f03f64642f02dfa9f"
 dependencies = [
  "crossterm 0.29.0",
  "erased-serde",

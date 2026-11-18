@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use norte_code_client::{AgentClient, EventStream, RemoteClient, RestClient};
-use norte_code_wire::{SessionKey, SessionSummary};
 use norte_code_wire::UserInputPart;
+use norte_code_wire::{SessionKey, SessionSummary};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
@@ -35,13 +35,31 @@ pub(crate) enum ClientEvent {
     Server(Box<norte_code_wire::ServerEvent>),
     /// The session list changed.
     Sessions(Vec<SessionSummary>),
+    /// The catalogue of models, grouped by provider.
+    Models(Vec<norte_code_wire::ModelInfo>),
+    /// The plan list of the attached session.
+    Plans(Vec<norte_code_wire::PlanSummary>),
+    /// The job list of the attached session.
+    Jobs(Vec<norte_code_wire::JobSummary>),
+    /// Telemetry for the whole fleet.
+    Telemetry(norte_code_wire::TelemetryReport),
+    /// Telemetry for the attached session.
+    TelemetrySession(norte_code_wire::TelemetryReport),
+    /// The cost of the attached session.
+    CostSession(norte_code_client::CostReport),
+    /// The fleet-wide cost total.
+    CostGlobal(norte_code_client::CostReport),
+    /// The list of installed plugins.
+    Plugins(Vec<norte_code_client::PluginSummary>),
+    /// The catalogue detail (providers, models) for the HOST view.
+    Catalog(norte_code_client::CatalogDetail),
+    /// The server-reported agents.
+    Agents(Vec<norte_code_wire::AgentSummary>),
 }
 
 /// Commands the interface sends to the connection task.
 #[derive(Clone, Debug)]
 pub(crate) enum UiCommand {
-    /// Attach to a fresh session; used on startup and after a detach.
-    Attach,
     /// Send a user message on the session's stream.
     Send {
         /// The session to send on.
@@ -53,15 +71,88 @@ pub(crate) enum UiCommand {
     },
     /// Refetch the session list.
     Refresh,
+    /// Set the session's model.
+    SetModel {
+        /// The session to change.
+        session: SessionKey,
+        /// The provider the model lives in.
+        provider: String,
+        /// The model id.
+        model: String,
+    },
+    /// Set the session's reasoning effort.
+    SetReasoning {
+        /// The session to change.
+        session: SessionKey,
+        /// The effort, `auto` / `low` / `medium` / `high`.
+        effort: String,
+    },
+    /// Refetch the catalogue views for the current session.
+    RefreshViews,
 }
 
 const MAX_ATTACH_ATTEMPTS: u32 = 3;
 const RETRY_BASE_MS: u64 = 400;
 
+/// Fetch everything the interface needs right after attach.
+async fn fetch_views(api: &Arc<RestClient>, session: &str, events: &Sender<ClientEvent>) {
+    let (
+        models,
+        plans,
+        jobs,
+        telemetry_session,
+        telemetry_global,
+        plugins,
+        catalog,
+        agents,
+        cost_session,
+        cost_global,
+    ) = tokio::join!(
+        api.models(),
+        api.plans(session),
+        api.list_jobs(session),
+        api.telemetry(Some(session)),
+        api.telemetry(None),
+        api.plugins(),
+        api.catalog_detail(),
+        api.agents(),
+        api.cost_report(Some(session)),
+        api.cost_report(None),
+    );
+    if let Ok(models) = models {
+        let _ = events.send(ClientEvent::Models(models)).await;
+    }
+    if let Ok(plans) = plans {
+        let _ = events.send(ClientEvent::Plans(plans)).await;
+    }
+    if let Ok(jobs) = jobs {
+        let _ = events.send(ClientEvent::Jobs(jobs)).await;
+    }
+    if let Ok(report) = telemetry_session {
+        let _ = events.send(ClientEvent::TelemetrySession(report)).await;
+    }
+    if let Ok(report) = telemetry_global {
+        let _ = events.send(ClientEvent::Telemetry(report)).await;
+    }
+    if let Ok(plugins) = plugins {
+        let _ = events.send(ClientEvent::Plugins(plugins)).await;
+    }
+    if let Ok(catalog) = catalog {
+        let _ = events.send(ClientEvent::Catalog(catalog)).await;
+    }
+    if let Ok(agents) = agents {
+        let _ = events.send(ClientEvent::Agents(agents)).await;
+    }
+    if let Ok(cost) = cost_session {
+        let _ = events.send(ClientEvent::CostSession(cost)).await;
+    }
+    if let Ok(cost) = cost_global {
+        let _ = events.send(ClientEvent::CostGlobal(cost)).await;
+    }
+}
+
 /// Starts the connection task and returns (commands, events).
-pub(crate) fn start(
-    config: ClientConfig,
-) -> (Sender<UiCommand>, Receiver<ClientEvent>) {
+pub(crate) fn start(config: ClientConfig) -> (Sender<UiCommand>, Receiver<ClientEvent>) {
     let (events_tx, events_rx) = mpsc::channel(256);
     let (commands_tx, commands_rx) = mpsc::channel(64);
     std::thread::spawn(move || {
@@ -100,7 +191,10 @@ async fn connection(
             return;
         }
     };
-    let api = match RestClient::new(&config.service.url, config.service.token.as_deref().unwrap_or_default()) {
+    let api = match RestClient::new(
+        &config.service.url,
+        config.service.token.as_deref().unwrap_or_default(),
+    ) {
         Ok(api) => Arc::new(api),
         Err(error) => {
             let _ = events
@@ -135,12 +229,10 @@ async fn connection(
     };
     let session = SessionKey::new(fresh.session_id.clone());
     let _ = events.send(ClientEvent::Sessions(sessions)).await;
-    let _ = events
-        .send(ClientEvent::Attached {
-            session: fresh,
-        })
-        .await;
-    stream_loop(&client, &api, &mut commands, &events, &session).await;
+    let _ = events.send(ClientEvent::Attached { session: fresh }).await;
+    // The views are filled from the same REST calls the service serves.
+    Box::pin(fetch_views(&api, session.as_str(), &events)).await;
+    Box::pin(stream_loop(&client, &api, &mut commands, &events, &session)).await;
 }
 
 /// Owns the session's event stream; driven by both the stream and commands.
@@ -155,7 +247,15 @@ async fn stream_loop(
     loop {
         match client.open_events(session.as_str()).await {
             Ok(mut stream) => {
-                let finished = drive_stream(&mut stream, commands, events, client, api).await;
+                let finished = Box::pin(drive_stream(
+                    &mut stream,
+                    commands,
+                    events,
+                    client,
+                    api,
+                    session,
+                ))
+                .await;
                 if finished {
                     return;
                 }
@@ -193,6 +293,7 @@ async fn drive_stream(
     events: &Sender<ClientEvent>,
     client: &Arc<RemoteClient>,
     api: &Arc<RestClient>,
+    session: &SessionKey,
 ) -> bool {
     loop {
         tokio::select! {
@@ -214,7 +315,37 @@ async fn drive_stream(
                             let _ = events.send(ClientEvent::Sessions(sessions)).await;
                         }
                     }
-                    UiCommand::Attach => {}
+                    UiCommand::RefreshViews => {
+                        Box::pin(fetch_views(api, session.as_str(), events)).await;
+                    }
+                    UiCommand::SetModel {
+                        session: target,
+                        provider,
+                        model,
+                    } => {
+                        let _ = api.set_session_model(target.as_str(), &provider, &model).await;
+                        if let Ok(models) = api.models().await {
+                            let _ = events.send(ClientEvent::Models(models)).await;
+                        }
+                    }
+                    UiCommand::SetReasoning {
+                        session: target,
+                        effort,
+                    } => {
+                        let reasoning = match effort.as_str() {
+                            "low" | "medium" | "high" => norte_code_wire::Reasoning::Effort {
+                                effort: effort.clone(),
+                            },
+                            _ => norte_code_wire::Reasoning::Automatic,
+                        };
+                        let _ = api
+                            .set_reasoning(
+                                target.as_str(),
+                                norte_code_wire::ReasoningScope::Session,
+                                reasoning,
+                            )
+                            .await;
+                    }
                 }
             }
             frame = stream.next() => {

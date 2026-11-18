@@ -81,7 +81,12 @@ pub(crate) enum Item {
         added: Vec<String>,
     },
     /// A shell session, rendered with the library `Console` view.
-    Shell(Console),
+    Shell {
+        /// The call id the host names; used to match output frames to it.
+        call_id: String,
+        /// The console block itself.
+        console: Console,
+    },
     /// A host notice, e.g. `model switched to claude-sonnet-4.5`.
     Notice {
         /// The notice text.
@@ -186,24 +191,44 @@ impl Transcript {
     /// Flip every `Running` tool block to `Done`.
     pub(crate) fn complete_running_tools(&mut self) {
         for item in &mut self.items {
-            if let Item::Tool { state, .. } = item {
-                if *state == ToolState::Running {
-                    *state = ToolState::Done;
-                }
+            if let Item::Tool { state, .. } = item
+                && *state == ToolState::Running
+            {
+                *state = ToolState::Done;
             }
         }
         self.dirty = true;
     }
 
+    /// Append a line of output to the console with the given call id.
+    pub(crate) fn append_console_line(&mut self, call_id: &str, line: String) -> bool {
+        for item in self.items.iter_mut().rev() {
+            if let Item::Shell {
+                call_id: id,
+                console,
+            } = item
+                && *id == call_id
+            {
+                console.push_line(line);
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Flip the `Running` tool block with the given call id to `Done`.
     pub(crate) fn finish_tool(&mut self, call_id: &str) {
         for item in self.items.iter_mut().rev() {
-            if let Item::Tool { call_id: id, state, .. } = item {
-                if *id == call_id && *state == ToolState::Running {
-                    *state = ToolState::Done;
-                    self.dirty = true;
-                    return;
-                }
+            if let Item::Tool {
+                call_id: id, state, ..
+            } = item
+                && *id == call_id
+                && *state == ToolState::Running
+            {
+                *state = ToolState::Done;
+                self.dirty = true;
+                return;
             }
         }
     }
@@ -215,7 +240,9 @@ impl Transcript {
             self.dirty = true;
             return;
         }
-        self.push(Item::Assistant { text: text.to_string() });
+        self.push(Item::Assistant {
+            text: text.to_string(),
+        });
     }
 
     /// Append reasoning text; merges into the trailing reasoning block.
@@ -225,21 +252,23 @@ impl Transcript {
             self.dirty = true;
             return;
         }
-        self.push(Item::Reasoning { text: text.to_string() });
+        self.push(Item::Reasoning {
+            text: text.to_string(),
+        });
     }
 
     fn item_height(item: &Item, width: usize) -> u16 {
         match item {
-            Item::User { text } | Item::Assistant { text } => {
-                wrap(text, width).len() as u16 + BLOCK_GAP
+            Item::User { text } | Item::Assistant { text } | Item::Reasoning { text } => {
+                u16::try_from(wrap(text, width).len()).unwrap_or(u16::MAX) + BLOCK_GAP
             }
-            Item::Tool { .. } => 2,
-            Item::Diff { removed, added } => (removed.len() + added.len() + 1) as u16,
-            Item::Shell(console) => {
-                console.measure().map(|(_, height)| height).unwrap_or(2) + BLOCK_GAP
+            Item::Tool { .. } | Item::Notice { .. } => 2,
+            Item::Diff { removed, added } => {
+                u16::try_from(removed.len() + added.len() + 1).unwrap_or(u16::MAX)
             }
-            Item::Notice { .. } => 2,
-            Item::Reasoning { text } => wrap(text, width).len() as u16 + BLOCK_GAP,
+            Item::Shell { console, .. } => {
+                console.measure().map_or(2, |(_, height)| height) + BLOCK_GAP
+            }
         }
     }
 
@@ -247,10 +276,14 @@ impl Transcript {
         if !self.dirty && self.heights_width == width {
             return;
         }
-        let width = width as usize;
-        self.heights = self.items.iter().map(|item| Self::item_height(item, width)).collect();
+        let width = usize::from(width);
+        self.heights = self
+            .items
+            .iter()
+            .map(|item| Self::item_height(item, width))
+            .collect();
         self.content_height = self.heights.iter().sum();
-        self.heights_width = width as u16;
+        self.heights_width = u16::try_from(width).unwrap_or(u16::MAX);
         self.dirty = false;
         let max = self.max_offset();
         if self.first_visible == u16::MAX || self.first_visible > max {
@@ -264,9 +297,9 @@ impl Transcript {
 
     /// Scroll the stream by `delta` rows; negative scrolls toward the top.
     pub(crate) fn scroll(&mut self, delta: isize) {
-        let max = self.max_offset() as isize;
-        let next = self.first_visible as isize + delta;
-        self.first_visible = next.clamp(0, max) as u16;
+        let max = i64::from(self.max_offset());
+        let next = i64::from(self.first_visible) + i64::try_from(delta).unwrap_or(0);
+        self.first_visible = u16::try_from(next.clamp(0, max)).unwrap_or(u16::MAX);
     }
 }
 
@@ -296,7 +329,7 @@ impl View for Transcript {
             self.thinking = Some(thinking.saturating_add(delta));
         }
         for item in &mut self.items {
-            if let Item::Shell(console) = item {
+            if let Item::Shell { console, .. } = item {
                 console.tick(delta, cx);
             }
         }
@@ -352,8 +385,8 @@ impl View for Transcript {
                     theme,
                 ),
                 Item::Diff { removed, added } => paint_diff(buf, rect, removed, added, clip, theme),
-                Item::Shell(console) => {
-                    let rows = console.measure().map(|(_, height)| height).unwrap_or(2);
+                Item::Shell { console, .. } => {
+                    let rows = console.measure().map_or(2, |(_, height)| height);
                     let shell_rect = Rect {
                         height: rows,
                         ..rect
@@ -375,9 +408,9 @@ impl View for Transcript {
                 ..ScrollbarStyle::default()
             };
             let scroll = Scroll {
-                offset: self.first_visible as usize,
-                viewport: area.height as usize,
-                total: self.content_height as usize,
+                offset: usize::from(self.first_visible),
+                viewport: usize::from(area.height),
+                total: usize::from(self.content_height),
             };
             render_scrollbar(buf, area, &scroll_style, theme, &scroll);
         }
@@ -390,7 +423,7 @@ impl View for Transcript {
                 if key.kind != KeyEventKind::Press || !focused {
                     return Outcome::Ignored;
                 }
-                let half = (self.view_height / 2).max(1) as isize;
+                let half = isize::try_from((self.view_height / 2).max(1)).unwrap_or(1);
                 match key.code {
                     KeyCode::Up => {
                         self.scroll(-1);
@@ -440,9 +473,9 @@ impl View for Transcript {
 }
 
 fn paint_user(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme) {
-    let lines = wrap(text, area.width as usize);
+    let lines = wrap(text, usize::from(area.width));
     for (row, line) in lines.iter().enumerate() {
-        let y = area.y + row as u16;
+        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
         if y >= clip {
             break;
         }
@@ -451,22 +484,26 @@ fn paint_user(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme
             y,
             "▌",
             1,
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         );
         buf.set_stringn(
             area.x + 2,
             y,
             line,
             line.chars().count(),
-            Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
         );
     }
 }
 
 fn paint_assistant(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme) {
-    let lines = wrap(text, area.width as usize);
+    let lines = wrap(text, usize::from(area.width));
     for (row, line) in lines.iter().enumerate() {
-        let y = area.y + row as u16;
+        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
         if y >= clip {
             break;
         }
@@ -476,7 +513,9 @@ fn paint_assistant(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &
 
 fn paint_inline_code(buf: &mut Buffer, x: u16, y: u16, line: &str, theme: &Theme) {
     let normal = Style::default().fg(theme.foreground);
-    let code = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let code = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
     let mut in_code = false;
     let mut col = x;
     for segment in line.split('`') {
@@ -486,11 +525,12 @@ fn paint_inline_code(buf: &mut Buffer, x: u16, y: u16, line: &str, theme: &Theme
         }
         let style = if in_code { code } else { normal };
         buf.set_stringn(col, y, segment, segment.chars().count(), style);
-        col += segment.chars().count() as u16;
+        col += u16::try_from(segment.chars().count()).unwrap_or(u16::MAX);
         in_code = !in_code;
     }
 }
 
+#[derive(Clone, Copy)]
 struct ToolRow<'a> {
     name: &'a str,
     target: Option<&'a str>,
@@ -519,19 +559,40 @@ fn paint_tool(buf: &mut Buffer, area: Rect, row: ToolRow<'_>, clip: u16, theme: 
         y,
         name,
         name.chars().count(),
-        Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(theme.foreground)
+            .add_modifier(Modifier::BOLD),
     );
-    let mut col = area.x + 2 + name.chars().count() as u16 + 2;
+    let mut col = area.x + 2 + u16::try_from(name.chars().count()).unwrap_or(u16::MAX) + 2;
     if let Some(target) = target {
-        buf.set_stringn(col, y, target, target.chars().count(), Style::default().fg(theme.muted));
-        col += target.chars().count() as u16 + 2;
+        buf.set_stringn(
+            col,
+            y,
+            target,
+            target.chars().count(),
+            Style::default().fg(theme.muted),
+        );
+        col += u16::try_from(target.chars().count()).unwrap_or(u16::MAX) + 2;
     }
     if let Some(meta) = meta {
-        buf.set_stringn(col, y, meta, meta.chars().count(), Style::default().fg(theme.success));
+        buf.set_stringn(
+            col,
+            y,
+            meta,
+            meta.chars().count(),
+            Style::default().fg(theme.success),
+        );
     }
 }
 
-fn paint_diff(buf: &mut Buffer, area: Rect, removed: &[String], added: &[String], clip: u16, theme: &Theme) {
+fn paint_diff(
+    buf: &mut Buffer,
+    area: Rect,
+    removed: &[String],
+    added: &[String],
+    clip: u16,
+    theme: &Theme,
+) {
     let surface = theme.secondary;
     let mut y = area.y;
     for line in removed {
@@ -539,8 +600,20 @@ fn paint_diff(buf: &mut Buffer, area: Rect, removed: &[String], added: &[String]
             return;
         }
         buf.set_style(Rect { height: 1, ..area }, Style::default().bg(surface));
-        buf.set_stringn(area.x, y, "−", 1, Style::default().fg(theme.destructive).bg(surface));
-        buf.set_stringn(area.x + 2, y, line, line.chars().count(), Style::default().fg(theme.destructive).bg(surface));
+        buf.set_stringn(
+            area.x,
+            y,
+            "−",
+            1,
+            Style::default().fg(theme.destructive).bg(surface),
+        );
+        buf.set_stringn(
+            area.x + 2,
+            y,
+            line,
+            line.chars().count(),
+            Style::default().fg(theme.destructive).bg(surface),
+        );
         y += 1;
     }
     for line in added {
@@ -548,8 +621,20 @@ fn paint_diff(buf: &mut Buffer, area: Rect, removed: &[String], added: &[String]
             return;
         }
         buf.set_style(Rect { height: 1, ..area }, Style::default().bg(surface));
-        buf.set_stringn(area.x, y, "+", 1, Style::default().fg(theme.success).bg(surface));
-        buf.set_stringn(area.x + 2, y, line, line.chars().count(), Style::default().fg(theme.success).bg(surface));
+        buf.set_stringn(
+            area.x,
+            y,
+            "+",
+            1,
+            Style::default().fg(theme.success).bg(surface),
+        );
+        buf.set_stringn(
+            area.x + 2,
+            y,
+            line,
+            line.chars().count(),
+            Style::default().fg(theme.success).bg(surface),
+        );
         y += 1;
     }
 }
@@ -575,9 +660,9 @@ fn paint_notice(buf: &mut Buffer, area: Rect, text: &str, tone: Tone, clip: u16,
 }
 
 fn paint_reasoning(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &Theme) {
-    let lines = wrap(text, area.width as usize);
+    let lines = wrap(text, usize::from(area.width));
     for (row, line) in lines.iter().enumerate() {
-        let y = area.y + row as u16;
+        let y = area.y + u16::try_from(row).unwrap_or(u16::MAX);
         if y >= clip {
             break;
         }
@@ -586,7 +671,9 @@ fn paint_reasoning(buf: &mut Buffer, area: Rect, text: &str, clip: u16, theme: &
             y,
             line,
             line.chars().count(),
-            Style::default().fg(theme.muted).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
         );
     }
 }
@@ -595,16 +682,26 @@ fn paint_thinking(buf: &mut Buffer, area: Rect, elapsed: Duration, theme: &Theme
     let y = area.y + area.height.saturating_sub(1);
     let secs = elapsed.as_secs();
     let label = format!("thinking {secs}s");
-    let frame = SPINNER_FRAMES[(elapsed.as_millis() / 80) as usize % SPINNER_FRAMES.len()];
+    let frame = SPINNER_FRAMES
+        [usize::try_from(elapsed.as_millis() / 80).unwrap_or(0) % SPINNER_FRAMES.len()];
     buf.set_stringn(area.x, y, frame, 1, Style::default().fg(theme.accent));
-    let sweep = ((elapsed.as_millis() / 90) % (label.chars().count() as u128 + 12)) as i64 - 6;
+    let sweep_span = u128::try_from(label.chars().count()).unwrap_or(0) + 12;
+    let sweep = i64::try_from((elapsed.as_millis() / 90) % sweep_span).unwrap_or(0) - 6;
     for (index, ch) in label.chars().enumerate() {
-        let distance = (index as i64 - sweep).abs();
+        let distance = (i64::try_from(index).unwrap_or(0) - sweep).abs();
         let style = if distance <= 3 {
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.muted)
         };
-        buf.set_stringn(area.x + 2 + index as u16, y, ch.to_string(), 1, style);
+        buf.set_stringn(
+            area.x + 2 + u16::try_from(index).unwrap_or(u16::MAX),
+            y,
+            ch.to_string(),
+            1,
+            style,
+        );
     }
 }
