@@ -36,8 +36,10 @@ fn drawn(view: &mut PlansView, model: &UiModel) -> String {
 
 #[test]
 fn the_plan_body_is_rendered_as_markdown() {
-    let mut model = UiModel::default();
-    model.plans = vec![plan("## Steps\n\n- install it\n- run it\n\n**done**")];
+    let model = UiModel {
+        plans: vec![plan("## Steps\n\n- install it\n- run it\n\n**done**")],
+        ..UiModel::default()
+    };
     let mut view = PlansView::default();
 
     let text = drawn(&mut view, &model);
@@ -54,8 +56,10 @@ fn the_plan_body_is_rendered_as_markdown() {
 
 #[test]
 fn the_header_names_the_plan_and_its_state() {
-    let mut model = UiModel::default();
-    model.plans = vec![plan("# The plan")];
+    let model = UiModel {
+        plans: vec![plan("# The plan")],
+        ..UiModel::default()
+    };
     let mut view = PlansView::default();
 
     let text = drawn(&mut view, &model);
@@ -68,8 +72,10 @@ fn the_header_names_the_plan_and_its_state() {
 
 #[test]
 fn a_markdown_table_is_drawn() {
-    let mut model = UiModel::default();
-    model.plans = vec![plan("| step | owner |\n|---|---|\n| build | me |")];
+    let model = UiModel {
+        plans: vec![plan("| step | owner |\n|---|---|\n| build | me |")],
+        ..UiModel::default()
+    };
     let mut view = PlansView::default();
 
     let text = drawn(&mut view, &model);

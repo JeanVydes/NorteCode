@@ -21,13 +21,14 @@ fn record(session: &str, id: &str) -> TelemetryRecord {
 }
 
 fn model_with(records: Vec<TelemetryRecord>) -> UiModel {
-    let mut model = UiModel::default();
-    model.telemetry = Some(TelemetryReport {
-        session: None,
-        records,
-        ..TelemetryReport::default()
-    });
-    model
+    UiModel {
+        telemetry: Some(TelemetryReport {
+            session: None,
+            records,
+            ..TelemetryReport::default()
+        }),
+        ..UiModel::default()
+    }
 }
 
 #[test]

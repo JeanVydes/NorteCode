@@ -128,7 +128,7 @@ fn the_command_menu_shows_its_last_row_on_a_forty_row_screen() {
     }
 
     let text = screen(40, 100, |frame| {
-        list.render(frame, "commands", ThemeMode::Dark)
+        list.render(frame, "commands", ThemeMode::Dark);
     });
 
     assert!(text.contains("row 29"), "the last row is cut:\n{text}");

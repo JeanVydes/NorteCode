@@ -13,22 +13,23 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 fn model_with_plugins() -> UiModel {
-    let mut model = UiModel::default();
-    model.plugins = vec![
-        PluginSummary {
-            name: "alpha".to_owned(),
-            enabled: true,
-            loaded: true,
-            load_error: None,
-        },
-        PluginSummary {
-            name: "beta".to_owned(),
-            enabled: true,
-            loaded: false,
-            load_error: Some("was built against plugin interface 1".to_owned()),
-        },
-    ];
-    model
+    UiModel {
+        plugins: vec![
+            PluginSummary {
+                name: "alpha".to_owned(),
+                enabled: true,
+                loaded: true,
+                load_error: None,
+            },
+            PluginSummary {
+                name: "beta".to_owned(),
+                enabled: true,
+                loaded: false,
+                load_error: Some("was built against plugin interface 1".to_owned()),
+            },
+        ],
+        ..UiModel::default()
+    }
 }
 
 fn drawn(view: &mut PluginsView, model: &UiModel) -> String {
@@ -163,13 +164,15 @@ fn a_loaded_plugin_reads_differently_from_one_that_failed() {
 
 #[test]
 fn an_enabled_plugin_the_host_did_not_load_is_not_called_failed() {
-    let mut model = UiModel::default();
-    model.plugins = vec![PluginSummary {
-        name: "gamma".to_owned(),
-        enabled: true,
-        loaded: false,
-        load_error: None,
-    }];
+    let model = UiModel {
+        plugins: vec![PluginSummary {
+            name: "gamma".to_owned(),
+            enabled: true,
+            loaded: false,
+            load_error: None,
+        }],
+        ..UiModel::default()
+    };
     let mut view = PluginsView::default();
 
     let text = drawn(&mut view, &model);

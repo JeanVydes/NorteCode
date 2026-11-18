@@ -32,8 +32,10 @@ fn catalog() -> Vec<ModelInfo> {
 
 #[test]
 fn a_matching_model_does_not_keep_its_whole_provider() {
-    let mut view = ModelsView::default();
-    view.filter = "gpt-6".to_owned();
+    let view = ModelsView {
+        filter: "gpt-6".to_owned(),
+        ..ModelsView::default()
+    };
 
     let rows = view.visible_rows_for(&catalog());
 
@@ -51,8 +53,10 @@ fn a_matching_model_does_not_keep_its_whole_provider() {
 
 #[test]
 fn a_matching_provider_shows_all_of_its_models() {
-    let mut view = ModelsView::default();
-    view.filter = "anthropic".to_owned();
+    let view = ModelsView {
+        filter: "anthropic".to_owned(),
+        ..ModelsView::default()
+    };
 
     let rows = view.visible_rows_for(&catalog());
 
@@ -72,8 +76,13 @@ fn an_empty_filter_shows_every_provider_and_no_model() {
 
 #[test]
 fn a_filter_that_matches_nothing_shows_nothing() {
-    let mut view = ModelsView::default();
-    view.filter = "zzz".to_owned();
+    let view = ModelsView {
+        filter: "zzz".to_owned(),
+        ..ModelsView::default()
+    };
 
-    assert!(view.visible_rows_for(&catalog()).is_empty());
+    assert!(
+        view.visible_rows_for(&catalog()).is_empty(),
+        "an unmatched filter must show nothing"
+    );
 }

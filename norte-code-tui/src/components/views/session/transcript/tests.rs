@@ -316,7 +316,10 @@ fn thought_content_stays_gray_and_uses_a_moving_palette_background() {
         .filter(|span| !span.content.trim().is_empty())
         .filter_map(|span| span.style.fg)
         .collect::<Vec<_>>();
-    assert!(!colors.is_empty());
+    assert!(
+        !colors.is_empty(),
+        "the shimmer must recolor at least one span"
+    );
     assert!(
         colors.iter().any(|color| *color
             == crate::components::palette::thinking_foreground(crate::ui_model::ThemeMode::Dark)),
@@ -1390,12 +1393,7 @@ fn the_separator_shows_how_long_the_tools_ran() {
 
 #[test]
 fn after_a_history_reload_the_error_lands_after_the_turn() {
-    use crate::ui_model::{SessionClock, TranscriptItem};
-
-    /// A clock every transcript test can borrow.
-    fn clock() -> SessionClock {
-        SessionClock::default()
-    }
+    use crate::ui_model::TranscriptItem;
     use norte_code_wire::HistorySpeaker;
 
     // The shape `replace_history(history, merged, preserve_live = true)`
@@ -1444,12 +1442,7 @@ fn after_a_history_reload_the_error_lands_after_the_turn() {
 
 #[test]
 fn a_queued_user_message_says_it_waits_for_the_turn() {
-    use crate::ui_model::{SessionClock, TranscriptItem};
-
-    /// A clock every transcript test can borrow.
-    fn clock() -> SessionClock {
-        SessionClock::default()
-    }
+    use crate::ui_model::TranscriptItem;
 
     let items = [
         TranscriptItem::UserMessage {
