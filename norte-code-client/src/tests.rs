@@ -583,7 +583,9 @@ fn an_empty_plan_list_still_decodes() {
         .expect("a plans event");
 
     match event.kind {
-        norte_code_wire::ServerEventKind::PlanList { plans } => assert!(plans.is_empty()),
+        norte_code_wire::ServerEventKind::PlanList { plans } => {
+            assert!(plans.is_empty(), "expected no plans, got {plans:?}");
+        }
         other => panic!("expected a plan list, got {other:?}"),
     }
 }
