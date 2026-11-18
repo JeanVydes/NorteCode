@@ -69,10 +69,10 @@ impl TerminalSession {
     /// How to restore. Never panics, never fails silently.
     pub(crate) fn leave(mut self) {
         self.active = false;
-        self.restore();
+        Self::restore();
     }
 
-    fn restore(&mut self) {
+    fn restore() {
         let _ = execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
@@ -86,7 +86,7 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.active {
-            self.restore();
+            Self::restore();
         }
     }
 }

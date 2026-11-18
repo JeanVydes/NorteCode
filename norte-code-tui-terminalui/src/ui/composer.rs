@@ -6,12 +6,12 @@
 
 use std::any::Any;
 
+use serde::Serialize;
+use terminalui::Node;
 use terminalui::components::chrome::{Border, BorderSet, Radius};
 use terminalui::components::cursor::{CursorMode, CursorShape, CursorStyle};
 use terminalui::components::input::{Input, InputStyle};
 use terminalui::components::scroll::ScrollbarStyle;
-use terminalui::Node;
-use serde::Serialize;
 
 use terminalui::{Context, InputEvent, Outcome, Theme, View};
 
@@ -61,6 +61,11 @@ impl Composer {
     pub(crate) fn clear(&mut self) {
         self.input.clear();
     }
+
+    /// Disable or enable editing; used when a page other than Chat is active.
+    pub(crate) fn set_disabled(&mut self, disabled: bool) {
+        self.input.state.disabled = disabled;
+    }
 }
 
 impl View for Composer {
@@ -88,7 +93,13 @@ impl View for Composer {
         None
     }
 
-    fn render(&mut self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer, cx: &mut Context, theme: &Theme) {
+    fn render(
+        &mut self,
+        area: ratatui::layout::Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        cx: &mut Context,
+        theme: &Theme,
+    ) {
         self.input.render(area, buf, cx, theme);
     }
 

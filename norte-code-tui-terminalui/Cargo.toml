@@ -18,9 +18,9 @@ name = "norte-code-tui-terminalui"
 path = "src/main.rs"
 
 [dependencies]
-terminalui = { path = "../../terminalui/crates/terminalui" }
+terminalui = { git = "https://github.com/JeanVydes/terminalui.git", rev = "a8a95f959f06cf29b208410f03f64642f02dfa9f" }
 ratatui = { version = "0.29", features = ["serde"] }
-crossterm = "0.29"
+crossterm = { version = "0.29", features = ["bracketed-paste"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -29,6 +29,7 @@ unicode-width = "0.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "io-util"] }
 norte-code-client = { path = "../norte-code-client" }
 norte-code-wire = { path = "../norte-code-wire" }
+norte-code-protocol = { path = "../norte-code-protocol" }
 
 [lints]
 workspace = true
