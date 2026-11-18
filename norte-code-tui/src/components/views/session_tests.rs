@@ -119,13 +119,15 @@ fn control_c_types_nothing_when_no_turn_is_running() {
 #[test]
 fn the_budget_approval_asks_and_declines() {
     let mut view = SessionView::default();
-    let mut model = UiModel::default();
-    model.budget_approval = Some(crate::ui_model::BudgetApprovalRequest {
-        scope: norte_code_wire::BudgetScope::Session,
-        unit: norte_code_wire::BudgetUnit::Usd,
-        spent: 1.0,
-        limit: 1.0,
-    });
+    let model = UiModel {
+        budget_approval: Some(crate::ui_model::BudgetApprovalRequest {
+            scope: norte_code_wire::BudgetScope::Session,
+            unit: norte_code_wire::BudgetUnit::Usd,
+            spent: 1.0,
+            limit: 1.0,
+        }),
+        ..UiModel::default()
+    };
 
     view.handle_key(key(KeyCode::Char('a')), &model);
     assert!(matches!(

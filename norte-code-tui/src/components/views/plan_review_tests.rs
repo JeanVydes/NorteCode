@@ -96,7 +96,7 @@ fn the_document_carries_line_numbers() {
 
     assert!(text.contains("plan review"), "drawn:\n{text}");
     assert!(text.contains("The plan"));
-    assert!(text.contains("1"));
+    assert!(text.contains('1'));
 }
 
 #[test]

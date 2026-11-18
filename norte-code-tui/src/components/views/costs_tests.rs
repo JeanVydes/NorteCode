@@ -39,11 +39,13 @@ fn drawn(model: &UiModel) -> String {
 
 #[test]
 fn the_ledger_totals_are_named() {
-    let mut model = UiModel::default();
-    model.costs = Some(norte_code_client::CostReport {
-        total_usd: Some(1.25),
-        requests: 9,
-    });
+    let model = UiModel {
+        costs: Some(norte_code_client::CostReport {
+            total_usd: Some(1.25),
+            requests: 9,
+        }),
+        ..UiModel::default()
+    };
 
     let text = drawn(&model);
 
@@ -54,16 +56,18 @@ fn the_ledger_totals_are_named() {
 
 #[test]
 fn the_breakdown_lists_the_models_it_spent_on() {
-    let mut model = UiModel::default();
-    model.telemetry = Some(TelemetryReport {
-        session: None,
-        records: vec![
-            record("openai", "gpt-4o", 0.5),
-            record("openai", "gpt-4o", 0.25),
-            record("anthropic", "claude", 1.0),
-        ],
-        ..TelemetryReport::default()
-    });
+    let model = UiModel {
+        telemetry: Some(TelemetryReport {
+            session: None,
+            records: vec![
+                record("openai", "gpt-4o", 0.5),
+                record("openai", "gpt-4o", 0.25),
+                record("anthropic", "claude", 1.0),
+            ],
+            ..TelemetryReport::default()
+        }),
+        ..UiModel::default()
+    };
 
     let text = drawn(&model);
 

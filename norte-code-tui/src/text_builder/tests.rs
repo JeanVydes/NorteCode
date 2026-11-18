@@ -42,7 +42,10 @@ fn a_narrow_bar_drops_tabs_instead_of_cutting_them() {
     let wide = TextBuilder::tab_bar(&model, ComponentId::Session, 200);
 
     assert!(narrow.tabs.len() <= wide.tabs.len());
-    assert!(!narrow.tabs.is_empty());
+    assert!(
+        !narrow.tabs.is_empty(),
+        "the narrow bar must keep at least one tab"
+    );
 }
 
 #[test]
@@ -57,17 +60,19 @@ fn every_tab_click_lands_inside_its_label() {
 
 #[test]
 fn the_status_line_never_overflows() {
-    let mut model = UiModel::default();
-    model.session_stats = Some(SessionStatsSummary {
-        requests: 3,
-        input_tokens: 12_000,
-        output_tokens: 340,
-        cache_read_tokens: 9_600,
-        cache_write_tokens: 100,
-        cost_usd: 0.001,
-        context_used: 12_000,
-        context_window: Some(200_000),
-    });
+    let model = UiModel {
+        session_stats: Some(SessionStatsSummary {
+            requests: 3,
+            input_tokens: 12_000,
+            output_tokens: 340,
+            cache_read_tokens: 9_600,
+            cache_write_tokens: 100,
+            cost_usd: 0.001,
+            context_used: 12_000,
+            context_window: Some(200_000),
+        }),
+        ..UiModel::default()
+    };
 
     for columns in [40_u16, 80, 200] {
         let line = status_line(&model, ComponentId::Session, columns);
@@ -123,17 +128,19 @@ fn the_theme_does_not_change_which_tabs_fit() {
 
 #[test]
 fn the_status_shows_the_context_gauge_when_the_host_reports_it() {
-    let mut model = UiModel::default();
-    model.session_stats = Some(SessionStatsSummary {
-        requests: 4,
-        input_tokens: 120_000,
-        output_tokens: 900,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        cost_usd: 0.2,
-        context_used: 120_000,
-        context_window: Some(200_000),
-    });
+    let model = UiModel {
+        session_stats: Some(SessionStatsSummary {
+            requests: 4,
+            input_tokens: 120_000,
+            output_tokens: 900,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: 0.2,
+            context_used: 120_000,
+            context_window: Some(200_000),
+        }),
+        ..UiModel::default()
+    };
 
     let text = text_of(&status_line(&model, ComponentId::Session, 160));
 
@@ -144,12 +151,14 @@ fn the_status_shows_the_context_gauge_when_the_host_reports_it() {
 
 #[test]
 fn a_full_context_turns_the_gauge_red() {
-    let mut model = UiModel::default();
-    model.session_stats = Some(SessionStatsSummary {
-        context_used: 190_000,
-        context_window: Some(200_000),
-        ..SessionStatsSummary::default()
-    });
+    let model = UiModel {
+        session_stats: Some(SessionStatsSummary {
+            context_used: 190_000,
+            context_window: Some(200_000),
+            ..SessionStatsSummary::default()
+        }),
+        ..UiModel::default()
+    };
 
     let line = status_line(&model, ComponentId::Session, 160);
     let colors = line
